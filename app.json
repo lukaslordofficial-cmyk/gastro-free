@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "Gastro Manager",
+    "slug": "gastro-manager",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "myapp",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
+        "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
+        "NSPhotoLibraryUsageDescription": "Wgraj zdjęcie cennika dostawcy z galerii."
+      },
+      "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA"
+      ],
+      "package": "com.emergent.gastrovision.pkqz88"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Wgraj zdjęcie cennika dostawcy z galerii.",
+          "cameraPermission": "Skanuj cenniki i oferty dostawców aparatem."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań."
+        }
+      ]
+    ]
+  }
+}

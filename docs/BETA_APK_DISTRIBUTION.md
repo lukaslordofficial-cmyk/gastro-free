@@ -55,3 +55,10 @@ Jeśli Node zgłasza błąd certyfikatu SSL: `$env:NODE_OPTIONS='--use-system-ca
 
 Closed beta = **wyłącznie Test mode** (`sk_test_` / `pk_test_`).  
 Karta testowa: `4242 4242 4242 4242`.
+
+## Ostatni udany build (2026-07-25)
+
+- Strona: https://expo.dev/accounts/lukaslord/projects/gastro-manager/builds/dac47c75-4ad4-46ce-9638-e5214c25d5d4
+- APK: https://expo.dev/artifacts/eas/FFMlo_EzucyCZ7SnzJRNG0Sjcs14W_Xf9-5Ma4f8rY4.apk
+
+**Uwaga:** ten APK ma `EXPO_PUBLIC_BACKEND_URL` z LAN (`10.250.65.228:8001`). Dla restauratorów poza Wi‑Fi ustaw publiczny HTTPS, `node scripts/sync-eas-preview-env.js`, przebuduj.

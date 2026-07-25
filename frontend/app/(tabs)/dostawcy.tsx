@@ -65,6 +65,7 @@ import {
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
@@ -2344,6 +2345,7 @@ const gbStyles = StyleSheet.create({
 export default function DostawcyScreen() {
   const theme = useAppTheme();
   const { openVoiceReport } = useUiOverlay();
+  const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2372,6 +2374,7 @@ export default function DostawcyScreen() {
   const [saving, setSaving] = useState(false);
 
   const fetchSuppliers = useCallback(async () => {
+    if (!authReady || !isAuthenticated || !accountKey || accountKey === 'default') return;
     const EXTRA =
       'min_order_value, shipping_cost, free_shipping_threshold, lead_time_days';
     const SEL_VISIBLE =
@@ -2383,8 +2386,7 @@ export default function DostawcyScreen() {
     const SEL_LEGACY =
       'id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order)';
     try {
-      const { getAccountKey } = await import('@/lib/accountKey');
-      const ak = getAccountKey();
+      const ak = accountKey;
       const [suppliersRes, countRes] = await Promise.all([
         supabase.from('suppliers').select(SEL_VISIBLE).eq('account_key', ak).order('name'),
         supabase
@@ -2442,9 +2444,17 @@ export default function DostawcyScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [authReady, isAuthenticated, accountKey]);
 
-  useEffect(() => { fetchSuppliers(); }, [fetchSuppliers]);
+  useEffect(() => {
+    if (!authReady) return;
+    if (!isAuthenticated) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void fetchSuppliers();
+  }, [fetchSuppliers, authReady, isAuthenticated, accountKey]);
 
   const handleUpload = useCallback(async (
     supplierId: string,

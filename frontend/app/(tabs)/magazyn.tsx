@@ -55,6 +55,7 @@ import {
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
+import { useAuth } from '@/contexts/AuthContext';
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
 
@@ -684,6 +685,7 @@ const BLANK_FORM = {
 export default function MagazynScreen() {
   const router = useRouter();
   const theme = useAppTheme();
+  const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const focusParams = useLocalSearchParams<{
     focusProductId?: string | string[];
     focusProductName?: string | string[];
@@ -724,53 +726,29 @@ export default function MagazynScreen() {
   // ── Data fetching ────────────────────────────────────────────────────────────────────────
 
   const fetchData = useCallback(async () => {
+    // Czekaj na sesję — inaczej pierwsze query idzie na account_key=default (całe demo, 20–30s).
+    if (!authReady || !isAuthenticated || !accountKey || accountKey === 'default') {
+      return;
+    }
+    const ak = accountKey;
+    const t0 = Date.now();
     try {
-      const { getAccountKey } = await import('@/lib/accountKey');
-      const ak = getAccountKey();
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase
           .from('inventory_items')
-          .select('id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)')
+          .select(
+            'id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)',
+          )
           .eq('account_key', ak)
           .eq('is_active', true)
           .order('name')
-          .then(async (res) => {
-            // Graceful fallback if optional columns missing
-            if (res.error && /account_key/.test(res.error.message ?? '')) {
-              // Migracja ADD_TENANT_ISOLATION jeszcze nieodpalona — nie pokazuj cudzych danych na ślepo
-              console.warn('[Magazyn] Brak kolumny account_key — uruchom ADD_TENANT_ISOLATION.sql');
-              return res;
-            }
-            if (res.error && /is_active|optimal_quantity|safety_buffer_percent/.test(res.error.message ?? '')) {
-              const withoutActive = await supabase
-                .from('inventory_items')
-                .select('id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)')
-                .eq('account_key', ak)
-                .order('name');
-              if (withoutActive.error && /optimal_quantity|safety_buffer_percent/.test(withoutActive.error.message ?? '')) {
-                const slim = await supabase
-                  .from('inventory_items')
-                  .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)')
-                  .eq('account_key', ak)
-                  .order('name');
-                if (slim.error && /safety_buffer_percent/.test(slim.error.message ?? '')) {
-                  return supabase
-                    .from('inventory_items')
-                    .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-                    .eq('account_key', ak)
-                    .order('name');
-                }
-                return slim;
-              }
-              return withoutActive;
-            }
-            return res;
-          }),
+          .limit(2000),
         supabase
           .from('inventory_categories')
           .select('id, name, color')
           .eq('account_key', ak)
-          .order('sort_order'),
+          .order('sort_order')
+          .limit(200),
         supabase
           .from('waste_logs')
           .select('id, item_name, quantity, unit, reason, created_at')
@@ -778,24 +756,52 @@ export default function MagazynScreen() {
           .order('created_at', { ascending: false })
           .limit(50),
       ]);
-      if (itemsRes.error) throw itemsRes.error;
+
+      let itemsData = itemsRes.data;
+      let itemsErr = itemsRes.error;
+      // Jedna szybka ścieżka awaryjna (bez łańcucha 4× requestów)
+      if (itemsErr && /is_active|optimal_quantity|safety_buffer_percent/.test(itemsErr.message ?? '')) {
+        const slim = await supabase
+          .from('inventory_items')
+          .select(
+            'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)',
+          )
+          .eq('account_key', ak)
+          .order('name')
+          .limit(2000);
+        itemsData = slim.data;
+        itemsErr = slim.error;
+      }
+      if (itemsErr) throw itemsErr;
       if (catsRes.error) throw catsRes.error;
-      if (wasteRes.error) throw wasteRes.error;
-      setInventory((itemsRes.data ?? []).map(mapDbRow));
+      // waste_logs opcjonalne — nie blokuj magazynu
+      if (wasteRes.error && !/account_key|waste_logs/.test(wasteRes.error.message ?? '')) {
+        console.warn('[Magazyn] waste_logs:', wasteRes.error.message);
+      }
+
+      setInventory((itemsData ?? []).map(mapDbRow));
       setDbCategories(catsRes.data ?? []);
-      setWasteLogs(wasteRes.data ?? []);
-      // Premium: od razu pokaż produkty (kategorie rozwinięte)
+      setWasteLogs(wasteRes.error ? [] : (wasteRes.data ?? []));
       setExpandedCategories(new Set((catsRes.data ?? []).map((c: CategoryRow) => c.name)));
       setError(null);
+      if (__DEV__) console.log(`[Magazyn] fetch ${Date.now() - t0}ms, items=${(itemsData ?? []).length}`);
     } catch (e: any) {
       setError(e.message ?? 'Nieznany błąd');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [authReady, isAuthenticated, accountKey]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    if (!authReady) return;
+    if (!isAuthenticated) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void fetchData();
+  }, [fetchData, authReady, isAuthenticated, accountKey]);
   const onRefresh = () => { setRefreshing(true); fetchData(); };
 
   // ── Category derived data ───────────────────────────────────────────────────────────────

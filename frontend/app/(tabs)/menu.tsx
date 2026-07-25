@@ -53,6 +53,7 @@ import {
 import { DS } from '@/constants/premiumTheme';
 import { assignUniqueDishImageSources } from '@/lib/productImages';
 import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
+import { useAuth } from '@/contexts/AuthContext';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -760,6 +761,7 @@ const BLANK_INV_FORM = {
 export default function MenuScreen() {
   const theme = useAppTheme();
   const { openVoiceReport } = useUiOverlay();
+  const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [utensils, setUtensils] = useState<KitchenUtensil[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -791,9 +793,9 @@ export default function MenuScreen() {
   // ── Data fetching ─────────────────────────────────────────────────────────
 
   const fetchData = useCallback(async () => {
+    if (!authReady || !isAuthenticated || !accountKey || accountKey === 'default') return;
     try {
-      const { getAccountKey } = await import('@/lib/accountKey');
-      const ak = getAccountKey();
+      const ak = accountKey;
       const [dishesRes, utensilsRes, invRes, catsRes] = await Promise.all([
         supabase
           .from('menu_items')
@@ -801,7 +803,8 @@ export default function MenuScreen() {
           .eq('account_key', ak)
           .eq('is_active', true)
           .order('category')
-          .order('name'),
+          .order('name')
+          .limit(1000),
         supabase
           .from('kitchen_utensils')
           .select('id, name, utensil_type, capacity_value, capacity_unit')
@@ -849,9 +852,17 @@ export default function MenuScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [authReady, isAuthenticated, accountKey]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    if (!authReady) return;
+    if (!isAuthenticated) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void fetchData();
+  }, [fetchData, authReady, isAuthenticated, accountKey]);
 
   const editingDishRef = useRef<Dish | null>(null);
   editingDishRef.current = editingDish;

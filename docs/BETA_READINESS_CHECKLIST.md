@@ -46,8 +46,8 @@ Bez tych kroków funkcje „są w kodzie”, ale lokal/staging nie zadziała:
 - **Sugestie Deal Hunter** — zależą od żywych katalogów dostawców + stanów; bez danych wynik pusty/słaby
 - **OCR receptur / skan menu / Inspiracje AI** — wiring OK (`RecipesModal` → `/api/recipes/ocr-text`); wymaga backendu + kredytów + OpenAI; brak E2E w CI
 - **Push** — lokalne przypomnienia OK; zdalny Expo Push wymaga `projectId` (EAS) + tokenów w DB + crona; web bez tokena → **znane ograniczenie bety**
-- **Soft-delete magazynu** — backend/głos używa `is_active`; UI `magazyn.tsx` może robić twarde `.delete()`
-- **`ExpirationScanModal`** — plik istnieje, niezaimportowany (orphan)
+- **Soft-delete magazynu** — UI Magazyn + Jarvis single-delete → `is_active=false` (fallback hard-delete bez kolumny); bulk już soft
+- **`ExpirationScanModal`** — plik istnieje, niezaimportowany (orphan); FAB Magazyn = edukacyjny Alert (faktura/głos)
 - **Mapowanie receptura→magazyn** — głównie Ustawienia/POS, nie pełny flow z głównego menu
 - **Brak EAS Build** — brak `eas.json` / projectId → ryzyko przy internal distribution i push
 - **Cache Inspiracji** — plik lokalny na serwerze (`.inspiration_recipe_cache.json`), nie współdzielony multi-instancyjnie
@@ -92,9 +92,10 @@ Bez tych kroków funkcje „są w kodzie”, ale lokal/staging nie zadziała:
 
 ### Znane długi techniczne do świadomej decyzji
 
-- [ ] Soft-delete vs hard-delete w UI magazynu — ujednolicić przed beta
+- [x] Soft-delete vs hard-delete w UI magazynu — soft-delete w Magazyn + Jarvis (fallback hard)
 - [x] Reliability UI — minimalna uczciwa powierzchnia („brak danych / wstępna”); pełny rating → v2
-- [ ] Podpiąć lub usunąć `ExpirationScanModal`
+- [ ] Podpiąć lub usunąć `ExpirationScanModal` (na razie FAB edukacyjny — świadomie)
+- [x] Znane ograniczenia bety — `docs/BETA_KNOWN_LIMITATIONS.md`
 - [ ] Krótki README setup (migracje, env, porty) — obecny README to placeholder
 
 ---
@@ -144,3 +145,4 @@ Bez zmian (nie są limitami planu): `MAX_GAP` optymalizera (~150 zł), koszty ak
 | Migracje | `supabase_migrations/` |
 | Push | `frontend/lib/pushNotifications.ts` |
 | OCR receptur | `RecipesModal` → `POST /api/recipes/ocr-text` |
+| Znane ograniczenia | `docs/BETA_KNOWN_LIMITATIONS.md` |

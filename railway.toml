@@ -1,0 +1,13 @@
+# Prefer: cd backend && railway up  (uses backend/railway.toml)
+# Or set Railway service Root Directory = backend and use backend/Dockerfile
+# https://docs.railway.app/guides/dockerfiles
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "backend/Dockerfile"
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

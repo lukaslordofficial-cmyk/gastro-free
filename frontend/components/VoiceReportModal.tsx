@@ -225,7 +225,7 @@ const COMMAND_EXAMPLES: { intent: Intent; example: string }[] = [
   { intent: 'rank_menu_sales', example: 'Pokaż ranking sprzedaży z wybranego okresu' },
   { intent: 'rank_waste_cost', example: 'Ile pieniędzy utracono przez straty produktowe' },
   { intent: 'rank_dead_menu', example: 'Najgorzej sprzedające się produkty' },
-  { intent: 'list_expiring_soon', example: 'Ranking potraw z datą przydatności' },
+  { intent: 'list_expiring_soon', example: 'Pokaż produkty z kończącą się datą ważności' },
   { intent: 'rank_supplier_spend', example: 'Ile wydałem u dostawców w wybranym okresie?' },
   { intent: 'haccp_tip', example: 'Jak przechowywać świeżego łososia? Co to FIFO?' },
   { intent: 'upload_invoice', example: 'Wgraj fakturę' },
@@ -2945,6 +2945,13 @@ function IntentDoneSummary({
                   ) : null}
                 </View>
               ))}
+              {!built.tips.length && !fallbackTip ? (
+                <Text style={[styles.expiryTipBody, { marginTop: 4, opacity: 0.75 }]}>
+                  {built.phase
+                    ? 'Brak tipów Zero Waste dla tej pozycji.'
+                    : 'Tipy Zero Waste: horyzont T−3…T−1 (za 1–3 dni / dziś).'}
+                </Text>
+              ) : null}
               {fallbackTip ? (
                 <Text style={[styles.expiryTipBody, { marginTop: 4 }]}>{fallbackTip}</Text>
               ) : null}

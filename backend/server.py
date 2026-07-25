@@ -64,6 +64,9 @@ VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
 INSPIRATIONS_MODEL = (
     os.environ.get("OPENAI_INSPIRATIONS_MODEL", "gpt-4o").strip() or "gpt-4o"
 )
+# Closed beta: single-tenant. Override per deploy for multi-restaurant pilots
+# (one service / ACCOUNT_KEY per restaurant until real auth lands).
+_ACCOUNT_KEY = (os.environ.get("ACCOUNT_KEY") or "default").strip() or "default"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -513,13 +516,21 @@ async def download_updated_zip():
     )
 
 
+@app.get("/health")
 @app.get("/api/health")
 async def health():
     sub_status = "unknown"
     async with httpx.AsyncClient(timeout=10.0, verify=_httpx_verify()) as client:
         try:
-            rows = await sb_get(client, "subscriptions",
-                                params={"select": "tier_level,credits_balance", "account_key": "eq.default", "limit": "1"})
+            rows = await sb_get(
+                client,
+                "subscriptions",
+                params={
+                    "select": "tier_level,credits_balance",
+                    "account_key": f"eq.{_ACCOUNT_KEY}",
+                    "limit": "1",
+                },
+            )
             if rows:
                 sub_status = f"ok tier={rows[0].get('tier_level')} credits={rows[0].get('credits_balance')}"
             else:
@@ -531,6 +542,7 @@ async def health():
     return {
         "status": "ok",
         "supabase": bool(SUPABASE_URL),
+        "account_key": _ACCOUNT_KEY,
         "subscription": sub_status,
         "openai_configured": bool(OPENAI_API_KEY),
         "stt_model": STT_MODEL,
@@ -1261,8 +1273,6 @@ def _with_billing(payload: dict, billing: Optional[dict]) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Subskrypcje i Portfel Kredytowy (Quota & Tier Authorization Management)
 # ─────────────────────────────────────────────────────────────────────────────
-
-_ACCOUNT_KEY = "default"  # brak logowania → jedno konto restauracji
 
 TIER_CONFIG = {
     0: {
@@ -8378,8 +8388,19 @@ async def _exec_delete_inventory_item(client, p):
             iid, name = rows[0]["id"], rows[0]["name"]
     if not iid:
         raise HTTPException(status_code=404, detail=f"Nie znaleziono produktu „{name or '?'}” w magazynie.")
-    await sb_delete(client, "inventory_items", {"id": f"eq.{iid}"})
-    return {"ok": True, "action": "delete_inventory_item", "message": f"Usunięto produkt: {name}."}
+    # Soft-delete jak bulk_delete_inventory — umożliwia „przywróć magazyn”
+    try:
+        await sb_patch(client, "inventory_items", {"id": f"eq.{iid}"}, {"is_active": False})
+        return {
+            "ok": True, "action": "delete_inventory_item", "restorable": True,
+            "message": f"Usunięto produkt: {name} (ukryty — powiedz „przywróć magazyn”, aby cofnąć).",
+        }
+    except httpx.HTTPStatusError:
+        await sb_delete(client, "inventory_items", {"id": f"eq.{iid}"})
+        return {
+            "ok": True, "action": "delete_inventory_item", "restorable": False,
+            "message": f"Usunięto produkt: {name}.",
+        }
 
 
 async def _exec_toggle_availability(client, p):

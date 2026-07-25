@@ -1,9 +1,10 @@
 # Dystrybucja APK (closed beta)
 
-## Bloker: publiczny backend
+## Publiczny backend (wymagany poza LAN)
 
-Obecny `frontend/.env` ma `EXPO_PUBLIC_BACKEND_URL` wskazujący na **IP LAN**.  
-APK zbudowany z takim URL **nie zadziała** u restauratorów poza Twoją siecią.
+`EXPO_PUBLIC_BACKEND_URL` musi być **publicznym HTTPS** (nie IP LAN).  
+Aktualny tunel beta: `https://fair-breads-do.loca.lt` (health `/api/health` = 200).  
+Docelowo: Railway/Render — [`BETA_PRODUCTION_BACKEND.md`](./BETA_PRODUCTION_BACKEND.md).
 
 Przed buildem **obowiązkowo** ustaw publiczny HTTPS backendu w profilu `preview`:
 

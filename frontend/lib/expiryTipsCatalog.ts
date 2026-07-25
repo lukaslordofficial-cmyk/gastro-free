@@ -55,7 +55,7 @@ export type ExpiryTip = {
   cta_label?: string;
   legal_note?: string;
   variables: ExpiryTipVariable[];
-  /** Tagí filtrujące (głównie gry): #szybka #grupowa #śmieszna #odważna */
+  /** Tagi filtrujące (głównie gry): #szybka #grupowa #śmieszna #odważna */
   tags?: ExpiryGameTag[];
   venue_fit?: ExpiryVenueFit;
   duration_sec?: number;

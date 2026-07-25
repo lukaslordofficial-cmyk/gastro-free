@@ -18,7 +18,7 @@ import { PremiumAlertProvider } from '@/components/PremiumAlert';
 import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
 import { warmProductImageIndexes } from '@/lib/productImages';
 
-LogBox.ignoreAllLogs(true);
+// Nie wyciszaj wszystkich logów w closed beta — widać prawdziwe błędy.
 LogBox.ignoreLogs(['Unable to activate keep awake', 'KeepAwake']);
 
 // W Expo Go keep-awake czasem nie jest dostępne — nie wolno crashować startu.

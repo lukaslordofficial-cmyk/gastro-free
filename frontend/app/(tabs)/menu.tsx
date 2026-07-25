@@ -799,7 +799,17 @@ export default function MenuScreen() {
         supabase
           .from('inventory_items')
           .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-          .order('name'),
+          .eq('is_active', true)
+          .order('name')
+          .then(async (res) => {
+            if (res.error && /is_active/.test(res.error.message ?? '')) {
+              return supabase
+                .from('inventory_items')
+                .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+                .order('name');
+            }
+            return res;
+          }),
         supabase
           .from('inventory_categories')
           .select('id, name')

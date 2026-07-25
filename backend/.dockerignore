@@ -1,0 +1,12 @@
+.env
+.env.*
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+tests
+.inspiration_recipe_cache.json
+.restaurant_profile.json
+static
+*.md

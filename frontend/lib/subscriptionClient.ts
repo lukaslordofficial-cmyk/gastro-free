@@ -195,7 +195,7 @@ export async function cancelSubscription(): Promise<SubscriptionState> {
   );
 }
 
-/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu 100 kredytów. */
+/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu 1000 kredytów. */
 export async function resignToFreeTier(): Promise<SubscriptionState> {
   const row = await ensureRow();
   const updated = await patchRow({

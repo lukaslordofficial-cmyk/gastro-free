@@ -1,0 +1,28 @@
+# Optional Fly.io deploy (from repo root after `fly launch` / `fly apps create`)
+# https://fly.io/docs/reference/configuration/
+
+app = 'gastro-manager-api'
+primary_region = 'waw'
+
+[build]
+  dockerfile = 'backend/Dockerfile'
+
+[http_service]
+  internal_port = 8001
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '10s'
+    grace_period = '40s'
+    method = 'GET'
+    path = '/api/health'
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

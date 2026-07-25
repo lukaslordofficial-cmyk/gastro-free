@@ -1,0 +1,42 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: connect this repo in Render Dashboard, or `render blueprint launch`
+services:
+  - type: web
+    name: gastro-manager-api
+    runtime: docker
+    rootDir: backend
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: OPENAI_STT_MODEL
+        value: whisper-1
+      - key: OPENAI_CHAT_MODEL
+        value: gpt-4o-mini
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_TIER1
+        sync: false
+      - key: STRIPE_PRICE_TIER2
+        sync: false
+      - key: STRIPE_PRICE_TOPUP_100
+        sync: false
+      - key: STRIPE_PRICE_TOPUP_500
+        sync: false
+      - key: STRIPE_PRICE_TOPUP_1000
+        sync: false
+      - key: ALLOW_MOCK_BILLING
+        value: "false"
+      - key: ACCOUNT_KEY
+        value: default
+      - key: CORS_ALLOW_ORIGINS
+        value: "*"

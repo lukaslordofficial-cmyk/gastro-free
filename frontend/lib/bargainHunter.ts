@@ -626,7 +626,7 @@ export function toSupplierGroups(
       },
     ];
   }
-  if (selected === 'optimized') return result.variant_split.suppliers ?? [];
+  if (selected === 'optimized') return result.variant_split?.suppliers ?? [];
   return [];
 }
 

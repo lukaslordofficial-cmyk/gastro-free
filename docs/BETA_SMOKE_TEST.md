@@ -25,4 +25,5 @@ Czas: ok. **10–15 minut**. Środowisko: APK z backendem dostępnym publicznie 
 - Czy masz internet i czy backend odpowiada (funkcje AI / głos / Łowca wymagają API)  
 - Wersja APK / data otrzymania linku  
 
-Pełniejsza checklista techniczna (dla zespołu): `docs/BETA_READINESS_CHECKLIST.md`.
+Pełniejsza checklista techniczna (dla zespołu): `docs/BETA_READINESS_CHECKLIST.md`.  
+Znane ograniczenia (LAN, Stripe Test, Reliability…): `docs/BETA_KNOWN_LIMITATIONS.md`.

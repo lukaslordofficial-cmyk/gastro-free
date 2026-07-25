@@ -741,7 +741,9 @@ function SupplierCard({
                     Czas dostawy
                   </Text>
                   <Text style={[cardStyles.dataValue, theme.isPremium && cardStyles.dataValuePrem]}>
-                    {supplier.lead_time_days} dni
+                    {supplier.lead_time_days === 1
+                      ? '1 dzień'
+                      : `${supplier.lead_time_days} dni`}
                   </Text>
                 </View>
               ) : (
@@ -2610,7 +2612,7 @@ export default function DostawcyScreen() {
         if (!err) {
           Alert.alert(
             'Częściowy zapis',
-            'Zapisano dane basiczne. Uruchom ADD_SUPPLIER_SHIPPING.sql w Supabase, aby włączyć koszty dostawy.',
+            'Zapisano dane podstawowe. Uruchom ADD_SUPPLIER_SHIPPING.sql w Supabase, aby włączyć koszty dostawy.',
           );
         }
       }
@@ -3022,7 +3024,6 @@ export default function DostawcyScreen() {
               <Text style={[mainStyles.toggleHint, prem && { color: DS.color.muted, marginBottom: 8 }]}>
                 Uzupełnij czas dostawy — Łowca Okazji używa tej wartości przy produktach krytycznych
                 (gdy puste: bezpieczny domyślny ~2 dni w optymalizerze, bez zapisu do bazy).
-                Kolumna SQL: lead_time_days (migracja ADD_SUPPLIER_LEAD_TIME.sql).
               </Text>
 
               <Text style={[mainStyles.fieldLabel, premLabel]}>Notatki</Text>

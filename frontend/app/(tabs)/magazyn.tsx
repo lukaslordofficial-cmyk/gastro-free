@@ -963,8 +963,18 @@ export default function MagazynScreen() {
         {
           text: 'Usuń', style: 'destructive',
           onPress: async () => {
-            const { error } = await supabase.from('inventory_items').delete().eq('id', item.id);
-            if (error) { Alert.alert('Błąd', error.message); return; }
+            // Soft-delete (is_active=false) — zgodne z ADD_SOFT_DELETE.sql i „przywróć magazyn”
+            const { error } = await supabase
+              .from('inventory_items')
+              .update({ is_active: false })
+              .eq('id', item.id);
+            if (error && /is_active/.test(error.message ?? '')) {
+              const hard = await supabase.from('inventory_items').delete().eq('id', item.id);
+              if (hard.error) { Alert.alert('Błąd', hard.error.message); return; }
+            } else if (error) {
+              Alert.alert('Błąd', error.message);
+              return;
+            }
             setInventory((prev) => prev.filter((i) => i.id !== item.id));
           },
         },

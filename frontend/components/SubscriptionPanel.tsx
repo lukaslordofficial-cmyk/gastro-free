@@ -146,7 +146,7 @@ export function SubscriptionPanel() {
         >
           {busy === 'resign'
             ? <ActivityIndicator size="small" color={theme.danger} />
-            : <Text style={styles.resignText}>Zrezygnuj z subskrypcji → plan Free (bez pakietu 100 kr.)</Text>}
+            : <Text style={styles.resignText}>Zrezygnuj z subskrypcji → plan Free (bez ponownego pakietu 1000 kr.)</Text>}
         </TouchableOpacity>
       )}
 

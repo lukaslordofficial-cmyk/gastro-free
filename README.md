@@ -7,6 +7,8 @@ Aplikacja dla restauracji: magazyn, menu, dostawcy, Jarvis, Łowca Okazji, subsk
 - Smoke test dla restauratorów: [`docs/BETA_SMOKE_TEST.md`](docs/BETA_SMOKE_TEST.md)
 - Gotowość / limity kredytów (1000): [`docs/BETA_READINESS_CHECKLIST.md`](docs/BETA_READINESS_CHECKLIST.md)
 - APK / EAS: [`docs/BETA_APK_DISTRIBUTION.md`](docs/BETA_APK_DISTRIBUTION.md)
+- Publiczny backend HTTPS: [`docs/BETA_PRODUCTION_BACKEND.md`](docs/BETA_PRODUCTION_BACKEND.md)
+- Znane limity (multi-tenant, tunel vs Railway): [`docs/BETA_KNOWN_LIMITATIONS.md`](docs/BETA_KNOWN_LIMITATIONS.md)
 
 ## Struktura
 

@@ -2383,21 +2383,24 @@ export default function DostawcyScreen() {
     const SEL_LEGACY =
       'id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order)';
     try {
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const [suppliersRes, countRes] = await Promise.all([
-        supabase.from('suppliers').select(SEL_VISIBLE).order('name'),
+        supabase.from('suppliers').select(SEL_VISIBLE).eq('account_key', ak).order('name'),
         supabase
           .from('supplier_offers')
           .select('*', { count: 'exact', head: true })
+          .eq('account_key', ak)
           .eq('status', 'done'),
       ]);
       let data = suppliersRes.data;
       if (suppliersRes.error) {
         const msg = suppliersRes.error.message ?? '';
         if (/lead_time_days/.test(msg)) {
-          const retry = await supabase.from('suppliers').select(SEL_NO_LEAD).order('name');
+          const retry = await supabase.from('suppliers').select(SEL_NO_LEAD).eq('account_key', ak).order('name');
           if (retry.error) {
             if (/shipping_cost|free_shipping_threshold/.test(retry.error.message ?? '')) {
-              const legacy = await supabase.from('suppliers').select(SEL_LEGACY).order('name');
+              const legacy = await supabase.from('suppliers').select(SEL_LEGACY).eq('account_key', ak).order('name');
               if (legacy.error) throw legacy.error;
               data = legacy.data;
             } else {
@@ -2407,11 +2410,11 @@ export default function DostawcyScreen() {
             data = retry.data;
           }
         } else if (/shipping_cost|free_shipping_threshold/.test(msg)) {
-          const retry = await supabase.from('suppliers').select(SEL_LEGACY).order('name');
+          const retry = await supabase.from('suppliers').select(SEL_LEGACY).eq('account_key', ak).order('name');
           if (retry.error) throw retry.error;
           data = retry.data;
         } else if (/is_visible/.test(msg)) {
-          const retry = await supabase.from('suppliers').select(SEL_BASE).order('name');
+          const retry = await supabase.from('suppliers').select(SEL_BASE).eq('account_key', ak).order('name');
           if (retry.error) throw retry.error;
           data = retry.data;
         } else {
@@ -2560,6 +2563,8 @@ export default function DostawcyScreen() {
       const shipVal = parseFloat(formShipping.replace(',', '.'));
       const freeVal = parseFloat(formFreeShipFrom.replace(',', '.'));
       const leadVal = parseFloat(formLeadTime.replace(',', '.'));
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const payload: Record<string, unknown> = {
         name: formName.trim(),
         nip: formNip.trim() || null,
@@ -2573,10 +2578,11 @@ export default function DostawcyScreen() {
         free_shipping_threshold:
           formFreeShipOn && isFinite(freeVal) && freeVal > 0 ? freeVal : 0,
         lead_time_days: isFinite(leadVal) && leadVal > 0 ? leadVal : null,
+        account_key: ak,
       };
       let err: any = null;
       if (editingId) {
-        ({ error: err } = await supabase.from('suppliers').update(payload).eq('id', editingId));
+        ({ error: err } = await supabase.from('suppliers').update(payload).eq('id', editingId).eq('account_key', ak));
       } else {
         const iconColor = ICON_COLORS[Math.floor(Math.random() * ICON_COLORS.length)];
         ({ error: err } = await supabase.from('suppliers').insert({ ...payload, icon_color: iconColor }));

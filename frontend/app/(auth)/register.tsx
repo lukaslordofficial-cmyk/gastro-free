@@ -42,8 +42,9 @@ export default function RegisterScreen() {
       }
       if (res.needsEmailConfirm) {
         setInfo(
-          'Konto utworzone. Sprawdź skrzynkę e-mail i potwierdź adres, potem wróć do logowania. ' +
-            '(Na closed beta możesz wyłączyć Confirm email w Supabase → Authentication.)',
+          'Konto utworzone. Zaloguj się tym samym e-mailem i hasłem. ' +
+            'Jeśli logowanie nie działa, w Supabase wyłącz „Confirm email” ' +
+            '(Authentication → Providers → Email).',
         );
         return;
       }

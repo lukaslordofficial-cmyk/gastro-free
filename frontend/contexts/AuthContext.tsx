@@ -10,6 +10,9 @@ import type { Session, User } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { setAccountKey, getAccountKey } from '@/lib/accountKey';
 import { polishAuthError } from '@/lib/authErrors';
+import { fetchJson } from '@/lib/safeFetch';
+
+const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
 export type UserProfile = {
   id: string;
@@ -188,14 +191,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           data: {
             restaurant_name: (restaurantName ?? '').trim() || null,
           },
+          // Preferujemy natychmiastową sesję (gdy Confirm email wyłączone w Supabase).
         },
       });
       if (error) return { ok: false as const, message: polishAuthError(error) };
-      const needsEmailConfirm = !data.session && !!data.user;
+
+      // Closed beta: bez maila potwierdzającego — Admin API na backendzie, potem login.
+      if (!data.session && data.user?.id && BACKEND_URL) {
+        const conf = await fetchJson(`${BACKEND_URL}/api/auth/auto-confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: data.user.id }),
+        });
+        if (conf.ok) {
+          const { error: signErr } = await supabase.auth.signInWithPassword({
+            email: e,
+            password,
+          });
+          if (!signErr) {
+            const { data: sess } = await supabase.auth.getSession();
+            if (sess.session) await applySession(sess.session);
+            return { ok: true as const };
+          }
+        }
+      }
+
       if (data.session?.user) {
         await applySession(data.session);
+        return { ok: true as const };
       }
-      return { ok: true as const, needsEmailConfirm };
+
+      // Fallback tylko gdy Confirm email nadal włączone i auto-confirm nie zadziałał
+      return {
+        ok: true as const,
+        needsEmailConfirm: true,
+      };
     },
     [applySession],
   );

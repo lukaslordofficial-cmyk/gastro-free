@@ -792,10 +792,13 @@ export default function MenuScreen() {
 
   const fetchData = useCallback(async () => {
     try {
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const [dishesRes, utensilsRes, invRes, catsRes] = await Promise.all([
         supabase
           .from('menu_items')
           .select('id, name, category, price_pln, pos_id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
+          .eq('account_key', ak)
           .eq('is_active', true)
           .order('category')
           .order('name'),
@@ -806,6 +809,7 @@ export default function MenuScreen() {
         supabase
           .from('inventory_items')
           .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+          .eq('account_key', ak)
           .eq('is_active', true)
           .order('name')
           .then(async (res) => {
@@ -813,6 +817,7 @@ export default function MenuScreen() {
               return supabase
                 .from('inventory_items')
                 .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+                .eq('account_key', ak)
                 .order('name');
             }
             return res;
@@ -820,6 +825,7 @@ export default function MenuScreen() {
         supabase
           .from('inventory_categories')
           .select('id, name')
+          .eq('account_key', ak)
           .order('sort_order'),
       ]);
 
@@ -1152,9 +1158,17 @@ export default function MenuScreen() {
         // ── Insert new dish ──
         const posId = makePosId(form.category, dishes.length + 1);
 
+        const { getAccountKey } = await import('@/lib/accountKey');
         const { data: newItem, error: itemError } = await supabase
           .from('menu_items')
-          .insert({ name: nameTrim, category: form.category, price_pln: price, pos_id: posId, is_active: true })
+          .insert({
+            name: nameTrim,
+            category: form.category,
+            price_pln: price,
+            pos_id: posId,
+            is_active: true,
+            account_key: getAccountKey(),
+          })
           .select('id')
           .single();
         if (itemError) throw itemError;

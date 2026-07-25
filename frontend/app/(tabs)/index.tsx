@@ -435,6 +435,8 @@ export default function FinanseScreen() {
 
   const fetchData = useCallback(async () => {
     try {
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const [
         revRes, fixedRes, varRes, revHistRes, varHistRes, inventoryRes,
         revAllRes, fixedAllRes, varAllRes,
@@ -445,7 +447,7 @@ export default function FinanseScreen() {
         supabase.from('variable_cost_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
         supabase.from('revenue_entries').select('year_month, amount_pln').order('year_month').limit(2000),
         supabase.from('variable_cost_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-        supabase.from('inventory_items').select('id, name, quantity, min_quantity, unit'),
+        supabase.from('inventory_items').select('id, name, quantity, min_quantity, unit').eq('account_key', ak),
         supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
         supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
         supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),

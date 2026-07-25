@@ -2,7 +2,11 @@
 
 ## Publiczny backend (wymagany poza LAN)
 
-`EXPO_PUBLIC_BACKEND_URL` musi być **publicznym HTTPS** (nie IP LAN).  
+`EXPO_PUBLIC_BACKEND_URL` musi być **publicznym HTTPS** (nie IP LAN).
+
+Produkcja Railway (2026-07-25):  
+`https://gastro-manager-api-production-21dd.up.railway.app`  
+(`https://railway.app` to tylko panel — nie wstawiaj go do apki.)  
 Aktualny tunel beta: `https://fair-breads-do.loca.lt` (health `/api/health` = 200).  
 Docelowo: Railway/Render — [`BETA_PRODUCTION_BACKEND.md`](./BETA_PRODUCTION_BACKEND.md).
 

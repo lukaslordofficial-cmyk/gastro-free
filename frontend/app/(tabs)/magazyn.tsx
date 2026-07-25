@@ -725,28 +725,39 @@ export default function MagazynScreen() {
 
   const fetchData = useCallback(async () => {
     try {
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase
           .from('inventory_items')
           .select('id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)')
+          .eq('account_key', ak)
           .eq('is_active', true)
           .order('name')
           .then(async (res) => {
             // Graceful fallback if optional columns missing
+            if (res.error && /account_key/.test(res.error.message ?? '')) {
+              // Migracja ADD_TENANT_ISOLATION jeszcze nieodpalona — nie pokazuj cudzych danych na ślepo
+              console.warn('[Magazyn] Brak kolumny account_key — uruchom ADD_TENANT_ISOLATION.sql');
+              return res;
+            }
             if (res.error && /is_active|optimal_quantity|safety_buffer_percent/.test(res.error.message ?? '')) {
               const withoutActive = await supabase
                 .from('inventory_items')
                 .select('id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)')
+                .eq('account_key', ak)
                 .order('name');
               if (withoutActive.error && /optimal_quantity|safety_buffer_percent/.test(withoutActive.error.message ?? '')) {
                 const slim = await supabase
                   .from('inventory_items')
                   .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)')
+                  .eq('account_key', ak)
                   .order('name');
                 if (slim.error && /safety_buffer_percent/.test(slim.error.message ?? '')) {
                   return supabase
                     .from('inventory_items')
                     .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+                    .eq('account_key', ak)
                     .order('name');
                 }
                 return slim;
@@ -758,10 +769,12 @@ export default function MagazynScreen() {
         supabase
           .from('inventory_categories')
           .select('id, name, color')
+          .eq('account_key', ak)
           .order('sort_order'),
         supabase
           .from('waste_logs')
           .select('id, item_name, quantity, unit, reason, created_at')
+          .eq('account_key', ak)
           .order('created_at', { ascending: false })
           .limit(50),
       ]);
@@ -887,8 +900,9 @@ export default function MagazynScreen() {
     const color = CAT_AUTO_COLORS.find((c) => !usedColors.includes(c))
       ?? CAT_AUTO_COLORS[dbCategories.length % CAT_AUTO_COLORS.length];
     const maxOrder = dbCategories.reduce((m, c) => Math.max(m, (c as any).sort_order ?? 0), 0);
+    const { getAccountKey } = await import('@/lib/accountKey');
     const { data: newCat, error } = await supabase.from('inventory_categories').insert({
-      name, color, icon_name: 'box', sort_order: maxOrder + 10,
+      name, color, icon_name: 'box', sort_order: maxOrder + 10, account_key: getAccountKey(),
     }).select('id, name, color').single();
     savingCatRef.current = false;
     setSavingCat(false);
@@ -1232,6 +1246,8 @@ export default function MagazynScreen() {
 
       const isPiece = form.unit === 'szt' || form.unit === 'opak';
       const uwv = isPiece && form.unitWeightVolume.trim() ? parseFloat(form.unitWeightVolume) : null;
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const payload: any = {
         name: nameTrim,
         category_id: categoryIdMap[form.category] ?? null,
@@ -1244,15 +1260,16 @@ export default function MagazynScreen() {
         unit_cost: 0,
         unit_weight_volume: uwv && !isNaN(uwv) ? uwv : null,
         weight_volume_unit: uwv && !isNaN(uwv) ? form.weightVolumeUnit : null,
+        account_key: ak,
       };
       const selectCols = 'id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)';
       let row: any = null;
       let saveError: any = null;
       if (editingId) {
-        const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, ...core } = payload;
-        let upd = await supabase.from('inventory_items').update(payload).eq('id', editingId).select(selectCols).single();
+        const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, account_key: _ak, ...core } = payload;
+        let upd = await supabase.from('inventory_items').update(payload).eq('id', editingId).eq('account_key', ak).select(selectCols).single();
         if (upd.error && /optimal_quantity/.test(upd.error.message ?? '')) {
-          upd = await supabase.from('inventory_items').update({ ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit }).eq('id', editingId).select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)').single();
+          upd = await supabase.from('inventory_items').update({ ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit }).eq('id', editingId).eq('account_key', ak).select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)').single();
         }
         row = upd.data;
         saveError = upd.error;

@@ -196,12 +196,54 @@ def _require_supabase() -> None:
         )
 
 
+# Tabele z kolumną account_key (migracja ADD_TENANT_ISOLATION.sql).
+_TENANT_TABLES = frozenset({
+    "inventory_items",
+    "inventory_categories",
+    "menu_items",
+    "suppliers",
+    "waste_logs",
+    "warehouse_inventory",
+    "supplier_offers",
+})
+
+
+def _table_name(path: str) -> str:
+    return (path or "").split("?", 1)[0].strip("/").split("/")[0]
+
+
+def _with_tenant_params(path: str, params: dict | list | None) -> dict | list | None:
+    """Dokleja filtr account_key do zapytań tenantowych (service_role omija RLS)."""
+    if not isinstance(params, dict):
+        return params
+    if _table_name(path) not in _TENANT_TABLES:
+        return params
+    if "account_key" in params:
+        return params
+    out = dict(params)
+    out["account_key"] = f"eq.{get_account_key()}"
+    return out
+
+
+def _with_tenant_payload(path: str, payload):
+    if _table_name(path) not in _TENANT_TABLES:
+        return payload
+    ak = get_account_key()
+    if isinstance(payload, list):
+        return [{**row, "account_key": (row.get("account_key") or ak)} for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        if payload.get("account_key"):
+            return payload
+        return {**payload, "account_key": ak}
+    return payload
+
+
 async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
     _require_supabase()
     r = await client.get(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        params=params or {},
+        params=_with_tenant_params(path, params) or {},
     )
     r.raise_for_status()
     return r.json()
@@ -234,7 +276,7 @@ async def sb_post(client: httpx.AsyncClient, path: str, payload):
     r = await client.post(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        json=payload,
+        json=_with_tenant_payload(path, payload),
     )
     r.raise_for_status()
     return r.json() if r.text else None
@@ -245,7 +287,7 @@ async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
     r = await client.patch(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        params=params,
+        params=_with_tenant_params(path, params) or {},
         json=payload,
     )
     r.raise_for_status()
@@ -257,7 +299,7 @@ async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
     r = await client.delete(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        params=params,
+        params=_with_tenant_params(path, params) or {},
     )
     r.raise_for_status()
     return r.json() if r.text else None
@@ -607,6 +649,43 @@ async def health():
         "stt_model": STT_MODEL,
         "chat_model": CHAT_MODEL,
     }
+
+
+class AutoConfirmBody(BaseModel):
+    user_id: str = Field(..., min_length=8, max_length=80)
+
+
+@app.post("/api/auth/auto-confirm")
+async def auth_auto_confirm(body: AutoConfirmBody):
+    """
+    Closed beta: potwierdza e-mail użytkownika przez Admin API (bez maila).
+    Wyłącz: AUTO_CONFIRM_EMAIL=false na Railway.
+    Docelowo wyłącz też „Confirm email” w Supabase → Authentication → Providers → Email.
+    """
+    flag = (os.environ.get("AUTO_CONFIRM_EMAIL") or "true").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        raise HTTPException(status_code=403, detail="AUTO_CONFIRM_EMAIL jest wyłączone.")
+    _require_supabase()
+    uid = (body.user_id or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F-]{32,36}", uid):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy user_id.")
+    url = f"{SUPABASE_URL}/auth/v1/admin/users/{uid}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=20.0, verify=_httpx_verify()) as client:
+        r = await client.put(url, headers=headers, json={"email_confirm": True})
+        if r.status_code >= 400:
+            # starsze API czasem używa PATCH
+            r2 = await client.patch(url, headers=headers, json={"email_confirm": True})
+            if r2.status_code >= 400:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Nie udało się potwierdzić e-maila: {r2.text[:300]}",
+                )
+    return {"ok": True, "user_id": uid, "email_confirmed": True}
 
 
 @app.get("/api/health/deep")

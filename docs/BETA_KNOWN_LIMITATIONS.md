@@ -11,7 +11,7 @@ Data: 2026-07-25.
 |--------------|----------|
 | **Backend publiczny vs LAN** | APK wymaga `EXPO_PUBLIC_BACKEND_URL` = publiczny HTTPS. Adres LAN działa tylko w tej samej Wi‑Fi. Patrz [`BETA_PRODUCTION_BACKEND.md`](./BETA_PRODUCTION_BACKEND.md). |
 | **Tunel ≠ produkcja** | Quick tunnel (localtunnel / cloudflared / serveo) wystarczy na smoke kilku testerów; URL pada po restarcie PC. Na skalę → Railway/Render/Fly + Docker z repo. |
-| **Auth jest, dane operacyjne częściowo wspólne** | Login/register działa (Supabase Auth + `profiles.account_key`). Kredyty/Stripe per user. Magazyn/menu **bez pełnego RLS per tenant** — patrz [`BETA_AUTH.md`](./BETA_AUTH.md). |
+| **Auth + tenant** | Po migracji `ADD_TENANT_ISOLATION.sql` magazyn/menu/dostawcy są per `account_key`. Bez tej migracji dane mogą być wspólne. Patrz [`BETA_AUTH.md`](./BETA_AUTH.md). |
 | **Push zdalny** | Lokalne przypomnienia dat ważności OK; Expo Push wymaga `projectId` (EAS) + tokenów w DB + crona. Web zwykle bez tokena. |
 | **GitHub / Railway** | Po pushu do `Gastro-Manager-15` podłącz Railway (Root = `backend` lub root `railway.toml`). |
 

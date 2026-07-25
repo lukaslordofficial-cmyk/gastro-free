@@ -37,20 +37,26 @@ const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
 const env = parseEnv(stripBom(fs.readFileSync(envPath, 'utf8')));
 const eas = JSON.parse(stripBom(fs.readFileSync(easPath, 'utf8')));
 eas.build = eas.build || {};
-eas.build.preview = eas.build.preview || {};
-eas.build.preview.env = eas.build.preview.env || {};
+const profiles = ['preview', 'preview-apk'].filter((p) => eas.build[p]);
+if (!profiles.includes('preview')) {
+  eas.build.preview = { env: {} };
+  profiles.push('preview');
+}
 
 let ok = 0;
-for (const k of KEYS) {
-  if (env[k]) {
-    eas.build.preview.env[k] = env[k];
-    ok += 1;
-    console.log(`set ${k} (len=${env[k].length})`);
-  } else {
-    console.log(`missing ${k}`);
+for (const profile of profiles) {
+  eas.build[profile].env = eas.build[profile].env || {};
+  for (const k of KEYS) {
+    if (env[k]) {
+      eas.build[profile].env[k] = env[k];
+      if (profile === 'preview') ok += 1;
+      console.log(`[${profile}] set ${k} (len=${env[k].length})`);
+    } else if (profile === 'preview') {
+      console.log(`missing ${k}`);
+    }
   }
 }
 
 fs.writeFileSync(easPath, JSON.stringify(eas, null, 2) + '\n', 'utf8');
-console.log(`Synced ${ok}/${KEYS.length} keys into eas.json preview.env`);
+console.log(`Synced ${ok}/${KEYS.length} keys into eas.json (${profiles.join(', ')})`);
 console.log('WARNING: EXPO_PUBLIC_BACKEND_URL must be a public HTTPS URL for remote beta testers.');

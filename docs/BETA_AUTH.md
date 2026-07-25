@@ -1,35 +1,40 @@
-# Auth (login / rejestracja) — closed beta
+# Auth + izolacja kont — closed beta
 
-Data: 2026-07-25.
+Data: 2026-07-25 (aktualizacja: tenant isolation + bez maila confirm).
 
 ## Flow
 
-1. Aplikacja startuje → brak sesji → ekran `/(auth)/login`.
-2. Rejestracja: e-mail + hasło (+ opcjonalna nazwa restauracji).
-3. Supabase Auth tworzy `auth.users` → trigger SQL (`ADD_AUTH_PROFILES.sql`) tworzy:
-   - `profiles` z `account_key = ak_<uuid_bez_kresek>`
-   - `subscriptions` z **1000 kredytów** (tier 0)
-4. Sesja w AsyncStorage; Magazyn/Menu/Subskrypcja używają `account_key` z profilu.
-5. Wylogowanie: Ustawienia → Konto → Wyloguj.
+1. Brak sesji → `/(auth)/login` / rejestracja.
+2. Rejestracja: e-mail + hasło (+ nazwa restauracji).
+3. Trigger SQL / app tworzy `profiles.account_key = ak_<uuid>` + **1000 kredytów**.
+4. Jeśli Supabase wymaga potwierdzenia e-maila → backend `POST /api/auth/auto-confirm` (service_role) i od razu logowanie — **bez maila**.
+5. Magazyn / menu / dostawcy filtrują po `account_key` → nowy user startuje z **pustymi** danymi.
 
-## Migracja (obowiązkowa w Supabase SQL Editor)
+## Migracje (Supabase SQL Editor) — obowiązkowe
 
-Uruchom po `ADD_SUBSCRIPTIONS.sql` / `FIX_SUBSCRIPTIONS_RLS.sql`:
+1. `ADD_SUBSCRIPTIONS.sql` / `FIX_SUBSCRIPTIONS_RLS.sql` (jeśli nie było)
+2. **`ADD_AUTH_PROFILES.sql`**
+3. **`ADD_TENANT_ISOLATION.sql`** ← kolumna `account_key` + RLS na inventory/menu/suppliers/waste
 
-- [`supabase_migrations/ADD_AUTH_PROFILES.sql`](../supabase_migrations/ADD_AUTH_PROFILES.sql)
+Bez pkt 3 nowi użytkownicy mogą nadal widzieć wspólne dane demo (`default`).
 
-## Supabase Auth (dashboard)
+## Supabase Auth (dashboard) — wyłączenie maila
 
-- Authentication → Providers → **Email** włączony.
-- Na closed beta: rozważ wyłączenie **Confirm email** (Authentication → Providers → Email), żeby testerzy od razu dostawali sesję.
-- Stripe pozostaje w **test mode** — portfel jest per `account_key`, nie globalny `default`.
+**Authentication → Providers → Email → Confirm email = OFF**
+
+To najczystszy wariant (sesja od razu po `signUp`).  
+Auto-confirm na backendzie jest zapasem (`AUTO_CONFIRM_EMAIL=true` na Railway, domyślnie włączone).
+
+Szablony PL (gdy kiedyś włączysz confirm): Authentication → Email Templates → Confirm signup → treść po polsku.
 
 ## Backend
 
-Klient wysyła nagłówek `X-Account-Key` (+ opcjonalnie `Authorization: Bearer <jwt>`).  
-Middleware FastAPI ustawia tenant na request; bez nagłówka = `ACCOUNT_KEY` z env (legacy).
+- Nagłówek `X-Account-Key` + opcjonalnie `Authorization: Bearer <jwt>`.
+- FastAPI dokleja `account_key` do zapytań tenantowych (service_role omija RLS).
+- Endpoint: `POST /api/auth/auto-confirm` body `{ "user_id": "<uuid>" }`.
 
-## Uwagi multi-tenant
+## Po deployu
 
-- Magazyn / menu w schemacie nadal często są **globalne** (historyczne tabele bez `account_key`) — izolacja kredytów/Stripe jest per user; pełne RLS na inventory/menu to kolejny etap.
-- Konto `default` zostaje dla starych deployów / seedów.
+1. Odpal SQL w Supabase.
+2. Wyłącz Confirm email.
+3. Przebuduj APK (zmiany FE) — Railway sam podciągnie backend z `main`.

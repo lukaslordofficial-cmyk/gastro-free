@@ -595,8 +595,10 @@ export function VoiceReportModal({
         form.append('audio', source as any, `voice.${ext}`);
       }
       form.append('language', 'pl');
+      const { backendTenantHeaders } = await import('@/lib/tenantScope');
       const result = await fetchJson<{ text?: string }>(`${BACKEND_URL}/api/voice/transcribe`, {
         method: 'POST',
+        headers: backendTenantHeaders(),
         body: form,
       });
       if (!result.ok) throw new Error(result.error);
@@ -682,8 +684,8 @@ export function VoiceReportModal({
     try {
       const result = await fetchJson<Interpretation>(`${BACKEND_URL}/api/voice/interpret`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
+              body: JSON.stringify({ text }),
       });
       if (!result.ok) throw new Error(result.error);
       const data = result.data;
@@ -712,8 +714,8 @@ export function VoiceReportModal({
     try {
       const result = await fetchJson<Interpretation>(`${BACKEND_URL}/api/voice/interpret`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
+              body: JSON.stringify({ text }),
       });
       if (!result.ok) throw new Error(result.error);
       const data = correctPeriodIntentFromTranscript(text, result.data);
@@ -924,8 +926,8 @@ export function VoiceReportModal({
         }
         const cmp = await fetchJson<Record<string, any>>(`${BACKEND_URL}/api/orders/compare-offers`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: compareItems }),
+          headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
+                body: JSON.stringify({ items: compareItems }),
         });
         if (!cmp.ok) throw new Error(cmp.error);
         const compare = cmp.data;
@@ -988,8 +990,8 @@ export function VoiceReportModal({
         warnings?: string[];
       }>(`${BACKEND_URL}/api/actions/apply`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
+              body: JSON.stringify({
           intent: applyIntent,
           payload,
           transcript: curTranscript,

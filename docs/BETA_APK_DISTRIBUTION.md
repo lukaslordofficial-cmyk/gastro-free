@@ -27,22 +27,29 @@ Bez publicznego backendu APK zainstaluje się, ale Jarvis / skany / Łowca / bil
 
 ## EAS Build (preferowane)
 
+Projekt Expo: [@lukaslord/gastro-manager](https://expo.dev/accounts/lukaslord/projects/gastro-manager)  
+(`projectId` w `frontend/app.json`).
+
 W katalogu `frontend/`:
 
 ```powershell
-npm i -g eas-cli
-eas login
-eas init
-# upewnij się, że preview.env ma publiczny backend URL
-eas build -p android --profile preview
+$env:NODE_OPTIONS='--use-system-ca'
+# wstaw EXPO_PUBLIC_* z lokalnego .env (w tym PUBLICZNY backend HTTPS)
+node scripts/sync-eas-preview-env.js
+eas build -p android --profile preview --non-interactive
 eas build:list
+# po buildzie przywróć placeholdery w eas.json (żeby nie commitować kluczy):
+git checkout -- eas.json
 ```
 
-Profil `preview` w `eas.json` generuje **APK** (`buildType: apk`) do internal distribution.  
-Po zakończeniu skopiuj link z `eas build:list` / strony Expo i wyślij mail.
+Profil `preview` generuje **APK** (`buildType: apk`) do internal distribution.  
+Po sukcesie: link APK z `eas build:list` / strony builda → wyślij mailem.
 
-Wymagane: konto Expo, opcjonalnie `EXPO_TOKEN` w CI.  
-Jeśli Node zgłasza błąd certyfikatu SSL: `set NODE_OPTIONS=--use-system-ca`.
+**Uwaga:** `package.json` → `preinstall` musi być `node ./scripts/cmd-guard.js ...` (bez `./`), inaczej EAS Linux: `Permission denied`.
+
+**Ads / Gradle:** Expo 54 + RN 0.81 wymaga `react-native-google-mobile-ads` ≥ 15.x (14.11 pada na `currentActivity`). Cleartext HTTP: `expo-build-properties` → `android.usesCleartextTraffic`.
+
+Jeśli Node zgłasza błąd certyfikatu SSL: `$env:NODE_OPTIONS='--use-system-ca'`.
 
 ## Stripe
 

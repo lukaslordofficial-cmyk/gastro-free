@@ -21,7 +21,6 @@
       "adaptiveIcon": {
         "backgroundColor": "#ffffff"
       },
-      "usesCleartextTraffic": true,
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
@@ -40,6 +39,15 @@
       "expo-router",
       "expo-font",
       "expo-web-browser",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true,
+            "kotlinVersion": "2.0.21"
+          }
+        }
+      ],
       [
         "expo-notifications",
         {

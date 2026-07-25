@@ -1,0 +1,17 @@
+# Upload only what EAS needs (app lives in frontend/)
+backend/
+docs/
+memory/
+supabase/
+supabase_migrations/
+tests/
+%s/
+.cursor/
+*.md
+!frontend/**
+frontend/node_modules/
+frontend/.expo/
+frontend/dist/
+**/.env
+**/.env.*
+!**/.env.example

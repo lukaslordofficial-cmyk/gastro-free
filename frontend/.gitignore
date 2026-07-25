@@ -36,6 +36,7 @@ yarn-error.*
 .env.*
 !.env.example
 .env*.local
+yarn.lock.bak
 
 # typescript
 *.tsbuildinfo

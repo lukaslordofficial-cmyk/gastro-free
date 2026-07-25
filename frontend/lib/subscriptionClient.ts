@@ -1,14 +1,19 @@
 /**
  * Subskrypcja — operacje bezpośrednio przez Supabase (bez wymagania backendu).
+ * account_key pochodzi z zalogowanego profilu (AuthProvider → lib/accountKey).
  */
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import { getAccountKey } from '@/lib/accountKey';
 import {
   FEATURE_CATALOG, TOPUP_PACKAGES, TIER_PLANS, tierName, type TopupKey,
 } from '@/lib/subscriptionCatalog';
 
-const ACCOUNT_KEY = 'default';
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
 const STARTER_CREDITS = 1000;
+
+function accountKey(): string {
+  return getAccountKey();
+}
 
 export type SubscriptionRow = {
   id: string;
@@ -82,10 +87,11 @@ function buildView(row: SubscriptionRow, message?: string | null): SubscriptionS
 
 async function fetchRow(): Promise<SubscriptionRow | null> {
   if (!isSupabaseConfigured) return null;
+  const key = accountKey();
   const { data, error } = await supabase
     .from('subscriptions')
     .select('*')
-    .eq('account_key', ACCOUNT_KEY)
+    .eq('account_key', key)
     .maybeSingle();
   if (error) {
     if (error.code === 'PGRST205' || error.message?.includes('schema cache')) return null;
@@ -99,7 +105,7 @@ async function ensureRow(): Promise<SubscriptionRow> {
   if (existing) return existing;
 
   const payload = {
-    account_key: ACCOUNT_KEY,
+    account_key: accountKey(),
     tier_level: 0,
     credits_balance: STARTER_CREDITS,
     status: 'active',
@@ -119,7 +125,7 @@ async function patchRow(changes: Partial<SubscriptionRow>): Promise<Subscription
   const { data, error } = await supabase
     .from('subscriptions')
     .update(changes)
-    .eq('account_key', ACCOUNT_KEY)
+    .eq('account_key', accountKey())
     .select('*')
     .single();
   if (error) throw error;
@@ -236,10 +242,22 @@ export async function grantRewardCredit(): Promise<{ ok: boolean; credits_balanc
 export async function syncBackendSubscription(): Promise<void> {
   if (!BACKEND_URL) return;
   try {
-    await fetch(`${BACKEND_URL}/api/subscription`, { method: 'GET' });
+    const key = accountKey();
+    const { data: sess } = await supabase.auth.getSession();
+    const token = sess.session?.access_token;
+    await fetch(`${BACKEND_URL}/api/subscription`, {
+      method: 'GET',
+      headers: {
+        'X-Account-Key': key,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
   } catch {
     /* ignore */
   }
 }
 
-export { BACKEND_URL, ACCOUNT_KEY };
+/** @deprecated użyj getAccountKey() — eksport dla kompatybilności */
+const ACCOUNT_KEY = 'default';
+
+export { BACKEND_URL, ACCOUNT_KEY, accountKey as resolveAccountKey };

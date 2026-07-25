@@ -11,17 +11,17 @@ Data: 2026-07-25.
 |--------------|----------|
 | **Backend publiczny vs LAN** | APK wymaga `EXPO_PUBLIC_BACKEND_URL` = publiczny HTTPS. Adres LAN działa tylko w tej samej Wi‑Fi. Patrz [`BETA_PRODUCTION_BACKEND.md`](./BETA_PRODUCTION_BACKEND.md). |
 | **Tunel ≠ produkcja** | Quick tunnel (localtunnel / cloudflared / serveo) wystarczy na smoke kilku testerów; URL pada po restarcie PC. Na skalę → Railway/Render/Fly + Docker z repo. |
-| **Brak ekranu logowania** | Closed beta = single-tenant (`ACCOUNT_KEY=default`). Nie ma flow „zaloguj się e-mailem” per restaurator. Quick win: osobny deploy z innym `ACCOUNT_KEY`. |
+| **Auth jest, dane operacyjne częściowo wspólne** | Login/register działa (Supabase Auth + `profiles.account_key`). Kredyty/Stripe per user. Magazyn/menu **bez pełnego RLS per tenant** — patrz [`BETA_AUTH.md`](./BETA_AUTH.md). |
 | **Push zdalny** | Lokalne przypomnienia dat ważności OK; Expo Push wymaga `projectId` (EAS) + tokenów w DB + crona. Web zwykle bez tokena. |
-| **GitHub push** | Push z CI/agenta może być zablokowany (brak `gh` auth) — release/tag robi właściciel ręcznie. |
+| **GitHub / Railway** | Po pushu do `Gastro-Manager-15` podłącz Railway (Root = `backend` lub root `railway.toml`). |
 
 ## Płatności / kredyty
 
 | Ograniczenie | Szczegół |
 |--------------|----------|
 | **Stripe = Test mode** | Tylko `sk_test_` / `pk_test_`. Karta: `4242…`. Live keys dopiero przy płatnych pilotach. |
-| **Kredyty beta = 1000** | Free / startowy pakiet: **1000** kredytów AI (nie 500/100). |
-| **Jeden portfel `default`** | `account_key = 'default'` — single-tenant na lokal / jedną restaurację. Nie wiąże jeszcze konta z `auth.uid()`. |
+| **Kredyty beta = 1000** | Free / startowy pakiet: **1000** kredytów AI na nowe konto (trigger + fallback w appce). |
+| **Legacy `default`** | Stary portfel `account_key='default'` zostaje dla seedów / fallbacku backendu bez nagłówka. |
 
 ## Produkt (świadomie niedokończone)
 

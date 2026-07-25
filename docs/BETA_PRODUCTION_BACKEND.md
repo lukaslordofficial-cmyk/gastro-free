@@ -36,10 +36,28 @@ Zalecane / billing:
 - `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_TIER1/2`, `STRIPE_PRICE_TOPUP_*`
 - `PUBLIC_APP_URL`, `BILLING_SUCCESS_URL`, `BILLING_CANCEL_URL`
 - `ALLOW_MOCK_BILLING=false`
-- `ACCOUNT_KEY=default` (jeden portfel na deploy — patrz multi-tenant poniżej)
+- `ACCOUNT_KEY=default` (fallback gdy brak nagłówka `X-Account-Key` — apka z logowaniem wysyła klucz z `profiles`)
 - `RESEND_API_KEY`, `RESEND_FROM_EMAIL` (maile zamówień)
 
 CORS: aplikacja ma `allow_origins=["*"]` — OK na closed beta.
+
+### Checklist zmiennych Railway (wklej w Variables)
+
+- [ ] `OPENAI_API_KEY`
+- [ ] `SUPABASE_URL`
+- [ ] `SUPABASE_SERVICE_ROLE_KEY`
+- [ ] `STRIPE_SECRET_KEY` (`sk_test_…`)
+- [ ] `STRIPE_PUBLISHABLE_KEY` (`pk_test_…`)
+- [ ] `STRIPE_WEBHOOK_SECRET` (po skonfigurowaniu webhooka)
+- [ ] `STRIPE_PRICE_TIER1` / `STRIPE_PRICE_TIER2` / `STRIPE_PRICE_TOPUP_*` (jeśli używane)
+- [ ] `PUBLIC_APP_URL` / `BILLING_SUCCESS_URL` / `BILLING_CANCEL_URL`
+- [ ] `ALLOW_MOCK_BILLING=false`
+- [ ] `ACCOUNT_KEY=default` (tylko fallback)
+- [ ] `RESEND_API_KEY` / `RESEND_FROM_EMAIL` (opcjonalnie)
+- [ ] `PORT` — Railway ustawia samo; Dockerfile czyta `${PORT}`
+
+**Root Directory:** `backend` **albo** root repo z `railway.toml` → `dockerfilePath = "backend/Dockerfile"`.  
+Healthcheck: `GET /api/health`.
 
 ---
 
@@ -83,12 +101,13 @@ cd frontend
 # ustaw EXPO_PUBLIC_BACKEND_URL=https://... (bez slash na końcu)
 $env:NODE_OPTIONS='--use-system-ca'
 node scripts/sync-eas-preview-env.js
-eas build -p android --profile preview --non-interactive
+eas build -p android --profile preview --non-interactive   # AAB (app-bundle)
+# opcjonalny APK: --profile preview-apk
 # po buildzie nie commituj kluczy:
 git checkout -- eas.json
 ```
 
-Szczegóły dystrybucji: [`BETA_APK_DISTRIBUTION.md`](./BETA_APK_DISTRIBUTION.md).
+Szczegóły: [`APP_SIZE_AND_AAB.md`](./APP_SIZE_AND_AAB.md), [`BETA_APK_DISTRIBUTION.md`](./BETA_APK_DISTRIBUTION.md).
 
 ---
 
@@ -112,22 +131,17 @@ Otrzymasz `https://*.trycloudflare.com` — wstaw do `EXPO_PUBLIC_BACKEND_URL` i
 |---------|------------------|------------------------------|
 | **DB** | Supabase (Postgres) — już primary, nie SQLite | Connection pooler (Supabase pooler / PgBouncer), indeksy, RLS per tenant |
 | **API** | 1× uvicorn worker na Railway/Render | Kilka replik; `gunicorn -k uvicorn.workers.UvicornWorker -w 2..4`; osobny worker na scraper/playwright |
-| **Auth** | `ACCOUNT_KEY=default` — **jeden** portfel kredytów / subskrypcja | Logowanie (Supabase Auth) + `account_key` / `restaurant_id` z JWT; albo szybki win: osobny deploy + `ACCOUNT_KEY` per restauracja |
+| **Auth** | Login/register + `profiles.account_key` + nagłówek `X-Account-Key` (patrz [`BETA_AUTH.md`](./BETA_AUTH.md)) | Pełne RLS na inventory/menu per tenant; JWT claim w `app_metadata` |
 | **Pliki / CDN** | Lokalne / Supabase Storage | CDN na assety, limity uploadu |
 | **Rate limits** | Brak / słabe | Rate limit na `/api/*` (AI kosztuje), Stripe webhook idempotency |
 | **HTTPS** | Terminacja u hosta (Railway/Render/Fly) | To samo + własna domena |
 | **Stripe** | **Test mode** | Live keys + webhook na publiczny URL |
 
-### Multi-tenant — quick win (bez przebudowy auth)
+### Multi-tenant
 
-Schemat już trzyma `account_key` w `subscriptions`. Backend czyta:
-
-```text
-ACCOUNT_KEY=<slug-restauracji>
-```
-
-Na betę z 2–3 restauracjami: **osobny serwis Railway** (lub osobne env) z innym `ACCOUNT_KEY` i osobnym APK / deep linkiem.  
-Pełne „zaloguj się e-mailem → wiele lokali w jednym APK” wymaga ekranu auth + mapowania `auth.uid()` → `account_key` (dziś brak — patrz [`BETA_KNOWN_LIMITATIONS.md`](./BETA_KNOWN_LIMITATIONS.md)).
+- **Aplikacja:** logowanie → `profiles.account_key` → kredyty/Stripe per user (migracja `ADD_AUTH_PROFILES.sql`).
+- **Backend:** `X-Account-Key` z klienta; env `ACCOUNT_KEY` tylko jako fallback.
+- **Ograniczenie:** tabele magazynu/menu historycznie bez kolumny tenant — pełna izolacja danych operacyjnych to kolejny etap (patrz [`BETA_KNOWN_LIMITATIONS.md`](./BETA_KNOWN_LIMITATIONS.md)).
 
 ---
 

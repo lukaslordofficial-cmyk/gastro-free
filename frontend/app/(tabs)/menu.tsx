@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useCallback, useEffect, Suspense, lazy } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import {
   RefreshControl,
   Pressable,
   DeviceEventEmitter,
+  ActivityIndicator,
 } from 'react-native';
 import {
   emitRecipeIngredientsChanged,
@@ -31,9 +32,15 @@ import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { MenuScanModal } from '@/components/MenuScanModal';
-import { InspirationsModal } from '@/components/InspirationsModal';
-import { RecipesModal } from '@/components/RecipesModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
+
+/** Ciężkie katalogi dań — osobny chunk Metro, nie przy cold start Menu. */
+const InspirationsModal = lazy(() =>
+  import('@/components/InspirationsModal').then((m) => ({ default: m.InspirationsModal })),
+);
+const RecipesModal = lazy(() =>
+  import('@/components/RecipesModal').then((m) => ({ default: m.RecipesModal })),
+);
 import { formatPln } from '@/lib/format';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import {
@@ -1957,79 +1964,85 @@ export default function MenuScreen() {
         onClose={() => setShowScanModal(false)}
         onConfirmed={() => { setShowScanModal(false); fetchData(); }}
       />
-      <InspirationsModal
-        visible={showInspirations}
-        onClose={() => setShowInspirations(false)}
-        onApplyToMenu={({ dishName, ingredients: ings }) => {
-          setEditingDish(null);
-          setForm({
-            name: dishName,
-            category: FORM_CATEGORIES[0],
-            price: '',
-          });
-          setIngredients(
-            ings.length > 0
-              ? ings.map((ing) => ({
-                  key: String(Date.now() + Math.random()),
-                  name: ing.name,
-                  quantity: String(ing.quantity),
-                  unit: ing.unit || 'g',
-                }))
-              : [newDraftIngredient()],
-          );
-          setShowAddModal(true);
-        }}
-      />
-      <RecipesModal
-        visible={showRecipes}
-        onClose={() => setShowRecipes(false)}
-        onUseInMenu={({ dishName, ingredients: ings }) => {
-          setEditingDish(null);
-          setForm({
-            name: dishName,
-            category: FORM_CATEGORIES[0],
-            price: '',
-          });
-          setIngredients(
-            ings.length > 0
-              ? ings.map((ing) => ({
-                  key: String(Date.now() + Math.random()),
-                  name: ing.name,
-                  quantity: String(ing.quantity),
-                  unit: ing.unit || 'g',
-                }))
-              : [newDraftIngredient()],
-          );
-          setShowAddModal(true);
-        }}
-        onAddToInventory={({ dishName, ingredients: ings }) => {
-          setPendingIngKey(null);
-          const first = ings[0];
-          const rawUnit = (first?.unit || 'g').toLowerCase();
-          const unitGuess: Unit =
-            rawUnit === 'ml' || rawUnit === 'l'
-              ? rawUnit === 'l'
-                ? 'L'
-                : 'ml'
-              : rawUnit === 'kg'
-                ? 'kg'
-                : rawUnit === 'szt'
-                  ? 'szt'
-                  : rawUnit === 'opak'
-                    ? 'opak'
-                    : 'g';
-          setInvForm({
-            name: dishName,
-            category: 'Inne',
-            currentQty: first && first.quantity > 0 ? String(first.quantity) : '',
-            criticalThreshold: '',
-            unit: unitGuess,
-            isCombo: true,
-            portionSize: first && first.quantity > 0 ? String(first.quantity) : '',
-          });
-          setShowInvModal(true);
-        }}
-      />
+      <Suspense fallback={<ActivityIndicator style={{ position: 'absolute', opacity: 0 }} />}>
+        {showInspirations ? (
+          <InspirationsModal
+            visible={showInspirations}
+            onClose={() => setShowInspirations(false)}
+            onApplyToMenu={({ dishName, ingredients: ings }) => {
+              setEditingDish(null);
+              setForm({
+                name: dishName,
+                category: FORM_CATEGORIES[0],
+                price: '',
+              });
+              setIngredients(
+                ings.length > 0
+                  ? ings.map((ing) => ({
+                      key: String(Date.now() + Math.random()),
+                      name: ing.name,
+                      quantity: String(ing.quantity),
+                      unit: ing.unit || 'g',
+                    }))
+                  : [newDraftIngredient()],
+              );
+              setShowAddModal(true);
+            }}
+          />
+        ) : null}
+        {showRecipes ? (
+          <RecipesModal
+            visible={showRecipes}
+            onClose={() => setShowRecipes(false)}
+            onUseInMenu={({ dishName, ingredients: ings }) => {
+              setEditingDish(null);
+              setForm({
+                name: dishName,
+                category: FORM_CATEGORIES[0],
+                price: '',
+              });
+              setIngredients(
+                ings.length > 0
+                  ? ings.map((ing) => ({
+                      key: String(Date.now() + Math.random()),
+                      name: ing.name,
+                      quantity: String(ing.quantity),
+                      unit: ing.unit || 'g',
+                    }))
+                  : [newDraftIngredient()],
+              );
+              setShowAddModal(true);
+            }}
+            onAddToInventory={({ dishName, ingredients: ings }) => {
+              setPendingIngKey(null);
+              const first = ings[0];
+              const rawUnit = (first?.unit || 'g').toLowerCase();
+              const unitGuess: Unit =
+                rawUnit === 'ml' || rawUnit === 'l'
+                  ? rawUnit === 'l'
+                    ? 'L'
+                    : 'ml'
+                  : rawUnit === 'kg'
+                    ? 'kg'
+                    : rawUnit === 'szt'
+                      ? 'szt'
+                      : rawUnit === 'opak'
+                        ? 'opak'
+                        : 'g';
+              setInvForm({
+                name: dishName,
+                category: 'Inne',
+                currentQty: first && first.quantity > 0 ? String(first.quantity) : '',
+                criticalThreshold: '',
+                unit: unitGuess,
+                isCombo: true,
+                portionSize: first && first.quantity > 0 ? String(first.quantity) : '',
+              });
+              setShowInvModal(true);
+            }}
+          />
+        ) : null}
+      </Suspense>
     </SafeAreaView>
   );
 }

@@ -1309,10 +1309,13 @@ function toImageSource(r: ResolvedProductImage | null): number | { uri: string }
   }
 }
 
-/** Podgrzej katalogi w tle (parse + require ids) — bez dekodowania bitmap do RAM. */
+/**
+ * Podgrzej lekki katalog składników po starcie UI.
+ * Katalog dań (setki WebP) ładujemy leniwie przy pierwszym matchu Menu / Inspiracji —
+ * nie ciągnij go przy cold start.
+ */
 export function warmProductImageIndexes(): void {
   void catalogAll();
-  void dishCatalog();
 }
 
 /**

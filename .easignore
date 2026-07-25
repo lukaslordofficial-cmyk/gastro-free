@@ -5,7 +5,7 @@ memory/
 supabase/
 supabase_migrations/
 tests/
-%s/
+scripts/
 .cursor/
 *.md
 !frontend/**
@@ -15,3 +15,6 @@ frontend/dist/
 **/.env
 **/.env.*
 !**/.env.example
+
+# Source dish boards (PNG sheets) — not referenced by app require(); keep in git, skip AAB/APK
+frontend/assets/premium/dishes/_board_*.png

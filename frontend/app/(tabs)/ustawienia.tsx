@@ -24,6 +24,7 @@ import {
   Check,
   Key,
   Zap,
+  LogOut,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { Colors } from '@/constants/colors';
@@ -42,6 +43,8 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
+import { useAuth } from '@/contexts/AuthContext';
+import { router } from 'expo-router';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -309,6 +312,29 @@ export default function UstawieniaScreen() {
   const [menuItems, setMenuItems] = useState<MenuItemForMapping[]>([]);
   const [inventoryItems, setInventoryItems] = useState<InventoryItemForRecipe[]>([]);
   const theme = useAppTheme();
+  const { user, profile, accountKey, signOut } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
+
+  const handleSignOut = () => {
+    Alert.alert('Wylogowanie', 'Na pewno chcesz się wylogować?', [
+      { text: 'Anuluj', style: 'cancel' },
+      {
+        text: 'Wyloguj',
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            setSigningOut(true);
+            try {
+              await signOut();
+              router.replace('/(auth)/login');
+            } finally {
+              setSigningOut(false);
+            }
+          })();
+        },
+      },
+    ]);
+  };
 
   const webhookUrl = buildPosWebhookUrl(
     BACKEND_URL || 'http://127.0.0.1:8001',
@@ -514,6 +540,67 @@ export default function UstawieniaScreen() {
             <Text style={[styles.headerTitle, { color: '#1E293B' }]}>Ustawienia</Text>
           </View>
         ) : null}
+
+        {/* ── Konto ── */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Info size={16} color={theme.textSecondary} />
+            <Text style={[styles.sectionTitle, { color: theme.textSecondary }]}>Konto</Text>
+          </View>
+          <View
+            style={[
+              styles.card,
+              theme.isPremium && {
+                backgroundColor: theme.card,
+                borderColor: theme.border,
+              },
+            ]}
+          >
+            <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginBottom: 4 }]}>
+              E-mail
+            </Text>
+            <Text style={{ color: theme.text, fontSize: 14, fontWeight: '600', marginBottom: 10 }}>
+              {user?.email || profile?.email || '—'}
+            </Text>
+            {profile?.restaurant_name ? (
+              <>
+                <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginBottom: 4 }]}>
+                  Restauracja
+                </Text>
+                <Text style={{ color: theme.text, fontSize: 14, fontWeight: '600', marginBottom: 10 }}>
+                  {profile.restaurant_name}
+                </Text>
+              </>
+            ) : null}
+            <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 14 }]}>
+              Klucz konta (kredyty / Stripe): {accountKey}
+            </Text>
+            <TouchableOpacity
+              style={[
+                styles.saveBtn,
+                {
+                  backgroundColor: theme.isPremium ? 'rgba(255,90,90,0.16)' : Colors.dangerLight,
+                  borderWidth: 1,
+                  borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : Colors.danger,
+                },
+                signingOut && styles.saveBtnDisabled,
+              ]}
+              onPress={handleSignOut}
+              disabled={signingOut}
+              activeOpacity={0.85}
+              testID="settings-logout"
+            >
+              {signingOut ? (
+                <ActivityIndicator color={theme.danger} />
+              ) : (
+                <>
+                  <LogOut size={16} color={theme.danger} strokeWidth={2.4} />
+                  <Text style={[styles.saveBtnText, { color: theme.danger }]}>Wyloguj się</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
 
         {/* ── POS Settings ── */}
         <View style={styles.section}>

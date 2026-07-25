@@ -6,6 +6,8 @@ import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import type { TopupKey } from '@/lib/subscriptionCatalog';
+import { getAccountKey } from '@/lib/accountKey';
+import { supabase } from '@/lib/supabase';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
 const PENDING_SESSION_KEY = 'stripe_pending_checkout_session';
@@ -14,6 +16,22 @@ export type CheckoutKind = 'subscription' | 'topup';
 
 function makeIdempotencyKey(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Account-Key': getAccountKey(),
+    ...extra,
+  };
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch {
+    /* ignore */
+  }
+  return headers;
 }
 
 export async function createCheckoutAndOpen(opts: {
@@ -26,7 +44,7 @@ export async function createCheckoutAndOpen(opts: {
   }
   const res = await fetch(`${BACKEND_URL}/api/billing/create-checkout-session`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await authHeaders(),
     body: JSON.stringify({
       kind: opts.kind,
       tier_level: opts.tier_level,
@@ -83,7 +101,7 @@ export async function confirmPendingCheckout(): Promise<{
   }
   const res = await fetch(`${BACKEND_URL}/api/billing/confirm-session`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await authHeaders(),
     body: JSON.stringify({ session_id: sessionId }),
   });
   const data = await res.json().catch(() => ({}));
@@ -108,7 +126,7 @@ export async function openBillingPortal(): Promise<{ ok: boolean; message: strin
   }
   const res = await fetch(`${BACKEND_URL}/api/billing/portal`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await authHeaders(),
     body: JSON.stringify({}),
   });
   const data = await res.json().catch(() => ({}));

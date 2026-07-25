@@ -10,6 +10,7 @@ import {
 } from '@/lib/subscriptionClient';
 import type { TopupKey } from '@/lib/subscriptionCatalog';
 import { useThemeMode } from '@/contexts/ThemeModeContext';
+import { useAuth } from '@/contexts/AuthContext';
 
 type SubscriptionContextValue = {
   state: SubscriptionState | null;
@@ -31,10 +32,17 @@ const SubscriptionContext = createContext<SubscriptionContextValue | null>(null)
 
 export function SubscriptionProvider({ children }: { children: React.ReactNode }) {
   const { setAppearance } = useThemeMode();
+  const { isAuthenticated, accountKey, ready: authReady } = useAuth();
   const [state, setState] = useState<SubscriptionState | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
+    if (!isAuthenticated) {
+      setState(null);
+      setLoading(false);
+      await setAppearance('free');
+      return;
+    }
     try {
       const next = await fetchSubscriptionState();
       setState(next);
@@ -46,9 +54,12 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     } finally {
       setLoading(false);
     }
-  }, [setAppearance]);
+  }, [setAppearance, isAuthenticated, accountKey]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!authReady) return;
+    void refresh();
+  }, [authReady, refresh]);
 
   const wrap = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
     const result = await fn();

@@ -116,9 +116,26 @@ export type Database = {
         Insert: Omit<Subscription, 'id' | 'created_at' | 'updated_at'>;
         Update: Partial<Omit<Subscription, 'id' | 'created_at'>>;
       };
+      profiles: {
+        Row: Profile;
+        Insert: Omit<Profile, 'created_at' | 'updated_at'> & {
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Omit<Profile, 'id'>>;
+      };
     };
   };
 };
+
+export interface Profile {
+  id: string;
+  email: string | null;
+  account_key: string;
+  restaurant_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface InventoryCategory {
   id: string;

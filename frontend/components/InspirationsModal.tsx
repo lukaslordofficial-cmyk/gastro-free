@@ -1,7 +1,7 @@
 /**
  * Inspiracje Kulinarne — katalog kategorii → siatka dań → przepis AI.
  */
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -29,11 +29,7 @@ import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
-import {
-  getInspirationCategories,
-  type InspirationCategory,
-  type InspirationDish,
-} from '@/lib/inspirationsRegistry';
+import type { InspirationCategory, InspirationDish } from '@/lib/inspirationsRegistry';
 import {
   loadUnlockedInspirations,
   saveUnlockedInspiration,
@@ -79,7 +75,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
   const muted = prem ? DS.color.muted : Colors.textSecondary;
   const border = prem ? DS.color.borderSubtle : Colors.border;
 
-  const categories = useMemo(() => getInspirationCategories(), []);
+  const [categories, setCategories] = useState<InspirationCategory[]>([]);
   const [stage, setStage] = useState<Stage>('categories');
   const [category, setCategory] = useState<InspirationCategory | null>(null);
   const [dish, setDish] = useState<InspirationDish | null>(null);
@@ -87,6 +83,20 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
   const [portions, setPortions] = useState(2);
   const [error, setError] = useState<string | null>(null);
   const [unlocked, setUnlocked] = useState<Record<string, { recipe: InspirationRecipe }>>({});
+
+  // Leniwe require katalogów dopiero gdy modal jest widoczny (nie przy imporcie Menu).
+  useEffect(() => {
+    if (!visible) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getInspirationCategories } = require('@/lib/inspirationsRegistry') as {
+        getInspirationCategories: () => InspirationCategory[];
+      };
+      setCategories(getInspirationCategories());
+    } catch {
+      setCategories([]);
+    }
+  }, [visible]);
 
   useEffect(() => {
     if (!visible) return;

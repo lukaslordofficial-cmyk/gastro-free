@@ -19,6 +19,7 @@ import logging
 import os
 import ssl
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Literal
@@ -64,9 +65,22 @@ VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
 INSPIRATIONS_MODEL = (
     os.environ.get("OPENAI_INSPIRATIONS_MODEL", "gpt-4o").strip() or "gpt-4o"
 )
-# Closed beta: single-tenant. Override per deploy for multi-restaurant pilots
-# (one service / ACCOUNT_KEY per restaurant until real auth lands).
-_ACCOUNT_KEY = (os.environ.get("ACCOUNT_KEY") or "default").strip() or "default"
+# Default tenant when client does not send X-Account-Key (legacy / ops).
+# Authenticated app clients send X-Account-Key from profiles.account_key.
+_ACCOUNT_KEY_DEFAULT = (os.environ.get("ACCOUNT_KEY") or "default").strip() or "default"
+_account_key_ctx: ContextVar[str] = ContextVar("account_key", default=_ACCOUNT_KEY_DEFAULT)
+
+
+def get_account_key() -> str:
+    """Per-request account_key (middleware) with env fallback."""
+    try:
+        return _account_key_ctx.get() or _ACCOUNT_KEY_DEFAULT
+    except LookupError:
+        return _ACCOUNT_KEY_DEFAULT
+
+
+# Back-compat alias for imports/tests — prefer get_account_key() at runtime.
+_ACCOUNT_KEY = _ACCOUNT_KEY_DEFAULT
 
 
 def _env(name: str, default: str = "") -> str:
@@ -94,6 +108,22 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def account_key_middleware(request: Request, call_next):
+    """Multi-tenant: X-Account-Key from logged-in app, else ACCOUNT_KEY env."""
+    raw = (request.headers.get("x-account-key") or "").strip()
+    # Allow only safe slug chars (ak_<uuid> / default / custom deploy slugs)
+    if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw):
+        key = raw
+    else:
+        key = _ACCOUNT_KEY_DEFAULT
+    token = _account_key_ctx.set(key)
+    try:
+        return await call_next(request)
+    finally:
+        _account_key_ctx.reset(token)
 
 
 _openai_client: AsyncOpenAI | None = None
@@ -527,7 +557,7 @@ async def health():
                 "subscriptions",
                 params={
                     "select": "tier_level,credits_balance",
-                    "account_key": f"eq.{_ACCOUNT_KEY}",
+                    "account_key": f"eq.{get_account_key()}",
                     "limit": "1",
                 },
             )
@@ -542,7 +572,7 @@ async def health():
     return {
         "status": "ok",
         "supabase": bool(SUPABASE_URL),
-        "account_key": _ACCOUNT_KEY,
+        "account_key": get_account_key(),
         "subscription": sub_status,
         "openai_configured": bool(OPENAI_API_KEY),
         "stt_model": STT_MODEL,
@@ -1172,7 +1202,7 @@ async def _deduct_credits(client: httpx.AsyncClient, credits: int, *, endpoint: 
     try:
         sub = await _ensure_subscription(client)
         new_bal = max(0, int(sub.get("credits_balance") or 0) - int(credits))
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"},
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"},
                        {"credits_balance": new_bal})
         return new_bal
     except Exception as e:  # noqa: BLE001
@@ -1350,10 +1380,10 @@ def _parse_dt(val):
 async def _ensure_subscription(client: httpx.AsyncClient) -> dict:
     """Pobiera (lub tworzy) pojedynczy wiersz subskrypcji dla konta restauracji."""
     rows = await sb_get(client, "subscriptions",
-                        params={"select": "*", "account_key": f"eq.{_ACCOUNT_KEY}", "limit": "1"})
+                        params={"select": "*", "account_key": f"eq.{get_account_key()}", "limit": "1"})
     if rows:
         return rows[0]
-    payload = {"account_key": _ACCOUNT_KEY, "tier_level": 0, "credits_balance": 1000,
+    payload = {"account_key": get_account_key(), "tier_level": 0, "credits_balance": 1000,
                "status": "active", "current_period_end": None, "free_starter_claimed": True}
     created = await sb_post(client, "subscriptions", payload)
     if isinstance(created, list) and created:
@@ -1394,7 +1424,7 @@ async def _get_subscription(client: httpx.AsyncClient) -> dict:
     sub2, changes = _apply_renewals(sub)
     if changes:
         try:
-            await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"}, changes)
+            await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"}, changes)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"renewal patch skipped: {e}")
     return sub2
@@ -11189,7 +11219,7 @@ async def subscription_topup(req: TopupRequest):
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
         sub = await _ensure_subscription(client)
         new_bal = int(sub.get("credits_balance") or 0) + pkg["credits"]
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"},
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"},
                        {"credits_balance": new_bal})
         sub["credits_balance"] = new_bal
         view = _subscription_view(sub, message=f"Doładowano {pkg['label']} za {pkg['price_pln']} zł (MOCK).")
@@ -11216,7 +11246,7 @@ async def subscription_subscribe(req: SubscribeRequest):
         cpe = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
         upd = {"tier_level": req.tier_level, "credits_balance": new_bal,
                "status": "active", "current_period_end": cpe}
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"}, upd)
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"}, upd)
         view = _subscription_view({**sub, **upd},
                                   message=f"Aktywowano plan {cfg['name']} (+{grant} kredytów). MOCK.")
         view["ok"] = True
@@ -11255,7 +11285,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
         cancel = f"{public}/billing-cancel"
     try:
         session = await create_checkout_session(
-            account_key=_ACCOUNT_KEY,
+            account_key=get_account_key(),
             kind=req.kind,
             tier_level=req.tier_level,
             package=req.package,
@@ -11303,7 +11333,7 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
             sb_get=sb_get,
             sb_post=sb_post,
             sb_patch=sb_patch,
-            account_key_default=_ACCOUNT_KEY,
+            account_key_default=get_account_key(),
             tier_config=TIER_CONFIG,
         )
         if result.get("paid"):
@@ -11356,7 +11386,7 @@ async def billing_webhook(request: Request):
             sb_get=sb_get,
             sb_post=sb_post,
             sb_patch=sb_patch,
-            account_key_default=_ACCOUNT_KEY,
+            account_key_default=get_account_key(),
             tier_config=TIER_CONFIG,
         )
     return result
@@ -11384,7 +11414,7 @@ async def subscription_resign():
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
         sub = await _ensure_subscription(client)
         upd = {"tier_level": 0, "status": "active", "current_period_end": None, "free_starter_claimed": True}
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"}, upd)
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"}, upd)
         view = _subscription_view({**sub, **upd},
                                   message=f"Przełączono na plan Free. Saldo: {sub.get('credits_balance')} kredytów "
                                           f"(bez ponownego pakietu startowego).")
@@ -11397,7 +11427,7 @@ async def subscription_cancel():
     """Anulowanie — brak dalszych doładowań; kredyty i tier zostają do końca okresu."""
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
         sub = await _ensure_subscription(client)
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"},
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"},
                        {"status": "canceled"})
         view = _subscription_view({**sub, "status": "canceled"},
                                   message="Subskrypcja anulowana. Kredyty i plan pozostają do końca "

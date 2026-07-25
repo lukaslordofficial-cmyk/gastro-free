@@ -1,9 +1,11 @@
 import 'react-native-url-polyfill/auto';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
 /**
- * Supabase client — graceful init.
+ * Supabase client — graceful init + persystencja sesji (AsyncStorage).
+ * Uwaga: nie używamy SecureStore — limit ~2 KB psuje JWT sesji Supabase.
  *
  * `createClient()` bez URL rzuca "supabaseUri is required" i wywala CAŁĄ apkę
  * (biały ekran / critical error) — nawet zanim ktokolwiek wywoła jakiekolwiek
@@ -36,5 +38,12 @@ function makeStubClient(): SupabaseClient<Database> {
 }
 
 export const supabase: SupabaseClient<Database> = isSupabaseConfigured
-  ? createClient<Database>(supabaseUrl, supabaseAnonKey)
+  ? createClient<Database>(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        storage: AsyncStorage,
+        autoRefreshToken: true,
+        persistSession: true,
+        detectSessionInUrl: false,
+      },
+    })
   : makeStubClient();

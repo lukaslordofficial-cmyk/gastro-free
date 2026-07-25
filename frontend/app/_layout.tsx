@@ -1,12 +1,13 @@
 import 'react-native-gesture-handler';
 import { useEffect } from 'react';
-import { InteractionManager, LogBox } from 'react-native';
-import { Stack } from 'expo-router';
+import { ActivityIndicator, InteractionManager, LogBox, View } from 'react-native';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
 import { useFrameworkReady } from '@/hooks/useFrameworkReady';
 import { useIconFonts } from '@/src/hooks/use-icon-fonts';
+import { AuthProvider, useAuth } from '@/contexts/AuthContext';
 import { SubscriptionProvider } from '@/contexts/SubscriptionContext';
 import { UiOverlayProvider } from '@/contexts/UiOverlayContext';
 import { AdsProvider } from '@/contexts/AdsProvider';
@@ -17,6 +18,7 @@ import { DocumentScanHost } from '@/components/DocumentScanHost';
 import { PremiumAlertProvider } from '@/components/PremiumAlert';
 import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
 import { warmProductImageIndexes } from '@/lib/productImages';
+import { DS } from '@/constants/premiumTheme';
 
 // Nie wyciszaj wszystkich logów w closed beta — widać prawdziwe błędy.
 LogBox.ignoreLogs(['Unable to activate keep awake', 'KeepAwake']);
@@ -29,6 +31,64 @@ function StatusBarThemed() {
   return <StatusBar style={isPremiumUi ? 'light' : 'dark'} />;
 }
 
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const { ready, isAuthenticated } = useAuth();
+  const segments = useSegments();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!ready) return;
+    const inAuth = segments[0] === '(auth)';
+    if (!isAuthenticated && !inAuth) {
+      router.replace('/(auth)/login');
+    } else if (isAuthenticated && inAuth) {
+      router.replace('/(tabs)');
+    }
+  }, [ready, isAuthenticated, segments, router]);
+
+  if (!ready) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: DS.color.bgPrimary,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <ActivityIndicator size="large" color={DS.color.greenEnd} />
+      </View>
+    );
+  }
+
+  return <>{children}</>;
+}
+
+function RootLayoutNav() {
+  return (
+    <AuthGate>
+      <SubscriptionProvider>
+        <PremiumAlertProvider>
+          <PushConsentBootstrap />
+          <UiOverlayProvider>
+            <AdsProvider>
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen name="+not-found" />
+              </Stack>
+              <StatusBarThemed />
+              <ProductCascadeHost />
+              <JarvisVoiceHost />
+              <DocumentScanHost />
+            </AdsProvider>
+          </UiOverlayProvider>
+        </PremiumAlertProvider>
+      </SubscriptionProvider>
+    </AuthGate>
+  );
+}
+
 export default function RootLayout() {
   useFrameworkReady();
   const [loaded, error] = useIconFonts();
@@ -39,7 +99,7 @@ export default function RootLayout() {
     }
   }, [loaded, error]);
 
-  // Po starcie UI: tylko indeks katalogów (require ids), bez dekodowania ~1000 bitmap do RAM.
+  // Po starcie UI: tylko indeks katalogów składników (bez ciężkiego dishCatalog).
   useEffect(() => {
     const task = InteractionManager.runAfterInteractions(() => {
       try {
@@ -56,23 +116,9 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <ThemeModeProvider>
-        <SubscriptionProvider>
-          <PremiumAlertProvider>
-          <PushConsentBootstrap />
-          <UiOverlayProvider>
-            <AdsProvider>
-              <Stack screenOptions={{ headerShown: false }}>
-                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-                <Stack.Screen name="+not-found" />
-              </Stack>
-              <StatusBarThemed />
-              <ProductCascadeHost />
-              <JarvisVoiceHost />
-              <DocumentScanHost />
-            </AdsProvider>
-          </UiOverlayProvider>
-          </PremiumAlertProvider>
-        </SubscriptionProvider>
+        <AuthProvider>
+          <RootLayoutNav />
+        </AuthProvider>
       </ThemeModeProvider>
     </SafeAreaProvider>
   );

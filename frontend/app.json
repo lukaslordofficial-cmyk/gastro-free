@@ -9,6 +9,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
+      "buildNumber": "1",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
         "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
@@ -18,10 +19,11 @@
       "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
     },
     "android": {
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#ffffff"
       },
-      "usesCleartextTraffic": true,
+      "usesCleartextTraffic": false,
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",

@@ -1,5 +1,5 @@
 /**
- * Merges frontend/.env EXPO_PUBLIC_* into eas.json build.preview.env for EAS APK builds.
+ * Merges frontend/.env EXPO_PUBLIC_* into eas.json build profiles (preview + production).
  * Does not print secret values. Run: node scripts/sync-eas-preview-env.js
  */
 const fs = require('fs');
@@ -37,10 +37,14 @@ const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
 const env = parseEnv(stripBom(fs.readFileSync(envPath, 'utf8')));
 const eas = JSON.parse(stripBom(fs.readFileSync(easPath, 'utf8')));
 eas.build = eas.build || {};
-const profiles = ['preview', 'preview-apk'].filter((p) => eas.build[p]);
+const profiles = ['preview', 'preview-apk', 'production'].filter((p) => eas.build[p]);
 if (!profiles.includes('preview')) {
   eas.build.preview = { env: {} };
   profiles.push('preview');
+}
+if (!profiles.includes('production')) {
+  eas.build.production = { env: {} };
+  profiles.push('production');
 }
 
 let ok = 0;
@@ -49,9 +53,9 @@ for (const profile of profiles) {
   for (const k of KEYS) {
     if (env[k]) {
       eas.build[profile].env[k] = env[k];
-      if (profile === 'preview') ok += 1;
+      if (profile === 'production') ok += 1;
       console.log(`[${profile}] set ${k} (len=${env[k].length})`);
-    } else if (profile === 'preview') {
+    } else if (profile === 'production') {
       console.log(`missing ${k}`);
     }
   }
@@ -59,4 +63,4 @@ for (const profile of profiles) {
 
 fs.writeFileSync(easPath, JSON.stringify(eas, null, 2) + '\n', 'utf8');
 console.log(`Synced ${ok}/${KEYS.length} keys into eas.json (${profiles.join(', ')})`);
-console.log('WARNING: EXPO_PUBLIC_BACKEND_URL must be a public HTTPS URL for remote beta testers.');
+console.log('WARNING: EXPO_PUBLIC_BACKEND_URL must be a public HTTPS URL for store / remote users.');

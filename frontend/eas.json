@@ -14,18 +14,6 @@
     "preview": {
       "distribution": "internal",
       "android": {
-        "buildType": "app-bundle"
-      },
-      "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
-        "EXPO_PUBLIC_SUPABASE_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
-        "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "SET_VIA_scripts/sync-eas-preview-env.js"
-      }
-    },
-    "preview-apk": {
-      "distribution": "internal",
-      "android": {
         "buildType": "apk"
       },
       "env": {
@@ -35,9 +23,22 @@
         "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "SET_VIA_scripts/sync-eas-preview-env.js"
       }
     },
+    "preview-apk": {
+      "extends": "preview",
+      "android": {
+        "buildType": "apk"
+      }
+    },
     "production": {
+      "distribution": "store",
       "android": {
         "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_SUPABASE_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "SET_VIA_scripts/sync-eas-preview-env.js"
       }
     }
   },

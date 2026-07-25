@@ -204,7 +204,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     }
 
     if (errMsg && (!data || data.length === 0)) {
-      console.warn('[MenuRecipeRow] recipe_ingredients:', errMsg);
+      if (__DEV__) console.warn('[MenuRecipeRow] recipe_ingredients:', errMsg);
     }
 
     const sorted = [...(data ?? [])].sort(

@@ -731,7 +731,6 @@ export default function MagazynScreen() {
       return;
     }
     const ak = accountKey;
-    const t0 = Date.now();
     try {
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase
@@ -776,7 +775,7 @@ export default function MagazynScreen() {
       if (catsRes.error) throw catsRes.error;
       // waste_logs opcjonalne — nie blokuj magazynu
       if (wasteRes.error && !/account_key|waste_logs/.test(wasteRes.error.message ?? '')) {
-        console.warn('[Magazyn] waste_logs:', wasteRes.error.message);
+        if (__DEV__) console.warn('[Magazyn] waste_logs:', wasteRes.error.message);
       }
 
       setInventory((itemsData ?? []).map(mapDbRow));
@@ -784,7 +783,6 @@ export default function MagazynScreen() {
       setWasteLogs(wasteRes.error ? [] : (wasteRes.data ?? []));
       setExpandedCategories(new Set((catsRes.data ?? []).map((c: CategoryRow) => c.name)));
       setError(null);
-      if (__DEV__) console.log(`[Magazyn] fetch ${Date.now() - t0}ms, items=${(itemsData ?? []).length}`);
     } catch (e: any) {
       setError(e.message ?? 'Nieznany błąd');
     } finally {

@@ -52,7 +52,7 @@ async function fetchProfile(userId: string): Promise<UserProfile | null> {
     if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
       return null;
     }
-    console.warn('[Auth] profiles:', error.message);
+    if (__DEV__) console.warn('[Auth] profiles:', error.message);
     return null;
   }
   if (!data) return null;
@@ -89,7 +89,7 @@ async function ensureLocalProfile(user: User): Promise<UserProfile> {
       free_starter_claimed: true,
     });
     if (subErr && !String(subErr.message || '').toLowerCase().includes('duplicate')) {
-      console.warn('[Auth] subscriptions seed:', subErr.message);
+      if (__DEV__) console.warn('[Auth] subscriptions seed:', subErr.message);
     }
     return data as UserProfile;
   }
@@ -119,7 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setProfile(p);
       setAccountKey(p.account_key);
     } catch (e) {
-      console.warn('[Auth] profile bootstrap', e);
+      if (__DEV__) console.warn('[Auth] profile bootstrap', e);
       const fallback = `ak_${next.user.id.replace(/-/g, '')}`;
       setProfile({
         id: next.user.id,

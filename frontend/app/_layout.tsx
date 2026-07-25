@@ -20,8 +20,11 @@ import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
 import { warmProductImageIndexes } from '@/lib/productImages';
 import { DS } from '@/constants/premiumTheme';
 
-// Nie wyciszaj wszystkich logów w closed beta — widać prawdziwe błędy.
 LogBox.ignoreLogs(['Unable to activate keep awake', 'KeepAwake']);
+// Produkcja: nie spamuj LogBoxem (Metro i tak nie działa w store build).
+if (!__DEV__) {
+  LogBox.ignoreAllLogs(true);
+}
 
 // W Expo Go keep-awake czasem nie jest dostępne — nie wolno crashować startu.
 void SplashScreen.preventAutoHideAsync().catch(() => {});

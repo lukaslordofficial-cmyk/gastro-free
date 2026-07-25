@@ -96,12 +96,17 @@ def _resend_api_key() -> str:
 def _resend_from_email() -> str:
     return _env("RESEND_FROM_EMAIL", "asystent.dostaw@gastromanager.org")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-
-    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY (lub SUPABASE_ANON_KEY) not configured")
-
 logger = logging.getLogger("gastro")
 logging.basicConfig(level=logging.INFO)
+
+# Do NOT crash the whole process on missing env — Railway healthcheck needs the
+# process listening. API routes that need Supabase still fail with 503.
+_SUPABASE_CONFIGURED = bool(SUPABASE_URL and SUPABASE_KEY)
+if not _SUPABASE_CONFIGURED:
+    logger.error(
+        "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY (lub SUPABASE_ANON_KEY) "
+        "nie są ustawione — ustaw Variables w Railway, inaczej API DB nie zadziała."
+    )
 
 app = FastAPI(title="Gastro Manager — Voice API")
 app.add_middleware(
@@ -162,16 +167,42 @@ def _openai() -> AsyncOpenAI:
 # Supabase helper (service_role → bypasses RLS)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SB_HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation",
-}
+def _sb_headers() -> dict[str, str]:
+    if not SUPABASE_KEY:
+        return {
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+
+# Back-compat for modules that import SB_HEADERS as a dict snapshot.
+SB_HEADERS = _sb_headers()
+
+
+def _require_supabase() -> None:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Supabase nie jest skonfigurowane. Ustaw SUPABASE_URL oraz "
+                "SUPABASE_SERVICE_ROLE_KEY w Variables na Railway."
+            ),
+        )
 
 
 async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
-    r = await client.get(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, params=params or {})
+    _require_supabase()
+    r = await client.get(
+        f"{SUPABASE_URL}/rest/v1/{path}",
+        headers=_sb_headers(),
+        params=params or {},
+    )
     r.raise_for_status()
     return r.json()
 
@@ -199,19 +230,35 @@ def _pg_ts(iso: str) -> str:
 
 
 async def sb_post(client: httpx.AsyncClient, path: str, payload):
-    r = await client.post(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, json=payload)
+    _require_supabase()
+    r = await client.post(
+        f"{SUPABASE_URL}/rest/v1/{path}",
+        headers=_sb_headers(),
+        json=payload,
+    )
     r.raise_for_status()
     return r.json() if r.text else None
 
 
 async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
-    r = await client.patch(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, params=params, json=payload)
+    _require_supabase()
+    r = await client.patch(
+        f"{SUPABASE_URL}/rest/v1/{path}",
+        headers=_sb_headers(),
+        params=params,
+        json=payload,
+    )
     r.raise_for_status()
     return r.json() if r.text else None
 
 
 async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
-    r = await client.delete(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, params=params)
+    _require_supabase()
+    r = await client.delete(
+        f"{SUPABASE_URL}/rest/v1/{path}",
+        headers=_sb_headers(),
+        params=params,
+    )
     r.raise_for_status()
     return r.json() if r.text else None
 
@@ -546,37 +593,57 @@ async def download_updated_zip():
     )
 
 
+@app.get("/")
 @app.get("/health")
 @app.get("/api/health")
 async def health():
-    sub_status = "unknown"
-    async with httpx.AsyncClient(timeout=10.0, verify=_httpx_verify()) as client:
-        try:
-            rows = await sb_get(
-                client,
-                "subscriptions",
-                params={
-                    "select": "tier_level,credits_balance",
-                    "account_key": f"eq.{get_account_key()}",
-                    "limit": "1",
-                },
-            )
-            if rows:
-                sub_status = f"ok tier={rows[0].get('tier_level')} credits={rows[0].get('credits_balance')}"
-            else:
-                sub_status = "empty"
-        except httpx.HTTPStatusError as e:
-            sub_status = f"error {e.response.status_code}"
-        except Exception as e:  # noqa: BLE001
-            sub_status = f"error {type(e).__name__}"
+    """Lightweight liveness for Railway — no outbound calls (must stay fast)."""
     return {
         "status": "ok",
-        "supabase": bool(SUPABASE_URL),
+        "service": "gastro-voice",
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "account_key_default": _ACCOUNT_KEY_DEFAULT,
+        "stt_model": STT_MODEL,
+        "chat_model": CHAT_MODEL,
+    }
+
+
+@app.get("/api/health/deep")
+async def health_deep():
+    """Optional deep check (Supabase round-trip) — not used by Railway healthcheck."""
+    sub_status = "skipped"
+    if SUPABASE_URL and SUPABASE_KEY:
+        async with httpx.AsyncClient(timeout=5.0, verify=_httpx_verify()) as client:
+            try:
+                rows = await sb_get(
+                    client,
+                    "subscriptions",
+                    params={
+                        "select": "tier_level,credits_balance",
+                        "account_key": f"eq.{get_account_key()}",
+                        "limit": "1",
+                    },
+                )
+                if rows:
+                    sub_status = (
+                        f"ok tier={rows[0].get('tier_level')} "
+                        f"credits={rows[0].get('credits_balance')}"
+                    )
+                else:
+                    sub_status = "empty"
+            except httpx.HTTPStatusError as e:
+                sub_status = f"error {e.response.status_code}"
+            except Exception as e:  # noqa: BLE001
+                sub_status = f"error {type(e).__name__}"
+    else:
+        sub_status = "not_configured"
+    return {
+        "status": "ok",
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
         "account_key": get_account_key(),
         "subscription": sub_status,
         "openai_configured": bool(OPENAI_API_KEY),
-        "stt_model": STT_MODEL,
-        "chat_model": CHAT_MODEL,
     }
 
 

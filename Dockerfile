@@ -20,9 +20,10 @@ RUN pip install --upgrade pip && pip install -r requirements-prod.txt
 
 COPY backend/ .
 
+# Railway injects PORT at runtime — listen on 0.0.0.0:$PORT (not a hardcoded port).
 EXPOSE 8001
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
+  CMD curl -fsS "http://127.0.0.1:${PORT:-8001}/api/health" || exit 1
 
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8001}"]
+CMD ["sh", "-c", "exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-8001}"]

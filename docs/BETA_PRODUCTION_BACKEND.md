@@ -45,9 +45,11 @@ CORS: aplikacja ma `allow_origins=["*"]` — OK na closed beta.
 
 ### Checklist zmiennych Railway (wklej w Variables)
 
-- [ ] `OPENAI_API_KEY`
+**Minimum, żeby healthcheck i API DB działały** (bez tego deploy pada albo API zwraca 503):
+
 - [ ] `SUPABASE_URL`
 - [ ] `SUPABASE_SERVICE_ROLE_KEY`
+- [ ] `OPENAI_API_KEY` (Jarvis / OCR — bez tego process wstanie, ale AI nie)
 - [ ] `STRIPE_SECRET_KEY` (`sk_test_…`)
 - [ ] `STRIPE_PUBLISHABLE_KEY` (`pk_test_…`)
 - [ ] `STRIPE_WEBHOOK_SECRET` (po skonfigurowaniu webhooka)

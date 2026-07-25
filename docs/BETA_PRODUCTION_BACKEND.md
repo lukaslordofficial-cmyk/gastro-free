@@ -10,9 +10,11 @@ Cel: FastAPI dostępne pod **publicznym HTTPS**, żeby APK z EAS działał u tes
 
 | Plik | Rola |
 |------|------|
-| `backend/Dockerfile` | Obraz produkcyjny: `uvicorn` na `0.0.0.0:$PORT`, health `/api/health` |
-| `backend/requirements-prod.txt` | Zależności API (bez Playwright Chromium) |
-| `backend/railway.toml` / `railway.toml` | Railway healthcheck + Docker build |
+| `Dockerfile` (root) | Obraz produkcyjny Railway z context = root repo |
+| `requirements-prod.txt` (root) | Zależności API — musi być w root (sync z `backend/`) |
+| `backend/Dockerfile` | Build lokalny: `cd backend && docker build` |
+| `backend/requirements-prod.txt` | Kopia zależności (trzymaj zsynchronizowaną z root) |
+| `railway.toml` (root) | `dockerfilePath = "Dockerfile"`, health `/api/health` |
 | `render.yaml` | Blueprint Render (Docker, rootDir=`backend`) |
 | `fly.toml` | Opcjonalny Fly.io |
 | `scripts/deploy-backend-railway.ps1` | Deploy + sync zmiennych z `backend/.env` |
@@ -56,7 +58,8 @@ CORS: aplikacja ma `allow_origins=["*"]` — OK na closed beta.
 - [ ] `RESEND_API_KEY` / `RESEND_FROM_EMAIL` (opcjonalnie)
 - [ ] `PORT` — Railway ustawia samo; Dockerfile czyta `${PORT}`
 
-**Root Directory:** `backend` **albo** root repo z `railway.toml` → `dockerfilePath = "backend/Dockerfile"`.  
+**Root Directory:** zostaw **puste / repo root** (używa root `Dockerfile` + `requirements-prod.txt`).  
+Nie ustawiaj Root Directory = `backend`, jeśli `dockerfilePath` wskazuje na root `Dockerfile`.  
 Healthcheck: `GET /api/health`.
 
 ---

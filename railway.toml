@@ -1,10 +1,12 @@
-# Prefer: cd backend && railway up  (uses backend/railway.toml)
-# Or set Railway service Root Directory = backend and use backend/Dockerfile
+# Build from monorepo root (context = repo root).
+# Do NOT set Railway Root Directory to "backend" when using this file —
+# use root Dockerfile + requirements-prod.txt instead.
+# Alternative: Root Directory = backend → backend/Dockerfile + backend/railway.toml
 # https://docs.railway.app/guides/dockerfiles
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "backend/Dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/api/health"

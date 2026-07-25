@@ -33,8 +33,9 @@ if (!fs.existsSync(envPath)) {
   process.exit(1);
 }
 
-const env = parseEnv(fs.readFileSync(envPath, 'utf8'));
-const eas = JSON.parse(fs.readFileSync(easPath, 'utf8'));
+const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
+const env = parseEnv(stripBom(fs.readFileSync(envPath, 'utf8')));
+const eas = JSON.parse(stripBom(fs.readFileSync(easPath, 'utf8')));
 eas.build = eas.build || {};
 eas.build.preview = eas.build.preview || {};
 eas.build.preview.env = eas.build.preview.env || {};

@@ -59,8 +59,10 @@ Karta testowa: `4242 4242 4242 4242`.
 
 ## Ostatni udany build (2026-07-25) — publiczny HTTPS
 
-- Strona: https://expo.dev/accounts/lukaslord/projects/gastro-manager/builds/49fa8b4a-4513-4c75-a887-a6184ab42826
-- Backend w APK: `https://fair-breads-do.loca.lt` (tunel → lokalny `:8001`; health 200 w momencie builda)
-- APK: https://expo.dev/artifacts/eas/ZAfHO5vHrib3UhpzeJbbiHjd3_2UGzedFYrGspJW3hA.apk
+- Strona: https://expo.dev/accounts/lukaslord/projects/gastro-manager/builds/d865e9ad-77aa-49a2-8dce-985f385f19e2
+- Backend w APK: `https://7aa96d61295f7058-31-128-20-61.serveousercontent.com` (serveo SSH → lokalny `:8001`)
+- APK: https://expo.dev/artifacts/eas/vocidXWLqoJLWOv2Ei7TKFFEmNc7AvTCn-D-rzPnZ-E.apk
 
-**Uwaga:** tunel działa tylko gdy PC z API + localtunnel/serveo są włączone. Na stały hosting: Railway (`railway login` → `scripts/deploy-backend-railway.ps1`), potem nowy sync + rebuild. Poprzedni build LAN: `dac47c75-…` / artifact `FFMlo_EzucyCZ7SnzJRNG0Sjcs14W_Xf9-5Ma4f8rY4.apk`.
+**Krytyczne:** tunel serveo/localtunnel pada / zmienia URL po restarcie PC lub SSH. Trzymaj proces `ssh … serveo.net` + uvicorn `:8001` włączone podczas testów.  
+**Na skalę / stałą betę:** `railway login` → `scripts/deploy-backend-railway.ps1` (Docker w `backend/`), podmień URL, `node scripts/sync-eas-preview-env.js`, przebuduj.  
+Starsze buildy: LAN `dac47c75-…`; pierwsze tunele `49fa8b4a-…` / `9b218f59-…` (URL już nieaktualne).

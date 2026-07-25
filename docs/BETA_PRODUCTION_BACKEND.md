@@ -135,11 +135,12 @@ Pełne „zaloguj się e-mailem → wiele lokali w jednym APK” wymaga ekranu a
 
 | Pole | Wartość |
 |------|---------|
-| HTTPS API (beta tunnel) | `https://fair-breads-do.loca.lt` |
-| Health | `GET /api/health` → **200** (`status: ok`, Supabase + OpenAI OK) |
+| HTTPS API (beta tunnel) | `https://7aa96d61295f7058-31-128-20-61.serveousercontent.com` |
+| Health | `GET /api/health` → **200** przy żywym tunelu |
 | Alias health | `/health` |
-| Hosting docelowy | **Railway** (login wymagany: `railway login` / kod activate) — Docker w `backend/` |
-| Serveo (zapas) | `https://df16e4c99f4dd3f4-37-225-90-5.serveousercontent.com` (sesja SSH; też 200) |
+| APK z tym URL | https://expo.dev/artifacts/eas/vocidXWLqoJLWOv2Ei7TKFFEmNc7AvTCn-D-rzPnZ-E.apk |
+| Hosting docelowy | **Railway** — `railway login` (browser OAuth; poprzednia próba agenta timeout) → `scripts/deploy-backend-railway.ps1` |
+| Uwaga | Serveo/localtunnel **zmienia URL** — nie na tysiące użytkowników; tylko closed beta przy włączonym PC |
 
 ### Uczciwość wobec skali
 

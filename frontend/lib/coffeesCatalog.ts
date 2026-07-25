@@ -1,0 +1,33 @@
+/**
+ * Katalog grafik — kawy i napoje kawowe (plansza 5×5).
+ * Podstawowe / puszki: recipeEligible: false — ukryte w Inspiracjach.
+ */
+import type { DishImageEntry } from '@/lib/dishImagesCatalog';
+
+export const COFFEES_CATALOG: DishImageEntry[] = [
+  { slug: 'espresso_klasyczne', category: 'kuchnia_polska', labelPl: 'Klasyczne Espresso', aliases: ['espresso', 'kawa espresso'], storagePath: 'dania/coffees/coffee_01.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_01.webp'), recipeEligible: false },
+  { slug: 'latte_macchiato', category: 'kuchnia_polska', labelPl: 'Latte Macchiato', aliases: ['latte macchiato', 'macchiato latte'], storagePath: 'dania/coffees/coffee_02.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_02.webp') },
+  { slug: 'cappuccino', category: 'kuchnia_polska', labelPl: 'Cappuccino', aliases: ['cappuccino', 'kapuczino'], storagePath: 'dania/coffees/coffee_03.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_03.webp') },
+  { slug: 'flat_white', category: 'kuchnia_polska', labelPl: 'Flat White', aliases: ['flat white', 'flatwhite'], storagePath: 'dania/coffees/coffee_04.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_04.webp') },
+  { slug: 'americano', category: 'kuchnia_polska', labelPl: 'Americano', aliases: ['americano', 'kawa americano'], storagePath: 'dania/coffees/coffee_05.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_05.webp'), recipeEligible: false },
+  { slug: 'frappe', category: 'kuchnia_polska', labelPl: 'Frappe', aliases: ['frappe', 'frappé', 'kawa frappe'], storagePath: 'dania/coffees/coffee_06.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_06.webp') },
+  { slug: 'iced_latte', category: 'kuchnia_polska', labelPl: 'Iced Latte', aliases: ['iced latte', 'latte mrożone', 'mrożone latte'], storagePath: 'dania/coffees/coffee_07.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_07.webp') },
+  { slug: 'mocha', category: 'kuchnia_polska', labelPl: 'Kawa Mocha (Mokka)', aliases: ['mocha', 'mokka', 'kawa mocha'], storagePath: 'dania/coffees/coffee_08.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_08.webp') },
+  { slug: 'espresso_macchiato', category: 'kuchnia_polska', labelPl: 'Espresso Macchiato', aliases: ['espresso macchiato', 'macchiato'], storagePath: 'dania/coffees/coffee_09.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_09.webp') },
+  { slug: 'irish_coffee', category: 'kuchnia_polska', labelPl: 'Kawa po irlandzku (Irish Coffee)', aliases: ['irish coffee', 'kawa irlandzka', 'kawa po irlandzku'], storagePath: 'dania/coffees/coffee_10.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_10.webp') },
+  { slug: 'nitro_cold_brew', category: 'kuchnia_polska', labelPl: 'Kawa Nitro Cold Brew', aliases: ['nitro cold brew', 'nitro coffee', 'nitro gold brew'], storagePath: 'dania/coffees/coffee_11.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_11.webp'), recipeEligible: false },
+  { slug: 'doppio', category: 'kuchnia_polska', labelPl: 'Double Espresso (Doppio)', aliases: ['doppio', 'double espresso', 'podwójne espresso'], storagePath: 'dania/coffees/coffee_12.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_12.webp'), recipeEligible: false },
+  { slug: 'drip_v60', category: 'kuchnia_polska', labelPl: 'Kawa przelewowa Drip V60', aliases: ['v60', 'drip', 'kawa przelewowa'], storagePath: 'dania/coffees/coffee_13.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_13.webp'), recipeEligible: false },
+  { slug: 'cold_brew_lod', category: 'kuchnia_polska', labelPl: 'Cold Brew z lodem', aliases: ['cold brew', 'cold brew z lodem'], storagePath: 'dania/coffees/coffee_14.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_14.webp') },
+  { slug: 'affogato', category: 'kuchnia_polska', labelPl: 'Deser Affogato', aliases: ['affogato', 'deser affogato'], storagePath: 'dania/coffees/coffee_15.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_15.webp') },
+  { slug: 'caramel_macchiato', category: 'kuchnia_polska', labelPl: 'Caramel Macchiato', aliases: ['caramel macchiato', 'karmelowe macchiato'], storagePath: 'dania/coffees/coffee_16.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_16.webp') },
+  { slug: 'kawa_turecka', category: 'kuchnia_polska', labelPl: 'Kawa po turecku', aliases: ['kawa turecka', 'turkish coffee', 'dżezwa'], storagePath: 'dania/coffees/coffee_17.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_17.webp') },
+  { slug: 'kawa_wietnamska', category: 'kuchnia_polska', labelPl: 'Mrożona kawa po wietnamsku', aliases: ['kawa wietnamska', 'vietnamese coffee', 'ca phe'], storagePath: 'dania/coffees/coffee_18.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_18.webp') },
+  { slug: 'pumpkin_spice_latte', category: 'kuchnia_polska', labelPl: 'Pumpkin Spice Latte', aliases: ['pumpkin spice', 'psl', 'dyniowa latte'], storagePath: 'dania/coffees/coffee_19.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_19.webp') },
+  { slug: 'dirty_chai', category: 'kuchnia_polska', labelPl: 'Dirty Chai Latte', aliases: ['dirty chai', 'chai latte'], storagePath: 'dania/coffees/coffee_20.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_20.webp') },
+  { slug: 'cortado', category: 'kuchnia_polska', labelPl: 'Kawa Cortado', aliases: ['cortado'], storagePath: 'dania/coffees/coffee_21.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_21.webp') },
+  { slug: 'affogato_premium', category: 'kuchnia_polska', labelPl: 'Affogato premium', aliases: ['affogato premium', 'podwójne affogato'], storagePath: 'dania/coffees/coffee_22.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_22.webp') },
+  { slug: 'cold_brew_puszka', category: 'kuchnia_polska', labelPl: 'Kawa Cold Brew w puszce', aliases: ['cold brew puszka', 'cold brew can'], storagePath: 'dania/coffees/coffee_23.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_23.webp'), recipeEligible: false },
+  { slug: 'espresso_tonic', category: 'kuchnia_polska', labelPl: 'Espresso Tonic', aliases: ['espresso tonic', 'espresso z tonikiem'], storagePath: 'dania/coffees/coffee_24.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_24.webp') },
+  { slug: 'ristretto', category: 'kuchnia_polska', labelPl: 'Shot Ristretto', aliases: ['ristretto', 'shot ristretto'], storagePath: 'dania/coffees/coffee_25.webp', localAsset: require('@/assets/premium/dishes/coffees/coffee_25.webp'), recipeEligible: false },
+];

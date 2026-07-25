@@ -1,0 +1,68 @@
+/**
+ * Katalog grafik — lody/sorbety + gofry/pancakes (plansze 5×5).
+ */
+type DishImageEntry = {
+  slug: string;
+  category: 'kuchnia_polska';
+  labelPl: string;
+  aliases: string[];
+  storagePath: string;
+  localAsset: number;
+  recipeEligible?: boolean;
+};
+
+export const ICE_CREAM_CATALOG: DishImageEntry[] = [
+  { slug: 'sundae_klasyczny', category: 'kuchnia_polska', labelPl: 'Klasyczny puchar lodowy (Sundae)', aliases: ['sundae', 'puchar lodowy', 'lody sundae'], storagePath: 'dania/ice_cream/ice_01.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_01.webp') },
+  { slug: 'miks_rzemieslniczy', category: 'kuchnia_polska', labelPl: 'Miks rzemieślniczych lodów', aliases: ['miks lodów', 'gałki lodów', 'lody rzemieślnicze'], storagePath: 'dania/ice_cream/ice_02.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_02.webp') },
+  { slug: 'sorbet_malinowy', category: 'kuchnia_polska', labelPl: 'Sorbet malinowy', aliases: ['sorbet malinowy', 'raspberry sorbet'], storagePath: 'dania/ice_cream/ice_03.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_03.webp') },
+  { slug: 'lody_tajskie_rolki', category: 'kuchnia_polska', labelPl: 'Lody tajskie (Rolki)', aliases: ['lody tajskie', 'rolki lodowe', 'thai rolled ice cream'], storagePath: 'dania/ice_cream/ice_04.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_04.webp') },
+  { slug: 'banana_split', category: 'kuchnia_polska', labelPl: 'Banana Split', aliases: ['banana split', 'banan split'], storagePath: 'dania/ice_cream/ice_05.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_05.webp') },
+  { slug: 'sorbet_cytrynowy_skorka', category: 'kuchnia_polska', labelPl: 'Sorbet cytrynowy w skórce', aliases: ['sorbet cytrynowy', 'lemon sorbet'], storagePath: 'dania/ice_cream/ice_06.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_06.webp') },
+  { slug: 'sorbet_mango', category: 'kuchnia_polska', labelPl: 'Sorbet mango', aliases: ['sorbet mango', 'mango sorbet'], storagePath: 'dania/ice_cream/ice_07.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_07.webp') },
+  { slug: 'ice_cream_sandwich', category: 'kuchnia_polska', labelPl: 'Kanapka lodowa', aliases: ['kanapka lodowa', 'ice cream sandwich'], storagePath: 'dania/ice_cream/ice_08.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_08.webp') },
+  { slug: 'tartufo', category: 'kuchnia_polska', labelPl: 'Włoskie Tartufo', aliases: ['tartufo', 'tartufo lodowe'], storagePath: 'dania/ice_cream/ice_09.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_09.webp') },
+  { slug: 'rozek_trzy_galki', category: 'kuchnia_polska', labelPl: 'Rożek z trzema gałkami', aliases: ['rożek lodowy', 'wafel z lodami', 'ice cream cone'], storagePath: 'dania/ice_cream/ice_10.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_10.webp') },
+  { slug: 'lody_kokosowe_skorupa', category: 'kuchnia_polska', labelPl: 'Lody kokosowe w skorupie', aliases: ['lody kokosowe', 'coconut ice cream'], storagePath: 'dania/ice_cream/ice_11.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_11.webp') },
+  { slug: 'affogato', category: 'kuchnia_polska', labelPl: 'Affogato', aliases: ['affogato', 'lody z espresso'], storagePath: 'dania/ice_cream/ice_12.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_12.webp') },
+  { slug: 'lody_na_patyku_premium', category: 'kuchnia_polska', labelPl: 'Lody na patyku premium', aliases: ['lody na patyku', 'ice cream bar', 'magnum'], storagePath: 'dania/ice_cream/ice_13.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_13.webp') },
+  { slug: 'mint_chocolate_chip', category: 'kuchnia_polska', labelPl: 'Lody miętowe z czekoladą', aliases: ['mint chocolate chip', 'lody miętowe', 'mięta czekolada'], storagePath: 'dania/ice_cream/ice_14.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_14.webp') },
+  { slug: 'tort_lodowy', category: 'kuchnia_polska', labelPl: 'Tort lodowy', aliases: ['tort lodowy', 'ice cream cake'], storagePath: 'dania/ice_cream/ice_15.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_15.webp') },
+  { slug: 'lody_matcha', category: 'kuchnia_polska', labelPl: 'Lody Matcha', aliases: ['lody matcha', 'matcha ice cream', 'zielona herbata lody'], storagePath: 'dania/ice_cream/ice_16.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_16.webp') },
+  { slug: 'lody_czarny_sezam', category: 'kuchnia_polska', labelPl: 'Lody z czarnego sezamu', aliases: ['czarny sezam', 'black sesame ice cream'], storagePath: 'dania/ice_cream/ice_17.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_17.webp') },
+  { slug: 'peach_melba', category: 'kuchnia_polska', labelPl: 'Peach Melba', aliases: ['peach melba', 'puchar peach melba'], storagePath: 'dania/ice_cream/ice_18.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_18.webp') },
+  { slug: 'wanilia_karmel', category: 'kuchnia_polska', labelPl: 'Lody waniliowe z karmelem', aliases: ['lody waniliowe karmel', 'bourbon vanilla caramel'], storagePath: 'dania/ice_cream/ice_19.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_19.webp') },
+  { slug: 'sorbet_owoce_lesne', category: 'kuchnia_polska', labelPl: 'Miks sorbetów z owoców leśnych', aliases: ['sorbet owoce leśne', 'forest fruit sorbet'], storagePath: 'dania/ice_cream/ice_20.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_20.webp') },
+  { slug: 'lod_wodny_patyk', category: 'kuchnia_polska', labelPl: 'Owocowy lód wodny na patyku', aliases: ['lód na patyku', 'sorbet na patyku', 'ice pop'], storagePath: 'dania/ice_cream/ice_21.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_21.webp') },
+  { slug: 'lody_brownie_fudge', category: 'kuchnia_polska', labelPl: 'Lody czekoladowe z brownie', aliases: ['lody brownie', 'chocolate fudge ice cream'], storagePath: 'dania/ice_cream/ice_22.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_22.webp') },
+  { slug: 'lody_truskawkowe', category: 'kuchnia_polska', labelPl: 'Lody truskawkowe', aliases: ['lody truskawkowe', 'strawberry ice cream'], storagePath: 'dania/ice_cream/ice_23.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_23.webp') },
+  { slug: 'sorbet_marakuja', category: 'kuchnia_polska', labelPl: 'Sorbet z marakui', aliases: ['sorbet marakuja', 'passion fruit sorbet'], storagePath: 'dania/ice_cream/ice_24.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_24.webp') },
+  { slug: 'taco_lodowe', category: 'kuchnia_polska', labelPl: 'Mini taco lodowe', aliases: ['taco lodowe', 'ice cream taco'], storagePath: 'dania/ice_cream/ice_25.webp', localAsset: require('@/assets/premium/dishes/ice_cream/ice_25.webp') },
+];
+
+export const PANCAKES_CATALOG: DishImageEntry[] = [
+  { slug: 'gofry_belgijskie_truskawki', category: 'kuchnia_polska', labelPl: 'Gofry belgijskie z bitą śmietaną', aliases: ['gofry belgijskie', 'belgian waffle strawberries'], storagePath: 'dania/pancakes/pancake_01.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_01.webp') },
+  { slug: 'pancakes_amerykanskie_maslo', category: 'kuchnia_polska', labelPl: 'Wieża amerykańskich pancakes', aliases: ['amerykańskie pancakes', 'pancake stack maple'], storagePath: 'dania/pancakes/pancake_02.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_02.webp') },
+  { slug: 'bubble_waffle', category: 'kuchnia_polska', labelPl: 'Gofry bąbelkowe (Bubble Waffle)', aliases: ['bubble waffle', 'gofry bąbelkowe'], storagePath: 'dania/pancakes/pancake_03.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_03.webp') },
+  { slug: 'souffle_pancakes', category: 'kuchnia_polska', labelPl: 'Puszyste pancakes japońskie (Soufflé)', aliases: ['souffle pancakes', 'japońskie pancakes', 'fluffy pancakes'], storagePath: 'dania/pancakes/pancake_04.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_04.webp') },
+  { slug: 'chicken_and_waffles', category: 'kuchnia_polska', labelPl: 'Gofry z chrupiącym kurczakiem', aliases: ['chicken and waffles', 'gofry z kurczakiem'], storagePath: 'dania/pancakes/pancake_05.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_05.webp') },
+  { slug: 'szaszlyki_mini_pancakes', category: 'kuchnia_polska', labelPl: 'Szaszłyki z mini-pancakes', aliases: ['szaszłyki pancakes', 'pancake skewers'], storagePath: 'dania/pancakes/pancake_06.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_06.webp') },
+  { slug: 'stroopwafel', category: 'kuchnia_polska', labelPl: 'Holenderski Stroopwafel', aliases: ['stroopwafel', 'gofry holenderskie'], storagePath: 'dania/pancakes/pancake_07.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_07.webp') },
+  { slug: 'red_velvet_pancakes', category: 'kuchnia_polska', labelPl: 'Red Velvet pancakes', aliases: ['red velvet pancakes', 'czerwone pancakes'], storagePath: 'dania/pancakes/pancake_08.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_08.webp') },
+  { slug: 'pancakes_czekolada', category: 'kuchnia_polska', labelPl: 'Pancakes z kawałkami czekolady', aliases: ['pancakes czekolada', 'chocolate chip pancakes'], storagePath: 'dania/pancakes/pancake_09.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_09.webp') },
+  { slug: 'gofry_borowkowe', category: 'kuchnia_polska', labelPl: 'Gofry borówkowe', aliases: ['gofry borówkowe', 'blueberry waffle'], storagePath: 'dania/pancakes/pancake_10.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_10.webp') },
+  { slug: 'gofry_losos', category: 'kuchnia_polska', labelPl: 'Gofry z wędzonym łososiem', aliases: ['gofry łosoś', 'savory salmon waffle'], storagePath: 'dania/pancakes/pancake_11.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_11.webp') },
+  { slug: 'pancakes_banan_orzech', category: 'kuchnia_polska', labelPl: 'Pancakes bananowo-orzechowe', aliases: ['pancakes bananowe', 'banana nut pancakes'], storagePath: 'dania/pancakes/pancake_12.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_12.webp') },
+  { slug: 'cinnamon_roll_pancakes', category: 'kuchnia_polska', labelPl: 'Pancakes cynamonowe', aliases: ['cinnamon roll pancakes', 'pancakes cynamon'], storagePath: 'dania/pancakes/pancake_13.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_13.webp') },
+  { slug: 'crepes_francuskie', category: 'kuchnia_polska', labelPl: 'Francuskie naleśniki (Crêpes)', aliases: ['naleśniki francuskie', 'crepes', 'crêpes'], storagePath: 'dania/pancakes/pancake_14.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_14.webp') },
+  { slug: 'gofry_ser_boczek', category: 'kuchnia_polska', labelPl: 'Gofry z serem i boczkiem', aliases: ['gofry cheddar', 'bacon cheese waffle'], storagePath: 'dania/pancakes/pancake_15.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_15.webp') },
+  { slug: 'pancakes_cytryna_ricotta', category: 'kuchnia_polska', labelPl: 'Cytrynowe pancakes z ricottą', aliases: ['lemon ricotta pancakes', 'pancakes ricotta'], storagePath: 'dania/pancakes/pancake_16.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_16.webp') },
+  { slug: 'paluszki_gofrowe', category: 'kuchnia_polska', labelPl: 'Paluszki gofrowe z sosem', aliases: ['waffle sticks', 'paluszki gofrowe', 'churros waffle'], storagePath: 'dania/pancakes/pancake_17.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_17.webp') },
+  { slug: 'pancakes_bataty', category: 'kuchnia_polska', labelPl: 'Pancakes z batatów', aliases: ['sweet potato pancakes', 'pancakes bataty'], storagePath: 'dania/pancakes/pancake_18.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_18.webp') },
+  { slug: 'pancakes_matcha', category: 'kuchnia_polska', labelPl: 'Pancakes Matcha', aliases: ['matcha pancakes', 'zielone pancakes'], storagePath: 'dania/pancakes/pancake_19.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_19.webp') },
+  { slug: 'gofry_piernikowe', category: 'kuchnia_polska', labelPl: 'Gofry piernikowe', aliases: ['gingerbread waffle', 'gofry korzenne'], storagePath: 'dania/pancakes/pancake_20.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_20.webp') },
+  { slug: 'silver_dollar_pancakes', category: 'kuchnia_polska', labelPl: 'Miska mini-pancakes', aliases: ['silver dollar pancakes', 'mini pancakes'], storagePath: 'dania/pancakes/pancake_21.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_21.webp') },
+  { slug: 'pancakes_pbj', category: 'kuchnia_polska', labelPl: 'Pancakes z masłem orzechowym i dżemem', aliases: ['pbj pancakes', 'pancakes masło orzechowe'], storagePath: 'dania/pancakes/pancake_22.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_22.webp') },
+  { slug: 'gofry_czekoladowe', category: 'kuchnia_polska', labelPl: 'Gofry czekoladowe', aliases: ['chocolate waffle', 'gofry czekoladowe'], storagePath: 'dania/pancakes/pancake_23.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_23.webp') },
+  { slug: 'corn_pancakes', category: 'kuchnia_polska', labelPl: 'Placuszki z kukurydzy', aliases: ['corn pancakes', 'placuszki kukurydziane'], storagePath: 'dania/pancakes/pancake_24.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_24.webp') },
+  { slug: 'gofry_jajko_sadzone', category: 'kuchnia_polska', labelPl: 'Gofry z jajkiem sadzonym', aliases: ['egg in a hole waffle', 'gofry z jajkiem'], storagePath: 'dania/pancakes/pancake_25.webp', localAsset: require('@/assets/premium/dishes/pancakes/pancake_25.webp') },
+];

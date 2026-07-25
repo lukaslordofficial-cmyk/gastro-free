@@ -1,0 +1,26 @@
+# Nabiał — siatka 5×5
+parmezan_blok_gourmet
+cheddar_kostki
+mozzarella_kulka
+ser_szwajcarski_dziury
+brie_ser_trojkat
+ser_gorgonzola_blok
+maslo_kostka_osolka
+mleko_dzbanek_szklany
+smietana_jogurt_miska
+jajko_kurze_brazowe
+jajko_kurze_biale
+jajko_kurze_bezowe
+twarog_twarozek_miska
+grana_padano_trojkat
+ser_tarty_mozzarella
+ser_ricotta_oscypek
+ser_camembert_kawalek
+smietanka_plynna_miseczka
+ser_feta_blok
+ser_burrata_sakiewka
+ser_guda_kawalek
+jogurt_naturalny_sloik
+ser_feta_kostki
+ser_rokpol_trojkat
+ser_twarogowy_okragly

@@ -1,0 +1,26 @@
+# Owoce — siatka 5×5
+cytryna_cala
+limonka_cala
+pomarancza_cala
+grejpfrut_rozowy
+awokado_hass
+jablko_czerwone
+gruszka_zielona
+banan_zolty
+ananas_caly
+mango_swieze
+winogrona_zielone
+truskawka_swieza
+borowki_amerykanskie
+maliny_swieze
+winogrona_ciemne
+kiwi_owoc
+brzoskwinia_swieza
+nektarynka
+sliwka_ciemna
+melon_galia
+granat_owoc
+karambola_gwiezdny_owoc
+pitaja_smoczy_owoc
+marakuja_passiflora
+kaki_persymona

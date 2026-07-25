@@ -1,0 +1,78 @@
+{
+  "expo": {
+    "name": "Gastro Manager",
+    "slug": "gastro-manager",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "myapp",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
+        "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
+        "NSPhotoLibraryUsageDescription": "Wgraj zdjęcie cennika dostawcy z galerii.",
+        "NSUserTrackingUsageDescription": "Identyfikator służy do wyświetlania spersonalizowanych reklam w planie darmowym."
+      },
+      "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
+      "package": "com.emergent.gastrovision.pkqz88"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "color": "#00FF78"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Wgraj zdjęcie cennika dostawcy z galerii.",
+          "cameraPermission": "Skanuj cenniki i oferty dostawców aparatem."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań."
+        }
+      ],
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-7415277897076822~9839286987",
+          "iosAppId": "ca-app-pub-7415277897076822~9839286987"
+        }
+      ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4873e735-f489-474d-a935-8467dab9cca2"
+      }
+    },
+    "owner": "lukaslord"
+  }
+}

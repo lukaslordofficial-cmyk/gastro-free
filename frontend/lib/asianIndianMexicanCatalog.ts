@@ -1,0 +1,95 @@
+/**
+ * Katalog grafik — kuchnia azjatycka / indyjska / meksykańska (plansze 5×5, WebP).
+ */
+type DishImageEntry = {
+  slug: string;
+  category: 'kuchnia_polska';
+  labelPl: string;
+  aliases: string[];
+  storagePath: string;
+  localAsset: number;
+};
+
+export const ASIAN_CATALOG: DishImageEntry[] = [
+  { slug: 'pad_thai_krewetki', category: 'kuchnia_polska', labelPl: 'Pad Thai z krewetkami', aliases: ['pad thai', 'pad thai krewetki', 'padthai'], storagePath: 'dania/asian/asian_01.webp', localAsset: require('@/assets/premium/dishes/asian/asian_01.webp') },
+  { slug: 'kurczak_kung_pao', category: 'kuchnia_polska', labelPl: 'Kurczak Kung Pao', aliases: ['kung pao', 'kurczak kung pao', 'gong bao'], storagePath: 'dania/asian/asian_02.webp', localAsset: require('@/assets/premium/dishes/asian/asian_02.webp') },
+  { slug: 'wolowina_brokuly_ostrygi', category: 'kuchnia_polska', labelPl: 'Wołowina w sosie ostrygowym z brokułami', aliases: ['wołowina brokuły', 'beef broccoli', 'sos ostrygowy'], storagePath: 'dania/asian/asian_03.webp', localAsset: require('@/assets/premium/dishes/asian/asian_03.webp') },
+  { slug: 'egg_fried_rice', category: 'kuchnia_polska', labelPl: 'Smażony ryż z jajkiem', aliases: ['egg fried rice', 'smażony ryż', 'smazony ryz', 'fried rice'], storagePath: 'dania/asian/asian_04.webp', localAsset: require('@/assets/premium/dishes/asian/asian_04.webp') },
+  { slug: 'sajgonki', category: 'kuchnia_polska', labelPl: 'Chrupiące sajgonki', aliases: ['sajgonki', 'spring rolls', 'sajgonka'], storagePath: 'dania/asian/asian_05.webp', localAsset: require('@/assets/premium/dishes/asian/asian_05.webp') },
+  { slug: 'chow_mein', category: 'kuchnia_polska', labelPl: 'Makaron Chow Mein', aliases: ['chow mein', 'makaron chow mein'], storagePath: 'dania/asian/asian_06.webp', localAsset: require('@/assets/premium/dishes/asian/asian_06.webp') },
+  { slug: 'kurczak_slodko_kwasny', category: 'kuchnia_polska', labelPl: 'Kurczak w sosie słodko-kwaśnym', aliases: ['słodko-kwaśny', 'slodko kwasny', 'sweet and sour', 'kurczak sweet sour'], storagePath: 'dania/asian/asian_07.webp', localAsset: require('@/assets/premium/dishes/asian/asian_07.webp') },
+  { slug: 'kaczka_chrupiaca', category: 'kuchnia_polska', labelPl: 'Chrupiące paski kaczki', aliases: ['chrupiąca kaczka', 'crispy duck', 'paski kaczki'], storagePath: 'dania/asian/asian_08.webp', localAsset: require('@/assets/premium/dishes/asian/asian_08.webp') },
+  { slug: 'wolowina_czarny_pieprz', category: 'kuchnia_polska', labelPl: 'Wołowina w sosie z czarnego pieprzu', aliases: ['black pepper beef', 'wołowina pieprz', 'czarny pieprz wołowina'], storagePath: 'dania/asian/asian_09.webp', localAsset: require('@/assets/premium/dishes/asian/asian_09.webp') },
+  { slug: 'kurczak_nerkowce', category: 'kuchnia_polska', labelPl: 'Kurczak z orzechami nerkowca', aliases: ['cashew chicken', 'kurczak nerkowiec', 'nerkowce'], storagePath: 'dania/asian/asian_10.webp', localAsset: require('@/assets/premium/dishes/asian/asian_10.webp') },
+  { slug: 'dim_sum', category: 'kuchnia_polska', labelPl: 'Pierożki Dim Sum', aliases: ['dim sum', 'siu mai', 'shu mai'], storagePath: 'dania/asian/asian_11.webp', localAsset: require('@/assets/premium/dishes/asian/asian_11.webp') },
+  { slug: 'gyoza', category: 'kuchnia_polska', labelPl: 'Pierożki Gyoza', aliases: ['gyoza', 'jiaozi', 'pierogi gyoza'], storagePath: 'dania/asian/asian_12.webp', localAsset: require('@/assets/premium/dishes/asian/asian_12.webp') },
+  { slug: 'fasolka_woka', category: 'kuchnia_polska', labelPl: 'Fasolka szparagowa z woka', aliases: ['fasolka woka', 'garlic green beans', 'fasolka czosnek'], storagePath: 'dania/asian/asian_13.webp', localAsset: require('@/assets/premium/dishes/asian/asian_13.webp') },
+  { slug: 'mapo_tofu', category: 'kuchnia_polska', labelPl: 'Mapo Tofu', aliases: ['mapo tofu', 'mapo', 'tofu mapo'], storagePath: 'dania/asian/asian_14.webp', localAsset: require('@/assets/premium/dishes/asian/asian_14.webp') },
+  { slug: 'general_tso', category: 'kuchnia_polska', labelPl: 'Kurczak Generała Tso', aliases: ['general tso', 'generał tso', 'general tsos'], storagePath: 'dania/asian/asian_15.webp', localAsset: require('@/assets/premium/dishes/asian/asian_15.webp') },
+  { slug: 'beef_lo_mein', category: 'kuchnia_polska', labelPl: 'Makaron Beef Lo Mein', aliases: ['lo mein', 'beef lo mein', 'makaron lo mein'], storagePath: 'dania/asian/asian_16.webp', localAsset: require('@/assets/premium/dishes/asian/asian_16.webp') },
+  { slug: 'krewetki_woka', category: 'kuchnia_polska', labelPl: 'Krewetki z woka', aliases: ['krewetki woka', 'shrimp snow peas', 'krewetki groszek'], storagePath: 'dania/asian/asian_17.webp', localAsset: require('@/assets/premium/dishes/asian/asian_17.webp') },
+  { slug: 'kaczka_pekinska', category: 'kuchnia_polska', labelPl: 'Kaczka po pekińsku', aliases: ['peking duck', 'kaczka pekińska', 'kaczka pekinska'], storagePath: 'dania/asian/asian_18.webp', localAsset: require('@/assets/premium/dishes/asian/asian_18.webp') },
+  { slug: 'skrzydelka_sweet_chili', category: 'kuchnia_polska', labelPl: 'Skrzydełka w sosie słodkie chili', aliases: ['sweet chili wings', 'skrzydełka chili', 'skrzydelka chili'], storagePath: 'dania/asian/asian_19.webp', localAsset: require('@/assets/premium/dishes/asian/asian_19.webp') },
+  { slug: 'nasi_goreng', category: 'kuchnia_polska', labelPl: 'Nasi Goreng', aliases: ['nasi goreng', 'indonezyjski ryż'], storagePath: 'dania/asian/asian_20.webp', localAsset: require('@/assets/premium/dishes/asian/asian_20.webp') },
+  { slug: 'tempura', category: 'kuchnia_polska', labelPl: 'Warzywa i krewetki w tempurze', aliases: ['tempura', 'tempura krewetki'], storagePath: 'dania/asian/asian_21.webp', localAsset: require('@/assets/premium/dishes/asian/asian_21.webp') },
+  { slug: 'wonton_smazone', category: 'kuchnia_polska', labelPl: 'Chrupiące pierożki Wonton', aliases: ['wonton', 'smażone wonton', 'fried wonton'], storagePath: 'dania/asian/asian_22.webp', localAsset: require('@/assets/premium/dishes/asian/asian_22.webp') },
+  { slug: 'sos_sweet_chili', category: 'kuchnia_polska', labelPl: 'Sos słodkie chili', aliases: ['sweet chili', 'sos chili', 'słódkie chili'], storagePath: 'dania/asian/asian_23.webp', localAsset: require('@/assets/premium/dishes/asian/asian_23.webp') },
+  { slug: 'sos_teriyaki', category: 'kuchnia_polska', labelPl: 'Sos Teriyaki', aliases: ['teriyaki', 'sos teriyaki'], storagePath: 'dania/asian/asian_24.webp', localAsset: require('@/assets/premium/dishes/asian/asian_24.webp') },
+  { slug: 'sos_sriracha', category: 'kuchnia_polska', labelPl: 'Sos Sriracha', aliases: ['sriracha', 'sos sriracha'], storagePath: 'dania/asian/asian_25.webp', localAsset: require('@/assets/premium/dishes/asian/asian_25.webp') },
+];
+
+export const INDIAN_CATALOG: DishImageEntry[] = [
+  { slug: 'butter_chicken', category: 'kuchnia_polska', labelPl: 'Butter Chicken', aliases: ['butter chicken', 'murgh makhani', 'maślany kurczak'], storagePath: 'dania/indian/indian_01.webp', localAsset: require('@/assets/premium/dishes/indian/indian_01.webp') },
+  { slug: 'chicken_tikka_masala', category: 'kuchnia_polska', labelPl: 'Chicken Tikka Masala', aliases: ['tikka masala', 'chicken tikka', 'tikka'], storagePath: 'dania/indian/indian_02.webp', localAsset: require('@/assets/premium/dishes/indian/indian_02.webp') },
+  { slug: 'lamb_rogan_josh', category: 'kuchnia_polska', labelPl: 'Lamb Rogan Josh', aliases: ['rogan josh', 'lamb rogan', 'jagnięcina rogan'], storagePath: 'dania/indian/indian_03.webp', localAsset: require('@/assets/premium/dishes/indian/indian_03.webp') },
+  { slug: 'biryani_warzywa', category: 'kuchnia_polska', labelPl: 'Biryani z warzywami', aliases: ['biryani', 'biryani warzywa'], storagePath: 'dania/indian/indian_04.webp', localAsset: require('@/assets/premium/dishes/indian/indian_04.webp') },
+  { slug: 'chana_masala', category: 'kuchnia_polska', labelPl: 'Chana Masala', aliases: ['chana masala', 'ciecierzyca masala'], storagePath: 'dania/indian/indian_05.webp', localAsset: require('@/assets/premium/dishes/indian/indian_05.webp') },
+  { slug: 'palak_paneer', category: 'kuchnia_polska', labelPl: 'Palak Paneer', aliases: ['palak paneer', 'saag paneer', 'szpinak paneer'], storagePath: 'dania/indian/indian_06.webp', localAsset: require('@/assets/premium/dishes/indian/indian_06.webp') },
+  { slug: 'tandoori_chicken', category: 'kuchnia_polska', labelPl: 'Kurczak Tandoori', aliases: ['tandoori', 'kurczak tandoori', 'tandoori chicken'], storagePath: 'dania/indian/indian_07.webp', localAsset: require('@/assets/premium/dishes/indian/indian_07.webp') },
+  { slug: 'samosy', category: 'kuchnia_polska', labelPl: 'Samosy', aliases: ['samosa', 'samosy', 'samosas'], storagePath: 'dania/indian/indian_08.webp', localAsset: require('@/assets/premium/dishes/indian/indian_08.webp') },
+  { slug: 'onion_bhaji', category: 'kuchnia_polska', labelPl: 'Onion Bhaji', aliases: ['onion bhaji', 'bhaji', 'bhajji'], storagePath: 'dania/indian/indian_09.webp', localAsset: require('@/assets/premium/dishes/indian/indian_09.webp') },
+  { slug: 'naan_czosnek', category: 'kuchnia_polska', labelPl: 'Chlebek Naan z czosnkiem', aliases: ['naan', 'garlic naan', 'chlebek naan'], storagePath: 'dania/indian/indian_10.webp', localAsset: require('@/assets/premium/dishes/indian/indian_10.webp') },
+  { slug: 'papadumy', category: 'kuchnia_polska', labelPl: 'Papadumy', aliases: ['papadum', 'papad', 'papadums'], storagePath: 'dania/indian/indian_11.webp', localAsset: require('@/assets/premium/dishes/indian/indian_11.webp') },
+  { slug: 'daal_makhani', category: 'kuchnia_polska', labelPl: 'Daal Makhani', aliases: ['daal makhani', 'dal makhani', 'daal'], storagePath: 'dania/indian/indian_12.webp', localAsset: require('@/assets/premium/dishes/indian/indian_12.webp') },
+  { slug: 'aloo_gobi', category: 'kuchnia_polska', labelPl: 'Aloo Gobi', aliases: ['aloo gobi', 'ziemniaki kalafior'], storagePath: 'dania/indian/indian_13.webp', localAsset: require('@/assets/premium/dishes/indian/indian_13.webp') },
+  { slug: 'prawn_malai_curry', category: 'kuchnia_polska', labelPl: 'Prawn Malai Curry', aliases: ['prawn malai', 'malai curry', 'krewetki curry'], storagePath: 'dania/indian/indian_14.webp', localAsset: require('@/assets/premium/dishes/indian/indian_14.webp') },
+  { slug: 'chicken_korma', category: 'kuchnia_polska', labelPl: 'Chicken Korma', aliases: ['korma', 'chicken korma', 'kurczak korma'], storagePath: 'dania/indian/indian_15.webp', localAsset: require('@/assets/premium/dishes/indian/indian_15.webp') },
+  { slug: 'mattar_paneer', category: 'kuchnia_polska', labelPl: 'Mattar Paneer', aliases: ['mattar paneer', 'matar paneer', 'paneer groszek'], storagePath: 'dania/indian/indian_16.webp', localAsset: require('@/assets/premium/dishes/indian/indian_16.webp') },
+  { slug: 'seekh_kebab', category: 'kuchnia_polska', labelPl: 'Seekh Kebab', aliases: ['seekh kebab', 'seekh', 'szaszłyk indyjski'], storagePath: 'dania/indian/indian_17.webp', localAsset: require('@/assets/premium/dishes/indian/indian_17.webp') },
+  { slug: 'mango_chutney', category: 'kuchnia_polska', labelPl: 'Mango Chutney', aliases: ['mango chutney', 'chutney'], storagePath: 'dania/indian/indian_18.webp', localAsset: require('@/assets/premium/dishes/indian/indian_18.webp') },
+  { slug: 'raita', category: 'kuchnia_polska', labelPl: 'Raita', aliases: ['raita', 'sos raita'], storagePath: 'dania/indian/indian_19.webp', localAsset: require('@/assets/premium/dishes/indian/indian_19.webp') },
+  { slug: 'achar', category: 'kuchnia_polska', labelPl: 'Achar', aliases: ['achar', 'indyjskie pikle', 'pickle'], storagePath: 'dania/indian/indian_20.webp', localAsset: require('@/assets/premium/dishes/indian/indian_20.webp') },
+  { slug: 'ryz_basmati', category: 'kuchnia_polska', labelPl: 'Ryż basmati z groszkiem', aliases: ['basmati', 'ryż basmati', 'basmati rice'], storagePath: 'dania/indian/indian_21.webp', localAsset: require('@/assets/premium/dishes/indian/indian_21.webp') },
+  { slug: 'gulab_jamun', category: 'kuchnia_polska', labelPl: 'Gulab Jamun', aliases: ['gulab jamun', 'gulab'], storagePath: 'dania/indian/indian_22.webp', localAsset: require('@/assets/premium/dishes/indian/indian_22.webp') },
+  { slug: 'medu_vada', category: 'kuchnia_polska', labelPl: 'Medu Vada', aliases: ['medu vada', 'vada'], storagePath: 'dania/indian/indian_23.webp', localAsset: require('@/assets/premium/dishes/indian/indian_23.webp') },
+  { slug: 'idli', category: 'kuchnia_polska', labelPl: 'Idli', aliases: ['idli'], storagePath: 'dania/indian/indian_24.webp', localAsset: require('@/assets/premium/dishes/indian/indian_24.webp') },
+  { slug: 'mango_lassi', category: 'kuchnia_polska', labelPl: 'Mango Lassi', aliases: ['mango lassi', 'lassi'], storagePath: 'dania/indian/indian_25.webp', localAsset: require('@/assets/premium/dishes/indian/indian_25.webp') },
+];
+
+export const MEXICAN_CATALOG: DishImageEntry[] = [
+  { slug: 'tacos_wolowina', category: 'kuchnia_polska', labelPl: 'Tacos z wołowiną', aliases: ['tacos', 'taco wołowina', 'beef tacos'], storagePath: 'dania/mexican/mexican_01.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_01.webp') },
+  { slug: 'taco_ryba', category: 'kuchnia_polska', labelPl: 'Taco z rybą', aliases: ['fish taco', 'taco ryba', 'taco z rybą'], storagePath: 'dania/mexican/mexican_02.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_02.webp') },
+  { slug: 'burrito', category: 'kuchnia_polska', labelPl: 'Burrito', aliases: ['burrito'], storagePath: 'dania/mexican/mexican_03.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_03.webp') },
+  { slug: 'quesadilla_kurczak', category: 'kuchnia_polska', labelPl: 'Quesadilla z kurczakiem', aliases: ['quesadilla', 'quesadilla kurczak'], storagePath: 'dania/mexican/mexican_04.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_04.webp') },
+  { slug: 'enchiladas', category: 'kuchnia_polska', labelPl: 'Enchiladas', aliases: ['enchiladas', 'enchilada'], storagePath: 'dania/mexican/mexican_05.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_05.webp') },
+  { slug: 'fajitas_kurczak', category: 'kuchnia_polska', labelPl: 'Fajitas z kurczakiem', aliases: ['fajitas', 'fajita', 'fajitas kurczak'], storagePath: 'dania/mexican/mexican_06.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_06.webp') },
+  { slug: 'chili_con_carne', category: 'kuchnia_polska', labelPl: 'Chili con carne', aliases: ['chili con carne', 'chili'], storagePath: 'dania/mexican/mexican_07.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_07.webp') },
+  { slug: 'nachos_supreme', category: 'kuchnia_polska', labelPl: 'Nachos Supreme', aliases: ['nachos', 'nachos supreme'], storagePath: 'dania/mexican/mexican_08.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_08.webp') },
+  { slug: 'tamale', category: 'kuchnia_polska', labelPl: 'Tamale', aliases: ['tamale', 'tamales'], storagePath: 'dania/mexican/mexican_09.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_09.webp') },
+  { slug: 'flautas', category: 'kuchnia_polska', labelPl: 'Flautas / Taquitos', aliases: ['flautas', 'taquitos', 'taquito'], storagePath: 'dania/mexican/mexican_10.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_10.webp') },
+  { slug: 'torta', category: 'kuchnia_polska', labelPl: 'Torta', aliases: ['torta', 'meksykańska kanapka'], storagePath: 'dania/mexican/mexican_11.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_11.webp') },
+  { slug: 'elote', category: 'kuchnia_polska', labelPl: 'Elote', aliases: ['elote', 'kukurydza meksykańska'], storagePath: 'dania/mexican/mexican_12.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_12.webp') },
+  { slug: 'ryz_meksykanski', category: 'kuchnia_polska', labelPl: 'Ryż po meksykańsku', aliases: ['ryż meksykański', 'mexican rice', 'arroz'], storagePath: 'dania/mexican/mexican_13.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_13.webp') },
+  { slug: 'frijoles_charros', category: 'kuchnia_polska', labelPl: 'Frijoles Charros', aliases: ['frijoles', 'charros', 'fasola meksykańska'], storagePath: 'dania/mexican/mexican_14.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_14.webp') },
+  { slug: 'taco_salad_bowl', category: 'kuchnia_polska', labelPl: 'Taco Salad Bowl', aliases: ['taco salad', 'sałatka taco'], storagePath: 'dania/mexican/mexican_15.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_15.webp') },
+  { slug: 'chimichanga', category: 'kuchnia_polska', labelPl: 'Chimichanga', aliases: ['chimichanga'], storagePath: 'dania/mexican/mexican_16.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_16.webp') },
+  { slug: 'ceviche_krewetki', category: 'kuchnia_polska', labelPl: 'Ceviche z krewetkami', aliases: ['ceviche', 'ceviche krewetki'], storagePath: 'dania/mexican/mexican_17.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_17.webp') },
+  { slug: 'jalapeno_poppers', category: 'kuchnia_polska', labelPl: 'Jalapeno Poppers', aliases: ['jalapeno poppers', 'jalapeño', 'poppers'], storagePath: 'dania/mexican/mexican_18.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_18.webp') },
+  { slug: 'churros', category: 'kuchnia_polska', labelPl: 'Churros', aliases: ['churros', 'churro'], storagePath: 'dania/mexican/mexican_19.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_19.webp') },
+  { slug: 'guacamole', category: 'kuchnia_polska', labelPl: 'Guacamole', aliases: ['guacamole', 'guac'], storagePath: 'dania/mexican/mexican_20.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_20.webp') },
+  { slug: 'pico_de_gallo', category: 'kuchnia_polska', labelPl: 'Pico de gallo', aliases: ['pico de gallo', 'pico'], storagePath: 'dania/mexican/mexican_21.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_21.webp') },
+  { slug: 'salsa_chipotle', category: 'kuchnia_polska', labelPl: 'Salsa Chipotle', aliases: ['salsa chipotle', 'chipotle'], storagePath: 'dania/mexican/mexican_22.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_22.webp') },
+  { slug: 'salsa_verde', category: 'kuchnia_polska', labelPl: 'Salsa Verde', aliases: ['salsa verde', 'zielona salsa'], storagePath: 'dania/mexican/mexican_23.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_23.webp') },
+  { slug: 'zupa_tortilla_mx', category: 'kuchnia_polska', labelPl: 'Zupa Tortilla', aliases: ['sopa de tortilla', 'zupa tortilla meksykańska'], storagePath: 'dania/mexican/mexican_24.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_24.webp') },
+  { slug: 'tres_leches', category: 'kuchnia_polska', labelPl: 'Pastel de Tres Leches', aliases: ['tres leches', 'pastel de tres leches', 'ciasto tres leches', 'sernik', 'ciasto'], storagePath: 'dania/mexican/mexican_25.webp', localAsset: require('@/assets/premium/dishes/mexican/mexican_25.webp') },
+];

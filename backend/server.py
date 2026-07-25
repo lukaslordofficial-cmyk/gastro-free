@@ -1,0 +1,11625 @@
+"""
+Gastro Manager — Backend (Voice + Intent → Supabase actions)
+
+• STT: OpenAI Whisper (whisper-1)      —> official `openai` SDK
+• LLM: OpenAI GPT-4o mini              —> official `openai` SDK (Structured Outputs)
+• DB : Supabase REST (service_role)
+
+Klucz OpenAI pobierany JEDYNIE ze zmiennej środowiskowej process.env.OPENAI_API_KEY
+(w Pythonie: os.environ["OPENAI_API_KEY"]).  Klucz NIGDY nie jest hardcodowany
+ani logowany.  Użytkownik uzupełnia go we własnym .env — patrz backend/.env.example.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+import json
+import logging
+import os
+import ssl
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional, Literal
+
+import re
+import unicodedata
+
+import certifi
+import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from openai import AsyncOpenAI, APIError, OpenAIError
+from pydantic import BaseModel, Field
+from rapidfuzz import fuzz, process as rf_process
+
+from bargain_hunter import build_optimize_response
+from token_billing import (
+    USD_TO_PLN,
+    compute_credits_from_usage,
+    merge_billing_events,
+    tokens_from_usage,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BACKEND_DIR = Path(__file__).resolve().parent
+# Zawsze ładuj backend/.env (nie zależ od cwd procesu uvicorn).
+load_dotenv(_BACKEND_DIR / ".env", override=True)
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    or os.environ.get("SUPABASE_ANON_KEY", "").strip()
+)
+STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "whisper-1")
+CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
+INSPIRATIONS_MODEL = (
+    os.environ.get("OPENAI_INSPIRATIONS_MODEL", "gpt-4o").strip() or "gpt-4o"
+)
+
+
+def _env(name: str, default: str = "") -> str:
+    """Odczyt zmiennej z backend/.env (nadpisuje puste/stare wartości w procesie)."""
+    load_dotenv(_BACKEND_DIR / ".env", override=True)
+    return (os.environ.get(name) or default).strip()
+
+
+def _resend_api_key() -> str:
+    return _env("RESEND_API_KEY")
+
+
+def _resend_from_email() -> str:
+    return _env("RESEND_FROM_EMAIL", "asystent.dostaw@gastromanager.org")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+
+    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY (lub SUPABASE_ANON_KEY) not configured")
+
+logger = logging.getLogger("gastro")
+logging.basicConfig(level=logging.INFO)
+
+app = FastAPI(title="Gastro Manager — Voice API")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+
+_openai_client: AsyncOpenAI | None = None
+
+
+def _httpx_verify():
+    """SSL verify for httpx — Windows needs system cert store, not certifi bundle."""
+    mode = os.environ.get("OPENAI_SSL_VERIFY", "auto").strip().lower()
+    if mode in ("0", "false", "no"):
+        return False
+    if mode in ("certifi", "bundle"):
+        return certifi.where()
+    return ssl.create_default_context()
+
+
+def _openai() -> AsyncOpenAI:
+    """Lazy OpenAI client. Fails fast with a clear message if key is missing."""
+    global _openai_client
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OPENAI_API_KEY nie jest ustawione. Dodaj klucz OpenAI w pliku "
+                "backend/.env (patrz backend/.env.example) i zrestartuj backend."
+            ),
+        )
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(
+            api_key=OPENAI_API_KEY,
+            http_client=httpx.AsyncClient(verify=_httpx_verify(), timeout=120.0),
+        )
+    return _openai_client
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supabase helper (service_role → bypasses RLS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SB_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
+
+
+async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
+    r = await client.get(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, params=params or {})
+    r.raise_for_status()
+    return r.json()
+
+
+def _pg_ts(iso: str) -> str:
+    """Timestamp bezpieczny w query string PostgREST (bez '+' → spacja w URL)."""
+    raw = (iso or "").strip()
+    if not raw:
+        return raw
+    if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+        return raw + "T00:00:00Z"
+    if raw.endswith("Z"):
+        return raw
+    try:
+        from datetime import datetime, timezone
+        s = raw.replace(" ", "T")
+        if s.endswith("+00:00") or s.endswith("-00:00"):
+            return s[:-6] + "Z"
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return raw.replace("+", "%2B")
+
+
+async def sb_post(client: httpx.AsyncClient, path: str, payload):
+    r = await client.post(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, json=payload)
+    r.raise_for_status()
+    return r.json() if r.text else None
+
+
+async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
+    r = await client.patch(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, params=params, json=payload)
+    r.raise_for_status()
+    return r.json() if r.text else None
+
+
+async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
+    r = await client.delete(f"{SUPABASE_URL}/rest/v1/{path}", headers=SB_HEADERS, params=params)
+    r.raise_for_status()
+    return r.json() if r.text else None
+
+
+def _current_year_month() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pydantic schemas (Structured Outputs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+Intent = Literal[
+    "waste",
+    "add_revenue",
+    "add_fixed_cost",
+    "add_variable_cost",
+    "add_inventory_item",
+    "add_menu_item",
+    "add_supplier",
+    "add_supplier_product",
+    # Voice CRUD (edycja parametrów)
+    "edit_menu_item_price",
+    "add_recipe_ingredient",
+    "edit_recipe_ingredient_qty",
+    "edit_inventory_item",
+    # Partie dat ważności
+    "add_expiration_batch",
+    # Zamawianie u dostawców
+    "order_product",
+    "order_critical_items_by_category",
+    "supplier_flip_order",
+    "budget_cap_order",
+    "compare_catalogs_top_savings",
+    "predictive_weekend_restock",
+    "check_minimum_order_value",
+    # Masowe operacje destrukcyjne (soft-delete / reset) — zabezpieczone modalem na FE
+    "bulk_delete_menu",
+    "bulk_delete_suppliers",
+    "bulk_reset_inventory",
+    "bulk_delete_inventory",
+    "restore_last_deleted_menu",
+    "restore_deleted_inventory",
+    "upload_menu",
+    # Pojedyncze usuwanie po nazwie (fuzzy)
+    "delete_menu_item",
+    "delete_supplier",
+    "delete_inventory_item",
+    # Dostępność dania (POS)
+    "toggle_menu_item_availability",
+    # Masowe zmiany cenowe / bufory
+    "bulk_edit_menu_prices_percentage",
+    "bulk_edit_menu_prices_fixed",
+    "bulk_edit_inventory_buffers",
+    # Edycja kategorii / nazwy dania
+    "edit_menu_item_category",
+    "rename_menu_item",
+    # Skalowanie receptury
+    "scale_recipe",
+    # Sterowanie UI (nawigacja / filtry) — wykonywane na froncie
+    "navigate_screen",
+    "filter_ui_inventory",
+    "filter_ui_menu_blocked",
+    # Analityka okresowa (AI Trend & Analytics Orchestrator)
+    "summarize_custom_period",
+    "compare_two_periods",
+    # Ranking sprzedaży / zużycia magazynu
+    "rank_menu_sales",
+    "rank_inventory_usage",
+    "rank_waste_cost",
+    "rank_dead_menu",
+    "list_expiring_soon",
+    "rank_supplier_spend",
+    "manager_core_alerts",
+    "haccp_tip",
+    "upload_invoice",
+    "upload_offer",
+    "upload_document",
+    "unknown",
+]
+
+
+# --- Payloads per intent -----------------------------------------------------
+
+class WastePayload(BaseModel):
+    item_type: Literal["dish", "ingredient", "unknown"] = "unknown"
+    related_id: Optional[str] = None
+    item_name: str = ""
+    quantity: float = 0.0
+    unit: str = ""
+    reason: str = ""
+
+
+class RevenuePayload(BaseModel):
+    description: str
+    amount_pln: float
+    note: Optional[str] = None
+
+
+FixedCostType = Literal["rent", "media", "payroll", "other"]
+VarCostType = Literal["materials", "waste", "other"]
+
+
+class FixedCostPayload(BaseModel):
+    type: FixedCostType = "other"
+    name: str
+    amount_pln: float
+
+
+class VarCostPayload(BaseModel):
+    type: VarCostType = "other"
+    name: str
+    amount_pln: float
+
+
+class InventoryItemPayload(BaseModel):
+    name: str
+    category_name: Optional[str] = None
+    quantity: float = 0.0
+    unit: str = "szt"
+    min_quantity: float = 0.0
+    optimal_quantity: Optional[float] = None
+    safety_buffer_percent: float = 20.0
+    unit_cost: Optional[float] = None
+    portion_size: Optional[float] = None
+    is_combo_polprodukt: bool = False
+
+
+class MenuIngredient(BaseModel):
+    ingredient_name: str
+    quantity: float
+    unit: str
+
+
+class MenuItemPayload(BaseModel):
+    name: str
+    category: Optional[str] = None
+    price_pln: float
+    ingredients: list[MenuIngredient] = []
+
+
+class SupplierPayload(BaseModel):
+    name: str
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    category: Optional[str] = None
+    nip: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class SupplierProductPayload(BaseModel):
+    supplier_name: Optional[str] = None       # for AI to name the supplier
+    supplier_id: Optional[str] = None         # if resolved
+    product_name: str
+    variant: Optional[str] = None
+    price_pln: float
+    unit_count: Optional[int] = None
+    volume_label: Optional[str] = None
+
+
+# --- Response schema returned by /voice/interpret ---------------------------
+
+class VoiceInterpretation(BaseModel):
+    intent: Intent
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    reason: Optional[str] = Field(default=None, description="Krótkie uzasadnienie klasyfikacji dla użytkownika")
+    payload: dict  # dyskryminator: przy zapisie waliduje się osobno pod właściwy typ
+    fuzzy_matches: list[dict] = Field(default_factory=list,
+                                      description="Lista dopasowań fuzzy: [{field, matched_to, score, resolved_id}]")
+    alternate_intents: list[dict] = Field(
+        default_factory=list,
+        description="Gdy niepewność: [{intent, label}] — FE pokazuje 2 propozycje",
+    )
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+def _guard_period_intent(text: str, data: dict) -> dict:
+    """Koryguje mylenie summarize ↔ compare i dokłada alternate_intents przy niskiej pewności."""
+    t = _strip_pl_month(text or "")
+    pl = dict(data.get("payload") or {})
+    intent = data.get("intent") or "unknown"
+    conf = float(data.get("confidence") or 0.5)
+
+    # „wgraj/zeskanuj menu” → upload_menu (nie oferta dostawcy)
+    if (
+        re.search(r"\b(wgraj|zeskanuj|skanuj|dodaj)\b.{0,40}\b(menu|karte dan|karte menu|karte potraw)\b", t)
+        or re.search(r"\b(menu|karte dan)\b.{0,40}\b(wgraj|zeskanuj|skanuj)\b", t)
+    ):
+        if intent in ("upload_offer", "upload_document", "upload_invoice", "unknown", "add_supplier"):
+            intent = "upload_menu"
+            data["intent"] = intent
+            data["reason"] = ((data.get("reason") or "") + " | guard: upload_menu").strip(" |")
+
+    # „przywróć magazyn/produkty” ≠ przywróć menu
+    if re.search(r"\b(przywroc|przywrocic|cofnij)\b", t):
+        if re.search(r"\b(magazyn\w*|produkt\w*|skladnik\w*)\b", t) and not re.search(r"\b(menu|danie|potraw\w*|karte)\b", t):
+            intent = "restore_deleted_inventory"
+            data["intent"] = intent
+        elif re.search(r"\b(menu|danie|potraw\w*|karte)\b", t):
+            intent = "restore_last_deleted_menu"
+            data["intent"] = intent
+
+    # TYLKO wyraźne porównanie — NIE „a”/„i” jako łącznik (fałszywe trafienia)
+    compare_re = re.compile(
+        r"\b(porownaj|porownanie|porownac|zestaw|zestawienie|versus|\bvs\b|roznic[ae]?)\b",
+        re.I,
+    )
+    has_compare = bool(compare_re.search(t))
+    # dwa miesiące + spójnik „i/oraz/vs” między nimi
+    months_found = re.findall(
+        r"\b(stycznia|styczen|lutego|luty|marca|marzec|kwietnia|kwiecien|maja|maj|"
+        r"czerwca|czerwiec|lipca|lipiec|sierpnia|sierpien|wrzesnia|wrzesien|"
+        r"pazdziernika|pazdziernik|listopada|listopad|grudnia|grudzien|grudznia)\b",
+        t,
+    )
+    month_hits = len(months_found)
+    if not has_compare and month_hits >= 2 and re.search(r"\b(i|oraz|vs|versus)\b", t):
+        has_compare = True
+
+    finance_one = bool(re.search(
+        r"\b(zysk|zyski|przychod|przychody|utarg|podsumuj|analiz|dane|raport|sprzedaz)\b",
+        t,
+    ))
+
+    # TWARDY OVERRIDE: „pokaż zyski z lipca” → zawsze summarize (nigdy compare)
+    if finance_one and month_hits <= 1 and not has_compare:
+        intent = "summarize_custom_period"
+        data["intent"] = intent
+        data["confidence"] = max(conf, 0.88)
+        data["reason"] = (
+            (data.get("reason") or "")
+            + " | Wymuszono: analiza jednego okresu (zyski/dane), nie porównanie."
+        ).strip(" |")
+        if not pl.get("period_1"):
+            pl["period_1"] = (text or "").strip()
+        pl["period_type"] = pl.get("period_type") or "month"
+        pl.pop("period_2", None)
+
+    elif intent == "compare_two_periods" and not has_compare and month_hits <= 1:
+        intent = "summarize_custom_period"
+        data["intent"] = intent
+        data["confidence"] = min(conf, 0.72)
+        data["reason"] = (
+            (data.get("reason") or "")
+            + " | Skorygowano: jeden okres → analiza, nie porównanie."
+        ).strip(" |")
+        if not pl.get("period_1") and pl.get("period_2"):
+            pl["period_1"] = pl["period_2"]
+        pl.pop("period_2", None)
+
+    elif intent == "summarize_custom_period" and has_compare and month_hits >= 2:
+        intent = "compare_two_periods"
+        data["intent"] = intent
+        data["reason"] = (
+            (data.get("reason") or "")
+            + " | Skorygowano: wykryto porównanie dwóch okresów."
+        ).strip(" |")
+
+    # Uzupełnij period_1 pełnym tekstem użytkownika
+    if intent in (
+        "summarize_custom_period",
+        "rank_menu_sales",
+        "rank_inventory_usage",
+        "rank_waste_cost",
+        "rank_dead_menu",
+        "rank_supplier_spend",
+    ):
+        if not pl.get("period_1") or len(str(pl.get("period_1") or "")) < 4:
+            pl["period_1"] = (text or "").strip()
+        pl["period_type"] = pl.get("period_type") or (
+            "year" if intent.startswith("rank_") else "month"
+        )
+
+    # Zawsze zaproponuj 2 warianty przy finance/compare (żeby FE mógł przełączyć)
+    if intent in ("summarize_custom_period", "compare_two_periods") or finance_one:
+        if intent == "summarize_custom_period":
+            alts = [
+                {"intent": "summarize_custom_period", "label": "Pokazanie danych / zysków z okresu"},
+                {"intent": "compare_two_periods", "label": "Porównanie dwóch okresów"},
+            ]
+        else:
+            alts = [
+                {"intent": "compare_two_periods", "label": "Porównanie dwóch okresów"},
+                {"intent": "summarize_custom_period", "label": "Pokazanie danych / zysków z okresu"},
+            ]
+        data["alternate_intents"] = alts
+
+    data["payload"] = pl
+    return data
+
+
+# --- Apply request (client confirms) ----------------------------------------
+
+class ApplyRequest(BaseModel):
+    intent: Intent
+    payload: dict
+    transcript: Optional[str] = None
+    source: Literal["voice", "manual"] = "voice"
+
+
+class ApplyResponse(BaseModel):
+    intent: Intent
+    ok: bool
+    id: Optional[str] = None
+    detail: str = ""
+    extras: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/")
+async def root():
+    return {"service": "gastro-voice", "status": "ok"}
+
+
+@app.get("/api/download/gastro-manager-updated.zip")
+async def download_updated_zip():
+    """Serves the packaged updated codebase for the user to review locally."""
+    path = Path(__file__).parent / "static" / "gastro-manager-updated.zip"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Paczka nie została jeszcze zbudowana.")
+    return FileResponse(
+        path=str(path),
+        media_type="application/zip",
+        filename="gastro-manager-updated.zip",
+    )
+
+
+@app.get("/api/health")
+async def health():
+    sub_status = "unknown"
+    async with httpx.AsyncClient(timeout=10.0, verify=_httpx_verify()) as client:
+        try:
+            rows = await sb_get(client, "subscriptions",
+                                params={"select": "tier_level,credits_balance", "account_key": "eq.default", "limit": "1"})
+            if rows:
+                sub_status = f"ok tier={rows[0].get('tier_level')} credits={rows[0].get('credits_balance')}"
+            else:
+                sub_status = "empty"
+        except httpx.HTTPStatusError as e:
+            sub_status = f"error {e.response.status_code}"
+        except Exception as e:  # noqa: BLE001
+            sub_status = f"error {type(e).__name__}"
+    return {
+        "status": "ok",
+        "supabase": bool(SUPABASE_URL),
+        "subscription": sub_status,
+        "openai_configured": bool(OPENAI_API_KEY),
+        "stt_model": STT_MODEL,
+        "chat_model": CHAT_MODEL,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) Voice transcription  — official openai SDK
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TranscribeResponse(BaseModel):
+    text: str
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+@app.post("/api/voice/transcribe", response_model=TranscribeResponse)
+async def transcribe(audio: UploadFile = File(...), language: str = Form("pl")):
+    client = _openai()
+    await _guard_ai()
+    contents = await audio.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Puste nagranie audio.")
+
+    filename = audio.filename or "audio.webm"
+    if "." not in filename:
+        ct = (audio.content_type or "").lower()
+        ext = ("webm" if "webm" in ct
+               else "wav" if "wav" in ct
+               else "mp3" if ("mpeg" in ct or "mp3" in ct)
+               else "m4a" if ("m4a" in ct or "mp4" in ct or "aac" in ct)
+               else "webm")
+        filename = f"{filename}.{ext}"
+
+    buf = io.BytesIO(contents)
+    buf.name = filename  # SDK uses `.name` for MIME detection
+
+    try:
+        resp = await client.audio.transcriptions.create(
+            model=STT_MODEL,
+            file=buf,
+            language=language or "pl",
+            prompt=(
+                "Kontekst: restauracja / gastronomia. Raportowanie strat magazynowych, "
+                "dodawanie kosztów, przychodów, produktów magazynowych, dań z menu, "
+                "dostawców. Ilości w kg, litrach, sztukach. Ceny w PLN."
+            ),
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"Whisper API: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"Whisper: {e}") from e
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/voice/transcribe", model=STT_MODEL,
+            extras={"filename": filename},
+        )
+
+    return TranscribeResponse(
+        text=(getattr(resp, "text", "") or "").strip(),
+        credits_deducted=int(billing.get("credits_deducted") or 0),
+        credits_remaining=billing.get("credits_remaining"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2) Interpret voice → intent + payload
+# ─────────────────────────────────────────────────────────────────────────────
+
+# JSON Schema for Structured Outputs — enforces exact shape and enums.
+_JSON_SCHEMA = {
+    "name": "VoiceInterpretation",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["intent", "confidence", "reason", "payload"],
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": [
+                    "waste", "add_revenue", "add_fixed_cost", "add_variable_cost",
+                    "add_inventory_item", "add_menu_item",
+                    "add_supplier", "add_supplier_product",
+                    "edit_menu_item_price", "add_recipe_ingredient",
+                    "edit_recipe_ingredient_qty", "edit_inventory_item",
+                    "add_expiration_batch",
+                    "order_product", "order_critical_items_by_category",
+                    "supplier_flip_order", "budget_cap_order",
+                    "compare_catalogs_top_savings", "predictive_weekend_restock",
+                    "check_minimum_order_value",
+                    "bulk_delete_menu", "bulk_delete_suppliers", "bulk_reset_inventory",
+                    "bulk_delete_inventory", "restore_last_deleted_menu", "restore_deleted_inventory",
+                    "delete_menu_item", "delete_supplier", "delete_inventory_item",
+                    "toggle_menu_item_availability",
+                    "bulk_edit_menu_prices_percentage", "bulk_edit_menu_prices_fixed",
+                    "bulk_edit_inventory_buffers",
+                    "edit_menu_item_category", "rename_menu_item", "scale_recipe",
+                    "navigate_screen", "filter_ui_inventory", "filter_ui_menu_blocked",
+                    "summarize_custom_period", "compare_two_periods",
+                    "rank_menu_sales", "rank_inventory_usage",
+                    "rank_waste_cost", "rank_dead_menu", "list_expiring_soon",
+                    "rank_supplier_spend", "manager_core_alerts", "haccp_tip",
+                    "upload_invoice", "upload_offer", "upload_document", "upload_menu",
+                    "unknown",
+                ],
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reason": {"type": "string"},
+            "payload": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "item_type", "related_id", "item_name", "quantity", "unit",
+                    "reason_text",
+                    "description", "amount_pln", "note",
+                    "cost_type", "cost_name",
+                    "product_name", "category_name",
+                    "min_quantity", "current_quantity", "safety_buffer_percent",
+                    "unit_cost", "portion_size", "is_combo_polprodukt",
+                    "menu_category", "price_pln", "ingredients",
+                    "supplier_name", "supplier_id", "contact_person", "phone",
+                    "email", "supplier_category", "nip", "notes",
+                    "variant", "unit_count", "volume_label",
+                    # Voice CRUD + supplier intents
+                    "dish_name", "new_price", "ingredient_name",
+                    "from_supplier", "to_supplier", "category",
+                    "max_budget",
+                    "items",
+                    "categories",
+                    # Bulk / delete / availability / navigation / scaling
+                    "percentage", "amount", "action", "available",
+                    "new_category", "new_name", "portions", "screen",
+                    # Analityka okresowa
+                    "period_type", "limit_days", "period_1", "period_2",
+                    # Ranking sprzedaży / zużycia
+                    "rank", "top_n",
+                    # Partie dat ważności
+                    "expiration_date", "alert_days",
+                ],
+                "properties": {
+                    # waste
+                    "item_type": {"type": ["string", "null"], "enum": ["dish", "ingredient", "unknown", None]},
+                    "related_id": {"type": ["string", "null"]},
+                    "item_name": {"type": ["string", "null"]},
+                    "quantity": {"type": ["number", "null"]},
+                    "unit": {"type": ["string", "null"]},
+                    "reason_text": {"type": ["string", "null"]},
+                    # revenue / costs
+                    "description": {"type": ["string", "null"]},
+                    "amount_pln": {"type": ["number", "null"]},
+                    "note": {"type": ["string", "null"]},
+                    "cost_type": {
+                        "type": ["string", "null"],
+                        "enum": ["rent", "media", "payroll", "materials", "waste", "other", None],
+                    },
+                    "cost_name": {"type": ["string", "null"]},
+                    # inventory item
+                    "product_name": {"type": ["string", "null"]},
+                    "category_name": {"type": ["string", "null"]},
+                    "min_quantity": {"type": ["number", "null"]},
+                    "current_quantity": {"type": ["number", "null"]},
+                    "safety_buffer_percent": {"type": ["number", "null"]},
+                    "unit_cost": {"type": ["number", "null"]},
+                    "portion_size": {"type": ["number", "null"]},
+                    "is_combo_polprodukt": {"type": ["boolean", "null"]},
+                    # menu item
+                    "menu_category": {"type": ["string", "null"]},
+                    "price_pln": {"type": ["number", "null"]},
+                    "ingredients": {
+                        "type": ["array", "null"],
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["ingredient_name", "quantity", "unit"],
+                            "properties": {
+                                "ingredient_name": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "unit": {"type": "string"},
+                            },
+                        },
+                    },
+                    # supplier
+                    "supplier_name": {"type": ["string", "null"]},
+                    "supplier_id": {"type": ["string", "null"]},
+                    "contact_person": {"type": ["string", "null"]},
+                    "phone": {"type": ["string", "null"]},
+                    "email": {"type": ["string", "null"]},
+                    "supplier_category": {"type": ["string", "null"]},
+                    "nip": {"type": ["string", "null"]},
+                    "notes": {"type": ["string", "null"]},
+                    # supplier product
+                    "variant": {"type": ["string", "null"]},
+                    "unit_count": {"type": ["integer", "null"]},
+                    "volume_label": {"type": ["string", "null"]},
+                    # Voice CRUD — nazwa dania/składnika + nowa cena
+                    "dish_name": {"type": ["string", "null"]},
+                    "new_price": {"type": ["number", "null"]},
+                    "ingredient_name": {"type": ["string", "null"]},
+                    # Supplier intents
+                    "from_supplier": {"type": ["string", "null"]},
+                    "to_supplier": {"type": ["string", "null"]},
+                    "category": {"type": ["string", "null"]},
+                    "max_budget": {"type": ["number", "null"]},
+                    # Bulk / delete / availability / navigation / scaling
+                    "percentage": {"type": ["number", "null"]},
+                    "amount": {"type": ["number", "null"]},
+                    "action": {"type": ["string", "null"], "enum": ["increase", "decrease", None]},
+                    "available": {"type": ["boolean", "null"]},
+                    "new_category": {"type": ["string", "null"]},
+                    "new_name": {"type": ["string", "null"]},
+                    "portions": {"type": ["number", "null"]},
+                    "screen": {
+                        "type": ["string", "null"],
+                        "enum": ["index", "menu", "magazyn", "dostawcy", "ustawienia", None],
+                    },
+                    # Analityka okresowa (AI Trend & Analytics Orchestrator)
+                    "period_type": {
+                        "type": ["string", "null"],
+                        "enum": ["day", "week", "month", "year", "custom", None],
+                    },
+                    "limit_days": {"type": ["integer", "null"]},
+                    "period_1": {"type": ["string", "null"]},
+                    "period_2": {"type": ["string", "null"]},
+                    # Ranking: best/worst + ile pozycji
+                    "rank": {
+                        "type": ["string", "null"],
+                        "enum": ["best", "worst", None],
+                    },
+                    "top_n": {"type": ["integer", "null"]},
+                    "expiration_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                    "alert_days": {
+                        "type": ["array", "null"],
+                        "items": {"type": "integer"},
+                        "description": "Dni przed końcem ważności na przypomnienie, np. [7,3,1]",
+                    },
+                    # Lista produktów dla order_product / supplier_flip_order
+                    "items": {
+                        "type": ["array", "null"],
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["product_name", "quantity", "unit"],
+                            "properties": {
+                                "product_name": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "unit": {"type": "string"},
+                            },
+                        },
+                    },
+                    # Lista kategorii magazynowych dla order_critical_items_by_category
+                    # ('all' → globalnie wszystkie krytyczne braki).
+                    "categories": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def _build_system_prompt(dishes: list, ingredients: list, suppliers: list) -> str:
+    d = "\n".join(f"  - id={x['id']} \"{x['name']}\"" for x in dishes[:120]) or "  (brak)"
+    i = "\n".join(f"  - id={x['id']} \"{x['name']}\" ({x.get('unit','')})" for x in ingredients[:200]) or "  (brak)"
+    s = "\n".join(f"  - id={x['id']} \"{x['name']}\"" for x in suppliers[:80]) or "  (brak)"
+    return f"""Jesteś asystentem restauracji (Gastro Manager). Otrzymujesz dyktowaną w języku polskim
+komendę użytkownika i musisz sklasyfikować JEDNĄ intencję oraz wypełnić spójny payload.
+
+DOSTĘPNE INTENCJE:
+1. "waste" – zgłoszenie straty magazynowej.
+   Słowa-klucze: wyrzuciłem, wyrzucić, zepsuł, spalił, skwaśniał, spleśniał, przeterminował,
+   strata, wylałem, zmarnował, wyrzucamy, uszkodzenie, wyleciał, wyrzucone.
+   * jeśli dotyczy gotowego dania → item_type="dish", related_id=id z listy dań poniżej
+   * jeśli dotyczy surowca z magazynu → item_type="ingredient", related_id=id z listy składników
+   * pola do wypełnienia: item_type, related_id, item_name, quantity, unit, reason_text
+
+2. "add_revenue" – przychód / utarg / wpłata / płatność otrzymana / wynajem sali.
+   Słowa: przychód, utarg, wpływ, zarobek, wynajem, sprzedaż, wpłata.
+   * pola: description, amount_pln, note
+
+3. "add_fixed_cost" – KOSZT STAŁY comiesięczny.
+   Słowa: czynsz, wynajem lokalu, prąd, gaz, woda, media, internet, telefon,
+   wynagrodzenia, pensje, ZUS, księgowa, ubezpieczenie, monitoring, abonament.
+   cost_type: "rent" | "media" | "payroll" | "other"
+   * pola: cost_type, cost_name, amount_pln
+
+4. "add_variable_cost" – KOSZT ZMIENNY (jednorazowy zakup / mandat / strata pieniężna).
+   Słowa: zakup, faktura, dostawa, zaopatrzenie, surowce, materiały,
+   mandat, kara, awaria, naprawa, transport.
+   cost_type: "materials" | "waste" | "other"
+   * pola: cost_type, cost_name, amount_pln
+
+5. "add_inventory_item" – dodanie NOWEGO produktu do magazynu.
+   Słowa: dodaj do magazynu, nowy produkt, załóż w magazynie, wprowadź, przyjmij.
+   * pola: product_name, category_name, quantity, unit, min_quantity,
+     safety_buffer_percent (min 10, domyślnie 20), unit_cost, portion_size, is_combo_polprodukt
+
+6. "add_menu_item" – dodanie nowego dania do MENU wraz z recepturą.
+   Słowa: dodaj do menu, nowe danie, nowa potrawa, wprowadź danie, wpisz do karty,
+   receptura, składniki dania.
+   * pola: product_name (nazwa dania), menu_category, price_pln,
+     ingredients[] (lista {{ingredient_name, quantity, unit}})
+
+7. "add_supplier" – dodanie nowego DOSTAWCY.
+   Słowa: nowy dostawca, dodaj dostawcę, załóż kontrahenta, hurtownia, kontrakt.
+   * pola: supplier_name, contact_person, phone, email, supplier_category, nip, notes
+
+8. "add_supplier_product" – dodanie produktu do KATALOGU konkretnego dostawcy z ceną.
+   Słowa: u dostawcy X, dodaj do oferty, cennik dostawcy, dostawca ma, oferuje.
+   * pola: supplier_name (nazwa dostawcy), product_name, variant, price_pln,
+     unit_count, volume_label
+
+9. "edit_menu_item_price" – ZMIANA ceny istniejącego dania w menu.
+   Słowa: zmień cenę, ustaw cenę, przecena, nowa cena.
+   * pola: dish_name (nazwa dania — MOŻE być zniekształcona przez Whisper, użyj najlepszego dopasowania z listy), new_price
+
+10. "add_recipe_ingredient" – DOPISANIE nowego składnika do receptury istniejącego dania.
+    Słowa: dodaj do (dania), dopisz składnik, dorzuć do receptury.
+    * pola: dish_name, ingredient_name, quantity, unit
+
+11. "edit_recipe_ingredient_qty" – ZMIANA gramatury/ilości istniejącego składnika w recepturze dania.
+    Słowa: zmień gramaturę, zmień ilość składnika, popraw ilość.
+    * pola: dish_name, ingredient_name, quantity, unit
+
+12. "edit_inventory_item" – ZMIANA parametrów produktu w magazynie (próg krytyczny, stan bieżący, safety buffer).
+    Słowa: zmień próg, ustaw stan, próg krytyczny, safety buffer, minimum, poziom bezpieczeństwa.
+    * pola: item_name (nazwa surowca), min_quantity (nowy próg krytyczny, opcjonalne),
+      current_quantity (nowy stan magazynu, opcjonalne),
+      safety_buffer_percent (nowy bufor bezpieczeństwa %, opcjonalne), unit
+
+12b. "add_expiration_batch" – USTAWIENIE daty ważności dla produktu JUŻ w magazynie (bez dodawania nowego produktu i bez zwiększania stanu).
+    Słowa: data ważności, termin przydatności, ustaw datę, partia, ważne do, spożyć przed,
+    „ustaw datę ważności twarogu 20.08.2026”, „mleko ważność 25 lipca”.
+    * pola: item_name (MUSI istnieć w magazynie), quantity (ile sztuk tej partii daty), unit,
+      expiration_date (YYYY-MM-DD — ZAWSZE konwertuj z PL formatów DD.MM.YYYY / „20 sierpnia 2026”),
+      alert_days (tablica int, opcjonalna; domyślnie [7,3,1] — kiedy przypomnieć).
+    * NIE twórz nowego produktu. NIE zwiększaj stanu magazynu.
+      Jeśli produktu nie ma w magazynie — backend zwróci błąd (użytkownik musi najpierw dodać produkt).
+    * Jedna wypowiedź może opisać jedną partię; wiele dat = wiele wariantów quantity+expiration w batches[].
+
+13. "order_product" – złóż zamówienie produktów u dostawcy (zwykłe zamówienie hurtowe).
+    Słowa: zamów, chcę zamówić, potrzebuję dostawy, dorzuć do zamówienia.
+    * pola: items[] (lista {{product_name, quantity, unit}}), supplier_name (opcjonalny)
+
+13b. "order_critical_items_by_category" – ZBIORCZE zamówienie WSZYSTKICH BRAKÓW magazynowych
+    (produktów, których stan spadł poniżej progu krytycznego), z filtrem po kategoriach.
+    Słowa: „zamów wszystkie braki", „zamów brakujące produkty", „domów co się kończy",
+    „zamów mięso i nabiał", „zamów braki z warzyw", „uzupełnij magazyn",
+    „ile brakuje", „braki magazynowe", „zamów wszystko czego brakuje".
+    * pole `categories: string[]` — twarda lista nazw kategorii magazynowych.
+      Sztywne nazwy do dopasowania (użyj dokładnie tych stringów):
+        'Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', 'Alkohole', 'Napoje',
+        'Mrożonki', 'Suchy magazyn', 'Chemia i czystość', 'Opakowania', 'Inne'.
+    * Fuzzy dopasowanie po potocznych słowach użytkownika:
+        „mięso"/„wędliny"/„wołowinę" → 'Mięso i wędliny'
+        „nabiał"/„mleko"/„sery"      → 'Nabiał'
+        „warzywa"/„owoce"/„jarzyny"  → 'Warzywa i owoce'
+        „napoje"/„soki"/„woda"       → 'Napoje'
+        „alkohole"/„wódka"/„piwo"    → 'Alkohole'
+        „mrożonki"/„mrożone"          → 'Mrożonki'
+        „suchy"/„makarony"/„mąka"    → 'Suchy magazyn'
+        „chemia"/„środki czystości"  → 'Chemia i czystość'
+        „opakowania"/„kubki"/„folie" → 'Opakowania'
+    * Jeśli użytkownik mówi „zamów WSZYSTKIE braki"/„zamów wszystko czego brakuje"
+      bez wskazania kategorii → categories = ["all"].
+    * Jeśli mówi „zamów mięso i nabiał" → categories = ["Mięso i wędliny", "Nabiał"].
+    * Nie wypełniaj items[] — backend sam wyliczy braki i deficyty.
+
+14. "supplier_flip_order" – PRZERZUCENIE koszyka z jednego dostawcy do drugiego (zmiana ceny/oferty).
+    Słowa: przerzuć na, zmień dostawcę, weź od (dostawcy) zamiast, przełącz na.
+    * pola: from_supplier (nazwa OBECNEGO dostawcy), to_supplier (nazwa NOWEGO), category (opcjonalna kategoria produktów, np. "mięso", "napoje")
+
+15. "budget_cap_order" – kompletuj zamówienie do LIMITU KWOTOWEGO, priorytetyzując najpilniejsze braki.
+    Słowa: za maksymalnie X zł, do budżetu, w ramach X złotych, do (kwoty).
+    * pola: category (opcjonalna, jeśli podana), max_budget (limit w PLN)
+
+16. "compare_catalogs_top_savings" – porównaj cenniki wszystkich dostawców, pokaż 5 największych PROMOCJI procentowych.
+    Słowa: gdzie taniej, top okazji, największe rabaty, top 5 promocji, gdzie oszczędzę.
+    * brak payload (wszystkie pola null poza intent).
+
+17. "predictive_weekend_restock" – wylicz sugerowane zamówienie na podstawie historycznej sprzedaży z POS z analogicznego okresu.
+    Słowa: ile zamówić na weekend, przygotuj zamówienie na piątek/sobotę, prognoza, co potrzebujemy.
+    * brak payload (opcjonalnie category).
+
+18. "check_minimum_order_value" – sprawdź minimum logistyczne dostawy u konkretnego dostawcy i zasugeruj dorzucenia.
+    Słowa: darmowy transport, minimum zamówienia, minimum logistyczne, ile dorzucić.
+    * pola: supplier_name (dostawca), category (opcjonalne — czego dorzucić).
+
+19. "bulk_delete_menu" – WYCZYSZCZENIE CAŁEGO MENU (ukrycie wszystkich dań).
+    Słowa: usuń całe menu, wyczyść menu, usuń wszystkie pozycje z karty, skasuj wszystkie dania, wyczyść kartę dań.
+    * brak payload (wszystkie pola null poza intent).
+
+20. "bulk_delete_suppliers" – USUNIĘCIE WSZYSTKICH DOSTAWCÓW.
+    Słowa: usuń wszystkich dostawców, wyczyść bazę dostawców, skasuj wszystkich kontrahentów, usuń całą listę dostawców.
+    * brak payload.
+
+21. "bulk_reset_inventory" – RESET STANÓW MAGAZYNOWYCH DO ZERA (remanent). Produkty ZOSTAJĄ na liście, zeruje się tylko ilość.
+    Słowa: zresetuj stany, wyzeruj stany, remanent do zera, magazyn na zero, wyzeruj ilości.
+    * brak payload.
+
+21b. "bulk_delete_inventory" – CAŁKOWITE USUNIĘCIE WSZYSTKICH produktów z magazynu (znikają też nazwy).
+    Słowa: usuń wszystkie produkty z magazynu, wyczyść magazyn, skasuj wszystkie składniki, usuń całą listę magazynową.
+    * brak payload.
+
+21c. "restore_last_deleted_menu" – PRZYWRÓCENIE usuniętych pozycji MENU (nie magazynu).
+    Używaj TYLKO gdy użytkownik mówi o menu / daniach / potrawach.
+21d. "restore_deleted_inventory" – PRZYWRÓCENIE usuniętych produktów MAGAZYNU.
+    Używaj gdy: „przywróć magazyn”, „przywróć produkty”, „cofnij usunięcie magazynu”.
+    NIGDY nie myl z restore_last_deleted_menu.
+    Słowa: przywróć menu, przywróć skasowane dania, cofnij usunięcie menu, przywróć ostatnio usunięte pozycje.
+    * brak payload.
+
+22. "delete_menu_item" – usunięcie POJEDYNCZEGO dania z menu po nazwie.
+    Słowa: usuń danie, skasuj z menu, wyrzuć z karty (konkretną potrawę).
+    * pola: dish_name (nazwa dania — może być zniekształcona przez Whisper).
+
+23. "delete_supplier" – usunięcie POJEDYNCZEGO dostawcy po nazwie.
+    Słowa: usuń dostawcę, skasuj kontrahenta (konkretnego).
+    * pola: supplier_name.
+
+24. "delete_inventory_item" – usunięcie POJEDYNCZEGO produktu z magazynu po nazwie.
+    Słowa: usuń z magazynu, skasuj produkt (konkretny surowiec).
+    * pola: item_name.
+
+25. "toggle_menu_item_availability" – WŁĄCZENIE/WYŁĄCZENIE dostępności dania w POS.
+    Słowa: wyłącz danie, zablokuj potrawę, włącz z powrotem, odblokuj danie, dzisiaj niedostępne.
+    * pola: dish_name, available (false=wyłącz/zablokuj, true=włącz/odblokuj).
+
+26. "bulk_edit_menu_prices_percentage" – MASOWA zmiana cen w menu o PROCENT.
+    Słowa: podnieś ceny o X procent, obniż ceny o X%, przez inflację o X%.
+    * pola: percentage (liczba %, np. 10), action ("increase"|"decrease"), category (opcjonalna kategoria menu, np. "Burgery", "Alkohole").
+
+27. "bulk_edit_menu_prices_fixed" – MASOWA zmiana cen w menu o KWOTĘ (zł).
+    Słowa: podnieś ceny o X złotych, obniż każdą pozycję o X zł.
+    * pola: amount (kwota PLN), action ("increase"|"decrease"), category (opcjonalna).
+
+28. "bulk_edit_inventory_buffers" – MASOWA zmiana buforów bezpieczeństwa w magazynie o PROCENT (punkty procentowe).
+    Słowa: zwiększ bufory bezpieczeństwa o X%, zmniejsz bufory dla warzyw o połowę.
+    * pola: percentage, action ("increase"|"decrease"), category (opcjonalna kategoria magazynu, np. "Warzywa", "Nabiał").
+
+29. "edit_menu_item_category" – zmiana KATEGORII istniejącego dania.
+    Słowa: przenieś do kategorii, zmień kategorię dania.
+    * pola: dish_name, new_category.
+
+30. "rename_menu_item" – zmiana NAZWY istniejącego dania.
+    Słowa: zmień nazwę dania, przemianuj potrawę.
+    * pola: dish_name, new_name.
+
+31. "scale_recipe" – PRZELICZENIE receptury dania na X porcji (kalkulator).
+    Słowa: przelicz składniki na X porcji, ile potrzebuję na X porcji, rozpisz na X porcji.
+    * pola: dish_name, portions (liczba porcji).
+
+32. "navigate_screen" – NAWIGACJA po aplikacji (zmiana ekranu/zakładki).
+    Słowa: otwórz zakładkę, przejdź do, przełącz na, pokaż ekran, wróć do panelu.
+    * pola: screen — jedna z: "index" (pulpit/kokpit/koszty/finanse/start),
+      "menu" (menu/karta dań), "magazyn" (magazyn/stany), "dostawcy" (dostawcy/zamówienia), "ustawienia" (ustawienia/profil).
+
+33. "filter_ui_inventory" – FILTROWANIE widoku magazynu po kategorii (i opcjonalnie dostawcy).
+    Słowa: pokaż w magazynie tylko (kategoria), wyświetl tylko nabiał/warzywa/mięso.
+    * pola: category (nazwa kategorii magazynu), supplier_id (opcjonalny).
+
+34. "filter_ui_menu_blocked" – POKAŻ w menu tylko dania ZABLOKOWANE (brak składników / niedostępne).
+    Słowa: pokaż zablokowane potrawy, które dania są niedostępne, co jest wyłączone.
+    * brak payload.
+
+36. "summarize_custom_period" – PODSUMOWANIE / ANALIZA JEDNEGO okresu (zyski, przychody, koszty).
+    Słowa: pokaż zyski z lipca, podsumuj lipiec 2025, jak poszło w maju, analiza miesiąca,
+    pokaż dane z lipca, przychody za sierpień, raport za 2025.
+    WAŻNE: jeśli użytkownik podaje JEDEN okres (nawet z rokiem) → TĘ intencję, NIE compare.
+    * pola: period_type ("day"|"week"|"month"|"year"|"custom"),
+      limit_days (liczba dni jeśli wprost podana, np. 30; inaczej null),
+      period_1 — WYPEŁNIJ pełnym tekstem okresu z rokiem gdy podany (np. "lipiec 2025", "2025-07").
+
+37. "compare_two_periods" – PORÓWNANIE dwóch okresów finansowych.
+    TYLKO gdy użytkownik wyraźnie porównuje: „porównaj”, „vs”, „a”, „zestaw”, „różnica między”.
+    Przykłady: porównaj lipiec 2025 i sierpień 2025, maj vs czerwiec.
+    NIE używaj gdy: „pokaż zyski z lipca”, „podsumuj maj” (to summarize_custom_period).
+    * pola: period_1 (np. "lipiec 2025"), period_2 (np. "sierpień 2025") — ZAWSZE z rokiem jeśli podany.
+
+38. "rank_menu_sales" – RANKING sprzedaży potraw / produktów z menu (POS).
+    Słowa: pokaż najlepiej sprzedający się produkt/produkty, top sprzedaż, hit dnia/tygodnia/miesiąca,
+    najsłabiej sprzedające się potrawy, flop, najgorsza sprzedaż, alkohole które się nie sprzedają,
+    „w lipcu", „w maju", „za czerwiec".
+    * pola: rank ("best"|"worst"), period_type ("day"|"week"|"month"|"year"|"custom"),
+      limit_days (opcjonalnie), top_n (ile pozycji, domyślnie 5),
+      category (opcjonalny filtr: np. "alkohole", "burgery" — kategoria menu),
+      period_1 — WYPEŁNIJ gdy użytkownik poda konkretny miesiąc/okres nazwany
+        (np. "lipiec", "maj", "2026-07"). To pozwala policzyć kalendarzowy miesiąc, nie „ostatnie 30 dni".
+
+39. "rank_inventory_usage" – RANKING zużycia produktów z magazynu (przez sprzedaż × receptury).
+    Słowa: produkt z magazynu którego zużyliśmy najwięcej/najmniej, co schodzi z magazynu,
+    największe zużycie składników, najmniej używany surowiec w tygodniu/miesiącu/lipcu.
+    * pola: rank ("best"=najwięcej|"worst"=najmniej), period_type, limit_days, top_n,
+      category (opcjonalny filtr kategorii magazynu, np. "Nabiał"),
+      period_1 (nazwa miesiąca / YYYY-MM jak wyżej).
+
+39b. "rank_waste_cost" – RANKING STRAT MAGAZYNOWYCH W ZŁOTÓWKACH (waste_logs × cena zakupu).
+    Słowa: ile utopiłem w koszu, ranking strat, ile wyrzuciłem w złotówkach, największe straty produktu,
+    strata finansowa na odpadach, kosz w tym miesiącu / 18 dni / 67 dni.
+    * pola: period_type, limit_days, top_n, period_1 (opcjonalnie nazwa miesiąca).
+    * System mnoży quantity × unit_cost z inventory_items (z faktur).
+
+39c. "rank_dead_menu" – NAJSŁABIEJ SPRZEDAJĄCE SIĘ dania (mała sprzedaż POS, ale qty>0).
+    Słowa: martwe dania, najsłabiej sprzedające się, flop, pozycje z najmniejszą rotacją,
+    dania które prawie nie schodzą, ranking najgorszej sprzedaży.
+    NIE pokazuj dań z zerową sprzedażą — tylko pozycje które się sprzedały, ale najsłabiej.
+    * pola: period_type, limit_days, top_n, category (opcjonalnie), period_1.
+
+39d. "list_expiring_soon" – DRABINA DAT WAŻNOŚCI (partie kończące się za 1/2/3 dni).
+    Słowa: co zaraz się przeterminuje, produkty na 3 dni, kończąca się data ważności,
+    alerty dat ważności, co ratować w chłodni, półprodukty do jutra.
+    * pola: limit_days (domyślnie 3 = dziś / jutro / pojutrze), top_n.
+
+39e. "rank_supplier_spend" – WYDATKI U DOSTAWCÓW (suma faktur w okresie).
+    Słowa: ile wydałem u Makro, ranking dostawców, wydatki na dostawy w kwartale,
+    u którego dostawcy poszło najwięcej kasy, spend dostawcy.
+    * pola: period_type, limit_days, top_n, period_1, supplier_name (opcjonalnie filtr nazwy).
+
+39f. "manager_core_alerts" – ALERTY KORELACJI CORE (POS↔magazyn, magazyn↔straty, straty↔zł, POS↔straty).
+    Słowa: co jest nie tak w lokalach, alerty managera, sprawdź korelacje, problemy magazyn-sprzedaż,
+    czy mam braki przy ruchu, paradoks strat, dublowanie dostaw.
+    * pola: period_type, limit_days (domyślnie tydzień).
+
+39g. "haccp_tip" – PORADA HACCP / PRZECHOWYWANIA / FIFO.
+    Słowa: jak przechowywać łososia, temperatura dla ryb, co to FIFO, tip HACCP do sałaty,
+    ile trzymać sos, temperatura nabiału.
+    * pola: item_name lub product_name (produkt / temat), note (opcjonalnie pytanie).
+
+40. "upload_invoice" – użytkownik chce WGRAĆ FAKTURĘ zakupową do MAGAZYNU (skan AI).
+    Słowa: chcę wgrać fakturę, wgraj fakturę, skanuj fakturę, dodaj fakturę zakupową.
+    * brak wymaganych pól. Otwiera skaner w kontekście magazynu.
+
+41. "upload_offer" – użytkownik chce WGRAĆ OFERTĘ / fakturę OD DOSTAWCY.
+    Słowa: chcę wgrać ofertę, wgraj ofertę dostawcy, gazetka, cennik dostawcy (skan),
+    wgraj fakturę od dostawcy.
+    * brak wymaganych pól. Otwiera skaner w kontekście dostawców.
+
+42. "upload_document" – użytkownik chce WGRAĆ DOKUMENT (faktura magazynowa — domyślnie).
+    Słowa: chcę wgrać dokument, skanuj dokument, wgraj plik do systemu.
+    * brak wymaganych pól.
+
+43. "upload_menu" – WGRAJ / ZESKANUJ MENU RESTAURACJI (kartę dań) do zakładki Menu.
+    Słowa: wgraj menu, zeskanuj menu, dodaj kartę dań, wgraj kartę menu, skanuj menu.
+    NIGDY nie myl z upload_offer (oferta dostawcy) ani upload_invoice.
+    * brak wymaganych pól. Otwiera skaner menu (nie katalog dostawcy).
+
+35. "unknown" – jeśli intencja niejasna albo brak wystarczających danych.
+
+ZASADY OGÓLNE:
+- Zawsze zwracaj JEDEN top-level JSON zgodny ze schematem.
+- WSZYSTKIE klucze payload MUSZĄ być obecne; nieużywane ustaw na null.
+- Ceny/kwoty w PLN jako liczba dziesiętna (przecinek → kropka).
+- unit z zestawu: "g","kg","ml","L","szt","opak","porcja".
+- Zawsze wypełniaj pole `reason` (top-level) — krótkie polskie uzasadnienie DECYZJI KLASYFIKACJI (max 120 zn.).
+- Jeżeli intencja to "waste"/"add_supplier_product" i próbujesz dopasować id z listy — użyj
+  DOKŁADNIE tego id (UUID) z sekcji poniżej. Jeśli nie masz pewności → null.
+- WAŻNE dla intencji edit_*/add_recipe_ingredient/order_product/supplier_*:
+  NIE ustawiaj id — po prostu wypełnij pola z tekstu (dish_name, ingredient_name, item_name).
+  Nawet zniekształcone przez Whisper nazwy (np. "pana kota") są OK — backend zrobi fuzzy match do bazy.
+
+DOSTĘPNE DANIA (menu_items):
+{d}
+
+DOSTĘPNE SKŁADNIKI (inventory_items):
+{i}
+
+DOSTĘPNI DOSTAWCY (suppliers):
+{s}
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Voice CRUD Fuzzy Matching — próg 65 (permisywny dla błędów Whisper).
+# ─────────────────────────────────────────────────────────────────────────────
+
+VOICE_FUZZY_THRESHOLD = 65
+
+
+def _resolve_by_fuzzy(query: Optional[str], rows: list[dict],
+                      key: str = "name", threshold: int = VOICE_FUZZY_THRESHOLD
+                      ) -> tuple[Optional[dict], float]:
+    """Dopasowuje `query` (nazwa dyktowana głosem) do rekordów `rows` po polu `key`.
+    Używa token_set_ratio + partial_ratio (fallback), by tolerować krótsze zapytania
+    Whisper (np. "pana kota" ↔ "Panna cotta z owocami").
+    Zwraca (rekord, score) lub (None, 0.0)."""
+    if not query or not rows:
+        return None, 0.0
+    q = _norm_pl(query)
+    if not q:
+        return None, 0.0
+    best_row: Optional[dict] = None
+    best_score = 0.0
+    for row in rows:
+        cand = _norm_pl(row.get(key, "") or "")
+        if not cand:
+            continue
+        # dwa scorery: bierzemy większy
+        s1 = float(fuzz.token_set_ratio(q, cand))
+        s2 = float(fuzz.partial_ratio(q, cand))
+        s = max(s1, s2)
+        if s > best_score:
+            best_score = s
+            best_row = row
+    if best_score >= threshold:
+        return best_row, best_score
+    return None, best_score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Token usage billing — Real-time Token-to-Credit (see token_billing.py).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _deduct_credits(client: httpx.AsyncClient, credits: int, *, endpoint: str) -> int:
+    """Odejmuje kredyty; saldo nigdy nie spada poniżej 0. Zwraca nowe saldo."""
+    if credits <= 0:
+        try:
+            sub = await _ensure_subscription(client)
+            return int(sub.get("credits_balance") or 0)
+        except Exception:
+            return 0
+    try:
+        sub = await _ensure_subscription(client)
+        new_bal = max(0, int(sub.get("credits_balance") or 0) - int(credits))
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"},
+                       {"credits_balance": new_bal})
+        return new_bal
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_deduct_credits skipped ({endpoint}): {e}")
+        try:
+            sub = await _ensure_subscription(client)
+            return int(sub.get("credits_balance") or 0)
+        except Exception:
+            return 0
+
+
+async def _log_token_usage(client: httpx.AsyncClient, *,
+                           endpoint: str, model: str,
+                           prompt_tokens: int, completion_tokens: int,
+                           cached_tokens: int = 0,
+                           audio_seconds: float = 0.0,
+                           extra_credits: int = 0,
+                           extras: Optional[dict] = None) -> dict:
+    """Loguje zużycie do token_usage, odejmuje kredyty; zwraca billing summary."""
+    breakdown = compute_credits_from_usage(
+        model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        audio_seconds=audio_seconds,
+        extra_credits=extra_credits,
+        usd_to_pln=USD_TO_PLN,
+    )
+    credits = int(breakdown["credits_deducted"])
+    ex = dict(extras or {})
+    ex["credits_charged"] = credits
+    try:
+        payload = {
+            "endpoint": endpoint,
+            "model": model,
+            "prompt_tokens": int(prompt_tokens),
+            "completion_tokens": int(completion_tokens),
+            "total_tokens": int(prompt_tokens + completion_tokens),
+            "cost_usd": breakdown["cost_usd"],
+            "cost_pln": breakdown["cost_pln"],
+            "extras": {**ex, "cached_tokens": int(cached_tokens), "audio_seconds": audio_seconds},
+        }
+        await sb_post(client, "token_usage", payload)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_log_token_usage skipped: {e}")
+
+    new_bal = await _deduct_credits(client, credits, endpoint=endpoint)
+    return {
+        **breakdown,
+        "credits_remaining": new_bal,
+        "endpoint": endpoint,
+    }
+
+
+async def _bill_openai_response(
+    client: httpx.AsyncClient,
+    resp: Any,
+    *,
+    endpoint: str,
+    model: str,
+    extras: Optional[dict] = None,
+    extra_credits: int = 0,
+) -> dict:
+    """Rozlicza pojedyncze wywołanie OpenAI na podstawie response.usage."""
+    usage = getattr(resp, "usage", None)
+    if not usage:
+        try:
+            sub = await _ensure_subscription(client)
+            bal = int(sub.get("credits_balance") or 0)
+        except Exception:
+            bal = None
+        return {"credits_deducted": 0, "credits_remaining": bal, "cost_usd": 0.0, "cost_pln": 0.0}
+
+    pt, ct, cached, audio = tokens_from_usage(usage)
+    return await _log_token_usage(
+        client,
+        endpoint=endpoint,
+        model=model,
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        cached_tokens=cached,
+        audio_seconds=audio,
+        extra_credits=extra_credits,
+        extras=extras,
+    )
+
+
+def _with_billing(payload: dict, billing: Optional[dict]) -> dict:
+    if not billing:
+        return payload
+    out = dict(payload)
+    out["credits_deducted"] = int(billing.get("credits_deducted") or 0)
+    if billing.get("credits_remaining") is not None:
+        out["credits_remaining"] = int(billing["credits_remaining"])
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subskrypcje i Portfel Kredytowy (Quota & Tier Authorization Management)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ACCOUNT_KEY = "default"  # brak logowania → jedno konto restauracji
+
+TIER_CONFIG = {
+    0: {
+        "name": "Free", "max_credits": 1000, "monthly_grant": 0, "price_pln": 0,
+        "deal_hunter": False, "price_note": None,
+        "perks": [
+            "Reklamy w aplikacji",
+            "Manualny magazyn, finanse i baza receptur, bez wsparcia automatyzacji",
+            "Jednorazowy pakiet 1000 kredytów AI na darmowy start i testy systemu "
+            "(beta: wystarczy na wiele skanów, Jarvis i Łowcę)",
+        ],
+    },
+    1: {
+        "name": "Podstawowy", "max_credits": 5000, "monthly_grant": 1000, "price_pln": 50,
+        "deal_hunter": False, "price_note": "50 zł za miesiąc",
+        "perks": [
+            "100% bez reklam",
+            "Odnawialny pakiet 1000 kredytów AI dodawany na konto co miesiąc",
+            "Skanowanie, kategoryzacja i księgowanie faktur zakupowych przez AI",
+            "„Skaner Menu z Wizją AI” – AI samo stworzy bazę potraw z roboczą "
+            "propozycją składu i gramatury",
+            "Pełne zarządzanie aplikacją poprzez sterowanie głosem",
+            "Integracja z POS – system monitoruje sprzedaż, zużycie produktów, "
+            "a nawet blokuje sprzedaż dań, jeśli braknie kluczowych składników produkcyjnych",
+            "Bezobsługowy „Kreator Zamówień AI” – automatyczne wykrywanie braków "
+            "magazynowych, generowanie gotowych wiadomości SMS/E-mail do twoich "
+            "dostawców z treścią zamówienia",
+        ],
+    },
+    2: {
+        "name": "Profesjonalny", "max_credits": 20000, "monthly_grant": 2500, "price_pln": 100,
+        "deal_hunter": True, "price_note": "100 zł za miesiąc",
+        "perks": [
+            "Wszystkie funkcje z pakietu Podstawowego (Skaner Faktur, Ofert, Menu, "
+            "Sterowanie Głosem itp.)",
+            "Odnawialny pakiet 2500 kredytów AI co miesiąc",
+            "Inteligentny moduł „ŁOWCA OKAZJI” – automatyczne skanowanie i analiza "
+            "ofert dostawców, i tworzenie najtańszych ofert zakupowych, podczas "
+            "składania zamówień",
+            "„Dynamiczny Asystent Zamiany” – przeliczanie gramatur potraw",
+        ],
+    },
+}
+
+TOPUP_PACKAGES = {
+    "small":  {"credits": 100,  "price_pln": 10, "label": "+100 kredytów"},
+    "medium": {"credits": 500,  "price_pln": 30, "label": "+500 kredytów"},
+    "large":  {"credits": 1000, "price_pln": 50, "label": "+1000 kredytów"},
+}
+
+FEATURE_CATALOG = [
+    {"key": "voice",       "icon": "🎙️", "name": "Szybka komenda głosowa",           "cost": "~1-2 kredyty",    "requires_deal_hunter": False},
+    {"key": "invoice",     "icon": "🧾", "name": "Skanowanie i księgowanie faktury",  "cost": "~15-20 kredytów", "requires_deal_hunter": False},
+    {"key": "menu",        "icon": "🥗", "name": "Analiza karty menu i receptur",     "cost": "~25-30 kredytów", "requires_deal_hunter": False},
+    {"key": "trend",       "icon": "📊", "name": "Analiza trendów AI",                "cost": "~5-10 kredytów",  "requires_deal_hunter": False},
+    {"key": "deal_hunter", "icon": "🏷️", "name": "Łowca Okazji (porównywarka ofert)", "cost": "~3-8 kredytów",   "requires_deal_hunter": True},
+    {"key": "scraper",     "icon": "🌐", "name": "Skan stron dostawców (monitoring)",  "cost": "5 kredytów / skan", "requires_deal_hunter": False},
+]
+
+
+def _parse_dt(val):
+    from datetime import datetime, timezone
+    if not val:
+        return None
+    s = str(val).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+async def _ensure_subscription(client: httpx.AsyncClient) -> dict:
+    """Pobiera (lub tworzy) pojedynczy wiersz subskrypcji dla konta restauracji."""
+    rows = await sb_get(client, "subscriptions",
+                        params={"select": "*", "account_key": f"eq.{_ACCOUNT_KEY}", "limit": "1"})
+    if rows:
+        return rows[0]
+    payload = {"account_key": _ACCOUNT_KEY, "tier_level": 0, "credits_balance": 1000,
+               "status": "active", "current_period_end": None, "free_starter_claimed": True}
+    created = await sb_post(client, "subscriptions", payload)
+    if isinstance(created, list) and created:
+        return created[0]
+    return payload
+
+
+def _apply_renewals(sub: dict):
+    """Leniwe odnawianie: dolicza grant co 30 dni dla aktywnej subskrypcji tier>0.
+    Dla anulowanej — po wygaśnięciu okresu degraduje do Free. Zwraca (sub, changes|None)."""
+    from datetime import datetime, timezone, timedelta
+    tier = int(sub.get("tier_level") or 0)
+    status = sub.get("status") or "active"
+    end = _parse_dt(sub.get("current_period_end"))
+    if tier <= 0 or not end:
+        return sub, None
+    now = datetime.now(timezone.utc)
+    if status == "canceled":
+        if now >= end:
+            changes = {"tier_level": 0, "current_period_end": None, "status": "expired"}
+            return {**sub, **changes}, changes
+        return sub, None
+    grant = TIER_CONFIG.get(tier, {}).get("monthly_grant", 0)
+    bal = int(sub.get("credits_balance") or 0)
+    added = 0
+    while now >= end and grant > 0:
+        bal += grant
+        added += grant
+        end = end + timedelta(days=30)
+    if added:
+        changes = {"credits_balance": bal, "current_period_end": end.isoformat()}
+        return {**sub, **changes}, changes
+    return sub, None
+
+
+async def _get_subscription(client: httpx.AsyncClient) -> dict:
+    sub = await _ensure_subscription(client)
+    sub2, changes = _apply_renewals(sub)
+    if changes:
+        try:
+            await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"}, changes)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"renewal patch skipped: {e}")
+    return sub2
+
+
+async def _check_ai_access(client: httpx.AsyncClient, *, needs_credits: bool = True,
+                           needs_deal_hunter: bool = False) -> dict:
+    """Autoryzacja tieru przed operacją AI. Rzuca 403 gdy brak uprawnień/kredytów.
+    Fail-open: jeśli tabela subscriptions nie istnieje jeszcze (brak migracji), nie blokuje."""
+    try:
+        sub = await _get_subscription(client)
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"subscriptions niedostępne → autoryzacja pominięta: {e}")
+        return {"tier_level": 2, "credits_balance": 10 ** 9, "status": "active"}
+    tier = int(sub.get("tier_level") or 0)
+    if needs_deal_hunter and tier < 2:
+        raise HTTPException(
+            status_code=403,
+            detail="Moduł „Łowca Okazji” dostępny w planie Profesjonalnym (Tier 2). "
+                   "Ulepsz subskrypcję w zakładce Subskrypcja.")
+    if needs_credits and int(sub.get("credits_balance") or 0) <= 0:
+        raise HTTPException(
+            status_code=403,
+            detail="Brak kredytów AI. Doładuj portfel w zakładce Subskrypcja, "
+                   "aby korzystać z funkcji AI (operacje ręczne pozostają dostępne).")
+    return sub
+
+
+async def _guard_ai(*, needs_credits: bool = True, needs_deal_hunter: bool = False) -> dict:
+    """Otwiera własnego klienta Supabase i weryfikuje dostęp (dla endpointów bez klienta)."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as c:
+        return await _check_ai_access(c, needs_credits=needs_credits,
+                                      needs_deal_hunter=needs_deal_hunter)
+
+
+class InterpretRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/voice/interpret", response_model=VoiceInterpretation)
+async def interpret(payload: InterpretRequest):
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Brak tekstu wejściowego.")
+
+    client = _openai()
+    await _guard_ai()
+
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        try:
+            dishes = await sb_get(httpx_c, "menu_items",
+                                  params={"select": "id,name", "is_active": "eq.true", "limit": "300"})
+        except Exception:
+            dishes = []
+        try:
+            ingredients = await sb_get(httpx_c, "inventory_items",
+                                       params={"select": "id,name,unit", "limit": "1000"})
+        except Exception:
+            ingredients = []
+        try:
+            suppliers = await sb_get(httpx_c, "suppliers",
+                                     params={"select": "id,name", "limit": "200"})
+        except Exception:
+            suppliers = []
+
+        system = _build_system_prompt(dishes, ingredients, suppliers)
+
+        try:
+            resp = await client.chat.completions.create(
+                model=CHAT_MODEL,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ],
+                response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
+            )
+        except APIError as e:
+            raise HTTPException(status_code=502, detail=f"OpenAI chat: {e.message}") from e
+        except OpenAIError as e:  # pragma: no cover
+            raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+
+        # Token billing (real usage from OpenAI).
+        billing = await _bill_openai_response(
+            httpx_c, resp,
+            endpoint="/api/voice/interpret",
+            model=CHAT_MODEL,
+            extras={"transcript_preview": text[:120]},
+        )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+        # Guard: „pokaż zyski z lipca 2025” ≠ compare; porównanie tylko przy wyraźnych słowach
+        data = _guard_period_intent(text, data)
+        # ── Fuzzy resolve nazw dla intencji CRUD/order/supplier (odporność na Whisper).
+        pl = data.get("payload") or {}
+        intent_val = data.get("intent")
+        extras: dict = {}
+
+        # ── Normalizacja: LLM czasami zwraca ingredients:[{ingredient_name,quantity,unit}]
+        # dla add_recipe_ingredient/edit_recipe_ingredient_qty zamiast pól top-level.
+        # Spłaszczamy — bierzemy pierwszy ingredient jako źródło danych.
+        if intent_val in ("add_recipe_ingredient", "edit_recipe_ingredient_qty"):
+            ings = pl.get("ingredients")
+            if isinstance(ings, list) and ings and not (pl.get("ingredient_name") or "").strip():
+                first = ings[0] or {}
+                if isinstance(first, dict):
+                    pl["ingredient_name"] = first.get("ingredient_name") or pl.get("ingredient_name")
+                    if pl.get("quantity") in (None, 0):
+                        pl["quantity"] = first.get("quantity")
+                    if not (pl.get("unit") or "").strip():
+                        pl["unit"] = first.get("unit") or pl.get("unit")
+
+        def _remember_match(field: str, matched_to: str, score: float, resolved_id: str) -> None:
+            extras.setdefault("fuzzy_matches", []).append({
+                "field": field, "matched_to": matched_to,
+                "score": round(score, 1), "resolved_id": resolved_id,
+            })
+
+        # dish_name → menu_items
+        if intent_val in ("edit_menu_item_price", "add_recipe_ingredient", "edit_recipe_ingredient_qty",
+                          "delete_menu_item", "toggle_menu_item_availability",
+                          "edit_menu_item_category", "rename_menu_item", "scale_recipe"):
+            q = pl.get("dish_name")
+            row, score = _resolve_by_fuzzy(q, dishes)
+            if row:
+                pl["dish_id"] = row["id"]
+                pl["dish_name_resolved"] = row["name"]
+                _remember_match("dish_name", row["name"], score, row["id"])
+
+        # item_name → inventory_items
+        if intent_val in ("edit_inventory_item", "delete_inventory_item", "add_expiration_batch"):
+            q = pl.get("item_name")
+            row, score = _resolve_by_fuzzy(q, ingredients)
+            if row:
+                pl["inventory_id"] = row["id"]
+                pl["item_name_resolved"] = row["name"]
+                _remember_match("item_name", row["name"], score, row["id"])
+
+        # ingredient_name → inventory_items (bez resolvowania id, ale zwracamy resolved name)
+        if intent_val in ("add_recipe_ingredient", "edit_recipe_ingredient_qty"):
+            q = pl.get("ingredient_name")
+            row, score = _resolve_by_fuzzy(q, ingredients)
+            if row:
+                pl["ingredient_inventory_id"] = row["id"]
+                pl["ingredient_name_resolved"] = row["name"]
+                _remember_match("ingredient_name", row["name"], score, row["id"])
+
+        # supplier_name / from_supplier / to_supplier → suppliers
+        for f in ("supplier_name", "from_supplier", "to_supplier"):
+            q = pl.get(f)
+            if not q:
+                continue
+            row, score = _resolve_by_fuzzy(q, suppliers)
+            if row:
+                pl[f"{f}_id"] = row["id"]
+                pl[f"{f}_resolved"] = row["name"]
+                _remember_match(f, row["name"], score, row["id"])
+
+        data["payload"] = pl
+        if extras.get("fuzzy_matches"):
+            reason = data.get("reason") or ""
+            picks = "; ".join(m["matched_to"] for m in extras["fuzzy_matches"])
+            data["reason"] = (reason + f" | Dopasowano: {picks}").strip(" |")
+            # Attach as top-level flag for FE convenience
+            data["fuzzy_matches"] = extras["fuzzy_matches"]
+
+    try:
+        fields = {k: v for k, v in data.items()
+                  if k in ("intent", "confidence", "reason", "payload", "fuzzy_matches", "alternate_intents")}
+        fields["credits_deducted"] = int(billing.get("credits_deducted") or 0)
+        fields["credits_remaining"] = billing.get("credits_remaining")
+        return VoiceInterpretation(**fields)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Schema mismatch: {e}") from e
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BC route (used by pre-existing frontend flow) — thin adapter over new schema
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WasteInterpretationLegacy(BaseModel):
+    item_type: Literal["dish", "ingredient", "unknown"]
+    related_id: Optional[str] = None
+    item_name: str
+    quantity: float
+    unit: str
+    reason: str
+    confidence: float = 0.5
+    notes: Optional[str] = None
+
+
+@app.post("/api/voice/interpret-waste", response_model=WasteInterpretationLegacy)
+async def interpret_waste_legacy(payload: InterpretRequest):
+    resp = await interpret(payload)
+    p = resp.payload
+    if resp.intent != "waste":
+        return WasteInterpretationLegacy(
+            item_type="unknown", item_name=p.get("item_name") or "",
+            quantity=float(p.get("quantity") or 0), unit=p.get("unit") or "",
+            reason=p.get("reason_text") or "", confidence=resp.confidence,
+            notes=resp.reason,
+        )
+    return WasteInterpretationLegacy(
+        item_type=p.get("item_type") or "unknown",
+        related_id=p.get("related_id"),
+        item_name=p.get("item_name") or "",
+        quantity=float(p.get("quantity") or 0),
+        unit=p.get("unit") or "",
+        reason=p.get("reason_text") or "",
+        confidence=resp.confidence,
+        notes=resp.reason,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) Actions.apply — persist to Supabase according to intent
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_base(qty: float, unit: str) -> tuple[float, str]:
+    """Sprowadza do wspólnej bazy. Gęstość gastronomiczna 1 g == 1 ml, więc
+    waga (g/kg) i objętość (ml/l) mają WSPÓLNĄ bazę 'g' — dzięki temu składnik
+    receptury podany w ml odejmuje się/liczy z magazynu w g (i odwrotnie)."""
+    u = (unit or "").lower().strip().rstrip(".")
+    if u in ("kg", "kilogram"):
+        return qty * 1000.0, "g"
+    if u in ("g", "gram", "gramy"):
+        return qty, "g"
+    if u in ("l", "litr", "litry"):
+        return qty * 1000.0, "g"   # 1 l = 1000 ml = 1000 g (płyny gastro)
+    if u in ("ml", "mililitr"):
+        return qty, "g"
+    return qty, u
+
+
+def _convert(qty: float, from_unit: str, to_unit: str) -> Optional[float]:
+    a, ua = _to_base(qty, from_unit)
+    b, ub = _to_base(1.0, to_unit)
+    if ua != ub:
+        return None
+    return a / b
+
+
+_PIECE_DEFAULT_SIZE = 200.0  # domyślnie 1 szt/opak ≈ 200 g/ml (produkty płynne/gastro)
+
+
+def _norm_name(s: str) -> str:
+    return " ".join((s or "").lower().split())
+
+
+def _is_porcja_row(name: str) -> bool:
+    return _norm_name(name) in ("porcja", "porcje", "wielkosc porcji", "wielkość porcji",
+                                "wielkosc porc) i", "gramatura", "gramatura porcji")
+
+
+def _to_gml(qty: float, unit: str, unit_size: float) -> Optional[float]:
+    """Zamiana na wspólną bazę g/ml (gęstość kulinarna 1:1). None dla nieznanej jednostki."""
+    u = _norm_name(unit)
+    if u == "kg":
+        return qty * 1000.0
+    if u in ("g", "gram", "gramy"):
+        return qty
+    if u in ("l", "litr", "litry"):
+        return qty * 1000.0
+    if u == "ml":
+        return qty
+    if _is_piece_unit(u):
+        return qty * unit_size
+    return None
+
+
+def _from_gml(val: float, unit: str, unit_size: float) -> Optional[float]:
+    u = _norm_name(unit)
+    if u == "kg":
+        return val / 1000.0
+    if u in ("g", "gram", "gramy"):
+        return val
+    if u in ("l", "litr", "litry"):
+        return val / 1000.0
+    if u == "ml":
+        return val
+    if _is_piece_unit(u):
+        return (val / unit_size) if unit_size else None
+    return None
+
+
+def _convert_culinary(qty: float, from_unit: str, to_unit: str,
+                      unit_size: Optional[float] = None) -> Optional[float]:
+    """Konwersja odporna dla g/kg/ml/l/szt/opak.
+    - g↔ml: gęstość gastronomiczna 1:1 (śmietana, mleko, oleje, sosy).
+    - szt/opak ↔ waga/objętość: przez `unit_size` (g/ml na 1 szt), domyślnie 200.
+    Zwraca None tylko dla całkiem nieznanej jednostki (np. 'porcja')."""
+    try:
+        size = float(unit_size) if (unit_size and float(unit_size) > 0) else _PIECE_DEFAULT_SIZE
+    except (TypeError, ValueError):
+        size = _PIECE_DEFAULT_SIZE
+    gml = _to_gml(qty, from_unit, size)
+    if gml is None:
+        return None
+    return _from_gml(gml, to_unit, size)
+
+
+# ── Spójność jednostek składników zwracanych przez AI ────────────────────────
+# Bug: dla tego samego składnika (np. śmietana) AI raz zwracało g, raz ml,
+# przez co przelicznik porcji się sypał. Poniżej sprowadzamy KAŻDY składnik o tej
+# samej nazwie do JEDNEJ jednostki we WSZYSTKICH potrawach z danego skanu.
+_LIQUID_NAME_HINTS = (
+    "smietan", "śmietan", "mlek", "olej", "sos", "bulion", "wywar", "woda",
+    "sok", "krem", "ocet", "syrop", "wino", "piwo", "śmieta", "majonez",
+    "musztard", "ketchup", "passata", "przecier", "esencj", "napój", "napoj",
+)
+
+
+def _canon_dim(u: str) -> Optional[str]:
+    """Wymiar jednostki: 'gml' dla g/kg/ml/l (przeliczalne 1:1), 'szt' dla sztuk."""
+    x = (u or "").strip().lower().rstrip(".")
+    if x in ("g", "gram", "gramy", "kg", "kilogram", "ml", "mililitr", "l", "litr", "litry"):
+        return "gml"
+    if x in ("szt", "sztuka", "sztuki", "opak", "op", "opakowanie",
+             "plaster", "plasterek", "listek", "list", "zabek", "ząbek"):
+        return "szt"
+    return None
+
+
+def _iter_ingredients(dish):
+    """Zwraca listę składników potrawy niezależnie od modelu (scan/suggest/confirm)."""
+    for attr in ("suggested_ingredients", "ingredients"):
+        val = getattr(dish, attr, None)
+        if val is not None:
+            return val
+    return []
+
+
+def _canonicalize_ingredient_units(dishes: list) -> None:
+    """In-place: ujednolica jednostkę każdego składnika w obrębie całego skanu.
+    Wszystkie wystąpienia „śmietana” dostaną tę samą jednostkę (g LUB ml),
+    a ilości zostaną przeliczone 1:1 (g↔ml) / 1000 (kg→g, l→ml)."""
+    from collections import Counter
+    votes: dict[str, Counter] = {}
+    for d in dishes:
+        for ing in _iter_ingredients(d):
+            name = _norm_name(getattr(ing, "name", "") or "")
+            unit = getattr(ing, "unit", "") or ""
+            if not name or _canon_dim(unit) != "gml":
+                continue
+            u = unit.strip().lower().rstrip(".")
+            base = "g" if u in ("g", "gram", "gramy", "kg", "kilogram") else "ml"
+            votes.setdefault(name, Counter())[base] += 1
+
+    canon: dict[str, str] = {}
+    for name, ctr in votes.items():
+        top = ctr.most_common()
+        best = top[0][1]
+        tied = [u for u, c in top if c == best]
+        if len(tied) == 1:
+            canon[name] = tied[0]
+        else:
+            canon[name] = "ml" if any(h in name for h in _LIQUID_NAME_HINTS) else "g"
+
+    for d in dishes:
+        for ing in _iter_ingredients(d):
+            name = _norm_name(getattr(ing, "name", "") or "")
+            if name not in canon:
+                continue
+            target = canon[name]
+            cur = getattr(ing, "unit", "") or ""
+            q = getattr(ing, "quantity", None)
+            if q is not None and (cur or "").strip().lower().rstrip(".") != target:
+                conv = _convert_culinary(float(q), cur, target)
+                if conv is not None:
+                    try:
+                        ing.quantity = round(conv, 2)
+                    except Exception:  # noqa: BLE001
+                        pass
+            ing.unit = target
+
+
+        return None
+    return _from_gml(gml, to_unit, size)
+
+
+async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[str], source: str):
+    warnings: list[str] = []
+    deductions: list[dict] = []
+
+    item_type = p.get("item_type") or "unknown"
+    if item_type not in ("dish", "ingredient"):
+        raise HTTPException(status_code=400, detail="Waste: item_type musi być 'dish' lub 'ingredient'.")
+
+    log_payload = {
+        "item_id": p.get("related_id") if item_type == "ingredient" else None,
+        "item_name": p.get("item_name") or "",
+        "quantity": p.get("quantity") or 0,
+        "unit": p.get("unit") or "",
+        "reason": p.get("reason_text") or "",
+        "item_type": item_type,
+        "related_id": p.get("related_id"),
+        "source": source,
+        "transcript": transcript,
+    }
+    try:
+        log_rows = await sb_post(client, "waste_logs", log_payload)
+    except httpx.HTTPStatusError as e:
+        body = e.response.text or ""
+        if any(k in body for k in ("item_type", "related_id", "source", "transcript")):
+            warnings.append("Migracja SQL nie zastosowana — zapisano tylko podstawowe pola.")
+            log_rows = await sb_post(client, "waste_logs", {
+                "item_id": log_payload["item_id"], "item_name": log_payload["item_name"],
+                "quantity": log_payload["quantity"], "unit": log_payload["unit"],
+                "reason": log_payload["reason"],
+            })
+        else:
+            raise HTTPException(status_code=502, detail=f"waste_logs insert: {body}") from e
+    log_id = (log_rows[0] if isinstance(log_rows, list) else log_rows)["id"]
+
+    related_id = p.get("related_id")
+    qty = float(p.get("quantity") or 0)
+    unit_in = p.get("unit") or ""
+    if item_type == "ingredient" and related_id:
+        rows: list = []
+        try:
+            rows = await sb_get(client, "inventory_items",
+                                params={"select": "id,name,quantity,unit,unit_weight_volume",
+                                        "id": f"eq.{related_id}"})
+        except httpx.HTTPStatusError:
+            try:
+                rows = await sb_get(client, "inventory_items",
+                                    params={"select": "id,name,quantity,unit", "id": f"eq.{related_id}"})
+            except httpx.HTTPStatusError as e:
+                warnings.append(f"Nie udało się pobrać produktu z magazynu "
+                                f"(kod {e.response.status_code}) — magazyn niezmieniony.")
+                rows = []
+        if rows:
+            inv = rows[0]
+            conv = _convert_culinary(qty, unit_in, inv["unit"], inv.get("unit_weight_volume"))
+            delta = conv if conv is not None else qty
+            new_qty = max(0.0, float(inv.get("quantity") or 0) - float(delta))
+            try:
+                await sb_patch(client, "inventory_items", {"id": f"eq.{related_id}"}, {"quantity": new_qty})
+                deductions.append({"inventory_id": inv["id"], "name": inv["name"],
+                                   "deducted": round(float(delta), 4), "unit": inv["unit"],
+                                   "new_quantity": round(new_qty, 4)})
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"Nie udało się zaktualizować stanu {inv['name']} ({str(e)[:60]}).")
+        else:
+            warnings.append(f"Zgłoszono stratę. Uwaga: Składnik [{p.get('item_name') or 'surowiec'}] "
+                            "nie był wcześniej wprowadzony na magazyn – stan ustawiono na 0.")
+    elif item_type == "dish" and related_id:
+        try:
+            recipe = await sb_get(client, "recipe_ingredients",
+                                  params={"select": "ingredient_name,quantity,unit",
+                                          "menu_item_id": f"eq.{related_id}"}) or []
+        except httpx.HTTPStatusError as e:
+            warnings.append(f"Nie udało się odczytać receptury (kod {e.response.status_code}) — "
+                            "zapisano tylko log straty, magazyn niezmieniony.")
+            recipe = []
+        # Wielkość porcji (baza g/ml): z menu_items.portion_size_grams lub legacy wiersza "Porcja".
+        portion_base: Optional[float] = None
+        try:
+            mi = await sb_get(client, "menu_items",
+                              params={"select": "portion_size_grams", "id": f"eq.{related_id}", "limit": "1"})
+            if mi and mi[0].get("portion_size_grams"):
+                portion_base = float(mi[0]["portion_size_grams"])
+        except httpx.HTTPStatusError:
+            portion_base = None
+        if portion_base is None:
+            for r in recipe:
+                if _is_porcja_row(r.get("ingredient_name")):
+                    pv = _to_gml(float(r.get("quantity") or 0), r.get("unit") or "g", _PIECE_DEFAULT_SIZE)
+                    if pv:
+                        portion_base = pv
+                    break
+        # Liczba porcji na podstawie zgłoszonego ubytku (0.5 l zupy → 500 g → n porcji).
+        wu = _norm_name(unit_in)
+        if wu in ("", "szt", "szt.", "porcja", "porcje", "opak", "danie", "dania"):
+            portions = qty
+        else:
+            waste_base = _to_gml(qty, unit_in, _PIECE_DEFAULT_SIZE)
+            portions = (waste_base / portion_base) if (waste_base and portion_base) else qty
+        if not portions or portions <= 0:
+            portions = 1.0
+
+        inv_all: list = []
+        try:
+            inv_all = await sb_get(client, "inventory_items",
+                                   params={"select": "id,name,quantity,unit,unit_weight_volume",
+                                           "limit": "1000"}) or []
+        except httpx.HTTPStatusError:
+            try:
+                inv_all = await sb_get(client, "inventory_items",
+                                       params={"select": "id,name,quantity,unit", "limit": "1000"}) or []
+            except httpx.HTTPStatusError as e:
+                warnings.append(f"Nie udało się pobrać magazynu (kod {e.response.status_code}) — "
+                                "zapisano tylko log straty.")
+                inv_all = []
+        inv_map = {_norm_name(r["name"]): r for r in inv_all}
+        for ing in recipe:
+            iname = ing.get("ingredient_name") or ""
+            if _is_porcja_row(iname):
+                continue  # "Porcja" to parametr potrawy, nie składnik do odjęcia
+            try:
+                key = _norm_name(iname)
+                inv = inv_map.get(key) or next(
+                    (v for k, v in inv_map.items() if key and (key in k or k in key)), None)
+                if not inv:
+                    warnings.append(f"Zgłoszono stratę. Uwaga: Składnik [{iname}] nie był wcześniej "
+                                    "wprowadzony na magazyn – stan ustawiono na 0.")
+                    continue
+                used = float(ing.get("quantity") or 0) * portions
+                conv = _convert_culinary(used, ing.get("unit") or "g", inv["unit"],
+                                         inv.get("unit_weight_volume"))
+                if conv is None:
+                    warnings.append(f"Pominięto {iname}: nieobsługiwana jednostka "
+                                    f"{ing.get('unit')}→{inv['unit']}.")
+                    continue
+                new_qty = max(0.0, float(inv.get("quantity") or 0) - conv)
+                await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": new_qty})
+                deductions.append({"inventory_id": inv["id"], "name": inv["name"],
+                                   "deducted": round(conv, 4), "unit": inv["unit"],
+                                   "new_quantity": round(new_qty, 4)})
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"Zgłoszono stratę. Uwaga: składnik [{iname}] pominięto przy "
+                                f"odejmowaniu ({str(e)[:60]}).")
+                continue
+
+    # POS Bottleneck Engine: przelicz dostępność dań po każdej zmianie stanu magazynu.
+    if deductions:
+        try:
+            await _recompute_menu_availability(client, changed_inventory_ids={d["inventory_id"] for d in deductions})
+        except Exception as e:
+            logger.debug(f"_recompute_menu_availability skipped: {e}")
+
+    return log_id, {"deductions": deductions}, warnings
+
+
+async def _apply_revenue(client, p, transcript, source):
+    desc = (p.get("description") or "").strip() or "Wpływ (dyktowane)"
+    amt = float(p.get("amount_pln") or 0)
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="Revenue: amount_pln musi być > 0.")
+    row = await sb_post(client, "revenue_entries", {
+        "year_month": _current_year_month(),
+        "description": desc, "amount_pln": amt,
+        "note": p.get("note") or transcript,
+    })
+    return row[0]["id"], {"description": desc, "amount_pln": amt}, []
+
+
+async def _apply_fixed_cost(client, p, transcript, source):
+    name = (p.get("cost_name") or p.get("description") or "").strip() or "Koszt stały"
+    amt = float(p.get("amount_pln") or 0)
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="Fixed cost: amount_pln musi być > 0.")
+    typ = p.get("cost_type") or "other"
+    if typ not in ("rent", "media", "payroll", "other"):
+        typ = "other"
+    row = await sb_post(client, "fixed_costs", {
+        "year_month": _current_year_month(),
+        "type": typ, "name": name, "amount_pln": amt,
+        "note": p.get("note") or transcript,
+    })
+    return row[0]["id"], {"type": typ, "name": name, "amount_pln": amt}, []
+
+
+async def _apply_variable_cost(client, p, transcript, source):
+    name = (p.get("cost_name") or p.get("description") or "").strip() or "Koszt zmienny"
+    amt = float(p.get("amount_pln") or 0)
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="Variable cost: amount_pln musi być > 0.")
+    typ = p.get("cost_type") or "other"
+    if typ not in ("materials", "waste", "other"):
+        typ = "other"
+    row = await sb_post(client, "variable_cost_entries", {
+        "year_month": _current_year_month(),
+        "type": typ, "name": name, "amount_pln": amt,
+        "note": p.get("note") or transcript,
+    })
+    return row[0]["id"], {"type": typ, "name": name, "amount_pln": amt}, []
+
+
+async def _resolve_category_id(client, name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    rows = await sb_get(client, "inventory_categories",
+                        params={"select": "id,name", "name": f"ilike.{name}", "limit": "1"})
+    if rows:
+        return rows[0]["id"]
+    # create new
+    new = await sb_post(client, "inventory_categories", {"name": name, "color": "#6B7280", "icon_name": "package"})
+    return new[0]["id"]
+
+
+async def _apply_expiration_batch(client, p, transcript, source):
+    """Zapis partii z datą ważności (głos) → warehouse_inventory.
+
+    TYLKO istniejące produkty w magazynie — nie tworzy nowych pozycji
+    i nie zwiększa stanu (produkty dodaje się w Magazynie / fakturą / „dodaj produkt”).
+    """
+    warnings: list[str] = []
+    name = (p.get("item_name") or p.get("product_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Brak nazwy produktu.")
+
+    raw_batches = p.get("batches")
+    if not isinstance(raw_batches, list) or not raw_batches:
+        raw_batches = [{
+            "quantity": p.get("quantity"),
+            "expiration_date": p.get("expiration_date"),
+        }]
+
+    def _norm_date(edate: str) -> str:
+        edate = str(edate or "").strip()
+        m = re.match(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$", edate)
+        if m:
+            edate = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", edate):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Podaj datę ważności z kalendarza (RRRR-MM-DD). Otrzymano: {edate or 'puste'}.",
+            )
+        return edate
+
+    batches: list[dict] = []
+    for b in raw_batches:
+        qty = float(b.get("quantity") or 0)
+        if qty <= 0:
+            continue
+        batches.append({
+            "quantity": qty,
+            "expiration_date": _norm_date(b.get("expiration_date")),
+        })
+    if not batches:
+        raise HTTPException(status_code=400, detail="Dodaj co najmniej jedną partię (ilość > 0 + data).")
+
+    unit = (p.get("unit") or "szt").strip() or "szt"
+    alert_days = p.get("alert_days") or [7, 3, 1]
+    if not isinstance(alert_days, list) or not alert_days:
+        alert_days = [7, 3, 1]
+    alert_days = [int(x) for x in alert_days]
+    total_qty = sum(b["quantity"] for b in batches)
+
+    inv_id = p.get("inventory_id") or p.get("related_id")
+    inv_name = name
+    if not inv_id:
+        inv_all = await sb_get(client, "inventory_items", params={"select": "id,name,quantity,unit", "limit": "2000"}) or []
+        best = None
+        best_score = 0.0
+        qn = _norm_pl(name)
+        for row in inv_all:
+            cand = _norm_pl(str(row.get("name") or ""))
+            if not cand:
+                continue
+            score = max(float(fuzz.token_set_ratio(qn, cand)), float(fuzz.partial_ratio(qn, cand)))
+            if score > best_score:
+                best_score = score
+                best = row
+        if not best or best_score < FUZZY_MATCH_THRESHOLD:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Nie znaleziono „{name}” w magazynie. "
+                    "Najpierw dodaj produkt w Magazynie, komendą „dodaj produkt” albo przez skan faktury."
+                ),
+            )
+        inv_id = best["id"]
+        inv_name = best.get("name") or name
+        unit = (best.get("unit") or unit or "szt")
+    else:
+        try:
+            rows = await sb_get(
+                client, "inventory_items",
+                params={"select": "id,name,quantity,unit", "id": f"eq.{inv_id}", "limit": "1"},
+            ) or []
+            if not rows:
+                raise HTTPException(status_code=404, detail="Produkt nie istnieje w magazynie.")
+            inv_name = rows[0].get("name") or name
+            unit = rows[0].get("unit") or unit
+        except HTTPException:
+            raise
+        except Exception:
+            warnings.append("Nie udało się odczytać produktu — zapisuję partie dat.")
+
+    saved_ids = []
+    for b in batches:
+        edate = b["expiration_date"]
+        qty = b["quantity"]
+        status = _expiry_status(edate)
+        try:
+            from datetime import date as _date
+            exp = _date.fromisoformat(edate)
+            if 0 <= (exp - _date.today()).days <= 7 and status == "fresh":
+                status = "warning"
+        except Exception:
+            pass
+
+        payload = {
+            "inventory_item_id": inv_id,
+            "product_name": inv_name,
+            "quantity": qty,
+            "unit": unit,
+            "expiration_date": edate,
+            "status": status,
+            "alert_triggers": alert_days,
+            "source": "voice",
+        }
+        try:
+            row = await sb_post(client, "warehouse_inventory", payload)
+        except httpx.HTTPStatusError as e:
+            payload.pop("alert_triggers", None)
+            try:
+                row = await sb_post(client, "warehouse_inventory", payload)
+                if "alert_triggers" not in "".join(warnings):
+                    warnings.append("Kolumna alert_triggers niedostępna — uruchom migrację ADD_INVOICE_EXPIRY_BATCHES.")
+            except httpx.HTTPStatusError as e2:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Nie zapisano partii (migracja warehouse_inventory?): {e2.response.text[:120]}",
+                ) from e2
+        batch_id = (row[0] if isinstance(row, list) else row).get("id")
+        saved_ids.append(batch_id)
+
+    return (saved_ids[0] if saved_ids else None), {
+        "product_name": inv_name,
+        "quantity": total_qty,
+        "unit": unit,
+        "batches": batches,
+        "alert_days": alert_days,
+        "increase_stock": False,
+        "created_new": False,
+        "batches_count": len(batches),
+    }, warnings
+
+
+async def _apply_inventory_item(client, p, transcript, source):
+    warnings: list[str] = []
+    name = (p.get("product_name") or p.get("item_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Inventory item: brak nazwy.")
+    unit = p.get("unit") or "szt"
+    qty = float(p.get("quantity") or 0)
+    minq = float(p.get("min_quantity") or 0)
+    buf = float(p.get("safety_buffer_percent") or 20)
+    if buf < 10:
+        buf = 10
+    opt_raw = p.get("optimal_quantity")
+    try:
+        opt_q = float(opt_raw) if opt_raw is not None and str(opt_raw).strip() != "" else None
+    except (TypeError, ValueError):
+        opt_q = None
+    cat_id = await _resolve_category_id(client, p.get("category_name"))
+    payload = {
+        "name": name, "category_id": cat_id,
+        "quantity": qty, "unit": unit,
+        "min_quantity": minq,
+        "portion_size": p.get("portion_size"),
+        "is_combo_polprodukt": bool(p.get("is_combo_polprodukt") or False),
+        "unit_cost": p.get("unit_cost") or 0,
+        "safety_buffer_percent": buf,
+    }
+    if opt_q is not None and opt_q > 0:
+        payload["optimal_quantity"] = opt_q
+    try:
+        row = await sb_post(client, "inventory_items", payload)
+    except httpx.HTTPStatusError as e:
+        body = e.response.text or ""
+        if "optimal_quantity" in body:
+            warnings.append("Kolumna optimal_quantity nie istnieje — pomijam (uruchom migrację SQL).")
+            payload.pop("optimal_quantity", None)
+            try:
+                row = await sb_post(client, "inventory_items", payload)
+            except httpx.HTTPStatusError as e2:
+                body = e2.response.text or ""
+                if "safety_buffer_percent" in body:
+                    warnings.append("Kolumna safety_buffer_percent nie istnieje — pomijam.")
+                    payload.pop("safety_buffer_percent", None)
+                    row = await sb_post(client, "inventory_items", payload)
+                else:
+                    raise HTTPException(status_code=502, detail=f"inventory_items insert: {body}") from e2
+        elif "safety_buffer_percent" in body:
+            warnings.append("Kolumna safety_buffer_percent nie istnieje — pomijam (uruchom migrację SQL).")
+            payload.pop("safety_buffer_percent", None)
+            row = await sb_post(client, "inventory_items", payload)
+        else:
+            raise HTTPException(status_code=502, detail=f"inventory_items insert: {body}") from e
+    return row[0]["id"], {
+        "name": name, "quantity": qty, "unit": unit,
+        "min_quantity": minq, "optimal_quantity": opt_q,
+    }, warnings
+
+
+async def _apply_menu_item(client, p, transcript, source):
+    warnings: list[str] = []
+    name = (p.get("product_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Menu item: brak nazwy.")
+    price = float(p.get("price_pln") or 0)
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="Menu item: price_pln musi być > 0.")
+    # Dedup: nie twórz drugiej potrawy o tej samej nazwie
+    try:
+        existing = await sb_get(client, "menu_items", params={
+            "select": "id,name,is_active,price_pln,category", "limit": "5000",
+        }) or []
+    except httpx.HTTPStatusError:
+        existing = await sb_get(client, "menu_items", params={
+            "select": "id,name,price_pln,category", "limit": "5000",
+        }) or []
+    hit, _score = _resolve_by_fuzzy(name, existing, threshold=88)
+    if hit:
+        menu_id = hit["id"]
+        if hit.get("is_active") is False:
+            await sb_patch(client, "menu_items", {"id": f"eq.{menu_id}"}, {
+                "is_active": True, "is_available": True,
+                "price_pln": price,
+                "category": p.get("menu_category") or hit.get("category") or "Inne",
+            })
+            warnings.append(
+                f"Potrawa „{hit.get('name')}” już była (nieaktywna) — przywrócono zamiast dublować."
+            )
+            return menu_id, {"name": hit.get("name") or name, "price_pln": price,
+                             "ingredients_count": 0, "restored": True}, warnings
+        warnings.append(f"Potrawa „{hit.get('name')}” już jest w menu — pominięto duplikat.")
+        return menu_id, {"name": hit.get("name") or name, "price_pln": float(hit.get("price_pln") or price),
+                         "ingredients_count": 0, "skipped_duplicate": True}, warnings
+
+    menu_row = await sb_post(client, "menu_items", {
+        "name": name, "category": p.get("menu_category") or "Inne",
+        "price_pln": price, "is_active": True,
+    })
+    menu_id = menu_row[0]["id"]
+    ingredients = p.get("ingredients") or []
+    if isinstance(ingredients, list) and ingredients:
+        rows = []
+        for idx, ing in enumerate(ingredients):
+            rows.append({
+                "menu_item_id": menu_id,
+                "ingredient_name": ing.get("ingredient_name") or "",
+                "quantity": float(ing.get("quantity") or 0),
+                "unit": ing.get("unit") or "szt",
+                "sort_order": idx + 1,
+            })
+        try:
+            await sb_post(client, "recipe_ingredients", rows)
+        except httpx.HTTPStatusError as e:
+            warnings.append(f"Receptura nie została w pełni zapisana: {e.response.text}")
+    return menu_id, {"name": name, "price_pln": price, "ingredients_count": len(ingredients)}, warnings
+
+
+async def _apply_supplier(client, p, transcript, source):
+    name = (p.get("supplier_name") or p.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Supplier: brak nazwy.")
+    row = await sb_post(client, "suppliers", {
+        "name": name,
+        "contact_person": p.get("contact_person"),
+        "phone": p.get("phone"),
+        "email": p.get("email"),
+        "category": p.get("supplier_category") or p.get("category") or "Inne",
+        "nip": p.get("nip"),
+        "notes": p.get("notes") or transcript,
+        "icon_color": "#2563EB",
+    })
+    return row[0]["id"], {"name": name}, []
+
+
+async def _apply_supplier_product(client, p, transcript, source):
+    warnings: list[str] = []
+    supplier_id = p.get("supplier_id")
+    if not supplier_id and p.get("supplier_name"):
+        rows = await sb_get(client, "suppliers",
+                            params={"select": "id,name", "name": f"ilike.%{p['supplier_name']}%", "limit": "1"})
+        if rows:
+            supplier_id = rows[0]["id"]
+        else:
+            warnings.append(f"Nie znaleziono dostawcy '{p['supplier_name']}' — tworzę nowego.")
+            new_sup = await sb_post(client, "suppliers", {
+                "name": p["supplier_name"], "category": "Inne", "icon_color": "#2563EB",
+            })
+            supplier_id = new_sup[0]["id"]
+    if not supplier_id:
+        raise HTTPException(status_code=400, detail="Supplier product: brak supplier_id/supplier_name.")
+    prod = (p.get("product_name") or "").strip()
+    if not prod:
+        raise HTTPException(status_code=400, detail="Supplier product: brak product_name.")
+    price = float(p.get("price_pln") or 0)
+    # `variant` ma w bazie ograniczenie NOT NULL — nigdy nie wysyłamy null.
+    volume_label = p.get("volume_label")
+    variant = p.get("variant") or volume_label or p.get("unit") or prod
+    row = await sb_post(client, "supplier_catalog", {
+        "supplier_id": supplier_id, "name": prod,
+        "variant": variant,
+        "volume_label": volume_label,
+        "unit_count": p.get("unit_count") or 1,
+        "price_pln": price,
+    })
+    return row[0]["id"], {"supplier_id": supplier_id, "product": prod, "price_pln": price}, warnings
+
+
+@app.post("/api/actions/apply", response_model=ApplyResponse)
+async def actions_apply(req: ApplyRequest):
+    dispatch = {
+        "waste": _apply_waste,
+        "add_revenue": _apply_revenue,
+        "add_fixed_cost": _apply_fixed_cost,
+        "add_variable_cost": _apply_variable_cost,
+        "add_inventory_item": _apply_inventory_item,
+        "add_expiration_batch": _apply_expiration_batch,
+        "add_menu_item": _apply_menu_item,
+        "add_supplier": _apply_supplier,
+        "add_supplier_product": _apply_supplier_product,
+    }
+    # Nowe intencje CRUD/supplier: delegowane do dedykowanych endpointów przez /voice/dispatch.
+    voice_crud = {
+        "edit_menu_item_price", "add_recipe_ingredient", "edit_recipe_ingredient_qty",
+        "edit_inventory_item", "supplier_flip_order", "budget_cap_order",
+        "compare_catalogs_top_savings", "predictive_weekend_restock", "check_minimum_order_value",
+        "order_critical_items_by_category", "order_product",
+        "bulk_delete_menu", "bulk_delete_suppliers", "bulk_reset_inventory",
+        "bulk_delete_inventory", "restore_last_deleted_menu", "restore_deleted_inventory",
+        "delete_menu_item", "delete_supplier", "delete_inventory_item",
+        "toggle_menu_item_availability",
+        "bulk_edit_menu_prices_percentage", "bulk_edit_menu_prices_fixed",
+        "bulk_edit_inventory_buffers",
+        "edit_menu_item_category", "rename_menu_item", "scale_recipe",
+        "navigate_screen", "filter_ui_inventory", "filter_ui_menu_blocked",
+        "summarize_custom_period", "compare_two_periods",
+        "rank_menu_sales", "rank_inventory_usage",
+        "rank_waste_cost", "rank_dead_menu", "list_expiring_soon",
+        "rank_supplier_spend", "manager_core_alerts", "haccp_tip",
+        "upload_invoice", "upload_offer", "upload_document", "upload_menu",
+    }
+    if req.intent in voice_crud:
+        # Dołącz transcript do payload — resolve okresu (period_1 / hint) gdy AI nic nie wypełnił.
+        payload = dict(req.payload or {})
+        tr = (req.transcript or "").strip()
+        if tr:
+            payload.setdefault("_transcript", tr)
+            if not payload.get("period_1") and not payload.get("note"):
+                payload["period_1"] = tr
+            elif payload.get("period_1") and tr and len(str(payload.get("period_1"))) < 8:
+                # Krótki period_1 („lipiec”) — dorzuć pełną komendę (może mieć rok).
+                if re.search(r"20\d{2}", tr) and not re.search(r"20\d{2}", str(payload.get("period_1"))):
+                    payload["period_1"] = tr
+        result = await voice_dispatch(VoiceDispatchRequest(intent=req.intent, payload=payload))
+        rec_id = result.get("dish_id") or result.get("inventory_id") or None
+        return ApplyResponse(intent=req.intent, ok=bool(result.get("ok", True)),
+                             id=rec_id, detail=result.get("message") or result.get("action") or "OK",
+                             extras=result, warnings=([result["message"]] if result.get("needs_migration") else []))
+    if req.intent == "unknown" or req.intent not in dispatch:
+        raise HTTPException(status_code=400, detail="Nieznana intencja — anuluj lub popraw ręcznie.")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            rec_id, extras, warnings = await dispatch[req.intent](
+                client, req.payload, req.transcript, req.source,
+            )
+        except HTTPException:
+            raise
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text}") from e
+    return ApplyResponse(intent=req.intent, ok=True, id=rec_id, detail="OK",
+                         extras=extras or {}, warnings=warnings or [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BC: /api/waste/apply — old shape, wraps new logic
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ApplyWasteRequestLegacy(BaseModel):
+    item_type: Literal["dish", "ingredient"]
+    related_id: Optional[str] = None
+    item_name: str
+    quantity: float
+    unit: str
+    reason: str
+    transcript: Optional[str] = None
+    source: Literal["voice", "manual"] = "voice"
+
+
+@app.post("/api/waste/apply")
+async def apply_waste_legacy(req: ApplyWasteRequestLegacy):
+    payload = {
+        "item_type": req.item_type,
+        "related_id": req.related_id,
+        "item_name": req.item_name,
+        "quantity": req.quantity,
+        "unit": req.unit,
+        "reason_text": req.reason,
+    }
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        log_id, extras, warnings = await _apply_waste(client, payload, req.transcript, req.source)
+    return {
+        "waste_log_id": log_id,
+        "deductions": extras.get("deductions", []),
+        "warnings": warnings,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) Supplier catalog — AI Vision scan (GPT-4o) + confirm upsert
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CatalogProduct(BaseModel):
+    product_name: str
+    price_netto: float = 0.0
+    unit: str = "szt"
+    volume_label: str = ""
+    product_code: Optional[str] = None
+
+
+class CatalogExtractionResponse(BaseModel):
+    supplier_id: str
+    supplier_name: Optional[str] = None
+    product_count: int
+    products: list[CatalogProduct]
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+class ConfirmCatalogRequest(BaseModel):
+    products: list[CatalogProduct]
+
+
+_CATALOG_JSON_SCHEMA = {
+    "name": "SupplierCatalogExtraction",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["products"],
+        "properties": {
+            "products": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["product_name", "price_netto", "unit", "volume_label", "product_code"],
+                    "properties": {
+                        "product_name": {"type": "string"},
+                        "price_netto": {"type": "number"},
+                        "unit": {"type": "string"},
+                        "volume_label": {"type": "string"},
+                        "product_code": {"type": ["string", "null"]},
+                    },
+                },
+            },
+        },
+    },
+}
+
+_CATALOG_SYSTEM_PROMPT = (
+    "Jesteś ekspertem od digitalizacji cenników i ofert handlowych hurtowni "
+    "gastronomicznych. Otrzymujesz zdjęcie(a) lub strony PDF cennika od dostawcy. "
+    "Wyodrębnij WSZYSTKIE pozycje produktowe do tablicy `products`. Dla każdej pozycji:\n"
+    "- product_name: pełna nazwa produktu (np. 'Mąka Tipo 00').\n"
+    "- price_netto: cena NETTO za opakowanie jako liczba (przecinek zamień na kropkę, "
+    "usuń symbol PLN/zł). Jeśli widoczna jest tylko cena brutto, przelicz na netto dla "
+    "VAT 23% (brutto/1.23), ale preferuj kolumnę netto jeśli istnieje. Gdy brak ceny → 0.\n"
+    "- unit: jednostka miary (np. 'kg', 'l', 'szt', 'opak').\n"
+    "- volume_label: opis opakowania widoczny na cenniku (np. 'worek 5kg', 'butelka 1L', "
+    "'karton 12szt'). Jeśli brak → pusty string.\n"
+    "- product_code: kod artykułu / indeks z hurtowni jeśli widoczny (np. 'MK-500'), "
+    "w przeciwnym razie null.\n"
+    "Nie wymyślaj produktów, których nie ma na dokumencie. Zwróć wyłącznie poprawny JSON "
+    "zgodny ze schematem."
+)
+
+
+def _images_from_upload(contents: bytes, mime: str, filename: str) -> list[str]:
+    """Return a list of base64 data-URIs (PNG/JPEG) to feed GPT-4o Vision.
+
+    PDFs are rendered page-by-page with PyMuPDF (max 8 pages)."""
+    name = (filename or "").lower()
+    is_pdf = "pdf" in (mime or "").lower() or name.endswith(".pdf")
+    if is_pdf:
+        try:
+            import fitz  # PyMuPDF
+        except Exception as e:  # pragma: no cover
+            raise HTTPException(status_code=500, detail=f"Brak biblioteki PDF: {e}") from e
+        uris: list[str] = []
+        try:
+            doc = fitz.open(stream=contents, filetype="pdf")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Nie udało się otworzyć PDF: {e}") from e
+        zoom = fitz.Matrix(2.0, 2.0)  # ~144 dpi — czytelne dla OCR modelu
+        for page in doc[:8]:
+            pix = page.get_pixmap(matrix=zoom)
+            png = pix.tobytes("png")
+            uris.append("data:image/png;base64," + base64.b64encode(png).decode())
+        doc.close()
+        if not uris:
+            raise HTTPException(status_code=400, detail="PDF nie zawiera stron.")
+        return uris
+    # image
+    img_mime = mime if (mime or "").startswith("image/") else "image/jpeg"
+    return [f"data:{img_mime};base64," + base64.b64encode(contents).decode()]
+
+
+@app.post("/api/suppliers/{supplier_id}/upload-catalog", response_model=CatalogExtractionResponse)
+async def upload_catalog(supplier_id: str, file: UploadFile = File(...)):
+    """Skanuje cennik (obraz lub PDF) GPT-4o Vision i zwraca podgląd produktów.
+    Zapis do bazy następuje dopiero po zatwierdzeniu (confirm-catalog)."""
+    client = _openai()
+    await _guard_ai()
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Pusty plik.")
+
+    # verify supplier exists + get name
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        rows = await sb_get(httpx_c, "suppliers",
+                            params={"select": "id,name", "id": f"eq.{supplier_id}", "limit": "1"})
+    if not rows:
+        raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+    supplier_name = rows[0]["name"]
+
+    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+
+    user_content: list[dict] = [
+        {"type": "text", "text": "Oto cennik/oferta dostawcy. Wyodrębnij wszystkie produkty."}
+    ]
+    for uri in image_uris:
+        user_content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    try:
+        resp = await client.chat.completions.create(
+            model=VISION_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": _CATALOG_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_schema", "json_schema": _CATALOG_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp,
+            endpoint=f"/api/suppliers/{supplier_id}/upload-catalog",
+            model=VISION_MODEL,
+            extras={"supplier_id": supplier_id},
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    products = [CatalogProduct(**p) for p in (data.get("products") or [])]
+    return CatalogExtractionResponse(
+        supplier_id=supplier_id, supplier_name=supplier_name,
+        product_count=len(products), products=products,
+        credits_deducted=int(billing.get("credits_deducted") or 0),
+        credits_remaining=billing.get("credits_remaining"),
+    )
+
+
+_catalog_extra_cols: Optional[bool] = None
+
+
+async def _has_catalog_extra_cols(client: httpx.AsyncClient) -> bool:
+    """True jeśli supplier_catalog ma kolumny `unit` i `product_code`.
+    Cache'ujemy tylko wynik pozytywny — dzięki temu po dodaniu kolumn (SQL) backend
+    automatycznie zacznie ich używać bez restartu."""
+    global _catalog_extra_cols
+    if _catalog_extra_cols:
+        return True
+    try:
+        await sb_get(client, "supplier_catalog", params={"select": "unit,product_code", "limit": "1"})
+        _catalog_extra_cols = True
+    except Exception:
+        _catalog_extra_cols = False
+        logger.warning("supplier_catalog: brak kolumn unit/product_code — zapisuję w trybie zgodności.")
+    return bool(_catalog_extra_cols)
+
+
+def _norm(s: str) -> str:
+    return " ".join((s or "").lower().split())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fuzzy matching (produkty z gazetek ↔ magazyn + składniki receptur)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Próg podobieństwa dla rapidfuzz (0-100). 80 = permisywny, jak wybrał użytkownik.
+FUZZY_MATCH_THRESHOLD = 68
+
+# Regex do wycinania jednostek/liczb: "1kg", "500 g", "200ml", "2 szt", "1,5l", "1.5 l"
+_UNIT_RE = re.compile(
+    r"\b\d+[.,]?\d*\s*"
+    r"(?:kg|g|mg|dag|l|ml|cl|dl|szt\.?|opak\.?|op\.?|kartonow?y?|karton|"
+    r"sztuk[a-zi]*|opakowa[a-z]*)\b",
+    re.IGNORECASE,
+)
+# Pojedyncze cyfry/liczby, myślniki, przecinki, kropki, znaki specjalne.
+_NOISE_RE = re.compile(r"[^a-z0-9\s]")
+
+
+def _strip_accents(text: str) -> str:
+    """Usuwa polskie znaki diakrytyczne: ą→a, ć→c, ł→l, ó→o itd."""
+    if not text:
+        return ""
+    # Uwaga: 'ł' nie rozkłada się przez NFKD → obsłużyć osobno.
+    text = text.replace("ł", "l").replace("Ł", "L")
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _norm_pl(text: str) -> str:
+    """Pełna normalizacja PL dla fuzzy matchingu:
+    - lower + usunięcie diakrytyków
+    - usunięcie jednostek/miar (1kg, 500g, 200ml, 2 szt...)
+    - usunięcie znaków niealfanum.
+    - tokenizacja + posortowany join (kolejność słów nie ma znaczenia).
+    - usunięcie marek/dostawców (Sokołów, …) by nie blokować matchingu.
+    """
+    if not text:
+        return ""
+    s = _strip_accents(str(text)).lower()
+    s = _UNIT_RE.sub(" ", s)
+    s = _NOISE_RE.sub(" ", s)
+    tokens = [t for t in s.split() if len(t) >= 2]
+    # Usuwamy typowe słowa-śmieci (przyimki), które nie niosą znaczenia
+    stop = {"do", "od", "na", "za", "ze", "we", "po", "pod", "nad", "przy",
+            "bez", "dla", "oraz", "lub", "albo"}
+    # Marki / szum e-commerce — „Sokołów Schab” ↔ magazyn „Schab”
+    brands = {
+        "sokolow", "sokolów", "animex", "morliny", "berlinki", "henkel",
+        "premium", "bio", "eko", "organic", "light", "classic", "extra",
+        "select", "selection", "gourmet", "fresh", "swieze", "swiezy",
+        "opak", "opakowanie", "promocja",
+    }
+    tokens = [t for t in tokens if t not in stop and t not in brands]
+    return " ".join(sorted(set(tokens)))
+
+
+def _fuzzy_match(query: str, choices: list[str], threshold: int = FUZZY_MATCH_THRESHOLD
+                 ) -> tuple[Optional[str], float]:
+    """Zwraca (najlepsze_dopasowanie_znormalizowane, score) lub (None, score),
+    jeśli poniżej progu. `choices` już znormalizowane przez `_norm_pl`."""
+    if not query or not choices:
+        return None, 0.0
+    # token_set_ratio dobrze radzi sobie z "filet z kurczaka" ↔ "kurczak filet"
+    # i różnymi kolejnościami słów.
+    best = rf_process.extractOne(
+        query, choices, scorer=fuzz.token_set_ratio, score_cutoff=threshold
+    )
+    if best is None:
+        # Spróbujmy jeszcze "partial ratio" jako fallback (np. "filet drobiowy"
+        # w bazie recept: "filet z indyka" — częściowe pokrycie).
+        best2 = rf_process.extractOne(
+            query, choices, scorer=fuzz.partial_ratio, score_cutoff=max(threshold - 5, 62)
+        )
+        if best2 is None:
+            return None, 0.0
+        return best2[0], float(best2[1])
+    return best[0], float(best[1])
+
+
+_inv_synonyms_col: Optional[bool] = None
+
+
+async def _has_inventory_synonyms(client: httpx.AsyncClient) -> bool:
+    """True jeśli inventory_items ma kolumnę `synonyms` (JSONB/lista tekstów)."""
+    global _inv_synonyms_col
+    if _inv_synonyms_col is not None:
+        return _inv_synonyms_col
+    try:
+        await sb_get(client, "inventory_items", params={"select": "synonyms", "limit": "1"})
+        _inv_synonyms_col = True
+    except Exception:
+        _inv_synonyms_col = False
+    return _inv_synonyms_col
+
+
+async def _load_matchable_terms(client: httpx.AsyncClient) -> dict:
+    """Ładuje wszystkie normalized-terms z magazynu + składników aktywnych receptur.
+
+    Zwraca:
+        {
+          "inv_terms": {norm_key: original_name, ...},
+          "recipe_terms": {norm_key: original_name, ...},
+        }
+    Uwaga: recipe_terms zawiera tylko składniki potraw, które są `is_active=true`
+    w `menu_items` (jeśli tabela ma tę kolumnę; w przeciwnym razie — wszystkie).
+    """
+    inv_terms: dict[str, str] = {}
+    recipe_terms: dict[str, str] = {}
+
+    # 1) Magazyn (name + opcjonalnie synonyms)
+    has_syn = await _has_inventory_synonyms(client)
+    select = "id,name,synonyms" if has_syn else "id,name"
+    try:
+        inv_rows = await sb_get(client, "inventory_items",
+                                params={"select": select, "limit": "5000"}) or []
+    except Exception as e:
+        logger.warning(f"_load_matchable_terms: inventory_items load failed: {e}")
+        inv_rows = []
+    for r in inv_rows:
+        name = (r.get("name") or "").strip()
+        if name:
+            k = _norm_pl(name)
+            if k:
+                inv_terms.setdefault(k, name)
+        if has_syn:
+            syns = r.get("synonyms") or []
+            if isinstance(syns, str):
+                # Czasami zapisane jako CSV
+                syns = [s for s in re.split(r"[,;|]", syns) if s.strip()]
+            for s in syns or []:
+                s = (str(s) or "").strip()
+                if not s:
+                    continue
+                k = _norm_pl(s)
+                if k:
+                    inv_terms.setdefault(k, name)
+
+    # 2) Składniki aktywnych receptur
+    # Najpierw pobierz aktywne dania (jeśli kolumna is_active istnieje).
+    active_ids: Optional[set[str]] = None
+    try:
+        menu_rows = await sb_get(client, "menu_items",
+                                 params={"select": "id", "is_active": "eq.true", "limit": "5000"})
+        active_ids = {r["id"] for r in (menu_rows or [])}
+    except Exception:
+        # Kolumna is_active może nie istnieć — bierzemy wtedy wszystkie potrawy
+        active_ids = None
+
+    try:
+        # Uwaga: recipe_ingredients ma pole ingredient_name (patrz kod _process_dish/_deduct)
+        ri = await sb_get(client, "recipe_ingredients",
+                          params={"select": "ingredient_name,menu_item_id", "limit": "20000"}) or []
+    except Exception as e:
+        logger.warning(f"_load_matchable_terms: recipe_ingredients load failed: {e}")
+        ri = []
+
+    for r in ri:
+        if active_ids is not None and r.get("menu_item_id") not in active_ids:
+            continue
+        name = (r.get("ingredient_name") or "").strip()
+        if not name:
+            continue
+        k = _norm_pl(name)
+        if k:
+            recipe_terms.setdefault(k, name)
+
+    return {"inv_terms": inv_terms, "recipe_terms": recipe_terms}
+
+
+_PIECE_UNITS = {"szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie"}
+
+
+def _is_piece_unit(u: str) -> bool:
+    x = (u or "").strip().lower()
+    return x in _PIECE_UNITS or x.startswith("szt") or x.startswith("op")
+
+
+def _yield_available(stock_qty: float, stock_unit: str,
+                     uwv: Optional[float], wvu: Optional[str],
+                     recipe_unit: str) -> tuple[Optional[float], bool]:
+    """Ile surowca (w jednostce receptury) mamy w magazynie.
+
+    - Jeśli jednostki są przeliczalne wprost (g↔kg, ml↔l) → standardowa konwersja.
+    - Jeśli magazyn jest w 'szt.'/'op.', a receptura w g/ml → najpierw
+      stan * unit_weight_volume (waga/objętość 1 szt.), potem konwersja do jednostki receptury.
+    Zwraca (dostępna_ilość_w_jednostce_receptury | None, convertible)."""
+    direct = _convert(stock_qty, stock_unit, recipe_unit)
+    if direct is not None:
+        return direct, True
+    if _is_piece_unit(stock_unit) and uwv and wvu:
+        total_wv = float(stock_qty) * float(uwv)  # w g lub ml
+        conv = _convert(total_wv, wvu, recipe_unit)
+        if conv is not None:
+            return conv, True
+    return None, False
+
+
+@app.post("/api/suppliers/{supplier_id}/confirm-catalog")
+async def confirm_catalog(supplier_id: str, req: ConfirmCatalogRequest):
+    """Zapisuje zatwierdzone produkty do supplier_catalog.
+    Jeśli produkt (po nazwie) już istnieje u dostawcy → aktualizuje cenę netto."""
+    if not req.products:
+        raise HTTPException(status_code=400, detail="Brak produktów do zapisania.")
+
+    inserted = 0
+    updated = 0
+    warnings: list[str] = []
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        sup = await sb_get(client, "suppliers", params={"select": "id", "id": f"eq.{supplier_id}", "limit": "1"})
+        if not sup:
+            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+
+        has_extra = await _has_catalog_extra_cols(client)
+
+        existing = await sb_get(client, "supplier_catalog",
+                                params={"select": "id,name,sort_order", "supplier_id": f"eq.{supplier_id}"})
+        by_name = {_norm(r["name"]): r for r in (existing or [])}
+        max_sort = max((int(r.get("sort_order") or 0) for r in (existing or [])), default=0)
+
+        for prod in req.products:
+            name = (prod.product_name or "").strip()
+            if not name:
+                continue
+            price = float(prod.price_netto or 0)
+            volume_label = (prod.volume_label or "").strip()
+            unit = (prod.unit or "szt").strip()
+            variant = volume_label or unit or name
+
+            payload: dict = {
+                "supplier_id": supplier_id,
+                "name": name,
+                "variant": variant,
+                "volume_label": volume_label,
+                "price_pln": price,
+                "unit_count": 1,
+                "liters_total": 0,
+            }
+            if has_extra:
+                payload["unit"] = unit
+                payload["product_code"] = (prod.product_code or None)
+
+            match = by_name.get(_norm(name))
+            try:
+                if match:
+                    update_payload = {"price_pln": price, "variant": variant, "volume_label": volume_label}
+                    if has_extra:
+                        update_payload["unit"] = unit
+                        update_payload["product_code"] = (prod.product_code or None)
+                    await sb_patch(client, "supplier_catalog", {"id": f"eq.{match['id']}"}, update_payload)
+                    updated += 1
+                else:
+                    max_sort += 1
+                    payload["sort_order"] = max_sort
+                    row = await sb_post(client, "supplier_catalog", payload)
+                    if row:
+                        by_name[_norm(name)] = (row[0] if isinstance(row, list) else row)
+                    inserted += 1
+            except httpx.HTTPStatusError as e:
+                warnings.append(f"{name}: {e.response.text[:120]}")
+
+    return {
+        "ok": True,
+        "inserted": inserted,
+        "updated": updated,
+        "saved": inserted + updated,
+        "warnings": warnings,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4b) Uniwersalny procesor dokumentów — faktura (ścieżka 1) vs oferta (ścieżka 2)
+#     Plik przetwarzany WYŁĄCZNIE w RAM, natychmiast niszczony. Zero zapisu na dysk.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DOCUMENT_CATEGORIES = [
+    "Mięso i wędliny", "Nabiał", "Warzywa i owoce", "Alkohole", "Napoje",
+    "Mrożonki", "Chemia i czystość", "Opakowania", "Inne",
+]
+
+_DOCUMENT_JSON_SCHEMA = {
+    "name": "DocumentExtraction",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["document_type", "supplier_name", "total_amount", "products"],
+        "properties": {
+            "document_type": {"type": "string", "enum": ["FAKTURA_ZAKUPOWA", "OFERTA_HANDLOWA", "MENU_RESTAURACYJNE"]},
+            "supplier_name": {"type": ["string", "null"]},
+            "total_amount": {"type": "number"},
+            "products": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["product_name", "quantity", "price_netto", "unit", "volume_label", "product_code", "category"],
+                    "properties": {
+                        "product_name": {"type": "string"},
+                        "quantity": {"type": "number"},
+                        "price_netto": {"type": "number"},
+                        "unit": {"type": "string"},
+                        "volume_label": {"type": "string"},
+                        "product_code": {"type": ["string", "null"]},
+                        "category": {"type": "string", "enum": DOCUMENT_CATEGORIES},
+                    },
+                },
+            },
+        },
+    },
+}
+
+_DOCUMENT_SYSTEM_PROMPT = (
+    "Jesteś ekspertem od dokumentów w gastronomii. Otrzymujesz zdjęcie(a) lub "
+    "strony PDF. Najpierw ROZPOZNAJ typ dokumentu:\n"
+    "- Jeśli to KARTA DAŃ / MENU RESTAURACJI dla gości (nazwy potraw z cenami dla klienta, "
+    "sekcje typu Przystawki/Dania główne/Desery/Napoje, bez NIP nabywcy i bez 'Do zapłaty' "
+    "jak na fakturze) — to jest 'MENU_RESTAURACYJNE'. NIE myl z cennikiem hurtowym dostawcy.\n"
+    "- Jeśli dokument zawiera dane transakcyjne — słowa: 'Faktura VAT', 'Faktura', 'Nabywca', "
+    "'Sprzedawca', 'Do zapłaty', 'Razem do zapłaty', 'Termin płatności', numer faktury, NIP nabywcy "
+    "— to jest 'FAKTURA_ZAKUPOWA'.\n"
+    "- Jeśli to cennik/oferta HANDLOWA DOSTAWCY (gazetka, lista SKU hurtowych, opakowania zbiorcze, "
+    "ceny netto dla restauracji) BEZ danych faktury — to jest 'OFERTA_HANDLOWA'.\n\n"
+    "Następnie wypełnij pola:\n"
+    "- document_type: 'MENU_RESTAURACYJNE' albo 'FAKTURA_ZAKUPOWA' albo 'OFERTA_HANDLOWA'.\n"
+    "- supplier_name: dla oferty/faktury nazwa sprzedawcy; dla MENU_RESTAURACYJNE → null.\n"
+    "- total_amount: dla FAKTURA_ZAKUPOWA → końcowa kwota 'Do zapłaty' (brutto) jako liczba; "
+    "dla OFERTA_HANDLOWA i MENU_RESTAURACYJNE → 0.\n"
+    "- products[]: dla faktury/oferty pozycje towarowe; dla MENU_RESTAURACYJNE wpisz potrawy "
+    "(product_name = nazwa dania, price_netto = cena dla gościa, quantity=0, unit='szt', "
+    "category najlepiej dopasuj lub 'Inne').\n\n"
+    "KATEGORYZACJA (pole category): dozwolone: 'Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', "
+    "'Alkohole', 'Napoje', 'Mrożonki', 'Chemia i czystość', 'Opakowania', 'Inne'.\n"
+    "Nie wymyślaj pozycji. Zwróć wyłącznie poprawny JSON zgodny ze schematem."
+)
+
+
+_catalog_visible_col: Optional[bool] = None
+
+
+async def _has_catalog_visible(client: httpx.AsyncClient) -> bool:
+    global _catalog_visible_col
+    if _catalog_visible_col:
+        return True
+    try:
+        await sb_get(client, "supplier_catalog", params={"select": "is_visible", "limit": "1"})
+        _catalog_visible_col = True
+    except Exception:
+        _catalog_visible_col = False
+    return bool(_catalog_visible_col)
+
+
+async def _find_or_create_supplier(client: httpx.AsyncClient, name: Optional[str]) -> tuple[str, str]:
+    """Zwraca (supplier_id, supplier_name). Tworzy dostawcę jeśli nie istnieje."""
+    clean = (name or "").strip() or "Nieznany dostawca"
+    existing = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "1000"})
+    for r in (existing or []):
+        if _norm(r["name"]) == _norm(clean):
+            return r["id"], r["name"]
+    colors = ["#2563EB", "#DC2626", "#16A34A", "#D97706", "#7C3AED", "#0891B2"]
+    color = colors[len(existing or []) % len(colors)]
+    row = await sb_post(client, "suppliers", {
+        "name": clean, "category": "Dodany ze skanu", "icon_color": color,
+    })
+    created = row[0] if isinstance(row, list) else row
+    return created["id"], created["name"]
+
+
+async def _resolve_category_id_cached(client: httpx.AsyncClient, cat_name: str, cache: dict) -> Optional[str]:
+    """Mapuje nazwę kategorii (tekst z AI) na inventory_categories.id. Tworzy kategorię jeśli brak.
+    Wersja z cache (używana przy imporcie faktur — wiele produktów naraz)."""
+    name = (cat_name or "Inne").strip() or "Inne"
+    if not cache.get("_loaded"):
+        rows = await sb_get(client, "inventory_categories", params={"select": "id,name,sort_order"})
+        cache["_rows"] = list(rows or [])
+        for r in (rows or []):
+            cache[_norm(r["name"])] = r["id"]
+            cache[_norm_pl(r["name"])] = r["id"]
+        cache["_max_sort"] = max((int(r.get("sort_order") or 0) for r in (rows or [])), default=0)
+        cache["_loaded"] = True
+    # 1) exact
+    for key in (_norm(name), _norm_pl(name)):
+        if key and key in cache and isinstance(cache[key], str):
+            return cache[key]
+    # 2) fuzzy do istniejących kategorii użytkownika (bez tworzenia duplikatów „Warzywa”/„Warzywa i owoce”)
+    user_rows = cache.get("_rows") or []
+    if user_rows:
+        hit, score = _resolve_by_fuzzy(name, user_rows, key="name", threshold=72)
+        if hit and hit.get("id"):
+            cache[_norm(name)] = hit["id"]
+            return hit["id"]
+    # 3) twórz tylko gdy naprawdę nowa
+    cache["_max_sort"] = int(cache.get("_max_sort", 0)) + 1
+    try:
+        row = await sb_post(client, "inventory_categories", {
+            "name": name, "color": "#64748B", "sort_order": cache["_max_sort"],
+        })
+        created = row[0] if isinstance(row, list) else row
+        cache[_norm(name)] = created["id"]
+        cache.setdefault("_rows", []).append(created)
+        return created["id"]
+    except httpx.HTTPStatusError:
+        return None
+
+
+# Słowa kluczowe → kategoria magazynowa (bezpłatna heurystyka, bez LLM)
+_CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("Warzywa i owoce", (
+        "pomidor", "cebula", "czosnek", "salat", "ogorek", "baklazan", "jabl", "banan",
+        "cytryn", "marchew", "ziemniak", "papryk", "brokul", "kalafior", "burak", "kapust",
+        "szpinak", "awokado", "grzyb", "pieczark", "owoc", "warzyw", "por", "seler", "pietruszk",
+        "koperek", "bazyl", "natk", "rzodkiew", "cukini", "dyni", "gruszk", "truskawk", "malin",
+        "borowk", "jagod", "winogron", "arbuz", "melon", "ananas", "mango", "kiwi", "batat",
+    )),
+    ("Nabiał", (
+        "mleko", "ser", "smietan", "jogurt", "maslo", "twarog", "mozarella", "mozzarella",
+        "parmezan", "jajk", "jaj ", "jajec", "kefir", "maślank", "maslank", "ricotta", "feta",
+        "goud", "cheddar", "camembert",
+    )),
+    ("Mięso i wędliny", (
+        "kurczak", "wolow", "wieprz", "indyk", "schab", "karkow", "wedlin", "boczek", "kielbas",
+        "szynk", "filet", "udziec", "mieso", "wolovina", "ryba", "losos", "dorsz", "krewet",
+        "kaczka", "ges", "baranin", "cielęcin", "cielecin", "mielon", "parowk", "kabanos",
+        "salami", "prosciutto", "tuna", "tunczyk", "sledz", "makrel",
+    )),
+    ("Alkohole", (
+        "wino", "piwo", "wodka", "whisky", "whiskey", "rum", "gin", "likier", "prosecco",
+        "szampan", "cydr", "aperol", "campari", "alkohol",
+    )),
+    ("Napoje", (
+        "sok", "woda", "cola", "napoj", "kawa", "herbata", "syrop", "tonik", "lemoniad",
+        "nektar", "energy", "izoton",
+    )),
+    ("Mrożonki", (
+        "mrozon", "frozen", "lody", "mrozonka", "mrozone", "mrozony",
+    )),
+    ("Chemia i czystość", (
+        "detergent", "plyn do naczy", "plyn do podlog", "mydlo", "papier toalet", "recznik papier",
+        "folia spozyw", "worki na smieci", "dezynfek", "chlor", "wybielacz", "chem",
+    )),
+    ("Opakowania", (
+        "pojemnik", "tacka", "pudelek", "pudelko", "opakowan", "kubek", "pokrywk", "slomk",
+        "serwetk", "talerz jednoraz", "sztucce",
+    )),
+    ("Suchy magazyn", (
+        "maka", "ryz", "makaron", "cukier", "sol", "olej", "oliw", "ocet", "przypraw",
+        "pieprz", "papryka mielona", "curry", "oregano", "tymianek", "kminek", "musztard",
+        "ketchup", "majonez", "koncentrat", "pasztet", "konserw", "fasola such", "soczewic",
+        "kasza", "platki", "bulion", "drozdze", "proszek do pieczenia", "skrobia",
+    )),
+]
+
+
+def _food_match_key(text: str) -> str:
+    """Klucz do deduplikacji: pomidor / pomidory / Pomidor świeży → ten sam stem.
+    Zachowuje liczby (np. śmietana 18% ≠ 30%)."""
+    s = _norm_pl(text)
+    # dołóż gołe liczby z oryginału (procenty tłuszczu itd.), bo _norm_pl bywa je gubi
+    raw = _strip_accents(str(text or "")).lower()
+    for m in re.findall(r"\d+[.,]?\d*", raw):
+        num = m.replace(",", ".")
+        if num and num not in s:
+            s = f"{s} {num}".strip()
+    out: list[str] = []
+    for t in s.split():
+        if t.isdigit() or re.match(r"^\d+[.]?\d*$", t):
+            out.append(t)
+            continue
+        base = t
+        for suf in ("ami", "ach", "owie", "owi", "ow", "om", "y", "i", "e", "a"):
+            if len(t) >= 5 and t.endswith(suf):
+                base = t[: -len(suf)]
+                break
+        if len(base) >= 3:
+            out.append(base)
+    return " ".join(sorted(set(out)))
+
+
+def _guess_category_free(
+    product_name: str,
+    *,
+    ai_category: Optional[str] = None,
+    user_categories: Optional[list[dict]] = None,
+    neighbor_category: Optional[str] = None,
+) -> str:
+    """Bezpłatne przypisanie kategorii: słowa kluczowe + kategorie użytkownika + AI hint."""
+    user_cats = user_categories or []
+    user_names = [(c.get("name") or "").strip() for c in user_cats if (c.get("name") or "").strip()]
+
+    def _map_to_user(wanted: str) -> str:
+        if not wanted:
+            return "Inne"
+        if not user_names:
+            return wanted
+        # exact / fuzzy do kategorii użytkownika
+        for un in user_names:
+            if _norm(un) == _norm(wanted) or _norm_pl(un) == _norm_pl(wanted):
+                return un
+        hit, score = _resolve_by_fuzzy(wanted, [{"name": n} for n in user_names], key="name", threshold=70)
+        if hit:
+            return hit["name"]
+        # częściowe: „Warzywa” w „Warzywa i owoce”
+        wn = _norm_pl(wanted)
+        for un in user_names:
+            unp = _norm_pl(un)
+            if wn and unp and (wn in unp or unp in wn):
+                return un
+        return wanted if wanted != "Inne" else (user_names[0] if False else "Inne")
+
+    # 1) kategoria z podobnego produktu już w magazynie
+    if neighbor_category and neighbor_category.strip() and _norm(neighbor_category) != "inne":
+        return _map_to_user(neighbor_category.strip())
+
+    # 2) słowa kluczowe w nazwie produktu
+    key = _food_match_key(product_name) + " " + _norm_pl(product_name)
+    best_cat = None
+    best_hits = 0
+    for cat_label, words in _CAT_KEYWORDS:
+        hits = sum(1 for w in words if w in key)
+        if hits > best_hits:
+            best_hits = hits
+            best_cat = cat_label
+    if best_cat and best_hits > 0:
+        return _map_to_user(best_cat)
+
+    # 3) hint z AI (jeśli nie „Inne”)
+    ai = (ai_category or "").strip()
+    if ai and _norm(ai) != "inne":
+        return _map_to_user(ai)
+
+    return _map_to_user("Inne")
+
+
+def _find_inventory_duplicate(
+    name: str,
+    inv_rows: list[dict],
+    *,
+    threshold: int = 82,
+) -> Optional[dict]:
+    """Szuka istniejącego produktu (pomidor ≈ Pomidory świeże)."""
+    if not name or not inv_rows:
+        return None
+    # 1) exact _norm
+    n = _norm(name)
+    for r in inv_rows:
+        if _norm(r.get("name") or "") == n:
+            return r
+    # 2) ten sam food stem
+    fk = _food_match_key(name)
+    if fk:
+        stem_hits = [r for r in inv_rows if _food_match_key(r.get("name") or "") == fk]
+        if len(stem_hits) == 1:
+            return stem_hits[0]
+        if len(stem_hits) > 1:
+            # najkrótsza kanoniczna nazwa
+            return min(stem_hits, key=lambda r: len(r.get("name") or ""))
+    # 3) rapidfuzz
+    hit, score = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=threshold)
+    if hit and score >= threshold:
+        return hit
+    # 4) luźniej dla krótkich nazw warzyw (pomidor/pomidory)
+    if len(_norm_pl(name).split()) <= 2:
+        hit2, score2 = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=74)
+        if hit2 and score2 >= 74:
+            return hit2
+    return None
+
+
+async def _load_user_inventory_categories(client: httpx.AsyncClient) -> list[dict]:
+    return await sb_get(client, "inventory_categories", params={
+        "select": "id,name,sort_order",
+        "order": "sort_order.asc",
+        "limit": "200",
+    }) or []
+
+
+async def _load_menu_lista_for_classification(client: httpx.AsyncClient) -> list[dict]:
+    """LISTA_MENU: dania aktywne + kluczowe składniki z recipe_ingredients."""
+    active_ids: Optional[set[str]] = None
+    try:
+        menu_rows = await sb_get(client, "menu_items", params={
+            "select": "id,name,category",
+            "is_active": "eq.true",
+            "limit": "2000",
+        }) or []
+        active_ids = {r["id"] for r in menu_rows}
+    except Exception:
+        menu_rows = await sb_get(client, "menu_items", params={
+            "select": "id,name,category", "limit": "2000",
+        }) or []
+        active_ids = None
+
+    ri = []
+    try:
+        ri = await sb_get(client, "recipe_ingredients", params={
+            "select": "menu_item_id,ingredient_name,quantity,unit",
+            "limit": "30000",
+        }) or []
+    except Exception as e:
+        logger.warning(f"_load_menu_lista: recipe_ingredients failed: {e}")
+
+    by_menu: dict[str, list[dict]] = {}
+    for r in ri:
+        mid = r.get("menu_item_id")
+        if not mid:
+            continue
+        if active_ids is not None and mid not in active_ids:
+            continue
+        name = (r.get("ingredient_name") or "").strip()
+        if not name:
+            continue
+        by_menu.setdefault(mid, []).append({
+            "name": name,
+            "quantity": r.get("quantity"),
+            "unit": r.get("unit") or "g",
+        })
+
+    out: list[dict] = []
+    for m in menu_rows:
+        ings = by_menu.get(m["id"], [])
+        out.append({
+            "danie": m.get("name") or "",
+            "kategoria": m.get("category") or "",
+            "skladniki": [i["name"] for i in ings],
+            "skladniki_szczegoly": ings[:40],
+        })
+    return out
+
+
+def _fuzzy_match_token_only(
+    query: str, choices: list[str], threshold: int = 82
+) -> tuple[Optional[str], float]:
+    """Ścisłe fuzzy (bez partial_ratio) — do weryfikacji „występuje w menu”."""
+    if not query or not choices:
+        return None, 0.0
+    best = rf_process.extractOne(
+        query, choices, scorer=fuzz.token_set_ratio, score_cutoff=threshold
+    )
+    if best is None:
+        return None, 0.0
+    return best[0], float(best[1])
+
+
+def _recipe_ingredient_keys(menu_lista: list[dict]) -> tuple[list[str], dict[str, str]]:
+    """Zwraca (keys_norm, map norm→oryginał) wyłącznie ze składników receptur."""
+    terms: dict[str, str] = {}
+    for m in menu_lista:
+        for s in (m.get("skladniki") or []):
+            k = _norm_pl(s)
+            if k:
+                terms.setdefault(k, s)
+    return list(terms.keys()), terms
+
+
+async def _classify_offer_vs_menu_ai(
+    menu_lista: list[dict],
+    products: list[dict],
+) -> dict[str, dict]:
+    """Klasyfikacja produktów oferty vs MENU (tylko składniki dań — bez magazynu).
+
+    Zwraca mapę: _norm_pl(nazwa) → {
+      is_visible: bool, matched_to, matched_via, score, reason
+    }
+    """
+    if not products:
+        return {}
+
+    # Kompaktowa LISTA_MENU (limit tokenów)
+    menu_compact = []
+    for m in menu_lista[:120]:
+        ings = (m.get("skladniki") or [])[:25]
+        menu_compact.append({
+            "danie": m.get("danie"),
+            "skladniki": ings,
+        })
+
+    prod_compact = []
+    for p in products:
+        name = (p.get("product_name") or "").strip()
+        if not name:
+            continue
+        prod_compact.append({
+            "nazwa": name,
+            "cena": float(p.get("price_netto") or 0),
+            "jednostka": (p.get("unit") or "").strip(),
+        })
+
+    if not prod_compact:
+        return {}
+
+    system = (
+        "Jesteś precyzyjnym systemem kulinarno-magazynowym dla aplikacji Gastro Manager. "
+        "Twój cel to przeanalizowanie listy produktów ze skanu oferty dostawcy i przypisanie "
+        "ich do jednej z DWÓCH kategorii na podstawie aktualnego MENU restauracji.\n\n"
+        "Otrzymujesz LISTA_MENU (dania + składniki z receptur) oraz PRODUKTY_DOSTAWCY.\n\n"
+        "Kategoria wystepujace_w_menu:\n"
+        "- Produkt MUSI być bezpośrednim, niezbędnym składnikiem do przygotowania przynajmniej "
+        "jednego dania — nazwa musi odpowiadać wpisowi ze `skladniki` (np. burger wołowy → "
+        "mięso mielone wołowe / bułki, JEŚLI te nazwy są na liście składników).\n"
+        "- Jeśli danie NIE MA żadnych składników na liście, NIE zgaduj — idź do dodatkowe.\n"
+        "- Bądź precyzyjny: baza dania lub kluczowy półprodukt → tu TYLKO gdy wynika ze składników.\n\n"
+        "Kategoria dodatkowe:\n"
+        "- WSZYSTKIE POZOSTAŁE produkty.\n"
+        "- Jeśli produkt NIE jest bezpośrednio w recepturze/składzie dań.\n"
+        "- Wątpliwości lub dopasowanie naciągane → dodatkowe "
+        "(np. sok pomarańczowy ≠ świeża pomarańcza z herbaty zimowej).\n"
+        "- Chemia, opakowania, kartony, produkty niezwiązane z menu → zawsze dodatkowe.\n\n"
+        "BŁĄD DO UNIKNIĘCIA: Nie stosuj ogólnych skojarzeń. Fakt, że coś jest jedzeniem "
+        "(np. makaron / kiełbasa śląska), nie oznacza, że występuje w menu, jeśli restauracja "
+        "tego nie ma w `skladniki`!\n\n"
+        "KAŻDY produkt z PRODUKTY_DOSTAWCY musi trafić DOKŁADNIE do jednej kategorii "
+        "(preferuj dodatkowe przy wątpliwościach).\n\n"
+        "Zwróć WYŁĄCZNIE czysty JSON:\n"
+        '{"wystepujace_w_menu":[{"nazwa_dostawcy":"...","cena":0.0,"pasuje_do_dania":"...",'
+        '"powod_dopasowania":"..."}],'
+        '"dodatkowe":[{"nazwa_dostawcy":"...","cena":0.0}]}'
+    )
+    user = (
+        f"LISTA_MENU ({len(menu_compact)} dań):\n{json.dumps(menu_compact, ensure_ascii=False)}\n\n"
+        f"PRODUKTY_DOSTAWCY ({len(prod_compact)} poz.):\n{json.dumps(prod_compact, ensure_ascii=False)}"
+    )
+
+    result_map: dict[str, dict] = {}
+    try:
+        client = _openai()
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw) if raw else {}
+        for item in (parsed.get("wystepujace_w_menu") or []):
+            nazwa = (item.get("nazwa_dostawcy") or "").strip()
+            if not nazwa:
+                continue
+            result_map[_norm_pl(nazwa)] = {
+                "is_visible": True,
+                "matched_via": "menu_ai",
+                "matched_to": item.get("pasuje_do_dania") or "",
+                "score": 95.0,
+                "reason": item.get("powod_dopasowania") or "",
+            }
+        for item in (parsed.get("dodatkowe") or []):
+            nazwa = (item.get("nazwa_dostawcy") or "").strip()
+            if not nazwa:
+                continue
+            key = _norm_pl(nazwa)
+            if key not in result_map:
+                result_map[key] = {
+                    "is_visible": False,
+                    "matched_via": None,
+                    "matched_to": None,
+                    "score": 0.0,
+                    "reason": "dodatkowe",
+                }
+    except Exception as e:
+        logger.warning(f"_classify_offer_vs_menu_ai failed: {e}")
+        return {}
+
+    return result_map
+
+
+async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict) -> dict:
+    """Ścieżka 2: oferta handlowa → zapis do supplier_catalog.
+
+    Widoczność (`is_visible` = „Występujące w menu”) wg precyzyjnej klasyfikacji
+    względem MENU (dania + składniki receptur), NIE względem całego magazynu.
+    Magazyn często zawiera produkty z ofert / onboarding — to NIE oznacza użycia w menu.
+    """
+    warnings: list[str] = []
+    products = data.get("products") or []
+
+    has_extra = await _has_catalog_extra_cols(client)
+    has_visible = await _has_catalog_visible(client)
+
+    # LISTA_MENU + klasyfikacja AI
+    menu_lista = await _load_menu_lista_for_classification(client)
+    recipe_keys, recipe_terms = _recipe_ingredient_keys(menu_lista)
+    if products and not recipe_keys:
+        warnings.append(
+            "Brak składników w recepturach menu — wszystkie pozycje oferty trafią do „Dodatkowe”. "
+            "Dodaj receptury w zakładce Menu (lub zaproponuj AI)."
+        )
+    ai_map = await _classify_offer_vs_menu_ai(menu_lista, products)
+    if not ai_map and products:
+        warnings.append(
+            "Klasyfikacja AI niedostępna — użyto ścisłego dopasowania do składników receptur "
+            "(bez magazynu)."
+        )
+
+    # Fallback + weryfikacja AI: TYLKO składniki receptur (bez magazynu)
+    RECIPE_VERIFY_THRESHOLD = 80
+    RECIPE_FALLBACK_THRESHOLD = 88
+
+    existing = await sb_get(client, "supplier_catalog",
+                            params={"select": "id,name,sort_order", "supplier_id": f"eq.{supplier_id}"})
+    by_name = {_norm(r["name"]): r for r in (existing or [])}
+    max_sort = max((int(r.get("sort_order") or 0) for r in (existing or [])), default=0)
+
+    visible_count = 0
+    hidden_count = 0
+    match_debug: list[dict] = []
+
+    for p in products:
+        name = (p.get("product_name") or "").strip()
+        if not name:
+            continue
+        try:
+            from delta_scraper.parser import is_valid_product_name
+            if not is_valid_product_name(name):
+                warnings.append(f"Pominięto niepoprawną nazwę: {name!r}")
+                continue
+        except Exception:
+            pass
+        norm_key = _norm_pl(name)
+
+        matched_via: Optional[str] = None
+        matched_to: Optional[str] = None
+        matched_score: float = 0.0
+        reason = ""
+        is_visible = False
+
+        ai_hit = ai_map.get(norm_key)
+        if ai_hit is None and ai_map:
+            # Tylko ścisłe fuzzy po kluczach AI (bez substring „ser”∈„deser”)
+            ak_hit, ak_score = _fuzzy_match_token_only(norm_key, list(ai_map.keys()), threshold=90)
+            if ak_hit is not None:
+                ai_hit = ai_map[ak_hit]
+                matched_score = ak_score
+
+        if ai_hit is not None and bool(ai_hit.get("is_visible")):
+            # Bramka: AI może zaproponować „w menu” tylko jeśli produkt
+            # pokrywa się ze składnikiem receptury (kiełbasa ≠ menu sushi).
+            rec_hit, rec_score = _fuzzy_match_token_only(
+                norm_key, recipe_keys, threshold=RECIPE_VERIFY_THRESHOLD
+            )
+            if rec_hit is not None:
+                is_visible = True
+                matched_via = "menu_ai+recipe"
+                matched_to = ai_hit.get("matched_to") or recipe_terms.get(rec_hit, rec_hit)
+                matched_score = max(float(ai_hit.get("score") or 0), rec_score)
+                reason = ai_hit.get("reason") or ""
+            else:
+                is_visible = False
+                matched_via = "menu_ai_rejected"
+                matched_to = ai_hit.get("matched_to")
+                reason = (
+                    "AI wskazało menu, ale brak dopasowania do składników receptur — dodatkowe"
+                )
+        elif ai_hit is not None:
+            is_visible = False
+            matched_via = ai_hit.get("matched_via")
+            reason = ai_hit.get("reason") or "dodatkowe"
+        else:
+            # Ścisły fallback: tylko receptury, bez partial_ratio
+            rec_hit, rec_score = _fuzzy_match_token_only(
+                norm_key, recipe_keys, threshold=RECIPE_FALLBACK_THRESHOLD
+            )
+            if rec_hit is not None:
+                is_visible = True
+                matched_via = "recipe_strict"
+                matched_to = recipe_terms.get(rec_hit, rec_hit)
+                matched_score = rec_score
+            else:
+                is_visible = False
+
+        if is_visible:
+            visible_count += 1
+        else:
+            hidden_count += 1
+
+        if len(match_debug) < 40:
+            match_debug.append({
+                "product": name,
+                "is_visible": is_visible,
+                "matched_via": matched_via,
+                "matched_to": matched_to,
+                "score": round(matched_score, 1),
+                "reason": reason,
+            })
+
+        price = float(p.get("price_netto") or 0)
+        volume_label = (p.get("volume_label") or "").strip()
+        unit = (p.get("unit") or "szt").strip()
+        variant = volume_label
+        if not variant and unit and unit.lower() not in ("szt", "szt.", "sztuki"):
+            variant = unit
+        if not variant:
+            variant = name
+
+        payload: dict = {
+            "supplier_id": supplier_id, "name": name, "variant": variant,
+            "volume_label": volume_label, "price_pln": price,
+            "unit_count": 1, "liters_total": 0,
+        }
+        if has_extra:
+            payload["unit"] = unit
+            payload["product_code"] = (p.get("product_code") or None)
+        if has_visible:
+            payload["is_visible"] = is_visible
+
+        match = by_name.get(_norm(name))
+        try:
+            if match:
+                upd = {"price_pln": price, "variant": variant, "volume_label": volume_label}
+                if has_extra:
+                    upd["unit"] = unit
+                    upd["product_code"] = (p.get("product_code") or None)
+                if has_visible:
+                    upd["is_visible"] = is_visible
+                await sb_patch(client, "supplier_catalog", {"id": f"eq.{match['id']}"}, upd)
+            else:
+                max_sort += 1
+                payload["sort_order"] = max_sort
+                row = await sb_post(client, "supplier_catalog", payload)
+                if row:
+                    by_name[_norm(name)] = (row[0] if isinstance(row, list) else row)
+        except httpx.HTTPStatusError as e:
+            warnings.append(f"{name}: {e.response.text[:100]}")
+
+    if not has_visible:
+        warnings.append("Kolumna is_visible nie istnieje — wszystkie produkty widoczne (uruchom migrację SQL).")
+
+    return {
+        "products_total": len(products),
+        "visible_count": visible_count,
+        "hidden_count": hidden_count,
+        "menu_dishes": len(menu_lista),
+        "classification": "menu_ai" if ai_map else "recipe_strict_fallback",
+        "match_preview": match_debug,
+        "warnings": warnings,
+    }
+
+
+class InvoiceBatchIn(BaseModel):
+    quantity: float = 0.0
+    expiration_date: Optional[str] = None  # YYYY-MM-DD
+
+
+class InvoiceProductIn(BaseModel):
+    product_name: str
+    quantity: float = 0.0
+    price_netto: float = 0.0
+    unit: str = "szt"
+    category: str = "Inne"
+    batches: list[InvoiceBatchIn] = Field(default_factory=list)
+    alert_days: list[int] = Field(default_factory=lambda: [7, 3, 1])
+
+
+class ConfirmInvoiceRequest(BaseModel):
+    supplier_id: Optional[str] = None
+    supplier_name: Optional[str] = None
+    total_amount: float = 0.0
+    products: list[InvoiceProductIn]
+    # inventory = magazyn+koszt materiałów (domyślnie)
+    # variable_cost = tylko koszt zmienny
+    # fixed_cost = tylko koszt stały
+    destination: str = "inventory"
+
+
+async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_name: str,
+                        products: list[dict], total: float,
+                        destination: str = "inventory") -> dict:
+    """Zapis faktury: magazyn / koszt zmienny / koszt stały — zależnie od destination.
+    Przy inventory: opcjonalne partie dat ważności → warehouse_inventory + invoices."""
+    warnings: list[str] = []
+    dest = (destination or "inventory").strip().lower()
+    if dest not in ("inventory", "variable_cost", "fixed_cost"):
+        dest = "inventory"
+
+    updated: list[dict] = []
+    created: list[dict] = []
+    batches_saved = 0
+    cost_id = None
+    invoice_id: Optional[str] = None
+
+    if dest == "inventory":
+        # Nagłówek faktury (best-effort — tabela może nie istnieć przed migracją)
+        try:
+            inv_row = await sb_post(client, "invoices", {
+                "supplier_id": supplier_id or None,
+                "supplier_name": supplier_name or None,
+                "total_cost": float(total or 0),
+                "note": "Skan faktury AI",
+            })
+            invoice_id = (inv_row[0] if isinstance(inv_row, list) else inv_row).get("id")
+        except Exception as e:
+            warnings.append(f"Tabela invoices niedostępna (uruchom migrację ADD_INVOICE_EXPIRY_BATCHES): {e}")
+            invoice_id = None
+
+        cat_cache: dict = {}
+        user_cats = await _load_user_inventory_categories(client)
+        cat_cache["_rows"] = list(user_cats)
+        for r in user_cats:
+            cat_cache[_norm(r["name"])] = r["id"]
+            cat_cache[_norm_pl(r["name"])] = r["id"]
+        cat_cache["_max_sort"] = max((int(r.get("sort_order") or 0) for r in user_cats), default=0)
+        cat_cache["_loaded"] = True
+
+        # id → nazwa kategorii (do dziedziczenia z dopasowanego produktu)
+        cat_id_to_name = {str(c["id"]): c["name"] for c in user_cats if c.get("id")}
+        inv_all = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,unit,unit_cost,category_id",
+            "limit": "5000",
+        }) or []
+        inv_rows = list(inv_all)
+
+        for p in products:
+            name = (p.get("product_name") or "").strip()
+            if not name:
+                continue
+            qty = float(p.get("quantity") or 0)
+            unit = (p.get("unit") or "szt").strip()
+            price = float(p.get("price_netto") or 0)
+            ai_cat = (p.get("category") or "").strip() or "Inne"
+            alert_days = p.get("alert_days") or [7, 3, 1]
+            if not isinstance(alert_days, list) or not alert_days:
+                alert_days = [7, 3, 1]
+            alert_days = [int(x) for x in alert_days if str(x).isdigit() or isinstance(x, (int, float))]
+            if not alert_days:
+                alert_days = [7, 3, 1]
+
+            inv = _find_inventory_duplicate(name, inv_rows, threshold=82)
+            item_id: Optional[str] = None
+            if inv:
+                item_id = str(inv["id"])
+                conv = _convert(qty, unit, inv["unit"])
+                delta = conv if conv is not None else qty
+                if conv is None and _norm(unit) != _norm(inv["unit"]):
+                    warnings.append(f"{name}: dodano {qty} {unit} bez konwersji do {inv['unit']} (połączono z „{inv['name']}”).")
+                new_qty = float(inv["quantity"] or 0) + float(delta)
+                patch_payload: dict = {"quantity": new_qty}
+                # odśwież unit_cost gdy znamy cenę z faktury
+                if price > 0:
+                    patch_payload["unit_cost"] = price
+                # jeśli produkt był w „Inne” / bez kategorii — popraw kategorię
+                neighbor_cat = cat_id_to_name.get(str(inv.get("category_id") or ""))
+                guessed = _guess_category_free(
+                    name, ai_category=ai_cat, user_categories=user_cats,
+                    neighbor_category=neighbor_cat if neighbor_cat and _norm(neighbor_cat) != "inne" else None,
+                )
+                if guessed and _norm(guessed) != "inne":
+                    if not neighbor_cat or _norm(neighbor_cat) == "inne":
+                        new_cat_id = await _resolve_category_id_cached(client, guessed, cat_cache)
+                        if new_cat_id:
+                            patch_payload["category_id"] = new_cat_id
+                            inv["category_id"] = new_cat_id
+                try:
+                    await sb_patch(
+                        client, "inventory_items", {"id": f"eq.{item_id}"},
+                        {**patch_payload, "default_alert_days": alert_days},
+                    )
+                except httpx.HTTPStatusError:
+                    # bez default_alert_days / unit_cost jeśli kolumna nie istnieje
+                    soft = {k: v for k, v in patch_payload.items() if k in ("quantity", "category_id", "unit_cost")}
+                    try:
+                        await sb_patch(client, "inventory_items", {"id": f"eq.{item_id}"}, soft)
+                    except httpx.HTTPStatusError:
+                        await sb_patch(client, "inventory_items", {"id": f"eq.{item_id}"}, {"quantity": new_qty})
+                updated.append({
+                    "name": inv["name"],
+                    "added": float(delta),
+                    "unit": inv["unit"],
+                    "new_quantity": new_qty,
+                    "merged_from": name if _norm(name) != _norm(inv["name"]) else None,
+                })
+                inv["quantity"] = new_qty
+                if price > 0:
+                    inv["unit_cost"] = price
+            else:
+                guessed = _guess_category_free(
+                    name, ai_category=ai_cat, user_categories=user_cats,
+                )
+                category = guessed
+                cat_id = await _resolve_category_id_cached(client, category, cat_cache)
+                payload = {
+                    "name": name, "quantity": qty, "unit": unit,
+                    "min_quantity": 0, "unit_cost": price, "category_id": cat_id,
+                    "is_combo_polprodukt": False, "safety_buffer_percent": 20,
+                    "default_alert_days": alert_days,
+                }
+                try:
+                    row = await sb_post(client, "inventory_items", payload)
+                except httpx.HTTPStatusError as e:
+                    body = e.response.text or ""
+                    if "default_alert_days" in body or "safety_buffer_percent" in body:
+                        payload.pop("default_alert_days", None)
+                        if "safety_buffer_percent" in body:
+                            payload.pop("safety_buffer_percent", None)
+                        try:
+                            row = await sb_post(client, "inventory_items", payload)
+                        except httpx.HTTPStatusError as e2:
+                            warnings.append(f"{name}: nie dodano do magazynu ({e2.response.text[:80]}).")
+                            continue
+                    else:
+                        warnings.append(f"{name}: nie dodano do magazynu ({body[:80]}).")
+                        continue
+                item_id = str((row[0] if isinstance(row, list) else row).get("id"))
+                created.append({"name": name, "quantity": qty, "unit": unit, "category": category})
+                new_row = {"id": item_id, "name": name, "quantity": qty, "unit": unit, "category_id": cat_id, "unit_cost": price}
+                inv_rows.append(new_row)
+
+            # Partie dat ważności
+            raw_batches = p.get("batches") or []
+            if isinstance(raw_batches, list):
+                for b in raw_batches:
+                    if not isinstance(b, dict):
+                        continue
+                    bqty = float(b.get("quantity") or 0)
+                    edate = str(b.get("expiration_date") or "").strip()
+                    if bqty <= 0 or not re.match(r"^\d{4}-\d{2}-\d{2}$", edate):
+                        continue
+                    status = _expiry_status(edate)
+                    # Widen warning window to 7 days for invoice batches
+                    try:
+                        from datetime import date as _date
+                        exp = _date.fromisoformat(edate)
+                        if 0 <= (exp - _date.today()).days <= 7 and status == "fresh":
+                            status = "warning"
+                    except Exception:
+                        pass
+                    batch_payload = {
+                        "restaurant_id": None,
+                        "inventory_item_id": item_id,
+                        "invoice_id": invoice_id,
+                        "product_name": name,
+                        "quantity": bqty,
+                        "unit": unit,
+                        "expiration_date": edate,
+                        "status": status,
+                        "alert_triggers": alert_days,
+                        "confidence_score": None,
+                        "source": "invoice_review",
+                    }
+                    try:
+                        await sb_post(client, "warehouse_inventory", batch_payload)
+                        batches_saved += 1
+                    except httpx.HTTPStatusError as e:
+                        # retry bez nowych kolumn
+                        for drop in ("invoice_id", "alert_triggers"):
+                            batch_payload.pop(drop, None)
+                        try:
+                            await sb_post(client, "warehouse_inventory", batch_payload)
+                            batches_saved += 1
+                        except Exception:
+                            warnings.append(
+                                f"{name}: nie zapisano partii {edate} "
+                                f"(migracja ADD_WAREHOUSE_INVENTORY_EXPIRY / ADD_INVOICE_EXPIRY_BATCHES). "
+                                f"{(e.response.text or '')[:60]}"
+                            )
+
+        if total > 0:
+            cost_name = f"Faktura — {supplier_name}".strip(" —") or "Zakup towaru (faktura)"
+            try:
+                cost_row = await sb_post(client, "variable_cost_entries", {
+                    "year_month": _current_year_month(),
+                    "type": "materials",
+                    "name": cost_name,
+                    "amount_pln": total,
+                    "note": f"Skan faktury · supplier:{supplier_id}",
+                })
+                cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
+            except httpx.HTTPStatusError as e:
+                warnings.append(f"Nie udało się dopisać kosztu: {e.response.text[:80]}")
+
+        if updated or created:
+            try:
+                await _recompute_menu_availability(client)
+            except Exception as e:
+                logger.debug(f"_recompute_menu_availability skipped: {e}")
+
+    elif dest == "variable_cost":
+        if total <= 0:
+            # suma z pozycji jeśli total pusty
+            total = sum(float(p.get("quantity") or 0) * float(p.get("price_netto") or 0) for p in products)
+        cost_name = f"Faktura (koszt zmienny) — {supplier_name}".strip(" —") or "Koszt zmienny (skan)"
+        try:
+            cost_row = await sb_post(client, "variable_cost_entries", {
+                "year_month": _current_year_month(),
+                "type": "materials",
+                "name": cost_name,
+                "amount_pln": float(total),
+                "note": f"Skan faktury → koszt zmienny · supplier:{supplier_id} · {len(products)} poz.",
+            })
+            cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
+        except httpx.HTTPStatusError as e:
+            warnings.append(f"Nie udało się dopisać kosztu zmiennego: {e.response.text[:80]}")
+
+    elif dest == "fixed_cost":
+        if total <= 0:
+            total = sum(float(p.get("quantity") or 0) * float(p.get("price_netto") or 0) for p in products)
+        cost_name = f"Faktura (koszt stały) — {supplier_name}".strip(" —") or "Koszt stały (skan)"
+        try:
+            cost_row = await sb_post(client, "fixed_costs", {
+                "year_month": _current_year_month(),
+                "type": "other",
+                "name": cost_name,
+                "amount_pln": float(total),
+                "note": f"Skan faktury → koszt stały · supplier:{supplier_id} · {len(products)} poz.",
+            })
+            cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
+        except httpx.HTTPStatusError as e:
+            warnings.append(f"Nie udało się dopisać kosztu stałego: {e.response.text[:80]}")
+
+    return {
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
+        "destination": dest,
+        "items_updated": len(updated),
+        "items_created": len(created),
+        "batches_saved": batches_saved if dest == "inventory" else 0,
+        "invoice_id": invoice_id,
+        "updated": updated,
+        "created": created,
+        "total_amount": total,
+        "cost_id": cost_id,
+        "warnings": warnings,
+    }
+
+
+@app.post("/api/documents/process")
+async def process_document(supplier_id: Optional[str] = Form(None), file: UploadFile = File(...)):
+    """Uniwersalny procesor: GPT-4o rozpoznaje typ dokumentu.
+    - FAKTURA → zwraca podgląd (bez zapisu) do zatwierdzenia z edycją kategorii.
+    - OFERTA → od razu zapisuje do katalogu dostawcy.
+    supplier_id jest opcjonalny — jeśli brak, dostawca zostanie rozpoznany/utworzony z dokumentu.
+    Plik żyje wyłącznie w RAM i jest niszczony po zakończeniu funkcji."""
+    client = _openai()
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Pusty plik.")
+
+    if supplier_id:
+        async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
+            sup = await sb_get(httpx_c, "suppliers",
+                               params={"select": "id,name", "id": f"eq.{supplier_id}", "limit": "1"})
+            if not sup:
+                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+
+    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    contents = b""  # zwolnij bajty pliku
+
+    user_content: list[dict] = [
+        {"type": "text", "text": "Rozpoznaj typ tego dokumentu i wyodrębnij dane zgodnie ze schematem."}
+    ]
+    for uri in image_uris:
+        user_content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    try:
+        resp = await client.chat.completions.create(
+            model=VISION_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": _DOCUMENT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_schema", "json_schema": _DOCUMENT_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+    finally:
+        image_uris = []
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/documents/process", model=VISION_MODEL,
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    doc_type = data.get("document_type") or "OFERTA_HANDLOWA"
+    supplier_name = data.get("supplier_name")
+
+    if doc_type == "MENU_RESTAURACYJNE":
+        # Menu restauracji → NIE twórz dostawcy / katalogu. FE otworzy skaner menu.
+        dishes_preview = []
+        for p in (data.get("products") or [])[:80]:
+            nm = (p.get("product_name") or "").strip()
+            if not nm:
+                continue
+            dishes_preview.append({
+                "name": nm,
+                "price_pln": float(p.get("price_netto") or 0),
+                "category": p.get("category") or "Inne",
+            })
+        return _with_billing({
+            "document_type": "MENU_RESTAURACYJNE",
+            "open_menu_scan": True,
+            "dishes_preview": dishes_preview,
+            "message": (
+                "Rozpoznano kartę dań (menu restauracji). "
+                "Otwórz „Skanuj menu”, aby wgrać potrawy — nie dodano dostawcy ani katalogu."
+            ),
+        }, billing)
+
+    if doc_type == "FAKTURA_ZAKUPOWA":
+        # PODGLĄD — nic nie zapisujemy; darmowa kategoryzacja pod kategorie użytkownika
+        raw_products = data.get("products") or []
+        enriched: list[dict] = []
+        user_cat_names: list[str] = []
+        async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client_db:
+            user_cats = await _load_user_inventory_categories(client_db)
+            user_cat_names = [c.get("name") for c in user_cats if c.get("name")]
+            inv_all = await sb_get(client_db, "inventory_items", params={
+                "select": "id,name,category_id", "limit": "5000",
+            }) or []
+            cat_id_to_name = {str(c["id"]): c["name"] for c in user_cats if c.get("id")}
+            for p in raw_products:
+                if not isinstance(p, dict):
+                    continue
+                pname = (p.get("product_name") or "").strip()
+                if not pname:
+                    continue
+                neighbor = _find_inventory_duplicate(pname, inv_all, threshold=82)
+                neighbor_cat = None
+                if neighbor and neighbor.get("category_id"):
+                    neighbor_cat = cat_id_to_name.get(str(neighbor["category_id"]))
+                guessed = _guess_category_free(
+                    pname,
+                    ai_category=p.get("category"),
+                    user_categories=user_cats,
+                    neighbor_category=neighbor_cat,
+                )
+                out = dict(p)
+                out["category"] = guessed
+                if neighbor:
+                    out["matched_inventory_name"] = neighbor.get("name")
+                enriched.append(out)
+        return _with_billing({
+            "document_type": doc_type,
+            "supplier_id": supplier_id,
+            "supplier_name": supplier_name,
+            "total_amount": float(data.get("total_amount") or 0),
+            "products": enriched or raw_products,
+            "user_categories": user_cat_names,
+        }, billing)
+
+    # OFERTA → rozpoznaj/utwórz dostawcę i zapisz od razu
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client_db:
+        if supplier_id:
+            resolved_id, resolved_name = supplier_id, (data.get("supplier_name") or "")
+        else:
+            resolved_id, resolved_name = await _find_or_create_supplier(client_db, supplier_name)
+        result = await _process_offer(client_db, resolved_id, data)
+        return _with_billing({
+            "document_type": doc_type,
+            "supplier_id": resolved_id,
+            "supplier_name": resolved_name or supplier_name,
+            **result,
+        }, billing)
+
+
+@app.post("/api/documents/confirm-invoice")
+async def confirm_invoice(req: ConfirmInvoiceRequest):
+    """Zatwierdzenie faktury z podglądu (po ewentualnej korekcie kategorii).
+    Zwiększa magazyn + dopisuje koszt. Tworzy dostawcę jeśli podano tylko nazwę."""
+    if not req.products:
+        raise HTTPException(status_code=400, detail="Brak pozycji do zaksięgowania.")
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        if req.supplier_id:
+            sup = await sb_get(client, "suppliers",
+                               params={"select": "id,name", "id": f"eq.{req.supplier_id}", "limit": "1"})
+            if not sup:
+                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+            supplier_id, supplier_name = sup[0]["id"], sup[0]["name"]
+        else:
+            supplier_id, supplier_name = await _find_or_create_supplier(client, req.supplier_name)
+
+        products = [p.model_dump() for p in req.products]
+        result = await _save_invoice(
+            client, supplier_id, supplier_name, products, float(req.total_amount or 0),
+            destination=getattr(req, "destination", None) or "inventory",
+        )
+    return {"document_type": "FAKTURA_ZAKUPOWA", **result}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5) Dynamic Portions Yield — na ile porcji każdej potrawy wystarczy zapas
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/inventory/{item_id}/portions-yield")
+async def portions_yield(item_id: str):
+    """Dla danego surowca liczy, na ile porcji każdej powiązanej potrawy wystarczy
+    aktualny stan magazynowy (stan / gramatura z receptury)."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            rows = await sb_get(client, "inventory_items",
+                                params={"select": "id,name,quantity,unit,unit_weight_volume,weight_volume_unit",
+                                        "id": f"eq.{item_id}", "limit": "1"})
+        except httpx.HTTPStatusError as e:
+            # kolumny unit_weight_volume/weight_volume_unit jeszcze nie dodane
+            if "unit_weight_volume" in (e.response.text or "") or "weight_volume_unit" in (e.response.text or ""):
+                rows = await sb_get(client, "inventory_items",
+                                    params={"select": "id,name,quantity,unit", "id": f"eq.{item_id}", "limit": "1"})
+            else:
+                raise
+        if not rows:
+            raise HTTPException(status_code=404, detail="Nie znaleziono produktu.")
+        item = rows[0]
+        item_name = item["name"]
+        stock_qty = float(item["quantity"] or 0)
+        stock_unit = item["unit"] or ""
+        uwv = item.get("unit_weight_volume")
+        wvu = item.get("weight_volume_unit")
+
+        # recipe_ingredients łączy się z magazynem po NAZWIE (nie FK)
+        recipes = await sb_get(client, "recipe_ingredients",
+                               params={"select": "menu_item_id,ingredient_name,quantity,unit"})
+        key = _norm(item_name)
+        matched = [
+            r for r in (recipes or [])
+            if _norm(r["ingredient_name"]) == key
+            or key in _norm(r["ingredient_name"])
+            or _norm(r["ingredient_name"]) in key
+        ]
+
+        # nazwy potraw
+        menu_ids = list({r["menu_item_id"] for r in matched})
+        menu_map: dict = {}
+        if menu_ids:
+            id_filter = "in.(" + ",".join(menu_ids) + ")"
+            menu_rows = await sb_get(client, "menu_items",
+                                     params={"select": "id,name,is_active", "id": id_filter})
+            menu_map = {m["id"]: m for m in (menu_rows or [])}
+
+    dishes = []
+    for r in matched:
+        per_portion = float(r["quantity"] or 0)
+        recipe_unit = r["unit"] or stock_unit
+        if per_portion <= 0:
+            continue
+        available, convertible = _yield_available(stock_qty, stock_unit, uwv, wvu, recipe_unit)
+        portions = int(available // per_portion) if available is not None else 0
+        menu = menu_map.get(r["menu_item_id"])
+        dishes.append({
+            "menu_item_id": r["menu_item_id"],
+            "dish_name": (menu or {}).get("name") or "Danie",
+            "is_active": (menu or {}).get("is_active", True),
+            "per_portion_qty": per_portion,
+            "unit": recipe_unit,
+            "portions": max(0, portions),
+            "convertible": convertible,
+        })
+
+    dishes.sort(key=lambda d: d["portions"])
+    return {
+        "item_id": item_id,
+        "item_name": item_name,
+        "stock_quantity": stock_qty,
+        "stock_unit": stock_unit,
+        "dishes": dishes,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6) Menu scan (GPT-4o Vision) — czyta menu restauracji, wyciąga potrawy
+#    Trzy endpointy: /scan (podgląd), /suggest-recipe (AI składniki/gramatura),
+#    /confirm-scan (zapis do menu_items + recipe_ingredients).
+# ─────────────────────────────────────────────────────────────────────────────
+
+MENU_CATEGORIES = [
+    "Przystawki", "Zupy", "Sałatki", "Burgery", "Dania główne",
+    "Makarony", "Pizza", "Desery", "Napoje", "Alkohole", "Inne",
+]
+
+_MENU_SCAN_JSON_SCHEMA = {
+    "name": "MenuExtraction",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["dishes"],
+        "properties": {
+            "dishes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "name", "category", "price_pln",
+                        "portion_weight_value", "portion_weight_unit",
+                        "ingredients",
+                    ],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "category": {"type": "string", "enum": MENU_CATEGORIES},
+                        "price_pln": {"type": "number"},
+                        "portion_weight_value": {"type": ["number", "null"]},
+                        "portion_weight_unit": {
+                            "type": ["string", "null"],
+                            "enum": ["g", "ml", "szt", None],
+                        },
+                        "ingredients": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["name", "quantity", "unit"],
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "quantity": {"type": ["number", "null"]},
+                                    "unit": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+_MENU_SCAN_SYSTEM_PROMPT = (
+    "Jesteś ekspertem od digitalizacji kart menu restauracji. Otrzymujesz zdjęcie(a) "
+    "lub strony PDF menu. Wyodrębnij WSZYSTKIE potrawy do tablicy `dishes`.\n\n"
+    "Dla każdej pozycji:\n"
+    "- name: nazwa dania (bez ceny, bez gramatury; np. 'Burger Podwójny').\n"
+    "- category: jedna z dozwolonych kategorii: "
+    f"{', '.join(MENU_CATEGORIES)}. Wybierz najbardziej pasującą na podstawie nazwy i sekcji menu.\n"
+    "- price_pln: cena w PLN jako liczba dziesiętna (przecinek zamień na kropkę, "
+    "usuń symbole '/zł/PLN'). Jeśli brak ceny → 0.\n"
+    "- portion_weight_value: gramatura porcji jeśli widoczna na menu (np. '250 g' → 250, "
+    "'0,3 l' → 300). Jeśli brak → null.\n"
+    "- portion_weight_unit: jednostka gramatury: 'g' (waga), 'ml' (płyny), 'szt' (sztuki). "
+    "Jeśli brak wagi → null.\n"
+    "- ingredients: lista składników jeśli są WYSZCZEGÓLNIONE pod nazwą dania (np. "
+    "'sos pomidorowy, mozzarella, bazylia'). Dla każdego składnika: name (nazwa), "
+    "quantity (null jeśli menu nie podaje ilości), unit (jednostka lub 'g' domyślnie). "
+    "Jeśli menu nie wypisuje składników danej potrawy → pusta lista [].\n\n"
+    "WAŻNE:\n"
+    "- Nie wymyślaj składników których nie ma w menu — jeśli menu podaje tylko nazwę, "
+    "zwróć puste `ingredients: []`. AI zaproponuje je później osobno.\n"
+    "- Nie wymyślaj gramatury — jeśli menu nie podaje, zwróć null.\n"
+    "- KATEGORYCZNIE ZAKAZANE: nazwy 'Porcja', 'Porcje', 'Wielkość porcji', "
+    "'Gramatura', 'Gramatura porcji' NIE MOGĄ pojawić się w `ingredients`. "
+    "Wielkość porcji zapisuj TYLKO w `portion_weight_value` + `portion_weight_unit`.\n"
+    "- Zignoruj sekcje: promocje/loga/adres/godziny/opisy restauracji.\n"
+    "- Zwróć wyłącznie poprawny JSON zgodny ze schematem."
+)
+
+
+class MenuScanIngredient(BaseModel):
+    name: str
+    quantity: Optional[float] = None
+    unit: str = "g"
+
+
+class MenuScanDish(BaseModel):
+    name: str
+    category: str = "Inne"
+    price_pln: float = 0.0
+    portion_weight_value: Optional[float] = None
+    portion_weight_unit: Optional[str] = None
+    ingredients: list[MenuScanIngredient] = Field(default_factory=list)
+
+
+class MenuScanResponse(BaseModel):
+    dishes: list[MenuScanDish]
+    warnings: list[str] = Field(default_factory=list)
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vision AI — skaner daty ważności (partie warehouse_inventory)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EXPIRY_SCAN_SYSTEM_PROMPT = (
+    "You are a precise data extraction agent for a restaurant inventory system. "
+    "Analyze the provided image of a food product.\n"
+    "Identify:\n"
+    "1. The clean product name (e.g., \"Mleko UHT 3.2%\").\n"
+    "2. The exact expiration date. Convert any Polish or international date formats "
+    "(e.g., \"Najlepiej spożyć przed: 24.12.2026\", \"EXP 12/26\", \"24-LIS-2026\") "
+    "into a standard YYYY-MM-DD format. If only a month/year is visible, set the date "
+    "to the last day of that month.\n\n"
+    "Respond strict JSON only."
+)
+
+_EXPIRY_SCAN_JSON_SCHEMA = {
+    "name": "ExpirationScan",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["product_name", "expiration_date", "confidence_score"],
+        "properties": {
+            "product_name": {"type": "string"},
+            "expiration_date": {"type": "string", "description": "YYYY-MM-DD"},
+            "confidence_score": {"type": "number"},
+        },
+    },
+}
+
+
+def _expiry_status(iso_date: str) -> str:
+    from datetime import date as _date
+    try:
+        exp = _date.fromisoformat(iso_date[:10])
+    except ValueError:
+        return "warning"
+    today = _date.today()
+    delta = (exp - today).days
+    if delta < 0:
+        return "expired"
+    if delta <= 7:
+        return "warning"
+    return "fresh"
+
+
+class ExpiryScanResponse(BaseModel):
+    ok: bool = True
+    product_name: str
+    expiration_date: str
+    confidence_score: float
+    status: str
+    quantity: float
+    unit: str = "szt"
+    inventory_item_id: Optional[str] = None
+    inventory_matched_name: Optional[str] = None
+    batch_id: Optional[str] = None
+    message: str = ""
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+@app.post("/api/inventory/scan-expiration", response_model=ExpiryScanResponse)
+async def scan_expiration(
+    file: UploadFile = File(...),
+    quantity: float = Form(...),
+    restaurant_id: Optional[str] = Form(None),
+    unit: str = Form("szt"),
+):
+    """Zdjecie etykiety → GPT-4o Vision → zapis partii w warehouse_inventory (+ bump stanu)."""
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="Ilość musi być > 0.")
+
+    client = _openai()
+    await _guard_ai()
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Pusty plik.")
+
+    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    contents = b""
+
+    user_content: list[dict] = [
+        {"type": "text", "text": "Extract product name and expiration date from this package photo."}
+    ]
+    for uri in image_uris:
+        user_content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    try:
+        resp = await client.chat.completions.create(
+            model=VISION_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": _EXPIRY_SCAN_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_schema", "json_schema": _EXPIRY_SCAN_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+    finally:
+        image_uris = []
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/inventory/scan-expiration", model=VISION_MODEL,
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    product_name = str(data.get("product_name") or "").strip()
+    expiration_date = str(data.get("expiration_date") or "").strip()
+    confidence = float(data.get("confidence_score") or 0)
+    if not product_name or not re.match(r"^\d{4}-\d{2}-\d{2}$", expiration_date):
+        raise HTTPException(status_code=422, detail="Nie udało się odczytać nazwy lub daty ważności.")
+
+    status = _expiry_status(expiration_date)
+    unit_clean = (unit or "szt").strip() or "szt"
+
+    inventory_item_id: Optional[str] = None
+    inventory_matched_name: Optional[str] = None
+    batch_id: Optional[str] = None
+
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        inv_all = await sb_get(
+            httpx_c, "inventory_items",
+            params={"select": "id,name,quantity,unit", "limit": "2000"},
+        ) or []
+        best_id = None
+        best_score = 0.0
+        best_name = None
+        best_qty = 0.0
+        qn = _norm_pl(product_name)
+        for row in inv_all:
+            cand = _norm_pl(str(row.get("name") or ""))
+            if not cand:
+                continue
+            score = max(
+                float(fuzz.token_set_ratio(qn, cand)),
+                float(fuzz.partial_ratio(qn, cand)),
+            )
+            if score > best_score:
+                best_score = score
+                best_id = row.get("id")
+                best_name = row.get("name")
+                best_qty = float(row.get("quantity") or 0)
+        if best_id and best_score >= FUZZY_MATCH_THRESHOLD:
+            inventory_item_id = str(best_id)
+            inventory_matched_name = str(best_name or "")
+            try:
+                await sb_patch(
+                    httpx_c,
+                    "inventory_items",
+                    {"id": f"eq.{inventory_item_id}"},
+                    {"quantity": best_qty + float(quantity)},
+                )
+            except Exception:
+                logging.exception("expiry scan: failed to bump inventory quantity")
+
+        payload = {
+            "restaurant_id": restaurant_id or None,
+            "inventory_item_id": inventory_item_id,
+            "product_name": product_name,
+            "quantity": float(quantity),
+            "unit": unit_clean,
+            "expiration_date": expiration_date,
+            "status": status,
+            "confidence_score": confidence,
+            "source": "vision_scan",
+        }
+        try:
+            inserted = await sb_post(httpx_c, "warehouse_inventory", payload)
+            if isinstance(inserted, list) and inserted:
+                batch_id = inserted[0].get("id")
+            elif isinstance(inserted, dict):
+                batch_id = inserted.get("id")
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Nie zapisano partii — uruchom migrację ADD_WAREHOUSE_INVENTORY_EXPIRY.sql. "
+                    f"Szczegóły: {e}"
+                ),
+            ) from e
+
+    msg = (
+        f"Dodano {quantity:g} {unit_clean} · {product_name} "
+        f"(ważne do {expiration_date}, status: {status})"
+    )
+    if inventory_matched_name:
+        msg += f". Dopasowano do magazynu: {inventory_matched_name}."
+
+    return ExpiryScanResponse(
+        product_name=product_name,
+        expiration_date=expiration_date,
+        confidence_score=confidence,
+        status=status,
+        quantity=float(quantity),
+        unit=unit_clean,
+        inventory_item_id=inventory_item_id,
+        inventory_matched_name=inventory_matched_name,
+        batch_id=batch_id,
+        message=msg,
+        credits_deducted=int(billing.get("credits_deducted") or 0),
+        credits_remaining=billing.get("credits_remaining"),
+    )
+
+
+@app.get("/api/inventory/expiry-daily-job")
+async def expiry_daily_job():
+    """Scheduler: odśwież statusy; alert gdy days_left ∈ alert_triggers (domyślnie 7/3/1)."""
+    from datetime import date as _date, timedelta
+
+    today = _date.today()
+    warn_until = today + timedelta(days=14)  # max look-ahead for custom triggers
+    alerts: list[dict] = []
+    dish: Optional[str] = None
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
+        try:
+            await httpx_c.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/warehouse_inventory_refresh_status",
+                headers=SB_HEADERS,
+                json={},
+            )
+        except Exception:
+            logging.exception("expiry job: refresh_status RPC failed")
+
+        rows = await sb_get(
+            httpx_c,
+            "warehouse_inventory",
+            params={
+                "select": "id,restaurant_id,product_name,quantity,unit,expiration_date,status,alert_triggers",
+                "expiration_date": f"lte.{warn_until.isoformat()}",
+                "quantity": "gt.0",
+                "limit": "500",
+            },
+        ) or []
+
+        batches = []
+        for r in rows:
+            try:
+                exp = _date.fromisoformat(str(r.get("expiration_date"))[:10])
+            except Exception:
+                continue
+            if exp < today:
+                continue
+            if float(r.get("quantity") or 0) <= 0:
+                continue
+            batches.append(r)
+
+        names = [str(b.get("product_name") or "") for b in batches if b.get("product_name")]
+        if names:
+            try:
+                await _guard_ai(needs_credits=False)
+                client = _openai()
+                resp = await client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    temperature=0.4,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
+                                "zaproponuj jedno konkretne „Danie dnia” po polsku "
+                                "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
+                            ),
+                        },
+                        {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
+                    ],
+                )
+                dish = (resp.choices[0].message.content or "").strip() or None
+            except Exception:
+                logging.exception("expiry job: dish suggestion failed")
+
+        for i, b in enumerate(batches):
+            exp = _date.fromisoformat(str(b["expiration_date"])[:10])
+            days_left = (exp - today).days
+            triggers = b.get("alert_triggers") or [7, 3, 1]
+            if not isinstance(triggers, list):
+                triggers = [7, 3, 1]
+            triggers_i = {int(x) for x in triggers if str(x).lstrip('-').isdigit() or isinstance(x, (int, float))}
+            if days_left not in triggers_i and days_left != 0:
+                continue
+            message = (
+                f"Produkt {b['product_name']} kończy ważność DZIŚ! Użyj go!"
+                if days_left == 0
+                else f"Produkt {b['product_name']} kończy ważność za {days_left} dni! Użyj go!"
+            )
+            # Expo Push + log
+            logging.info("EXPIRY_ALERT %s", message)
+            alerts.append({
+                "restaurant_id": b.get("restaurant_id"),
+                "batch_id": b.get("id"),
+                "product_name": b.get("product_name"),
+                "days_left": days_left,
+                "alert_day": days_left,
+                "message": message,
+                "dish_of_the_day": dish if i == 0 else None,
+            })
+        if alerts:
+            try:
+                await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
+            except Exception:
+                # retry without alert_day if column missing
+                for a in alerts:
+                    a.pop("alert_day", None)
+                try:
+                    await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
+                except Exception:
+                    logging.exception("expiry job: alert insert failed")
+
+            # Wyślij Expo Push do zarejestrowanych urządzeń
+            try:
+                tokens = await sb_get(
+                    httpx_c,
+                    "device_push_tokens",
+                    params={"select": "token", "limit": "500"},
+                ) or []
+                push_msgs = []
+                for t in tokens:
+                    tok = str(t.get("token") or "").strip()
+                    if not tok:
+                        continue
+                    for a in alerts[:20]:
+                        push_msgs.append({
+                            "to": tok,
+                            "title": "Termin przydatności",
+                            "body": a["message"],
+                            "sound": "default",
+                            "data": {"type": "expiry", "product_name": a.get("product_name")},
+                        })
+                # Expo accepts arrays up to ~100
+                for i in range(0, len(push_msgs), 80):
+                    chunk = push_msgs[i:i + 80]
+                    if not chunk:
+                        continue
+                    await httpx_c.post(
+                        "https://exp.host/--/api/v2/push/send",
+                        json=chunk,
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        timeout=30.0,
+                    )
+            except Exception:
+                logging.exception("expiry job: Expo Push failed")
+
+    return {
+        "ok": True,
+        "alert_count": len(alerts),
+        "dish_of_the_day": dish,
+        "reminders": [a["message"] for a in alerts],
+    }
+
+
+@app.get("/api/manager/core-alerts-job")
+async def manager_core_alerts_job(push: bool = True):
+    """Cron: policz alerty CORE i opcjonalnie wyślij push (severity critical/warn)."""
+    res = await _run_manager_core_alerts(period_type="week", limit_days=7)
+    alerts = [a for a in (res.get("alerts") or []) if a.get("severity") in ("critical", "warn")]
+    pushed = 0
+    if push and alerts:
+        async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
+            try:
+                tokens = await sb_get(
+                    httpx_c,
+                    "device_push_tokens",
+                    params={"select": "token", "limit": "500"},
+                ) or []
+                push_msgs = []
+                for a in alerts[:8]:
+                    body = f"[{a.get('pair')}] {a.get('name')}: {a.get('detail', '')}"[:180]
+                    for t in tokens:
+                        tok = t.get("token")
+                        if not tok:
+                            continue
+                        push_msgs.append({
+                            "to": tok,
+                            "title": "Manager AI — alert",
+                            "body": body,
+                            "sound": "default",
+                            "data": {"type": "manager_core", "pair": a.get("pair")},
+                        })
+                for i in range(0, len(push_msgs), 80):
+                    chunk = push_msgs[i:i + 80]
+                    if not chunk:
+                        continue
+                    await httpx_c.post(
+                        "https://exp.host/--/api/v2/push/send",
+                        json=chunk,
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        timeout=30.0,
+                    )
+                    pushed += len(chunk)
+            except Exception:
+                logging.exception("manager core alerts: Expo Push failed")
+    return {
+        "ok": True,
+        "alert_count": len(res.get("alerts") or []),
+        "pushed_messages": pushed,
+        "speech": res.get("assistant_speech"),
+        "alerts": res.get("alerts") or [],
+    }
+
+
+@app.post("/api/menu/scan", response_model=MenuScanResponse)
+async def menu_scan(file: UploadFile = File(...)):
+    """Skanuje wgrane menu (obraz lub PDF) modelem GPT-4o Vision i zwraca podgląd potraw.
+    Nic nie zapisuje — użytkownik zatwierdza po edycji (potwierdzenie w /menu/confirm-scan)."""
+    client = _openai()
+    await _guard_ai()
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Pusty plik.")
+
+    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    contents = b""
+
+    user_content: list[dict] = [
+        {"type": "text", "text": "Wyodrębnij WSZYSTKIE potrawy z tego menu zgodnie ze schematem."}
+    ]
+    for uri in image_uris:
+        user_content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    try:
+        resp = await client.chat.completions.create(
+            model=VISION_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": _MENU_SCAN_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_schema", "json_schema": _MENU_SCAN_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+    finally:
+        image_uris = []
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/menu/scan", model=VISION_MODEL,
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    dishes_raw = data.get("dishes") or []
+    dishes: list[MenuScanDish] = []
+    for d in dishes_raw:
+        try:
+            dishes.append(MenuScanDish(**d))
+        except Exception:
+            continue
+
+    warnings: list[str] = []
+    if not dishes:
+        warnings.append("Nie udało się rozpoznać żadnej potrawy na wgranym menu.")
+    # Ujednolić jednostki: ten sam składnik = ta sama jednostka we wszystkich potrawach.
+    _canonicalize_ingredient_units(dishes)
+    return MenuScanResponse(
+        dishes=dishes, warnings=warnings,
+        credits_deducted=int(billing.get("credits_deducted") or 0),
+        credits_remaining=billing.get("credits_remaining"),
+    )
+
+
+# --- 6a2) OCR tekstu receptury (notatki / odręczne) ----------------------------
+
+_RECIPE_OCR_JSON_SCHEMA = {
+    "name": "RecipeOcrText",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["text"],
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "Pełny tekst przepisu odczytany z obrazu, po polsku.",
+            },
+        },
+    },
+}
+
+
+class RecipeOcrResponse(BaseModel):
+    text: str
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+@app.post("/api/recipes/ocr-text", response_model=RecipeOcrResponse)
+async def recipe_ocr_text(file: UploadFile = File(...)):
+    """Odczytuje tekst przepisu z zdjęcia notatek (odręczne lub drukowane)."""
+    client = _openai()
+    await _guard_ai()
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Pusty plik.")
+
+    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    contents = b""
+
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "Przeczytaj CAŁY tekst przepisu / receptury z tego zdjęcia notatek. "
+                "Zachowaj kolejność kroków i ilości. Zwróć wyłącznie treść przepisu po polsku, "
+                "bez komentarzy ani wstępów. Jeśli tekst jest nieczytelny — oddaj to, co da się odczytać."
+            ),
+        }
+    ]
+    for uri in image_uris:
+        user_content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    try:
+        resp = await client.chat.completions.create(
+            model=VISION_MODEL,
+            temperature=0.0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Jesteś asystentem kuchennym. Odczytujesz przepisy z notatek i zdjęć. "
+                        "Zwracasz wyłącznie JSON ze schematem."
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_schema", "json_schema": _RECIPE_OCR_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+    finally:
+        image_uris = []
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/recipes/ocr-text", model=VISION_MODEL,
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    text = (data.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Nie udało się odczytać tekstu przepisu ze zdjęcia.")
+
+    return RecipeOcrResponse(
+        text=text,
+        credits_deducted=int(billing.get("credits_deducted") or 0),
+        credits_remaining=billing.get("credits_remaining"),
+    )
+
+
+# --- 6b) Sugestie receptury (AI) ---------------------------------------------
+
+_MENU_SUGGEST_JSON_SCHEMA = {
+    "name": "MenuRecipeSuggestions",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["dishes"],
+        "properties": {
+            "dishes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "name",
+                        "suggested_portion_weight_value",
+                        "suggested_portion_weight_unit",
+                        "suggested_ingredients",
+                    ],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "suggested_portion_weight_value": {"type": ["number", "null"]},
+                        "suggested_portion_weight_unit": {
+                            "type": ["string", "null"],
+                            "enum": ["g", "ml", "szt", None],
+                        },
+                        "suggested_ingredients": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["name", "quantity", "unit"],
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "quantity": {"type": "number"},
+                                    "unit": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+class SuggestRecipeDishIn(BaseModel):
+    name: str
+    category: Optional[str] = None
+    ingredients: list[MenuScanIngredient] = Field(default_factory=list)
+    portion_weight_value: Optional[float] = None
+    portion_weight_unit: Optional[str] = None
+
+
+class SuggestRecipeRequest(BaseModel):
+    dishes: list[SuggestRecipeDishIn]
+
+
+class SuggestedDishOut(BaseModel):
+    name: str
+    suggested_ingredients: list[MenuScanIngredient] = Field(default_factory=list)
+    suggested_portion_weight_value: Optional[float] = None
+    suggested_portion_weight_unit: Optional[str] = None
+
+
+class SuggestRecipeResponse(BaseModel):
+    dishes: list[SuggestedDishOut]
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+@app.post("/api/menu/suggest-recipe", response_model=SuggestRecipeResponse)
+async def menu_suggest_recipe(req: SuggestRecipeRequest):
+    """Dla listy potraw AI proponuje brakujące składniki i/lub gramaturę.
+    Dla każdej potrawy:
+    - jeśli `ingredients` puste → proponuje pełny wzorcowy skład + gramatury,
+    - jeśli `ingredients` niepuste, ale bez ilości LUB brak `portion_weight_value` →
+      proponuje gramatury wzorcowe (nie zmienia nazw składników użytkownika).
+    Zwraca WYŁĄCZNIE sugestie — decyduje frontend, czy je zastosować."""
+    if not req.dishes:
+        raise HTTPException(status_code=400, detail="Brak potraw do przetworzenia.")
+
+    client = _openai()
+    await _guard_ai()
+
+    payload_dishes = [
+        {
+            "name": d.name,
+            "category": d.category or "Inne",
+            "has_ingredients": bool(d.ingredients),
+            "ingredients": [
+                {"name": i.name, "has_quantity": i.quantity is not None, "unit": i.unit or "g"}
+                for i in d.ingredients
+            ],
+            "has_portion_weight": d.portion_weight_value is not None,
+            "portion_weight_unit_hint": d.portion_weight_unit,
+        }
+        for d in req.dishes
+    ]
+
+    system_prompt = (
+        "Jesteś doświadczonym szefem kuchni. Dla listy potraw restauracyjnych proponujesz "
+        "receptury na 1 porcję zgodnie z powszechnie stosowanymi standardami gastronomicznymi.\n\n"
+        "Dla KAŻDEJ potrawy zwróć obiekt z polami:\n"
+        "- name: dokładnie taka sama nazwa jak wejściowa.\n"
+        "- suggested_portion_weight_value: łączna wzorcowa waga/objętość porcji "
+        "(np. burger ≈ 350, spaghetti ≈ 400, latte ≈ 250). Jeśli wejście `has_portion_weight=true`, "
+        "zwróć null (użytkownik już podał gramaturę).\n"
+        "- suggested_portion_weight_unit: 'g' (dania stałe), 'ml' (napoje), 'szt' (jeżeli liczone w sztukach). "
+        "Null jeśli suggested_portion_weight_value=null.\n"
+        "- suggested_ingredients: lista składników z realistycznymi gramaturami wzorcowymi "
+        "(np. bułka 80g, kotlet wołowy 150g, ser 20g, sałata 20g, sos 30g). Zasady:\n"
+        "   * Jeśli `has_ingredients=true` (użytkownik już podał składniki), UŻYJ dokładnie tych nazw "
+        "     (pole name musi być identyczne) — możesz jedynie doszacować ilości.\n"
+        "   * Jeśli `has_ingredients=false`, wygeneruj kompletny wzorcowy skład (5–10 pozycji).\n"
+        "   * Jednostki: 'g' (waga), 'ml' (płyny), 'szt' (jajko, plaster itp.).\n"
+        "   * SPÓJNOŚĆ JEDNOSTEK (KRYTYCZNE): ten sam składnik musi mieć IDENTYCZNĄ "
+        "jednostkę we WSZYSTKICH potrawach naraz. Jeśli 'śmietana' jest w ml w jednym "
+        "daniu, MUSI być w ml we wszystkich. Płyny/nabiał/oleje/sosy (śmietana, mleko, "
+        "olej, sos, bulion, woda, sok, krem) ZAWSZE w 'ml'; produkty stałe ZAWSZE w 'g'; "
+        "liczone na sztuki (jajko, plaster, bułka) w 'szt'. Nigdy nie mieszaj g i ml dla "
+        "tego samego produktu.\n"
+        "   * Ilości > 0.\n"
+        "   * KATEGORYCZNIE ZAKAZANE: 'Porcja', 'Porcje', 'Wielkość porcji', 'Gramatura', "
+        "'Gramatura porcji' NIE MOGĄ pojawić się w `suggested_ingredients`. Wielkość porcji "
+        "zapisuj TYLKO w `suggested_portion_weight_value` + `suggested_portion_weight_unit`.\n\n"
+        "Zwróć wyłącznie poprawny JSON zgodny ze schematem."
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps({"dishes": payload_dishes}, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_schema", "json_schema": _MENU_SUGGEST_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/menu/suggest-recipe", model=CHAT_MODEL,
+            extras={"dishes_count": len(req.dishes)},
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    out: list[SuggestedDishOut] = []
+    for d in data.get("dishes") or []:
+        try:
+            out.append(SuggestedDishOut(**d))
+        except Exception:
+            continue
+    # Ujednolić jednostki: ten sam składnik = ta sama jednostka we wszystkich potrawach.
+    _canonicalize_ingredient_units(out)
+    return SuggestRecipeResponse(
+        dishes=out,
+        credits_deducted=int(billing.get("credits_deducted") or 0),
+        credits_remaining=billing.get("credits_remaining"),
+    )
+
+
+# --- 6b2) Inspiracje Kulinarne — pełny przepis AI + cache --------------------
+
+_INSPIRATION_CACHE_FILE = Path(__file__).parent / ".inspiration_recipe_cache.json"
+
+_INSPIRATION_SYSTEM = (
+    "You are a professional Head Chef and Food Technologist acting as an AI assistant "
+    "for a culinary mobile application's \"Inspirations\" section. Your task is to generate "
+    "a comprehensive, restaurant-quality recipe based ONLY on the Polish dish name provided "
+    "by the user.\n\n"
+    "CRITICAL RULES:\n"
+    "1. Language: You must always respond in Polish.\n"
+    "2. Output Format: You must return the data strictly as a valid JSON object. "
+    "Do not include any markdown formatting (like ```json) in the raw API response.\n"
+    "3. Scaling: Default measurements must be calculated for exactly 2 portions "
+    "(except for shared platters/boards, which should be scaled for 4-6 portions). "
+    "All ingredients must use strict metric units (g, ml, pcs, tbsp, tsp) as separate "
+    "numeric values and text labels to allow frontend scaling. "
+    "Use Polish unit labels: g, ml, szt, łyżeczka, łyżka.\n"
+    "4. Tone: Impersonal verbs for steps (e.g., \"Pokroić\", \"Rozgrzać\")."
+)
+
+_INSPIRATION_JSON_SCHEMA = {
+    "name": "InspirationRecipe",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "dish_name",
+            "prep_time_minutes",
+            "difficulty",
+            "default_portions",
+            "short_teaser",
+            "ingredients_sections",
+            "steps",
+            "chef_tip",
+        ],
+        "properties": {
+            "dish_name": {"type": "string"},
+            "prep_time_minutes": {"type": "integer"},
+            "difficulty": {"type": "string", "enum": ["Łatwy", "Średni", "Trudny"]},
+            "default_portions": {"type": "integer"},
+            "short_teaser": {"type": "string"},
+            "ingredients_sections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["section_name", "ingredients"],
+                    "properties": {
+                        "section_name": {"type": "string"},
+                        "ingredients": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["name", "base_quantity", "unit"],
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "base_quantity": {"type": "number"},
+                                    "unit": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "steps": {"type": "array", "items": {"type": "string"}},
+            "chef_tip": {"type": "string"},
+        },
+    },
+}
+
+
+def _inspiration_cache_key(slug: str, dish_name: str) -> str:
+    raw = (slug or "").strip().lower() or (dish_name or "").strip().lower()
+    return re.sub(r"\s+", "_", raw)
+
+
+def _read_inspiration_cache() -> dict:
+    try:
+        if _INSPIRATION_CACHE_FILE.exists():
+            return json.loads(_INSPIRATION_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _write_inspiration_cache(cache: dict) -> None:
+    try:
+        _INSPIRATION_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=0), encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning("inspiration cache write failed: %s", e)
+
+
+class InspirationRecipeRequest(BaseModel):
+    dish_name: str
+    slug: Optional[str] = None
+    force_refresh: bool = False
+
+
+class InspirationIngredient(BaseModel):
+    name: str
+    base_quantity: float
+    unit: str
+
+
+class InspirationIngredientSection(BaseModel):
+    section_name: str
+    ingredients: list[InspirationIngredient] = Field(default_factory=list)
+
+
+class InspirationRecipeResponse(BaseModel):
+    dish_name: str
+    prep_time_minutes: int
+    difficulty: str
+    default_portions: int
+    short_teaser: str
+    ingredients_sections: list[InspirationIngredientSection]
+    steps: list[str]
+    chef_tip: str
+    cached: bool = False
+    slug: Optional[str] = None
+    credits_deducted: int = 0
+    credits_remaining: Optional[int] = None
+
+
+@app.post("/api/inspirations/recipe", response_model=InspirationRecipeResponse)
+async def inspiration_recipe(req: InspirationRecipeRequest):
+    """Pełny przepis JSON dla modułu Inspiracje — z cache po slug/nazwie."""
+    dish_name = (req.dish_name or "").strip()
+    if not dish_name:
+        raise HTTPException(status_code=400, detail="Podaj nazwę potrawy.")
+    slug = (req.slug or "").strip() or None
+    key = _inspiration_cache_key(slug or "", dish_name)
+
+    if not req.force_refresh:
+        cache = _read_inspiration_cache()
+        hit = cache.get(key)
+        if isinstance(hit, dict) and hit.get("dish_name"):
+            try:
+                return InspirationRecipeResponse(**{**hit, "cached": True, "slug": slug,
+                                                    "credits_deducted": 0, "credits_remaining": None})
+            except Exception:
+                pass
+
+    client = _openai()
+    await _guard_ai()
+
+    try:
+        resp = await client.chat.completions.create(
+            model=INSPIRATIONS_MODEL,
+            temperature=0.35,
+            messages=[
+                {"role": "system", "content": _INSPIRATION_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Wygeneruj przepis dla potrawy: {dish_name}. "
+                        "Zwróć wyłącznie JSON zgodny ze schematem."
+                    ),
+                },
+            ],
+            response_format={"type": "json_schema", "json_schema": _INSPIRATION_JSON_SCHEMA},
+        )
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e.message}") from e
+    except OpenAIError as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+
+    billing = {"credits_deducted": 0, "credits_remaining": None}
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/inspirations/recipe", model=INSPIRATIONS_MODEL,
+            extras={"dish_name": dish_name, "slug": slug},
+        )
+
+    raw = (resp.choices[0].message.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+
+    try:
+        recipe = InspirationRecipeResponse(
+            **data,
+            cached=False,
+            slug=slug,
+            credits_deducted=int(billing.get("credits_deducted") or 0),
+            credits_remaining=billing.get("credits_remaining"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Niepoprawna struktura przepisu: {e}") from e
+
+    cache = _read_inspiration_cache()
+    cache[key] = recipe.model_dump(exclude={"cached", "credits_deducted", "credits_remaining"})
+    _write_inspiration_cache(cache)
+    return recipe
+
+
+# --- 6c) Zapis zatwierdzonych potraw -----------------------------------------
+
+class ConfirmMenuIngredient(BaseModel):
+    name: str
+    quantity: Optional[float] = None
+    unit: str = "g"
+
+
+class ConfirmMenuDish(BaseModel):
+    name: str
+    category: str = "Inne"
+    price_pln: float = 0.0
+    portion_weight_value: Optional[float] = None
+    portion_weight_unit: Optional[str] = None
+    ingredients: list[ConfirmMenuIngredient] = Field(default_factory=list)
+
+
+class ConfirmMenuScanRequest(BaseModel):
+    dishes: list[ConfirmMenuDish]
+
+
+def _make_pos_id_for_category(category: str, offset: int) -> str:
+    prefix_map = {
+        "Burgery": "BRG", "Dania główne": "DAN", "Sałatki": "SAL",
+        "Makarony": "MAK", "Zupy": "ZUP", "Pizza": "PIZ",
+        "Przystawki": "PRZ", "Desery": "DES", "Napoje": "NAP",
+        "Alkohole": "ALK", "Inne": "INN",
+    }
+    return f"{prefix_map.get(category, 'INN')}-{str(offset).zfill(3)}"
+
+
+# Sztywne kategorie systemowe (Menu-to-Inventory Onboarding).
+MENU_CATEGORIES = ['Burgery', 'Pizze', 'Zupy', 'Dania obiadowe', 'Sałatki',
+                   'Desery', 'Napoje', 'Inne']
+WAREHOUSE_CATEGORIES = ['Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', 'Alkohole',
+                        'Napoje', 'Mrożonki', 'Suchy magazyn', 'Chemia i czystość',
+                        'Opakowania', 'Inne']
+_WAREHOUSE_CAT_COLORS = {
+    'Mięso i wędliny': '#DC2626', 'Nabiał': '#F59E0B', 'Warzywa i owoce': '#16A34A',
+    'Alkohole': '#7C3AED', 'Napoje': '#0891B2', 'Mrożonki': '#0EA5E9',
+    'Suchy magazyn': '#B45309', 'Chemia i czystość': '#6366F1',
+    'Opakowania': '#64748B', 'Inne': '#94A3B8',
+}
+
+
+async def _ensure_warehouse_categories(client: httpx.AsyncClient) -> dict:
+    """Zapewnia istnienie sztywnych kategorii magazynowych. Zwraca mapę {norm_name: id}."""
+    existing = await sb_get(client, "inventory_categories", params={"select": "id,name,sort_order"}) or []
+    by_norm = {_norm(r["name"]): r["id"] for r in existing}
+    max_sort = max((int(r.get("sort_order") or 0) for r in existing), default=0)
+    for cat in WAREHOUSE_CATEGORIES:
+        if _norm(cat) in by_norm:
+            continue
+        max_sort += 1
+        try:
+            row = await sb_post(client, "inventory_categories", {
+                "name": cat, "color": _WAREHOUSE_CAT_COLORS.get(cat, "#94A3B8"),
+                "sort_order": max_sort,
+            })
+            created = row[0] if isinstance(row, list) else row
+            by_norm[_norm(cat)] = created["id"]
+        except httpx.HTTPStatusError:
+            pass
+    return by_norm
+
+
+async def _gpt_categorize_ingredients(names: list[str],
+                                      httpx_c: Optional[httpx.AsyncClient] = None) -> dict:
+    """GPT-4o-mini przypisuje każdy składnik do jednej ze sztywnych kategorii magazynowych.
+    Zwraca {name: category}. Best-effort — brakujące → 'Inne'."""
+    result = {n: "Inne" for n in names}
+    if not names:
+        return result
+    try:
+        client = _openai()
+        cats = ", ".join(WAREHOUSE_CATEGORIES)
+        prompt = (
+            "Przypisz każdy produkt spożywczy/gastronomiczny do JEDNEJ kategorii magazynowej.\n"
+            f"Dozwolone kategorie (użyj DOKŁADNIE tych nazw): {cats}.\n"
+            "Zwróć JSON: {\"items\": [{\"name\": <nazwa>, \"category\": <kategoria>}]}.\n"
+            f"Produkty: {json.dumps(names, ensure_ascii=False)}"
+        )
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL, temperature=0.0,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        if httpx_c is not None:
+            await _bill_openai_response(
+                httpx_c, resp,
+                endpoint="/api/menu/confirm-scan",
+                model=CHAT_MODEL,
+                extras={"categorize_count": len(names)},
+            )
+        data = json.loads(resp.choices[0].message.content or "{}")
+        for it in (data.get("items") or []):
+            nm = (it.get("name") or "").strip()
+            cat = (it.get("category") or "Inne").strip()
+            if cat not in WAREHOUSE_CATEGORIES:
+                cat = "Inne"
+            # dopasuj do oryginalnej nazwy (case-insensitive)
+            for orig in names:
+                if _norm(orig) == _norm(nm):
+                    result[orig] = cat
+                    break
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_gpt_categorize_ingredients failed: {e}")
+    return result
+
+
+async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: list[str]):
+    """Dla każdego składnika receptury, którego NIE MA w magazynie, tworzy nowy produkt
+    (stan 0, min 5, bufor 20%) z kategorią przypisaną przez GPT. Zwraca (count, items, warnings)."""
+    warnings: list[str] = []
+    # unikalne, pomijając 'Porcja'/'Wielkość porcji'/'Gramatura' (parametr potrawy, nie produkt).
+    seen: dict[str, str] = {}
+    for n in ingredient_names:
+        nm = (n or "").strip()
+        if not nm or _is_porcja_row(nm):
+            continue
+        key = _norm_name(nm)
+        if key and key not in seen:
+            seen[key] = nm
+    if not seen:
+        return 0, [], warnings
+
+    inv = await sb_get(client, "inventory_items", params={"select": "id,name", "limit": "5000"}) or []
+    to_create: list[str] = []
+    for norm_key, orig in seen.items():
+        hit, _score = _resolve_by_fuzzy(orig, inv, threshold=86)
+        if not hit:
+            to_create.append(orig)
+    if not to_create:
+        return 0, [], warnings
+
+    await _ensure_warehouse_categories(client)
+    cat_map = await _gpt_categorize_ingredients(to_create, client)
+    cat_cache: dict = {}
+    created: list[dict] = []
+    for name in to_create:
+        cat_name = cat_map.get(name, "Inne")
+        cat_id = await _resolve_category_id_cached(client, cat_name, cat_cache)
+        payload = {
+            "name": name, "category_id": cat_id, "quantity": 0,
+            "unit": "szt", "min_quantity": 5, "safety_buffer_percent": 20,
+            "is_combo_polprodukt": False, "unit_cost": 0,
+        }
+        try:
+            await sb_post(client, "inventory_items", payload)
+            created.append({"name": name, "category": cat_name})
+        except httpx.HTTPStatusError as e:
+            if "safety_buffer_percent" in (e.response.text or ""):
+                payload.pop("safety_buffer_percent", None)
+                try:
+                    await sb_post(client, "inventory_items", payload)
+                    created.append({"name": name, "category": cat_name})
+                except httpx.HTTPStatusError as e2:
+                    warnings.append(f"{name}: nie utworzono w magazynie ({e2.response.text[:80]}).")
+            else:
+                warnings.append(f"{name}: nie utworzono w magazynie ({e.response.text[:80]}).")
+    return len(created), created, warnings
+
+
+
+@app.post("/api/menu/confirm-scan")
+async def menu_confirm_scan(req: ConfirmMenuScanRequest):
+    """Zapisuje zatwierdzone potrawy do bazy (menu_items + recipe_ingredients).
+    Wielkość porcji jest zapisywana jako parametr nadrzędny w
+    `menu_items.portion_size_grams` (i opcjonalnie `portion_size_unit`), NIGDY
+    jako wiersz 'Porcja' w recipe_ingredients ani jako produkt w inventory_items."""
+    if not req.dishes:
+        raise HTTPException(status_code=400, detail="Brak potraw do zapisania.")
+
+    # Ostatnia bramka spójności jednostek przed zapisem receptur.
+    _canonicalize_ingredient_units(req.dishes)
+
+    inserted = 0
+    skipped = 0
+    restored = 0
+    saved: list[dict] = []
+    warnings: list[str] = []
+    all_ingredient_names: list[str] = []
+    portion_column_missing = False
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        try:
+            existing_menu = await sb_get(client, "menu_items", params={
+                "select": "id,name,is_active,category,price_pln", "limit": "10000",
+            }) or []
+        except httpx.HTTPStatusError:
+            existing_menu = await sb_get(client, "menu_items", params={
+                "select": "id,name,category,price_pln", "limit": "10000",
+            }) or []
+        existing_count_rows = existing_menu
+        base_offset = len(existing_count_rows or [])
+
+        for idx, dish in enumerate(req.dishes):
+            name = (dish.name or "").strip()
+            if not name:
+                continue
+            category = dish.category or "Inne"
+            price = float(dish.price_pln or 0)
+
+            # Deduplikacja: ta sama potrawa już w menu → pomiń / przywróć nieaktywną
+            hit, _sc = _resolve_by_fuzzy(name, existing_menu, threshold=88)
+            if hit:
+                if hit.get("is_active") is False:
+                    patch = {"is_active": True, "is_available": True}
+                    if price > 0:
+                        patch["price_pln"] = price
+                    if category:
+                        patch["category"] = category
+                    try:
+                        await sb_patch(client, "menu_items", {"id": f"eq.{hit['id']}"}, patch)
+                        restored += 1
+                        saved.append({"id": hit["id"], "name": hit.get("name") or name,
+                                      "action": "restored"})
+                        warnings.append(f"„{hit.get('name')}” już była w menu (ukryta) — przywrócono.")
+                    except httpx.HTTPStatusError as e:
+                        warnings.append(f"{name}: nie udało się przywrócić ({e.response.text[:80]})")
+                else:
+                    skipped += 1
+                    warnings.append(f"„{hit.get('name') or name}” już jest w menu — pominięto duplikat.")
+                continue
+
+            pos_id = _make_pos_id_for_category(category, base_offset + idx + 1)
+
+            # Wielkość porcji → parametr nadrzędny (baza g/ml: 1 ml == 1 g dla płynów gastro).
+            portion_grams: Optional[float] = None
+            portion_unit: Optional[str] = None
+            if dish.portion_weight_value and dish.portion_weight_unit:
+                try:
+                    pv = float(dish.portion_weight_value)
+                except (TypeError, ValueError):
+                    pv = 0.0
+                pu = _norm_name(dish.portion_weight_unit)
+                if pv > 0:
+                    if pu == "kg":
+                        portion_grams, portion_unit = pv * 1000.0, "g"
+                    elif pu in ("l", "litr", "litry"):
+                        portion_grams, portion_unit = pv * 1000.0, "ml"
+                    elif pu in ("g", "gram", "gramy"):
+                        portion_grams, portion_unit = pv, "g"
+                    elif pu == "ml":
+                        portion_grams, portion_unit = pv, "ml"
+                    else:  # szt / opak / porcja itp. — przelicznik domyślny
+                        portion_grams, portion_unit = pv * _PIECE_DEFAULT_SIZE, "szt"
+
+            menu_payload: dict = {
+                "name": name, "category": category, "price_pln": price,
+                "pos_id": pos_id, "is_active": True,
+            }
+            if portion_grams is not None:
+                menu_payload["portion_size_grams"] = portion_grams
+                menu_payload["portion_size_unit"] = portion_unit
+
+            try:
+                row = await sb_post(client, "menu_items", menu_payload)
+            except httpx.HTTPStatusError as e:
+                body = e.response.text or ""
+                # Fallback: baza bez kolumn portion_size_* → zapisz bez nich i ostrzeż.
+                if ("portion_size_grams" in body or "portion_size_unit" in body) and portion_grams is not None:
+                    portion_column_missing = True
+                    menu_payload.pop("portion_size_grams", None)
+                    menu_payload.pop("portion_size_unit", None)
+                    try:
+                        row = await sb_post(client, "menu_items", menu_payload)
+                    except httpx.HTTPStatusError as e2:
+                        warnings.append(f"{name}: nie zapisano ({e2.response.text[:120]}).")
+                        continue
+                else:
+                    warnings.append(f"{name}: nie zapisano ({body[:120]}).")
+                    continue
+            menu_id = (row[0] if isinstance(row, list) else row)["id"]
+
+            recipe_rows: list[dict] = []
+            for i, ing in enumerate(dish.ingredients):
+                iname = (ing.name or "").strip()
+                if not iname:
+                    continue
+                # Pomiń wielkość porcji — to parametr nadrzędny, nie składnik.
+                if _is_porcja_row(iname):
+                    continue
+                recipe_rows.append({
+                    "menu_item_id": menu_id,
+                    "ingredient_name": iname,
+                    "quantity": float(ing.quantity or 0),
+                    "unit": ing.unit or "g",
+                    "sort_order": i + 1,
+                })
+                all_ingredient_names.append(iname)
+
+            if recipe_rows:
+                try:
+                    await sb_post(client, "recipe_ingredients", recipe_rows)
+                except httpx.HTTPStatusError as e:
+                    warnings.append(f"{name}: składniki niezapisane ({e.response.text[:120]}).")
+
+            inserted += 1
+            saved.append({"id": menu_id, "name": name, "category": category, "price_pln": price, "action": "inserted"})
+            existing_menu.append({"id": menu_id, "name": name, "is_active": True, "category": category, "price_pln": price})
+
+        # Automatyczny onboarding magazynu: utwórz brakujące składniki jako produkty (stan 0).
+        inv_created_count = 0
+        inv_created_items: list[dict] = []
+        try:
+            inv_created_count, inv_created_items, inv_warns = await _auto_onboard_inventory(
+                client, all_ingredient_names)
+            warnings.extend(inv_warns)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"Auto-onboarding magazynu pominięty: {e}")
+
+    if portion_column_missing:
+        warnings.append(
+            "Uwaga: kolumny `menu_items.portion_size_grams` / `portion_size_unit` "
+            "nie istnieją. Uruchom migrację SQL `ADD_PORTION_SIZE.sql`, aby ubytki "
+            "płynnych potraw (l/ml) działały poprawnie."
+        )
+
+    msg_parts = [f"Dodano {inserted} nowych potraw."]
+    if skipped:
+        msg_parts.append(f"Pominięto {skipped} duplikatów (już w menu).")
+    if restored:
+        msg_parts.append(f"Przywrócono {restored} ukrytych.")
+
+    return {
+        "ok": True,
+        "inserted": inserted,
+        "skipped_duplicates": skipped,
+        "restored": restored,
+        "saved": saved,
+        "inventory_created": inv_created_count,
+        "inventory_items": inv_created_items,
+        "warnings": warnings,
+        "message": " ".join(msg_parts),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7) POS Webhook — pełen obieg: sprzedaż → magazyn → finanse
+# ─────────────────────────────────────────────────────────────────────────────
+from datetime import datetime, timezone  # noqa: E402
+
+
+class PosSaleItem(BaseModel):
+    pos_external_id: Optional[str] = None
+    dish_name: Optional[str] = None
+    quantity_sold: float = Field(gt=0)
+    unit_price_pln: Optional[float] = None  # jeśli null → pos_products.price_pln
+
+
+class PosWebhookRequest(BaseModel):
+    external_order_id: Optional[str] = None
+    items: list[PosSaleItem]
+
+
+@app.get("/api/pos/providers")
+async def pos_providers_list():
+    """Lista adapterów popularnych POS (PL) — do pickera w Ustawieniach."""
+    from pos_adapters import PROVIDERS
+    return {"providers": PROVIDERS}
+
+
+@app.post("/api/pos/webhook")
+async def pos_webhook(request: Request, provider: Optional[str] = None):
+    """Odbiera uderzenie POS (kanoniczny JSON lub format konkretnego providera).
+
+    Query: ?provider=gopos|posbistro|dotykacka|… — normalizacja w pos_adapters.
+    Dla każdej pozycji: pos_products → recipes → inventory → revenue.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Oczekiwano JSON body.")
+
+    from pos_adapters import normalize_pos_payload
+    from pydantic import ValidationError
+
+    canonical = normalize_pos_payload(provider, body if isinstance(body, dict) else {})
+    try:
+        req = PosWebhookRequest(**canonical)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Niepoprawny payload POS po normalizacji ({provider or 'generic'}): {e.errors()[:3]}",
+        )
+
+    if not req.items:
+        raise HTTPException(status_code=400, detail="Brak pozycji w zamówieniu.")
+
+    now = datetime.now(timezone.utc)
+    year_month = now.strftime("%Y-%m")
+
+    processed: list[dict] = []
+    inventory_updates: list[dict] = []
+    warnings: list[str] = []
+    revenue_total = 0.0
+    sale_log_ids: list[str] = []
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        for it in req.items:
+            product: Optional[dict] = None
+
+            if it.pos_external_id:
+                rows = await sb_get(client, "pos_products", params={
+                    "select": "id,name,pos_external_id,price_pln",
+                    "pos_external_id": f"eq.{it.pos_external_id}",
+                    "limit": "1",
+                })
+                if rows:
+                    product = rows[0]
+            if product is None and it.dish_name:
+                rows = await sb_get(client, "pos_products", params={
+                    "select": "id,name,pos_external_id,price_pln",
+                    "name": f"ilike.{it.dish_name}",
+                    "limit": "1",
+                })
+                if rows:
+                    product = rows[0]
+
+            if (product is None):
+                key = it.pos_external_id or it.dish_name or "?"
+                # Fallback: menu_items.pos_id + recipe_ingredients (mapowanie w Ustawieniach)
+                menu_row = None
+                if it.pos_external_id:
+                    mrows = await sb_get(client, "menu_items", params={
+                        "select": "id,name,pos_id,price_pln",
+                        "pos_id": f"eq.{it.pos_external_id}",
+                        "is_active": "eq.true",
+                        "limit": "1",
+                    })
+                    if mrows:
+                        menu_row = mrows[0]
+                if menu_row is None and it.dish_name:
+                    mrows = await sb_get(client, "menu_items", params={
+                        "select": "id,name,pos_id,price_pln",
+                        "name": f"ilike.{it.dish_name}",
+                        "is_active": "eq.true",
+                        "limit": "1",
+                    })
+                    if mrows:
+                        menu_row = mrows[0]
+
+                if menu_row is None:
+                    warnings.append(f"Pominięto '{key}' — brak dopasowania w pos_products ani menu_items.")
+                    continue
+
+                qty = float(it.quantity_sold)
+                unit_price = float(it.unit_price_pln) if it.unit_price_pln is not None else float(menu_row.get("price_pln") or 0)
+                line_total = round(unit_price * qty, 2)
+                ings = await sb_get(client, "recipe_ingredients", params={
+                    "select": "id,ingredient_name,quantity,unit,warehouse_product_id",
+                    "menu_item_id": f"eq.{menu_row['id']}",
+                }) or []
+                item_consumed: list[dict] = []
+                mapped = [r for r in ings if r.get("warehouse_product_id")]
+                if not mapped:
+                    warnings.append(
+                        f"'{menu_row['name']}': brak zmapowanych składników (warehouse_product_id) — magazyn nie zaktualizowany."
+                    )
+                else:
+                    for r in mapped:
+                        inv_id = r["warehouse_product_id"]
+                        consume = float(r.get("quantity") or 0) * qty
+                        inv_rows = await sb_get(client, "inventory_items", params={
+                            "select": "id,name,quantity,unit,min_quantity",
+                            "id": f"eq.{inv_id}",
+                            "limit": "1",
+                        })
+                        if not inv_rows:
+                            warnings.append(f"'{menu_row['name']}': brak inventory_items id={inv_id}.")
+                            continue
+                        inv = inv_rows[0]
+                        before = float(inv["quantity"])
+                        after = round(before - consume, 4)
+                        try:
+                            await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": after})
+                        except httpx.HTTPStatusError as e:
+                            warnings.append(f"'{inv['name']}': nie zaktualizowano stanu ({e.response.text[:100]}).")
+                            continue
+                        min_qty = float(inv.get("min_quantity") or 0)
+                        status = "ok"
+                        if after <= 0:
+                            status = "out_of_stock"
+                        elif min_qty > 0 and after <= min_qty:
+                            status = "below_minimum"
+                        upd = {
+                            "inventory_id": inv["id"],
+                            "name": inv["name"],
+                            "unit": inv.get("unit") or r.get("unit") or "kg",
+                            "consumed": consume,
+                            "quantity_before": before,
+                            "quantity_after": after,
+                            "min_quantity": min_qty,
+                            "status": status,
+                        }
+                        inventory_updates.append(upd)
+                        item_consumed.append(upd)
+
+                processed.append({
+                    "pos_external_id": menu_row.get("pos_id") or it.pos_external_id,
+                    "name": menu_row["name"],
+                    "quantity": qty,
+                    "unit_price_pln": unit_price,
+                    "line_total_pln": line_total,
+                    "inventory_consumed": item_consumed,
+                })
+                revenue_total = round(revenue_total + line_total, 2)
+                continue
+
+            qty = float(it.quantity_sold)
+            unit_price = float(it.unit_price_pln) if it.unit_price_pln is not None else float(product.get("price_pln") or 0)
+            line_total = round(unit_price * qty, 2)
+
+            recipes = await sb_get(client, "recipes", params={
+                "select": "id,warehouse_product_id,quantity_per_portion,unit",
+                "pos_product_id": f"eq.{product['id']}",
+            })
+            item_consumed: list[dict] = []
+
+            if not recipes:
+                warnings.append(f"'{product['name']}': brak receptury (recipes) — magazyn nie zaktualizowany.")
+            else:
+                for r in recipes:
+                    inv_id = r["warehouse_product_id"]
+                    consume = float(r["quantity_per_portion"]) * qty
+                    inv_rows = await sb_get(client, "inventory_items", params={
+                        "select": "id,name,quantity,unit,min_quantity",
+                        "id": f"eq.{inv_id}",
+                        "limit": "1",
+                    })
+                    if not inv_rows:
+                        warnings.append(f"'{product['name']}': brak inventory_items id={inv_id}.")
+                        continue
+                    inv = inv_rows[0]
+                    before = float(inv["quantity"])
+                    after = round(before - consume, 4)
+                    try:
+                        await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": after})
+                    except httpx.HTTPStatusError as e:
+                        warnings.append(f"'{inv['name']}': nie zaktualizowano stanu ({e.response.text[:100]}).")
+                        continue
+
+                    min_qty = float(inv.get("min_quantity") or 0)
+                    status = "ok"
+                    if after <= 0:
+                        status = "out_of_stock"
+                    elif min_qty > 0 and after <= min_qty:
+                        status = "below_minimum"
+
+                    upd = {
+                        "inventory_id": inv["id"],
+                        "name": inv["name"],
+                        "unit": inv.get("unit") or r.get("unit") or "kg",
+                        "consumed": consume,
+                        "quantity_before": before,
+                        "quantity_after": after,
+                        "min_quantity": min_qty,
+                        "status": status,
+                    }
+                    inventory_updates.append(upd)
+                    item_consumed.append(upd)
+
+            try:
+                log_rows = await sb_post(client, "pos_sales_log", {
+                    "pos_external_id": product["pos_external_id"],
+                    "pos_product_id": product["id"],
+                    "quantity_sold": qty,
+                })
+                log_id = (log_rows[0] if isinstance(log_rows, list) else log_rows).get("id")
+                if log_id:
+                    sale_log_ids.append(log_id)
+            except httpx.HTTPStatusError as e:
+                warnings.append(f"'{product['name']}': pos_sales_log — {e.response.text[:100]}")
+
+            processed.append({
+                "pos_external_id": product["pos_external_id"],
+                "name": product["name"],
+                "quantity": qty,
+                "unit_price_pln": unit_price,
+                "line_total_pln": line_total,
+                "inventory_consumed": item_consumed,
+            })
+            revenue_total = round(revenue_total + line_total, 2)
+
+        revenue_id: Optional[str] = None
+        if revenue_total > 0:
+            def _fmt_qty(q: float) -> str:
+                return str(int(q)) if float(q).is_integer() else f"{q:g}"
+            summary_items = ", ".join(f"{p['name']} × {_fmt_qty(p['quantity'])}" for p in processed)
+            desc = f"POS: {summary_items}"
+            if req.external_order_id:
+                desc = f"[{req.external_order_id}] {desc}"
+            try:
+                rev_rows = await sb_post(client, "revenue_entries", {
+                    "year_month": year_month,
+                    "description": desc[:255],
+                    "amount_pln": revenue_total,
+                })
+                revenue_id = (rev_rows[0] if isinstance(rev_rows, list) else rev_rows).get("id")
+            except httpx.HTTPStatusError as e:
+                warnings.append(f"revenue_entries: {e.response.text[:120]}")
+
+        # POS Bottleneck Engine: przelicz dostępność dań po zjeździe stanu z POS.
+        if inventory_updates:
+            try:
+                await _recompute_menu_availability(client, changed_inventory_ids={u["inventory_id"] for u in inventory_updates})
+            except Exception as e:
+                logger.debug(f"_recompute_menu_availability skipped: {e}")
+
+    return {
+        "ok": True,
+        "external_order_id": req.external_order_id,
+        "processed_items": processed,
+        "inventory_updates": inventory_updates,
+        "revenue_added_pln": revenue_total,
+        "revenue_entry_id": revenue_id,
+        "sale_log_ids": sale_log_ids,
+        "warnings": warnings,
+    }
+
+
+@app.get("/api/pos/products")
+async def pos_products_list():
+    """Helper dla generatora ruchu i debugowania: lista produktów POS."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        rows = await sb_get(client, "pos_products", params={
+            "select": "id,pos_external_id,name,price_pln",
+            "order": "name.asc",
+            "limit": "500",
+        })
+    return {"products": rows or []}
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ŁOWCY OKAZJI — inteligentny system zamówień + porównywarka ofert
+# ═════════════════════════════════════════════════════════════════════════════
+
+RESEND_API_KEY = _resend_api_key()
+RESEND_FROM_EMAIL = _resend_from_email()
+
+# --- Profil restauracji (dane kontaktowe dla dostawców) ----------------------
+# Przechowujemy w Supabase (tabela restaurant_profile, singleton). Jeśli tabela
+# nie istnieje, korzystamy z lokalnego pliku fallback, aby funkcja działała od razu.
+PROFILE_FALLBACK_FILE = Path(__file__).parent / ".restaurant_profile.json"
+
+
+def _read_profile_disk() -> dict:
+    try:
+        if PROFILE_FALLBACK_FILE.exists():
+            data = json.loads(PROFILE_FALLBACK_FILE.read_text(encoding="utf-8"))
+            return {"contact_email": data.get("contact_email", "") or "",
+                    "contact_phone": data.get("contact_phone", "") or ""}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"contact_email": "", "contact_phone": ""}
+
+
+def _write_profile_disk(email: str, phone: str) -> None:
+    try:
+        PROFILE_FALLBACK_FILE.write_text(
+            json.dumps({"contact_email": email, "contact_phone": phone}), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Nie udało się zapisać profilu na dysku: %s", e)
+
+
+async def get_restaurant_profile(client: httpx.AsyncClient) -> dict:
+    try:
+        rows = await sb_get(client, "restaurant_profile",
+                            params={"select": "contact_email,contact_phone", "limit": "1"})
+        if rows:
+            return {"contact_email": rows[0].get("contact_email") or "",
+                    "contact_phone": rows[0].get("contact_phone") or ""}
+        disk = _read_profile_disk()
+        if disk["contact_email"] or disk["contact_phone"]:
+            return disk
+        return {"contact_email": "", "contact_phone": ""}
+    except httpx.HTTPError:
+        return _read_profile_disk()
+
+
+async def set_restaurant_profile(client: httpx.AsyncClient, email: str, phone: str) -> None:
+    payload = {"contact_email": email, "contact_phone": phone,
+               "updated_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        rows = await sb_get(client, "restaurant_profile", params={"select": "id", "limit": "1"})
+        if rows:
+            await sb_patch(client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload)
+        else:
+            await sb_post(client, "restaurant_profile", payload)
+    except httpx.HTTPError:
+        _write_profile_disk(email, phone)
+
+
+def _order_footer(profile: dict) -> str:
+    email = (profile.get("contact_email") or "").strip() or "(brak)"
+    phone = (profile.get("contact_phone") or "").strip() or "(brak)"
+    return ("--- Wiadomość wygenerowana automatycznie przez asystenta AI Gastro-Manager. "
+            "Prosimy NIE ODPOWIADAĆ na tego maila. Kontakt z restauracją wyłącznie pod adresem: "
+            f"{email} lub numerem telefonu: {phone}. ---")
+
+
+class ProfilePayload(BaseModel):
+    contact_email: str = ""
+    contact_phone: str = ""
+
+
+@app.get("/api/restaurant/profile")
+async def get_profile_endpoint():
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        p = await get_restaurant_profile(client)
+    complete = bool((p.get("contact_email") or "").strip() and (p.get("contact_phone") or "").strip())
+    return {**p, "complete": complete}
+
+
+@app.put("/api/restaurant/profile")
+async def put_profile_endpoint(payload: ProfilePayload):
+    email = (payload.contact_email or "").strip()
+    phone = (payload.contact_phone or "").strip()
+    if not email or not phone:
+        raise HTTPException(status_code=400, detail="Podaj e-mail oraz telefon kontaktowy.")
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Podaj poprawny adres e-mail.")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        await set_restaurant_profile(client, email, phone)
+    return {"ok": True, "contact_email": email, "contact_phone": phone, "complete": True}
+
+# --- Jednostki: przeliczanie do wspólnej jednostki bazowej (kg / l / szt) ----
+# dim -> (base_dim, factor_do_bazowej)
+_UNIT_MAP = {
+    "g": ("kg", 0.001), "gram": ("kg", 0.001), "gramy": ("kg", 0.001),
+    "kg": ("kg", 1.0), "kilogram": ("kg", 1.0),
+    "ml": ("l", 0.001), "mililitr": ("l", 0.001),
+    "l": ("l", 1.0), "litr": ("l", 1.0), "litry": ("l", 1.0),
+    "szt": ("szt", 1.0), "sztuka": ("szt", 1.0), "sztuk": ("szt", 1.0),
+    "opak": ("szt", 1.0), "opakowanie": ("szt", 1.0),
+    "porcja": ("szt", 1.0), "porcje": ("szt", 1.0),
+}
+
+
+def _norm_unit(u: str):
+    """Zwraca (base_dim, factor). Domyślnie traktujemy jak 'szt'."""
+    key = (u or "").strip().lower().rstrip(".")
+    return _UNIT_MAP.get(key, ("szt", 1.0))
+
+
+def _slug(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9 ]", " ", s.lower())
+
+
+def _tokens(s: str):
+    return [t for t in _slug(s).split() if len(t) > 2]
+
+
+def _match_score(req_name: str, cand_name: str) -> float:
+    """Ułamek istotnych tokenów zapytania obecnych w nazwie z katalogu (0..1)."""
+    rt = set(_tokens(req_name))
+    ct = set(_tokens(cand_name))
+    if not rt or not ct:
+        return 0.0
+    inter = rt & ct
+    if not inter:
+        return 0.0
+    return len(inter) / len(rt)
+
+
+def _catalog_base_price(row: dict):
+    """(base_dim, cena_za_jednostke_bazowa) na podstawie wiersza supplier_catalog."""
+    try:
+        price = float(row.get("price_pln") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    if price <= 0:
+        return None
+    try:
+        liters = float(row.get("liters_total") or 0)
+    except (TypeError, ValueError):
+        liters = 0.0
+    # Produkty płynne mają wypełnione liters_total → cena za litr
+    if liters > 0:
+        return ("l", price / liters)
+    # Produkty sztukowe/opakowaniowe z podaną wagą (kg_total) → cena za kg.
+    try:
+        kg = float(row.get("kg_total") or 0)
+    except (TypeError, ValueError):
+        kg = 0.0
+    if kg > 0:
+        return ("kg", price / kg)
+    base_dim, _ = _norm_unit(row.get("unit"))
+    if base_dim in ("kg", "l"):
+        # W tym katalogu cena dla jednostek wagowych/objętościowych jest za 1 kg / 1 l
+        return (base_dim, price)
+    # Sztuki / opakowania: dzielimy cenę paczki przez liczbę sztuk
+    try:
+        count = float(row.get("unit_count") or 1) or 1.0
+    except (TypeError, ValueError):
+        count = 1.0
+    return ("szt", price / count)
+
+
+def _catalog_pack_base_qty(row: dict, base_dim: str) -> float:
+    """Wielkość jednego opakowania katalogowego w jednostce bazowej (kg/l/szt)."""
+    try:
+        liters = float(row.get("liters_total") or 0)
+    except (TypeError, ValueError):
+        liters = 0.0
+    if liters > 0 and base_dim == "l":
+        return liters
+    try:
+        kg = float(row.get("kg_total") or 0)
+    except (TypeError, ValueError):
+        kg = 0.0
+    if kg > 0 and base_dim == "kg":
+        return kg
+    try:
+        count = float(row.get("unit_count") or 0)
+    except (TypeError, ValueError):
+        count = 0.0
+    if count > 0 and base_dim == "szt":
+        return count
+    return 1.0
+
+
+def _qty_in_band(target: float, lo: float, hi: float, pack: float) -> float:
+    """Dobiera ilość w paśmie [lo, hi] (±10% wokół targetu), preferując pełne opakowania.
+
+    Jeśli większe/mniejsze opakowanie w paśmie ma sens (pełne paczki) — wybiera je.
+    Inaczej zwraca target przycięty do [lo, hi].
+    """
+    import math
+    t = max(0.0, float(target or 0))
+    lo_v = max(0.0, float(lo if lo is not None else t * 0.9))
+    hi_v = max(lo_v, float(hi if hi is not None else t * 1.1))
+    if t <= 0:
+        return 0.0
+    pack_v = float(pack or 1.0)
+    if pack_v <= 0:
+        pack_v = 1.0
+    # ciągłe / jednostkowe — trzymaj target w paśmie
+    if pack_v <= 1.0001 and abs(pack_v - 1.0) < 1e-6:
+        return round(min(hi_v, max(lo_v, t)), 4)
+    # pełne paczki w paśmie
+    n_lo = max(1, int(math.ceil(lo_v / pack_v - 1e-9)))
+    n_hi = max(n_lo, int(math.floor(hi_v / pack_v + 1e-9)))
+    best_n = None
+    best_score = None
+    for n in range(n_lo, n_hi + 1):
+        qty = n * pack_v
+        if qty < lo_v - 1e-9 or qty > hi_v + 1e-9:
+            continue
+        # preferuj pokrycie ≥ target, potem bliskość targetu
+        under = max(0.0, t - qty)
+        dist = abs(qty - t)
+        score = (under, dist, qty)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_n = n
+    if best_n is not None:
+        return round(best_n * pack_v, 4)
+    # żadna paczka nie mieści się — zaokrąglij w górę do cover target, jeśli ≤ hi
+    n_need = max(1, int(math.ceil(t / pack_v - 1e-9)))
+    qty_up = n_need * pack_v
+    if lo_v - 1e-9 <= qty_up <= hi_v + 1e-9:
+        return round(qty_up, 4)
+    return round(min(hi_v, max(lo_v, t)), 4)
+
+
+def _fmt_pln(v: float) -> str:
+    return f"{v:.2f}".replace(".", ",") + " zł"
+
+
+def _fmt_qty(q: float) -> str:
+    return (f"{q:.0f}" if float(q).is_integer() else f"{q:.2f}".replace(".", ","))
+
+
+# --- Schematy ----------------------------------------------------------------
+
+class CompareItem(BaseModel):
+    product_name_or_id: str
+    quantity: float
+    unit: str
+    # Pasmo ±10% wokół deficytu do progu optymalnego — tańsze opakowanie w paśmie wygrywa
+    quantity_min: Optional[float] = None
+    quantity_max: Optional[float] = None
+
+
+class CompareOffersRequest(BaseModel):
+    items: list[CompareItem]
+    restaurant_name: Optional[str] = None
+
+
+class MessageSupplierGroup(BaseModel):
+    supplier_id: Optional[str] = None
+    supplier_name: str
+    supplier_email: Optional[str] = None
+    subtotal_pln: float = 0.0
+    items: list[dict] = Field(default_factory=list)
+
+
+class GenerateMessagesRequest(BaseModel):
+    suppliers: list[MessageSupplierGroup]
+    restaurant_name: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class SendEmailRequest(BaseModel):
+    to: str
+    subject: str
+    html: Optional[str] = None
+    body_text: Optional[str] = None
+    supplier_name: Optional[str] = None
+    # nadpisania (opcjonalne, domyślnie centralny klucz/adres systemowy)
+    api_key: Optional[str] = None
+    from_email: Optional[str] = None
+
+
+class InterpretOrderRequest(BaseModel):
+    text: str
+
+
+# --- Algorytm porównywania ---------------------------------------------------
+
+async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
+    # `kg_total` bywa nieobecne w starszym schemacie — próbujemy z nim, a przy
+    # błędzie „column does not exist” pobieramy bez niego (base-price użyje 0).
+    try:
+        catalog = await sb_get(client, "supplier_catalog", params={
+            "select": "id,supplier_id,name,variant,unit,price_pln,liters_total,kg_total,unit_count,is_visible",
+            "limit": "2000",
+        })
+    except httpx.HTTPStatusError as e:
+        if "kg_total" in (e.response.text or ""):
+            catalog = await sb_get(client, "supplier_catalog", params={
+                "select": "id,supplier_id,name,variant,unit,price_pln,liters_total,unit_count,is_visible",
+                "limit": "2000",
+            })
+        else:
+            raise
+    supplier_select = (
+        "id,name,email,contact_person,phone,min_order_value,"
+        "shipping_cost,free_shipping_threshold,lead_time_days"
+    )
+    try:
+        await sb_get(client, "suppliers", params={
+            "select": "min_order_value,shipping_cost,free_shipping_threshold,lead_time_days",
+            "limit": "1",
+        })
+    except Exception:
+        try:
+            await sb_get(client, "suppliers", params={
+                "select": "min_order_value,shipping_cost,free_shipping_threshold",
+                "limit": "1",
+            })
+            supplier_select = (
+                "id,name,email,contact_person,phone,min_order_value,"
+                "shipping_cost,free_shipping_threshold"
+            )
+        except Exception:
+            try:
+                await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
+                supplier_select = "id,name,email,contact_person,phone,min_order_value"
+            except Exception:
+                supplier_select = "id,name,email,contact_person,phone"
+    suppliers = await sb_get(client, "suppliers", params={
+        "select": supplier_select, "limit": "500",
+    })
+    return catalog or [], suppliers or []
+
+
+async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[str, float]:
+    """
+    Agreguje Reliability Score z supplier_orders (received_ok) / reviews.
+    Fail-soft: pusty dict gdy kolumny / tabela jeszcze nie istnieją.
+
+    TODO(Phase 4 FE): post-delivery rating form → received_ok / missing_count
+    na supplier_orders lub wiersze w supplier_delivery_reviews.
+    """
+    from collections import defaultdict
+    from smart_basket_optimizer import compute_reliability_score
+
+    ok_map: dict[str, int] = defaultdict(int)
+    bad_map: dict[str, int] = defaultdict(int)
+    miss_map: dict[str, int] = defaultdict(int)
+    review_map: dict[str, int] = defaultdict(int)
+
+    try:
+        rows = await sb_get(client, "supplier_orders", params={
+            "select": "supplier_id,received_ok,missing_count",
+            "received_ok": "not.is.null",
+            "limit": "2000",
+        }) or []
+        for r in rows:
+            sid = r.get("supplier_id")
+            if not sid:
+                continue
+            if r.get("received_ok") is True:
+                ok_map[sid] += 1
+            elif r.get("received_ok") is False:
+                bad_map[sid] += 1
+            try:
+                miss_map[sid] += int(r.get("missing_count") or 0)
+            except (TypeError, ValueError):
+                pass
+            review_map[sid] += 1
+    except Exception as e:
+        logger.debug(f"reliability from supplier_orders skipped: {e}")
+
+    try:
+        revs = await sb_get(client, "supplier_delivery_reviews", params={
+            "select": "supplier_id,received_ok,missing_count",
+            "limit": "2000",
+        }) or []
+        for r in revs:
+            sid = r.get("supplier_id")
+            if not sid:
+                continue
+            if r.get("received_ok") is True:
+                ok_map[sid] += 1
+            else:
+                bad_map[sid] += 1
+            try:
+                miss_map[sid] += int(r.get("missing_count") or 0)
+            except (TypeError, ValueError):
+                pass
+            review_map[sid] += 1
+    except Exception as e:
+        logger.debug(f"reliability from delivery_reviews skipped: {e}")
+
+    out: dict[str, float] = {}
+    for sid in set(list(ok_map) + list(bad_map) + list(review_map)):
+        score = compute_reliability_score(
+            received_ok_count=ok_map.get(sid, 0),
+            received_bad_count=bad_map.get(sid, 0),
+            missing_total=miss_map.get(sid, 0),
+            review_count=review_map.get(sid, 0),
+        )
+        if score is not None:
+            out[sid] = score
+    return out
+
+
+# ── AI Synonym Matching (Inteligentny Łowca Okazji) ──────────────────────────
+AI_SYNONYM_SIM_MIN = 55      # min. podobieństwo rapidfuzz, by w ogóle pytać AI
+AI_SYNONYM_CONF_MIN = 0.7    # min. pewność AI, by uznać dopasowanie
+AI_MAX_PER_ITEM = 3          # ile kandydatów AI sprawdzamy na jedną pozycję
+AI_MAX_CHECKS = 12           # globalny limit zapytań AI na jedno porównanie
+
+
+async def _ai_confirm_synonym(
+    httpx_c: httpx.AsyncClient,
+    warehouse_name: str,
+    supplier_name: str,
+    *,
+    request_id: Optional[str] = None,
+) -> tuple[bool, float, dict]:
+    """GPT-4o-mini: czy produkt z hurtowni to ten sam co produkt z magazynu kuchni.
+    Zwraca (is_match, confidence, billing). Zużycie tokenów rozliczane (Token-to-Credit)."""
+    try:
+        client = _openai()
+        prompt = (
+            f"Czy produkt z hurtowni '{supplier_name}' to jest to samo, co produkt "
+            f"z magazynu kuchni '{warehouse_name}'? Odpowiedz wyłącznie krótkim JSON: "
+            '{"is_match": boolean, "confidence": float}.'
+        )
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL, temperature=0.0,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        usage = getattr(resp, "usage", None)
+        billing = {"credits_deducted": 0}
+        if usage:
+            extras = {"synonym_check": f"{warehouse_name} ~ {supplier_name}"}
+            if request_id:
+                extras["request_id"] = request_id
+            billing = await _bill_openai_response(
+                httpx_c, resp,
+                endpoint="/api/orders/compare-offers",
+                model=CHAT_MODEL,
+                extras=extras,
+            )
+        data = json.loads((resp.choices[0].message.content or "{}").strip())
+        return bool(data.get("is_match")), float(data.get("confidence") or 0.0), billing
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_ai_confirm_synonym failed: {e}")
+        return False, 0.0, {"credits_deducted": 0}
+
+
+async def _persist_synonyms(httpx_c: httpx.AsyncClient, additions: dict) -> None:
+    """Dopisuje nowe (potwierdzone przez AI) synonimy do inventory_items.synonyms,
+    aby kolejne porównania działały natychmiast, bez zużywania tokenów AI.
+    additions: {inv_id: {"existing": list[str], "new": set[str]}}"""
+    for inv_id, slot in additions.items():
+        merged = list(slot.get("existing") or [])
+        low = {str(x).strip().lower() for x in merged}
+        changed = False
+        for name in slot.get("new") or set():
+            key = str(name).strip().lower()
+            if key and key not in low:
+                merged.append(name)
+                low.add(key)
+                changed = True
+        if changed:
+            try:
+                await sb_patch(httpx_c, "inventory_items", {"id": f"eq.{inv_id}"},
+                               {"synonyms": merged})
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"_persist_synonyms patch failed for {inv_id}: {e}")
+
+
+_LONG_SHELF_KEYWORDS = (
+    "mąka", "maka", "cukier", "sól", "sol ", "olej", "ocet", "ryż", "ryz",
+    "makaron", "kasza", "pelati", "puszka", "konserwa", "bulion", "przypraw",
+)
+
+
+async def _load_long_shelf_fillers(client: httpx.AsyncClient, limit: int = 18) -> list[dict]:
+    """Produkty magazynowe / katalogowe o długiej dacie — wypełniacze progów."""
+    out: list[dict] = []
+    try:
+        inv = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,unit,min_quantity",
+            "limit": "800",
+        }) or []
+        for row in inv:
+            name = (row.get("name") or "").lower()
+            if any(k in name for k in _LONG_SHELF_KEYWORDS):
+                out.append({
+                    "name": row.get("name"),
+                    "stock": float(row.get("quantity") or 0),
+                    "unit": row.get("unit") or "szt",
+                    "source": "warehouse",
+                })
+            if len(out) >= limit:
+                break
+    except Exception as e:
+        logger.warning(f"_load_long_shelf_fillers: {e}")
+    return out
+
+
+async def _load_deal_hunter_kitchen_signals(
+    client: httpx.AsyncClient,
+    *,
+    days: int = 30,
+) -> dict:
+    """
+    Sygnały kuchni (ostatnie ~30 dni) dla priority score + suggestions.
+    Zwraca:
+      kitchen_priorities: { inventory_id | norm_name → {score, class_a, reasons, ...} }
+      waste_top: [{name, cost_pln?, qty?}, ...]
+      fillers: long-shelf candidates
+    Fail-soft — puste mapy gdy brak danych / błąd.
+    """
+    from smart_basket_optimizer import compute_priority_score, _product_norm_key
+
+    kitchen_priorities: dict[str, dict] = {"_by_name": {}}
+    waste_top: list[dict] = []
+    fillers: list[dict] = []
+
+    try:
+        fillers = await _load_long_shelf_fillers(client)
+    except Exception as e:
+        logger.warning(f"deal_hunter fillers: {e}")
+
+    # ── POS / menu sales (30d) ──
+    sales_by_ing: dict[str, float] = {}
+    try:
+        dish_sales = await _aggregate_menu_sales(client, days)
+        # Map dish sales → ingredients via recipes (same idea as rank_inventory_usage)
+        ri = await sb_get(client, "recipe_ingredients", params={
+            "select": "menu_item_id,ingredient_name,quantity,unit",
+            "limit": "30000",
+        }) or []
+        by_menu: dict[str, list] = {}
+        for r in ri:
+            by_menu.setdefault(r["menu_item_id"], []).append(r)
+        for d in dish_sales:
+            sold = float(d.get("qty_sold") or 0)
+            if sold <= 0:
+                continue
+            # dish-level sales score (for menu items that are also ordered as products)
+            dname = _product_norm_key(str(d.get("name") or ""))
+            if dname:
+                sales_by_ing[dname] = sales_by_ing.get(dname, 0.0) + sold
+            for ing in by_menu.get(d["menu_item_id"], []):
+                iname = _product_norm_key(str(ing.get("ingredient_name") or ""))
+                if not iname:
+                    continue
+                used = float(ing.get("quantity") or 0) * sold
+                sales_by_ing[iname] = sales_by_ing.get(iname, 0.0) + used
+    except Exception as e:
+        logger.warning(f"deal_hunter menu sales: {e}")
+
+    # ── Waste TOP (30d) ──
+    waste_qty: dict[str, float] = {}
+    try:
+        from datetime import datetime, timezone, timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        logs = await sb_get(client, "waste_logs", params={
+            "select": "item_name,quantity,unit,created_at,item_id",
+            "created_at": f"gte.{_pg_ts(since)}",
+            "order": "created_at.desc",
+            "limit": "5000",
+        }) or []
+        for w in logs:
+            key = _product_norm_key(str(w.get("item_name") or ""))
+            if not key:
+                continue
+            waste_qty[key] = waste_qty.get(key, 0.0) + float(w.get("quantity") or 0)
+        ranked_waste = sorted(waste_qty.items(), key=lambda kv: -kv[1])
+        waste_top = [{"name": k, "qty": v} for k, v in ranked_waste[:15]]
+    except Exception as e:
+        logger.warning(f"deal_hunter waste: {e}")
+
+    # ── Inventory stock vs min (low stock) ──
+    inv_rows: list[dict] = []
+    try:
+        inv_rows = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,min_quantity,unit",
+            "limit": "5000",
+        }) or []
+    except Exception as e:
+        logger.warning(f"deal_hunter inventory: {e}")
+
+    max_sales = max(sales_by_ing.values()) if sales_by_ing else 0.0
+    max_waste = max(waste_qty.values()) if waste_qty else 0.0
+
+    for row in inv_rows:
+        name = str(row.get("name") or "")
+        key = _product_norm_key(name)
+        iid = str(row.get("id") or "")
+        qty = float(row.get("quantity") or 0)
+        try:
+            min_q = float(row.get("min_quantity") or 0)
+        except (TypeError, ValueError):
+            min_q = 0.0
+        low_stock = min_q > 0 and qty <= min_q
+        sales_rank = (sales_by_ing.get(key, 0.0) / max_sales) if max_sales > 0 else 0.0
+        # usage ≈ sales_by_ing (recipe×POS) — reuse as usage_rank
+        usage_rank = sales_rank
+        waste_rank = (waste_qty.get(key, 0.0) / max_waste) if max_waste > 0 else 0.0
+        pri = compute_priority_score(
+            sales_rank=sales_rank,
+            usage_rank=usage_rank,
+            waste_rank=waste_rank,
+            low_stock=low_stock,
+            critical_shortage=False,
+        )
+        pri["name"] = name
+        pri["inventory_id"] = iid
+        if iid:
+            kitchen_priorities[iid] = pri
+        if key:
+            kitchen_priorities["_by_name"][key] = pri
+            kitchen_priorities[key] = pri
+
+    # Also stamp pure waste/sales keys not in inventory
+    for key, val in sales_by_ing.items():
+        if key in kitchen_priorities:
+            continue
+        sales_rank = (val / max_sales) if max_sales > 0 else 0.0
+        waste_rank = (waste_qty.get(key, 0.0) / max_waste) if max_waste > 0 else 0.0
+        pri = compute_priority_score(
+            sales_rank=sales_rank,
+            usage_rank=sales_rank,
+            waste_rank=waste_rank,
+        )
+        kitchen_priorities[key] = pri
+        kitchen_priorities["_by_name"][key] = pri
+
+    return {
+        "kitchen_priorities": kitchen_priorities,
+        "waste_top": waste_top,
+        "fillers": fillers,
+    }
+
+
+async def _enrich_deal_hunter_ai_tips(
+    client: httpx.AsyncClient,
+    result: dict,
+    per_item: list[dict],
+) -> dict:
+    """LLM jako analityk biznesowy — NIE liczy koszyków, tylko smart_tip + summary.
+
+    Koszty API: jedno wywołanie na porównanie, kompaktowy JSON wejściowy.
+    """
+    scenarios = result.get("scenarios") or []
+    if not scenarios:
+        scenarios = [
+            result.get("scenario_split_max"),
+            result.get("scenario_monolith"),
+            result.get("scenario_smart_hybrid"),
+        ]
+        scenarios = [s for s in scenarios if isinstance(s, dict)]
+    if not scenarios:
+        return result
+
+    needed = [p.get("product_name") for p in per_item if p.get("product_name")]
+    compact_scenarios = []
+    for sc in scenarios:
+        compact_scenarios.append({
+            "id": sc.get("id"),
+            "label": sc.get("label"),
+            "products_pln": sc.get("products_pln"),
+            "shipping_pln": sc.get("shipping_pln"),
+            "total_pln": sc.get("total_pln"),
+            "supplier_count": sc.get("supplier_count"),
+            "viable": sc.get("viable"),
+            "meets_all_minimums": sc.get("meets_all_minimums"),
+            "missing": (sc.get("missing") or [])[:8],
+            "logistics_hints": sc.get("logistics_hints") or [],
+            "math_tip": sc.get("smart_tip") or "",
+            "split": {
+                (g.get("supplier_name") or "?"): [
+                    i.get("product_name") for i in (g.get("items") or [])[:12]
+                ]
+                for g in (sc.get("suppliers") or [])
+            },
+        })
+
+    fillers = await _load_long_shelf_fillers(client)
+    # Structured evidence from math suggestions — LLM must not invent tips
+    math_suggestions = result.get("suggestions") or []
+    decision_log = result.get("decision_log") or []
+    prompt = (
+        "Jesteś 'Łowcą Okazji' – doradcą zakupowym Gastro Manager. "
+        "Koszyki i kwoty są JUŻ WYLICZONE matematycznie — NIE zmieniaj liczb. "
+        "Twoje zadanie: napisać krótkie, praktyczne tipy po polsku.\n\n"
+        f"Produkty potrzebne: {json.dumps(needed, ensure_ascii=False)}\n"
+        f"Scenariusze (math): {json.dumps(compact_scenarios, ensure_ascii=False)}\n"
+        f"Wypełniacze długoterminowe z magazynu: {json.dumps(fillers, ensure_ascii=False)}\n"
+        f"Sugestie matematyczne (evidence — bazuj na nich, nie wymyślaj): "
+        f"{json.dumps(math_suggestions[:12], ensure_ascii=False)}\n"
+        f"Decision log (fragment): {json.dumps((decision_log or [])[:8], ensure_ascii=False)}\n\n"
+        "Zwróć WYŁĄCZNIE JSON:\n"
+        "{"
+        '"analysis_summary":"2-3 zdania podsumowania dla szefa kuchni",'
+        '"recommended_variant_id":"split_max|monolith|smart_hybrid",'
+        '"recommended_reason":"jedno zdanie dlaczego",'
+        '"tips":[{"scenario_id":"...","smart_tip":"konkretna rada (minima/dostawa/wypełniacz)"}],'
+        '"suggestion_rewrites":[{"type":"...","message":"opcjonalnie dopracowana treść sugestii"}]'
+        "}"
+    )
+    try:
+        oai = _openai()
+        resp = await oai.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.3,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Analityk finansowy gastronomii. Nie wymyślaj cen ani faktów. "
+                        "Opieraj tipy na logistics_hints, sugestiach matematycznych i wypełniaczach."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        bill = await _bill_openai_response(
+            client, resp, endpoint="/api/orders/compare-offers/tips",
+            model=CHAT_MODEL, extras={"scenarios": len(scenarios)},
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw) if raw else {}
+    except Exception as e:
+        logger.warning(f"_enrich_deal_hunter_ai_tips LLM failed: {e}")
+        return result
+
+    tips_by_id = {
+        (t.get("scenario_id") or ""): (t.get("smart_tip") or "").strip()
+        for t in (parsed.get("tips") or [])
+        if isinstance(t, dict)
+    }
+
+    def _apply(sc: Optional[dict]) -> Optional[dict]:
+        if not isinstance(sc, dict):
+            return sc
+        tip = tips_by_id.get(sc.get("id") or "")
+        if tip:
+            sc = dict(sc)
+            sc["smart_tip"] = tip
+        return sc
+
+    result["scenario_split_max"] = _apply(result.get("scenario_split_max"))
+    result["scenario_monolith"] = _apply(result.get("scenario_monolith"))
+    result["scenario_smart_hybrid"] = _apply(result.get("scenario_smart_hybrid"))
+    result["scenarios"] = [_apply(s) for s in (result.get("scenarios") or [])]
+
+    summary = (parsed.get("analysis_summary") or "").strip()
+    if summary:
+        result["analysis_summary"] = summary
+        result["assistant_speech"] = summary
+    rec = (parsed.get("recommended_variant_id") or "").strip()
+    if rec in ("split_max", "monolith", "smart_hybrid"):
+        result["recommended_scenario_id"] = rec
+        reason = (parsed.get("recommended_reason") or "").strip()
+        if reason:
+            result["recommended_reason"] = reason
+
+    # Optional LLM wording polish for math suggestions (keep evidence intact)
+    rewrites = {
+        (r.get("type") or ""): (r.get("message") or "").strip()
+        for r in (parsed.get("suggestion_rewrites") or [])
+        if isinstance(r, dict) and (r.get("message") or "").strip()
+    }
+    if rewrites and isinstance(result.get("suggestions"), list):
+        polished = []
+        for s in result["suggestions"]:
+            s2 = dict(s)
+            t = s2.get("type") or ""
+            if t in rewrites:
+                s2["message"] = rewrites[t]
+                s2["llm_polished"] = True
+            polished.append(s2)
+        result["suggestions"] = polished
+    if bill:
+        result.setdefault("_tips_billing", bill)
+        # Dołącz do głównego rozliczenia jeśli merge_billing nie był wywołany
+        if bill.get("credits_deducted"):
+            result["credits_deducted"] = int(result.get("credits_deducted") or 0) + int(
+                bill.get("credits_deducted") or 0
+            )
+            if bill.get("credits_remaining") is not None:
+                result["credits_remaining"] = bill.get("credits_remaining")
+    return result
+
+
+def _merge_duplicate_compare_items(per_item: list[dict]) -> list[dict]:
+    """Łączy linie porównania, które to ten sam produkt magazynowy / ten sam food_key.
+
+    Chroni przed podwójnym zamówieniem (np. „filet z kurczaka” + „kurczak filet” → 2× 6 kg).
+    Różne cięcia (filet vs pierś) mają inny food_key i zostają osobno.
+    """
+    if len(per_item) <= 1:
+        return per_item
+
+    def _group_key(pi: dict) -> str:
+        inv = pi.get("inventory_id")
+        if inv:
+            return f"inv:{inv}"
+        fk = (pi.get("food_key") or _food_match_key(pi.get("product_name") or "")).strip()
+        unit = (pi.get("unit") or "").strip().lower()
+        return f"fk:{fk}|{unit}" if fk else f"name:{_norm_pl(pi.get('product_name') or '')}|{unit}"
+
+    buckets: dict[str, list[dict]] = {}
+    for pi in per_item:
+        buckets.setdefault(_group_key(pi), []).append(pi)
+
+    merged: list[dict] = []
+    for group in buckets.values():
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        # Dodatkowo: wymagaj podobieństwa nazw jeśli tylko food_key (uniknij przypadkowych zderzeń)
+        if not group[0].get("inventory_id") and len(group) > 1:
+            refined: list[list[dict]] = []
+            for pi in group:
+                placed = False
+                for cluster in refined:
+                    ref = cluster[0].get("product_name") or ""
+                    cand = pi.get("product_name") or ""
+                    if fuzz.token_set_ratio(_norm_pl(ref), _norm_pl(cand)) >= 86:
+                        cluster.append(pi)
+                        placed = True
+                        break
+                if not placed:
+                    refined.append([pi])
+            subgroups = refined
+        else:
+            subgroups = [group]
+
+        for cluster in subgroups:
+            if len(cluster) == 1:
+                merged.append(cluster[0])
+                continue
+            base = dict(cluster[0])
+            total_qty = sum(float(x.get("quantity") or 0) for x in cluster)
+            total_base = sum(float(x.get("base_quantity") or x.get("quantity") or 0) for x in cluster)
+            total_target = sum(float(x.get("target_quantity") or x.get("quantity") or 0) for x in cluster)
+            names = [str(x.get("product_name") or "") for x in cluster]
+            # Preferuj najdłuższą / najbardziej opisową nazwę
+            best_name = max(names, key=lambda n: (len(n), n))
+            # Połącz oferty: per dostawca najtańsza linia, przeliczona do nowej ilości
+            bbs: dict[str, dict] = {}
+            for x in cluster:
+                for sid, q in (x.get("best_by_supplier") or {}).items():
+                    prev = bbs.get(sid)
+                    up = float(q.get("unit_price_base") or 0)
+                    if prev is None or up < float(prev.get("unit_price_base") or 1e18):
+                        bbs[sid] = dict(q)
+            for sid, q in bbs.items():
+                up = float(q.get("unit_price_base") or 0)
+                q["line_total"] = round(up * total_base, 2)
+                q["order_base_qty"] = round(total_base, 4)
+            base["product_name"] = best_name
+            base["quantity"] = round(total_qty, 4)
+            base["base_quantity"] = round(total_base, 4)
+            base["target_quantity"] = round(total_target, 4)
+            base["quantity_min"] = round(total_target * 0.9, 4)
+            base["quantity_max"] = round(total_target * 1.1, 4)
+            base["best_by_supplier"] = bbs
+            base["merged_from"] = names
+            merged.append(base)
+    return merged
+
+
+@app.post("/api/orders/compare-offers")
+async def compare_offers(req: CompareOffersRequest):
+    if not req.items:
+        raise HTTPException(status_code=400, detail="Brak pozycji do porównania.")
+
+    request_id = str(uuid.uuid4())
+    per_item = []
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        await _check_ai_access(client, needs_credits=True, needs_deal_hunter=True)
+        catalog, suppliers = await _fetch_catalog_and_suppliers(client)
+        sup_by_id = {s["id"]: s for s in suppliers}
+
+        # Magazyn (nazwa + synonimy) — natychmiastowe dopasowanie bez AI.
+        has_syn = await _has_inventory_synonyms(client)
+        inv_select = "id,name,synonyms" if has_syn else "id,name"
+        inv_rows = await sb_get(client, "inventory_items",
+                                params={"select": inv_select, "limit": "2000"}) or []
+
+        ai_budget = AI_MAX_CHECKS
+        synonym_additions: dict = {}   # inv_id -> {"existing": [...], "new": set()}
+        billing_events: list[dict] = []
+
+        def _consider(bbs: dict, row: dict, price_base: float, base_dim: str,
+                      order_base_qty: float, target_base_qty: float, via: str,
+                      pack_base_qty: float = 0.0, band_hi_base: float = 0.0) -> None:
+            sid = row.get("supplier_id")
+            if not sid:
+                return
+            line_total = round(price_base * order_base_qty, 2)
+            prev = bbs.get(sid)
+            # Tańsza linia wygrywa; przy remisie — ilość bliżej targetu
+            better = False
+            if prev is None:
+                better = True
+            elif line_total < prev["line_total"] - 1e-9:
+                better = True
+            elif abs(line_total - prev["line_total"]) < 1e-9:
+                if abs(order_base_qty - target_base_qty) < abs(
+                    float(prev.get("order_base_qty") or 0) - target_base_qty
+                ):
+                    better = True
+            if better:
+                sup = sup_by_id.get(sid, {})
+                bbs[sid] = {
+                    "supplier_id": sid,
+                    "supplier_name": sup.get("name", "Dostawca"),
+                    "supplier_email": sup.get("email"),
+                    "matched_name": row.get("name"),
+                    "matched_variant": row.get("variant"),
+                    "unit_price_base": round(price_base, 2),
+                    "base_dim": base_dim,
+                    "line_total": line_total,
+                    "matched_via": via,
+                    "order_base_qty": round(order_base_qty, 4),
+                    "target_base_qty": round(target_base_qty, 4),
+                    "pack_base_qty": round(float(pack_base_qty or 0), 4),
+                    "band_hi_base": round(float(band_hi_base or 0), 4),
+                }
+
+        for it in req.items:
+            req_dim, req_factor = _norm_unit(it.unit)
+            req_base_qty = float(it.quantity) * req_factor
+            qty_lo_base = (
+                float(it.quantity_min) * req_factor
+                if it.quantity_min is not None else req_base_qty * 0.9
+            )
+            qty_hi_base = (
+                float(it.quantity_max) * req_factor
+                if it.quantity_max is not None else req_base_qty * 1.1
+            )
+            if qty_hi_base < qty_lo_base:
+                qty_lo_base, qty_hi_base = qty_hi_base, qty_lo_base
+
+            # Rozpoznaj produkt w magazynie → id + istniejące synonimy.
+            inv_row, _ = _resolve_by_fuzzy(it.product_name_or_id, inv_rows, threshold=70)
+            inv_id = inv_row.get("id") if inv_row else None
+            existing_syn = list(inv_row.get("synonyms") or []) if inv_row else []
+            known_names = [it.product_name_or_id]
+            if inv_row:
+                known_names.append(inv_row.get("name", ""))
+            known_names.extend(existing_syn)
+            known_names = [n for n in known_names if n]
+            known_norm = [_norm_pl(n) for n in known_names]
+
+            best_by_supplier: dict[str, dict] = {}
+            candidates: list[tuple] = []   # (row, base_dim, price_base, sim, order_base)
+
+            for row in catalog:
+                if row.get("is_visible") is False:
+                    continue
+                row_name = row.get("name", "")
+                bp = _catalog_base_price(row)
+                if bp is None:
+                    continue
+                base_dim, price_base = bp
+                if base_dim != req_dim:
+                    continue
+                pack = _catalog_pack_base_qty(row, base_dim)
+                order_base = _qty_in_band(req_base_qty, qty_lo_base, qty_hi_base, pack)
+                if order_base <= 0:
+                    continue
+                score = max((_match_score(n, row_name) for n in known_names), default=0.0)
+                if score >= 0.5:
+                    _consider(best_by_supplier, row, price_base, base_dim,
+                              order_base, req_base_qty, "fuzzy",
+                              pack_base_qty=pack, band_hi_base=qty_hi_base)
+                else:
+                    rn = _norm_pl(row_name)
+                    sim = max((max(float(fuzz.token_set_ratio(kn, rn)),
+                                   float(fuzz.partial_ratio(kn, rn)))
+                               for kn in known_norm), default=0.0)
+                    if sim >= AI_SYNONYM_SIM_MIN:
+                        candidates.append((row, base_dim, price_base, sim, order_base, pack))
+
+            # AI Synonym Matching — tylko dla kandydatów poniżej progu fuzzy.
+            if inv_row and candidates and ai_budget > 0:
+                warehouse_name = inv_row.get("name") or it.product_name_or_id
+                # Grupujemy kandydatów po znormalizowanej nazwie — jedno pytanie AI
+                # obejmuje wszystkich dostawców z tą samą nazwą produktu.
+                by_name: dict[str, list] = {}
+                order: list[tuple] = []
+                for row, base_dim, price_base, sim, order_base, pack in candidates:
+                    key = _norm_pl(row.get("name", ""))
+                    if not key:
+                        continue
+                    if key not in by_name:
+                        by_name[key] = []
+                        order.append((key, row.get("name", ""), sim))
+                    by_name[key].append((row, base_dim, price_base, order_base, pack))
+                order.sort(key=lambda o: o[2], reverse=True)
+                per_item_checks = 0
+                for key, disp_name, _sim in order:
+                    if ai_budget <= 0 or per_item_checks >= AI_MAX_PER_ITEM:
+                        break
+                    ai_budget -= 1
+                    per_item_checks += 1
+                    is_match, conf, bill = await _ai_confirm_synonym(
+                        client, warehouse_name, disp_name, request_id=request_id,
+                    )
+                    billing_events.append(bill)
+                    if is_match and conf >= AI_SYNONYM_CONF_MIN:
+                        for row, base_dim, price_base, order_base, pack in by_name[key]:
+                            _consider(best_by_supplier, row, price_base, base_dim,
+                                      order_base, req_base_qty, "ai",
+                                      pack_base_qty=pack, band_hi_base=qty_hi_base)
+                        if inv_id:
+                            slot = synonym_additions.setdefault(
+                                inv_id, {"existing": existing_syn, "new": set()})
+                            slot["new"].add(disp_name)
+
+            # Ilość zamówienia: mediana order_base z dopasowań (albo target)
+            ordered_bases = [
+                float(v.get("order_base_qty") or req_base_qty)
+                for v in best_by_supplier.values()
+            ]
+            if ordered_bases:
+                ordered_bases.sort()
+                chosen_base = ordered_bases[len(ordered_bases) // 2]
+            else:
+                chosen_base = req_base_qty
+            display_qty = chosen_base / req_factor if req_factor else chosen_base
+
+            per_item.append({
+                "product_name": it.product_name_or_id,
+                "quantity": round(display_qty, 4),
+                "unit": it.unit,
+                "base_dim": req_dim,
+                "base_quantity": round(chosen_base, 4),
+                "target_quantity": float(it.quantity),
+                "quantity_min": float(it.quantity_min) if it.quantity_min is not None else round(float(it.quantity) * 0.9, 4),
+                "quantity_max": float(it.quantity_max) if it.quantity_max is not None else round(float(it.quantity) * 1.1, 4),
+                "best_by_supplier": best_by_supplier,
+                "inventory_id": inv_id,
+                "food_key": _food_match_key(it.product_name_or_id),
+            })
+
+        # Scal warianty tej samej pozycji (filet z kurczaka / kurczak filet) → 1 linia w koszyku
+        per_item = _merge_duplicate_compare_items(per_item)
+
+        # Zapamiętaj potwierdzone synonimy (kolejne porównania bez tokenów AI).
+        if has_syn and synonym_additions:
+            await _persist_synonyms(client, synonym_additions)
+
+        reliability_by_sid: dict = {}
+        try:
+            reliability_by_sid = await _load_supplier_reliability_scores(client)
+        except Exception as e:
+            logger.debug(f"reliability scores skipped: {e}")
+
+        suppliers_meta = {
+            sid: {
+                "name": s.get("name", "Dostawca"),
+                "email": s.get("email"),
+                "min_order_value": float(s.get("min_order_value") or 0),
+                "shipping_cost": float(s.get("shipping_cost") or 0),
+                "free_shipping_threshold": float(s.get("free_shipping_threshold") or 0),
+                **({"lead_time_days": float(s["lead_time_days"])}
+                   if s.get("lead_time_days") is not None else {}),
+                **({"reliability_score": float(reliability_by_sid[sid])}
+                   if sid in reliability_by_sid else {}),
+            }
+            for sid, s in sup_by_id.items()
+        }
+        # Kitchen priority signals (POS/usage/waste/stock) — fail-soft
+        kitchen_priorities: dict = {}
+        waste_top: list = []
+        fillers: list = []
+        try:
+            signals = await _load_deal_hunter_kitchen_signals(client, days=30)
+            kitchen_priorities = signals.get("kitchen_priorities") or {}
+            waste_top = signals.get("waste_top") or []
+            fillers = signals.get("fillers") or []
+        except Exception as e:
+            logger.warning(f"deal_hunter kitchen signals skipped: {e}")
+
+        from smart_basket_optimizer import build_smart_optimize_response
+        result = build_smart_optimize_response(
+            per_item,
+            suppliers_meta,
+            kitchen_priorities=kitchen_priorities,
+            waste_top=waste_top,
+            fillers=fillers,
+        )
+        # Warstwa AI: tylko interpretacja tipów (koszyki już policzone matematycznie)
+        try:
+            result = await _enrich_deal_hunter_ai_tips(client, result, per_item)
+        except Exception as e:
+            logger.warning(f"deal_hunter AI tips skipped: {e}")
+        if billing_events:
+            result.update(merge_billing_events(billing_events))
+        else:
+            result.setdefault("credits_deducted", 0)
+        return result
+
+
+@app.post("/api/bargain-hunter/optimize")
+async def bargain_hunter_optimize(req: CompareOffersRequest):
+    return await compare_offers(req)
+
+
+class CriticalOrderRequest(BaseModel):
+    """Zamów wszystkie braki krytyczne (opcjonalnie filtr kategorii) — Smart Optimizer v2."""
+    categories: list[str] = Field(default_factory=lambda: ["all"])
+    restaurant_name: Optional[str] = None
+    force_refresh: bool = False
+
+
+@app.post("/api/optimizer/critical-order")
+async def optimizer_critical_order(req: CriticalOrderRequest):
+    """
+    Łowca Okazji v2 — krytyczne braki → do 3 scenariuszy koszyka.
+    Cache 2h po fingerprintcie listy krytycznej (soft).
+    """
+    from smart_basket_optimizer import cache_get, cache_set, fingerprint_critical, make_cache_key
+
+    cats = req.categories or ["all"]
+    det = await orders_critical_by_category(CriticalByCategoryRequest(
+        categories=cats,
+        restaurant_name=req.restaurant_name,
+        skip_compare=True,
+    ))
+    critical = det.get("critical_products") or []
+    if not critical:
+        return {
+            "ok": bool(det.get("ok", True)),
+            "optimizer_version": 2,
+            "message": det.get("message") or "Brak produktów krytycznych.",
+            "critical_products": [],
+            "matched_categories": det.get("matched_categories"),
+            "unmatched_categories": det.get("unmatched_categories"),
+            "compare": None,
+            "from_cache": False,
+        }
+
+    crit_fp = fingerprint_critical(critical)
+    soft_key = make_cache_key(crit_fp, "soft")
+    if not req.force_refresh:
+        cached = cache_get(soft_key)
+        if cached and cached.get("compare"):
+            return cached
+
+    compare_req = CompareOffersRequest(
+        items=[
+            CompareItem(
+                product_name_or_id=c["name"],
+                quantity=c["deficit"],
+                unit=c["unit"],
+                quantity_min=c.get("order_qty_min"),
+                quantity_max=c.get("order_qty_max"),
+            )
+            for c in critical
+        ],
+        restaurant_name=req.restaurant_name,
+    )
+    try:
+        compare_result = await compare_offers(compare_req)
+    except HTTPException as e:
+        return {
+            "ok": False,
+            "optimizer_version": 2,
+            "message": f"Optymalizacja nieudana: {e.detail}",
+            "critical_products": critical,
+            "compare": None,
+            "from_cache": False,
+        }
+
+    payload = {
+        "ok": True,
+        "optimizer_version": 2,
+        "action": "critical_order",
+        "matched_categories": det.get("matched_categories"),
+        "unmatched_categories": det.get("unmatched_categories"),
+        "critical_products": critical,
+        "compare": compare_result,
+        "is_multivariable": compare_result.get("is_multivariable"),
+        "savings_amount": compare_result.get("savings_amount"),
+        "message": (
+            f"Przeliczono {len(critical)} krytycznych pozycji · "
+            f"{'3 scenariusze' if compare_result.get('is_multivariable') else '1 optymalny koszyk'}."
+        ),
+        "from_cache": False,
+    }
+    cache_set(soft_key, payload)
+    return payload
+
+
+# --- Bulk Category-Targeted Orders (Łowca Okazji na braki) ------------------
+
+# Potoczne słowa → nasze sztywne nazwy kategorii magazynowych.
+_CATEGORY_SYNONYMS: dict[str, list[str]] = {
+    'Mięso i wędliny':   ['mieso', 'mięso', 'wedliny', 'wędliny', 'wolowina', 'wołowina',
+                          'wieprzowina', 'drob', 'drób', 'kurczak', 'szynka', 'kielbasa',
+                          'kiełbasa', 'boczek', 'salami'],
+    'Nabiał':            ['nabial', 'nabiał', 'mleko', 'jogurt', 'ser', 'sery', 'masło',
+                          'maslo', 'smietana', 'śmietana', 'jajka', 'twarog', 'twaróg'],
+    'Warzywa i owoce':   ['warzywa', 'owoce', 'jarzyny', 'sałata', 'salata', 'pomidor',
+                          'ogorek', 'ogórek', 'cebula', 'ziemniaki', 'marchew', 'papryka',
+                          'jablka', 'jabłka', 'banany', 'cytryny'],
+    'Alkohole':          ['alkohol', 'alkohole', 'wodka', 'wódka', 'piwo', 'wino',
+                          'whisky', 'gin', 'rum'],
+    'Napoje':            ['napoje', 'napoj', 'napój', 'soki', 'sok', 'woda', 'kola',
+                          'cola', 'tonik', 'lemoniada'],
+    'Mrożonki':          ['mrozonki', 'mrożonki', 'mrozone', 'mrożone', 'lody', 'frytki mrozone'],
+    'Suchy magazyn':     ['suchy', 'makaron', 'makarony', 'maka', 'mąka', 'ryż', 'ryz',
+                          'kasza', 'cukier', 'sol', 'sól', 'przyprawy', 'konserwy'],
+    'Chemia i czystość': ['chemia', 'srodki czystosci', 'środki czystości', 'plyn',
+                          'płyn', 'mydlo', 'mydło', 'reczniki', 'ręczniki'],
+    'Opakowania':        ['opakowania', 'kubki', 'talerze', 'folie', 'folia', 'sztucce',
+                          'sztućce', 'serwetki', 'papier'],
+    'Inne':              ['inne', 'pozostale', 'pozostałe'],
+}
+
+
+def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]:
+    """Zwraca (matched_canonical, unmatched_raw) — dopasowuje potoczne nazwy do
+    sztywnych kategorii z `WAREHOUSE_CATEGORIES`. Fuzzy matching + słownik synonimów."""
+    matched: list[str] = []
+    unmatched: list[str] = []
+    canonical_norm = {_norm_pl(c): c for c in WAREHOUSE_CATEGORIES}
+    for r in raw or []:
+        s = (r or "").strip()
+        if not s:
+            continue
+        if s.lower() == "all":
+            return ["all"], []
+        key = _norm_pl(s)
+        # 1) exact norm match
+        if key in canonical_norm and canonical_norm[key] not in matched:
+            matched.append(canonical_norm[key])
+            continue
+        # 2) synonim map (norm)
+        found = None
+        for canon, syns in _CATEGORY_SYNONYMS.items():
+            if any(_norm_pl(x) == key or _norm_pl(x) in key or key in _norm_pl(x) for x in syns):
+                found = canon
+                break
+        if found and found not in matched:
+            matched.append(found)
+            continue
+        # 3) rapidfuzz do sztywnych kategorii
+        best = None
+        best_score = 0.0
+        for canon_norm, canon in canonical_norm.items():
+            score = float(fuzz.token_set_ratio(key, canon_norm))
+            if score > best_score:
+                best_score, best = score, canon
+        if best and best_score >= 70 and best not in matched:
+            matched.append(best)
+        else:
+            unmatched.append(s)
+    return matched, unmatched
+
+
+class CriticalByCategoryRequest(BaseModel):
+    categories: list[str] = Field(default_factory=list)
+    restaurant_name: Optional[str] = None
+    skip_compare: bool = False  # True = tylko detekcja braków (bez Łowcy)
+    # critical = tylko qty <= min; optimal = wszystkie poniżej progu optymalnego
+    stock_target: str = "critical"
+
+
+@app.post("/api/orders/critical-by-category")
+async def orders_critical_by_category(req: CriticalByCategoryRequest):
+    """Zbiorcze zamówienie braków magazynowych z filtrem kategorii.
+
+    Krok po kroku:
+      1. Rozpoznaj żądane kategorie (`['all']` = wszystkie).
+      2. Pobierz z `inventory_items` produkty krytyczne (quantity <= min_quantity).
+      3. Filtruj po kategoriach (jeśli != ['all']).
+      4. Wylicz deficyt: `deficit = min_quantity * (1 + safety_buffer_percent/100) - quantity`.
+      5. Przekaż listę pozycji do `/api/orders/compare-offers` (algorytm Łowcy Okazji).
+      6. Zwróć wynik + `matched_categories`, `critical_products`, `unmatched_categories`.
+    """
+    matched, unmatched = _resolve_warehouse_categories(req.categories or [])
+    if not matched:
+        return {
+            "ok": False,
+            "action": "order_critical_items_by_category",
+            "matched_categories": [],
+            "unmatched_categories": unmatched,
+            "critical_products": [],
+            "compare": None,
+            "message": ("Nie rozpoznano żadnej kategorii magazynowej. Powiedz np. "
+                        "'zamów wszystkie braki', 'zamów mięso i nabiał'."),
+        }
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        # Pobierz magazyn wraz z powiązaną kategorią.
+        inv_all: list[dict] = []
+        try:
+            inv_all = await sb_get(
+                client, "inventory_items",
+                params={
+                    "select": ("id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
+                               "category_id,inventory_categories(name)"),
+                    "limit": "5000",
+                },
+            ) or []
+        except httpx.HTTPStatusError as e:
+            # Fallback: bez optimal_quantity / safety_buffer / joina
+            text = (e.response.text if e.response is not None else "") or ""
+            if "optimal_quantity" in text:
+                try:
+                    inv_all = await sb_get(
+                        client, "inventory_items",
+                        params={
+                            "select": ("id,name,quantity,unit,min_quantity,safety_buffer_percent,"
+                                       "category_id,inventory_categories(name)"),
+                            "limit": "5000",
+                        },
+                    ) or []
+                except httpx.HTTPStatusError:
+                    inv_all = []
+            if not inv_all:
+                inv_all = await sb_get(
+                    client, "inventory_items",
+                    params={"select": "id,name,quantity,unit,min_quantity,category_id",
+                            "limit": "5000"},
+                ) or []
+                cat_rows = await sb_get(client, "inventory_categories",
+                                        params={"select": "id,name", "limit": "500"}) or []
+                cat_by_id = {c["id"]: c.get("name") for c in cat_rows}
+                for r in inv_all:
+                    r["inventory_categories"] = {"name": cat_by_id.get(r.get("category_id"))}
+
+        want_all = matched == ["all"]
+        wanted_set = {_norm_pl(x) for x in matched} if not want_all else set()
+        target_mode = (req.stock_target or "critical").strip().lower()
+        if target_mode not in ("critical", "optimal"):
+            target_mode = "critical"
+
+        # Ile produktów jest w wybranych kategoriach (mianownik do X/Y)
+        category_total = 0
+        critical: list[dict] = []
+        for r in inv_all:
+            name = (r.get("name") or "").strip()
+            if not name or "(dup)" in name.lower():
+                continue
+            if r.get("is_active") is False:
+                continue
+            try:
+                qty = float(r.get("quantity") or 0)
+                minq = float(r.get("min_quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            cat_obj = r.get("inventory_categories") or {}
+            cat_name = (cat_obj.get("name") if isinstance(cat_obj, dict) else None) or ""
+            # FE: brak category_id → wyświetla „Inne” (mapDbRow). Backend musi robić to samo.
+            effective_cat = (cat_name or "").strip() or "Inne"
+            if not want_all:
+                if _norm_pl(effective_cat) not in wanted_set:
+                    if not any(
+                        fuzz.token_set_ratio(_norm_pl(effective_cat), w) >= 88
+                        for w in wanted_set
+                    ):
+                        continue
+            category_total += 1
+            buf_pct = float(r.get("safety_buffer_percent") or 20.0)
+            try:
+                opt_user = float(r.get("optimal_quantity") or 0)
+            except (TypeError, ValueError):
+                opt_user = 0.0
+            if opt_user > 0:
+                optimal = opt_user
+            elif minq > 0:
+                optimal = minq * (1.0 + buf_pct / 100.0)
+            else:
+                optimal = 0.0
+
+            if target_mode == "critical":
+                # Brak: poniżej min (gdy ustawione) ALBO stan < 1 gdy brak progu
+                # (wcześniej min_quantity<=0 pomijało puste produkty → za mało pozycji w koszyku)
+                if minq > 0:
+                    is_short = qty <= minq
+                else:
+                    is_short = qty < 1.0
+                if not is_short:
+                    continue
+                if optimal <= 0:
+                    optimal = max(minq, 1.0)
+            else:
+                # optimal: wszystko poniżej progu; pusty stan bez progu → zamów 1
+                if optimal <= 0:
+                    if qty > 0:
+                        continue
+                    optimal = 1.0
+                if qty >= optimal:
+                    continue
+
+            deficit = max(0.0, round(optimal - qty, 4))
+            if deficit <= 0:
+                if qty <= 0:
+                    deficit = max(1.0, optimal or 1.0)
+                else:
+                    continue
+            qty_lo = round(deficit * 0.9, 4)
+            qty_hi = round(deficit * 1.1, 4)
+            critical.append({
+                "id": r["id"],
+                "name": name,
+                "unit": r.get("unit") or "szt",
+                "current_quantity": qty,
+                "min_quantity": minq,
+                "safety_buffer_percent": buf_pct,
+                "optimal_quantity": round(optimal, 4),
+                "deficit": deficit,
+                "order_qty_min": qty_lo,
+                "order_qty_max": qty_hi,
+                "category": effective_cat,
+            })
+
+        if not critical:
+            return {
+                "ok": True,
+                "action": "order_critical_items_by_category",
+                "matched_categories": matched,
+                "unmatched_categories": unmatched,
+                "category_total": category_total,
+                "critical_products": [],
+                "compare": None,
+                "message": (
+                    f"Brak produktów do zamówienia w kategoriach: {', '.join(matched)} "
+                    f"(w kategorii: {category_total} pozycji)."
+                    if not want_all else
+                    "Nie znaleziono braków w magazynie."
+                ),
+            }
+
+    if req.skip_compare:
+        return {
+            "ok": True,
+            "action": "order_critical_items_by_category",
+            "matched_categories": matched,
+            "unmatched_categories": unmatched,
+            "category_total": category_total,
+            "critical_products": critical,
+            "critical_count": len(critical),
+            "compare": None,
+            "message": (
+                f"Znaleziono {len(critical)} braków do zamówienia "
+                f"(w kategorii łącznie {category_total} pozycji)."
+            ),
+        }
+
+    # Wywołaj Łowcę Okazji na wyliczonym koszyku (własny async client w środku).
+    compare_req = CompareOffersRequest(
+        items=[
+            CompareItem(
+                product_name_or_id=c["name"],
+                quantity=c["deficit"],
+                unit=c["unit"],
+                quantity_min=c.get("order_qty_min"),
+                quantity_max=c.get("order_qty_max"),
+            )
+            for c in critical
+        ],
+        restaurant_name=req.restaurant_name,
+    )
+    compare_result: Optional[dict] = None
+    compare_error: Optional[str] = None
+    try:
+        compare_result = await compare_offers(compare_req)
+    except HTTPException as e:
+        compare_error = f"compare-offers HTTP {e.status_code}: {e.detail}"
+    except Exception as e:  # noqa: BLE001
+        compare_error = f"compare-offers: {str(e)[:120]}"
+
+    found_in_offers = 0
+    if isinstance(compare_result, dict):
+        req_items = compare_result.get("items_requested") or []
+        found_in_offers = sum(1 for it in req_items if it.get("found"))
+
+    # Mianownik = wszystkie produkty w kategorii (np. 80), licznik = znalezione w ofertach
+    denom = category_total if category_total > 0 else len(critical)
+    msg_parts = [
+        f"Do zamówienia: {len(critical)} braków"
+        + (f" z kategorii {', '.join(matched)}" if not want_all else " (globalnie)")
+        + f" · w kategorii łącznie {category_total} pozycji."
+    ]
+    msg_parts.append(
+        f"W ofertach dostawców dopasowano {found_in_offers} z {denom} pozycji."
+    )
+    if unmatched:
+        msg_parts.append(f"Nierozpoznane kategorie: {', '.join(unmatched)}.")
+    if compare_error:
+        msg_parts.append(compare_error)
+
+    return {
+        "ok": True,
+        "action": "order_critical_items_by_category",
+        "matched_categories": matched,
+        "unmatched_categories": unmatched,
+        "category_total": category_total,
+        "critical_products": critical,
+        "critical_count": len(critical),
+        "found_in_offers_count": found_in_offers,
+        "compare": compare_result,
+        "message": " ".join(msg_parts),
+    }
+
+
+def _is_internal_order_note(notes: Optional[str]) -> bool:
+    """Notatki wewnętrzne (koszyk / draft) — nie trafiają do maila do dostawcy."""
+    t = (notes or "").strip().lower()
+    if not t:
+        return True
+    markers = (
+        "łowca okazji",
+        "lowca okazji",
+        "zapisane na później",
+        "zapisane na pozniej",
+        "na później",
+        "na pozniej",
+        "[internal]",
+    )
+    return any(m in t for m in markers)
+
+@app.post("/api/orders/generate-messages")
+async def generate_messages(req: GenerateMessagesRequest):
+    if not req.suppliers:
+        raise HTTPException(status_code=400, detail="Brak dostawców do wygenerowania wiadomości.")
+    restaurant = (req.restaurant_name or "Nasza restauracja").strip()
+    today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as _c:
+        profile = await get_restaurant_profile(_c)
+    footer = _order_footer(profile)
+    contact_email = (profile.get("contact_email") or "").strip()
+    contact_phone = (profile.get("contact_phone") or "").strip()
+    contact_block = ""
+    if contact_email or contact_phone:
+        parts = []
+        if contact_email:
+            parts.append(f"e-mail: {contact_email}")
+        if contact_phone:
+            parts.append(f"tel.: {contact_phone}")
+        contact_block = "W razie pytań prosimy o kontakt: " + ", ".join(parts) + "."
+
+    messages = []
+    for g in req.suppliers:
+        items = g.items or []
+        subtotal = g.subtotal_pln or round(sum(float(i.get("line_total") or 0) for i in items), 2)
+        supplier_hello = (g.supplier_name or "Państwa firmę").strip()
+
+        rows_html = ""
+        for i in items:
+            qty = _fmt_qty(float(i.get("quantity") or 0))
+            unit = i.get("unit", "")
+            name = i.get("matched_name") or i.get("product_name", "")
+            line = float(i.get("line_total") or 0)
+            rows_html += (
+                f"<tr>"
+                f"<td style='padding:8px 10px;border:1px solid #E2E8F0'>{name}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:center'>{qty} {unit}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:right'>{_fmt_pln(line)}</td>"
+                f"</tr>"
+            )
+
+        safe_notes = (req.notes or "").strip()
+        if _is_internal_order_note(safe_notes):
+            safe_notes = ""
+        notes_html = (
+            f'<p style="margin-top:12px"><strong>Uwagi do zamówienia:</strong> {safe_notes}</p>'
+            if safe_notes else ""
+        )
+        email_html = f"""<div style="font-family:Arial,Helvetica,sans-serif;color:#0F172A;max-width:640px;line-height:1.5">
+  <p>Szanowni Państwo,</p>
+  <p>
+    w imieniu restauracji <strong>{restaurant}</strong> przesyłamy zamówienie towaru
+    z prośbą o potwierdzenie realizacji.
+  </p>
+  <p style="margin:0 0 4px 0;color:#64748B;font-size:13px">Data zamówienia: {today}</p>
+  <p style="margin:0 0 14px 0;color:#64748B;font-size:13px">Odbiorca / hurtownia: {supplier_hello}</p>
+  <table style="border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:14px">
+    <thead>
+      <tr style="background:#F1F5F9">
+        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:left">Pozycja</th>
+        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:center">Ilość</th>
+        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right">Wartość orientacyjna</th>
+      </tr>
+    </thead>
+    <tbody>{rows_html}</tbody>
+    <tfoot>
+      <tr>
+        <td colspan="2" style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right;font-weight:700">
+          Łączna wartość orientacyjna
+        </td>
+        <td style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right;font-weight:700">{_fmt_pln(subtotal)}</td>
+      </tr>
+    </tfoot>
+  </table>
+  <p>
+    Prosimy o potwierdzenie: <strong>dostępności produktów</strong>, ostatecznych cen netto
+    oraz <strong>terminu i formy dostawy</strong>.
+    Podane kwoty mają charakter orientacyjny (na podstawie aktualnego cennika) —
+    wiążące będą ceny potwierdzone przez Państwa.
+  </p>
+  {notes_html}
+  <p>{contact_block}</p>
+  <p style="margin-top:20px">
+    Z poważaniem,<br/>
+    <strong>{restaurant}</strong>
+  </p>
+  <p style="color:#94A3B8;font-size:12px;border-top:1px solid #E2E8F0;padding-top:12px;margin-top:20px">{footer}</p>
+</div>"""
+
+        email_text_lines = [
+            "Szanowni Państwo,",
+            "",
+            f"W imieniu restauracji {restaurant} przesyłamy zamówienie towaru "
+            f"(data: {today}) z prośbą o potwierdzenie realizacji.",
+            f"Hurtownia: {supplier_hello}",
+            "",
+            "Zamawiane pozycje:",
+        ]
+        for i in items:
+            pname = i.get("matched_name") or i.get("product_name", "")
+            email_text_lines.append(
+                f"• {pname} — {_fmt_qty(float(i.get('quantity') or 0))} {i.get('unit', '')} "
+                f"(orient. {_fmt_pln(float(i.get('line_total') or 0))})"
+            )
+        email_text_lines += [
+            "",
+            f"Łączna wartość orientacyjna: {_fmt_pln(subtotal)}",
+            "",
+            "Prosimy o potwierdzenie dostępności, ostatecznych cen netto oraz terminu i formy dostawy.",
+            "Podane kwoty mają charakter orientacyjny — wiążące będą ceny potwierdzone przez Państwa.",
+        ]
+        if safe_notes:
+            email_text_lines += ["", f"Uwagi: {safe_notes}"]
+        if contact_block:
+            email_text_lines += ["", contact_block]
+        email_text_lines += ["", "Z poważaniem,", restaurant, "", footer]
+        email_text = "\n".join(email_text_lines)
+
+        sms_items = "; ".join(
+            f"{_fmt_qty(float(i.get('quantity') or 0))} {i.get('unit', '')} "
+            f"{(i.get('matched_name') or i.get('product_name') or '')}"
+            for i in items
+        )
+        sms_text = (
+            f"{restaurant} — zamówienie ({today}): {sms_items}. "
+            f"Orient. {_fmt_pln(subtotal)}. Prosimy o potwierdzenie dostępności i terminu dostawy."
+        )
+        if contact_phone:
+            sms_text += f" Kontakt: {contact_phone}."
+
+        messages.append({
+            "supplier_id": g.supplier_id,
+            "supplier_name": g.supplier_name,
+            "supplier_email": g.supplier_email,
+            "email_subject": f"Zamówienie towaru — {restaurant} | {today}",
+            "email_html": email_html,
+            "email_text": email_text,
+            "email_body_text": email_text,
+            "sms_text": sms_text,
+            "subtotal_pln": subtotal,
+        })
+
+    return {"messages": messages, "profile": profile,
+            "profile_complete": bool(contact_email and contact_phone)}
+
+
+
+# --- Wysyłka e-mail przez Resend ---------------------------------------------
+
+@app.post("/api/orders/send-email")
+async def send_order_email(req: SendEmailRequest):
+    api_key = (req.api_key or _resend_api_key() or RESEND_API_KEY).strip()
+    from_email = (req.from_email or _resend_from_email() or RESEND_FROM_EMAIL).strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Brak klucza Resend (RESEND_API_KEY). "
+                "Dodaj go w backend/.env i zrestartuj uvicorn (zmiana .env wymaga pełnego restartu)."
+            ),
+        )
+    if not req.to:
+        raise HTTPException(status_code=400, detail="Brak adresu odbiorcy (supplier email).")
+
+    # Treść: jeśli podano edytowalny body_text, budujemy z niego HTML (zachowując
+    # łamanie linii). W przeciwnym razie używamy gotowego HTML.
+    html = req.html
+    if req.body_text:
+        safe = (req.body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        html = ("<div style=\"font-family:Arial,Helvetica,sans-serif;color:#0F172A;"
+                "white-space:pre-wrap;line-height:1.5\">" + safe.replace("\n", "<br>") + "</div>")
+    if not html:
+        raise HTTPException(status_code=400, detail="Brak treści wiadomości.")
+
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        profile = await get_restaurant_profile(client)
+        payload = {
+            "from": f"Gastro Manager <{from_email}>",
+            "to": [req.to],
+            "subject": req.subject,
+            "html": html,
+        }
+        # reply_to = e-mail restauratora → odpowiedź hurtowni trafia do niego, nie do nas
+        reply_to = (profile.get("contact_email") or "").strip()
+        if reply_to:
+            payload["reply_to"] = reply_to
+        try:
+            r = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Błąd połączenia z Resend: {e}") from e
+
+    if r.status_code >= 400:
+        detail = r.text
+        try:
+            detail = r.json().get("message", detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"Resend odrzucił wysyłkę: {detail}")
+
+    data = r.json() if r.text else {}
+    return {"ok": True, "id": data.get("id"), "to": req.to}
+
+
+# --- Intencja głosowa Jarvisa: order_product ---------------------------------
+
+@app.post("/api/orders/interpret-command")
+async def interpret_order_command(req: InterpretOrderRequest):
+    """Alias/kompatybilność wsteczna dla frontendu — używa nowego /api/voice/interpret
+    i mapuje odpowiedź do starego formatu {intent, items[]}.
+    Nowe intencje (edit_menu_item_price, add_recipe_ingredient, edit_recipe_ingredient_qty,
+    edit_inventory_item, supplier_*) są przekazywane w polu `payload`, `fuzzy_matches`, `full`."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Brak tekstu komendy.")
+
+    interpretation = await interpret(InterpretRequest(text=text))
+    intent = interpretation.intent
+    p = interpretation.payload or {}
+
+    # Wsteczna kompatybilność: order_product → items[]
+    items = []
+    if intent == "order_product":
+        raw_items = p.get("items") or []
+        for i in raw_items:
+            try:
+                items.append({
+                    "product_name": str(i.get("product_name", "")).strip(),
+                    "quantity": float(i.get("quantity") or 1),
+                    "unit": str(i.get("unit") or "szt").strip(),
+                })
+            except (TypeError, ValueError):
+                continue
+        items = [i for i in items if i["product_name"]]
+
+    return {
+        "intent": intent,
+        "items": items,
+        "payload": p,
+        "confidence": interpretation.confidence,
+        "reason": interpretation.reason,
+    }
+
+
+# =============================================================================
+# VOICE CRUD — endpointy wykonawcze (edycja menu, receptur, magazynu, dostawców)
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POS Bottleneck Engine — automatyczne blokowanie dań gdy braki w składnikach.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_menu_is_available_col: Optional[bool] = None
+
+
+async def _has_menu_is_available(client: httpx.AsyncClient) -> bool:
+    """True jeśli menu_items ma kolumnę is_available (POS Bottleneck flag)."""
+    global _menu_is_available_col
+    if _menu_is_available_col is not None:
+        return _menu_is_available_col
+    try:
+        await sb_get(client, "menu_items", params={"select": "is_available", "limit": "1"})
+        _menu_is_available_col = True
+    except Exception:
+        _menu_is_available_col = False
+        logger.warning("menu_items.is_available NIE istnieje — uruchom migrację "
+                       "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql, żeby włączyć POS Bottleneck Engine.")
+    return _menu_is_available_col
+
+
+async def _recompute_menu_availability(client: httpx.AsyncClient,
+                                       changed_inventory_ids: Optional[set[str]] = None
+                                       ) -> dict:
+    """Przelicza is_available dla dań, których receptury używają zmienionych składników.
+
+    Reguła: danie jest niedostępne, jeśli JAKIKOLWIEK jego składnik ma
+    stan magazynowy (`quantity`) < wymagana ilość dla 1 porcji.
+    Fuzzy-match po nazwie (recipe_ingredients.ingredient_name ↔ inventory_items.name).
+    """
+    has_col = await _has_menu_is_available(client)
+    if not has_col:
+        return {"skipped": True, "reason": "menu_items.is_available nie istnieje — uruchom migrację."}
+
+    inv_all = await sb_get(client, "inventory_items",
+                           params={"select": "id,name,quantity,unit", "limit": "5000"}) or []
+    inv_by_id = {r["id"]: r for r in inv_all}
+    inv_norm_to_id: dict[str, str] = {}
+    for r in inv_all:
+        k = _norm_pl(r.get("name") or "")
+        if k:
+            inv_norm_to_id.setdefault(k, r["id"])
+
+    ri = await sb_get(client, "recipe_ingredients",
+                      params={"select": "menu_item_id,ingredient_name,quantity,unit", "limit": "20000"}) or []
+    by_menu: dict[str, list[dict]] = {}
+    for r in ri:
+        by_menu.setdefault(r["menu_item_id"], []).append(r)
+
+    menu_rows = await sb_get(client, "menu_items",
+                             params={"select": "id,name,is_available,is_active", "limit": "5000"}) or []
+
+    updates: list[dict] = []
+    changed = 0
+    inv_keys = list(inv_norm_to_id.keys())
+
+    for m in menu_rows:
+        mid = m["id"]
+        if not m.get("is_active", True):
+            continue  # nieaktywne dania: pomijamy (POS ich nie widzi)
+        ingredients = by_menu.get(mid, [])
+        available = True
+        blocker: Optional[str] = None
+        for ing in ingredients:
+            iname = ing.get("ingredient_name") or ""
+            req_qty = float(ing.get("quantity") or 0)
+            req_unit = ing.get("unit") or ""
+            # Fuzzy match do inventory_items
+            hit, score = _fuzzy_match(_norm_pl(iname), inv_keys, threshold=75)
+            if not hit:
+                # nie umiemy zweryfikować → uznajemy jako blocker (bezpieczna strona)
+                available = False
+                blocker = f"{iname} (brak w magazynie)"
+                break
+            inv_id = inv_norm_to_id[hit]
+            inv = inv_by_id.get(inv_id, {})
+            stock_qty = float(inv.get("quantity") or 0)
+            stock_unit = inv.get("unit") or req_unit
+            # Konwersja jednostek
+            usable, ok = _yield_available(stock_qty, stock_unit, None, None, req_unit)
+            if not ok or usable is None:
+                usable = stock_qty  # fallback bez konwersji (np. jednostki zgodne)
+            if usable < req_qty:
+                available = False
+                blocker = f"{inv.get('name') or iname}: {usable:.2f}{req_unit} < {req_qty}{req_unit}"
+                break
+
+        current = bool(m.get("is_available", True))
+        if current != available:
+            try:
+                await sb_patch(client, "menu_items", {"id": f"eq.{mid}"},
+                               {"is_available": available})
+                changed += 1
+                updates.append({
+                    "menu_item_id": mid, "name": m.get("name"),
+                    "is_available": available, "blocker": blocker,
+                })
+            except Exception as e:
+                logger.warning(f"is_available update failed for {mid}: {e}")
+
+    return {"scanned": len(menu_rows), "changed": changed, "updates": updates}
+
+
+@app.post("/api/menu/recompute-availability")
+async def menu_recompute_availability():
+    """Ręczne przeliczenie POS Bottleneck Engine (blokowanie dań po brakach składników)."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        return await _recompute_menu_availability(client)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CRUD wykonawczy dla intencji głosowych.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SetMenuPriceRequest(BaseModel):
+    dish_name: Optional[str] = None
+    dish_id: Optional[str] = None
+    new_price: float
+
+
+@app.post("/api/menu/set-price")
+async def set_menu_price(req: SetMenuPriceRequest):
+    """Zmienia cenę dania. Wymagany dish_id LUB dish_name (fuzzy-matched na backendzie)."""
+    if req.new_price is None or req.new_price < 0:
+        raise HTTPException(status_code=400, detail="Nieprawidłowa cena.")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        dish_id = req.dish_id
+        matched_name: Optional[str] = None
+        matched_score = 0.0
+        if not dish_id and req.dish_name:
+            rows = await sb_get(client, "menu_items",
+                                params={"select": "id,name", "is_active": "eq.true", "limit": "1000"}) or []
+            hit, score = _resolve_by_fuzzy(req.dish_name, rows)
+            if hit:
+                dish_id = hit["id"]
+                matched_name = hit["name"]
+                matched_score = score
+        if not dish_id:
+            raise HTTPException(status_code=404, detail="Nie znaleziono dania (brak dish_id i fuzzy).")
+        try:
+            row = await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"},
+                                 {"price_pln": float(req.new_price)})
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
+        return {
+            "ok": True, "dish_id": dish_id, "new_price": float(req.new_price),
+            "matched_name": matched_name, "matched_score": round(matched_score, 1),
+            "row": row[0] if isinstance(row, list) and row else row,
+        }
+
+
+class SetRecipeIngredientRequest(BaseModel):
+    dish_name: Optional[str] = None
+    dish_id: Optional[str] = None
+    ingredient_name: str
+    quantity: float
+    unit: Optional[str] = None
+    mode: Literal["upsert", "edit_qty"] = "upsert"  # upsert = add or edit
+
+
+@app.post("/api/recipes/set-ingredient")
+async def set_recipe_ingredient(req: SetRecipeIngredientRequest):
+    """Dodaje LUB aktualizuje składnik receptury dania.
+    mode='upsert' → dodaje jeśli brak, aktualizuje qty/unit jeśli istnieje.
+    mode='edit_qty' → tylko aktualizuje qty (błąd 404 gdy brak)."""
+    if req.quantity is None or req.quantity < 0:
+        raise HTTPException(status_code=400, detail="Nieprawidłowa ilość.")
+    if not (req.ingredient_name or "").strip():
+        raise HTTPException(status_code=400, detail="Brak nazwy składnika.")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        dish_id = req.dish_id
+        matched_dish: Optional[str] = None
+        if not dish_id and req.dish_name:
+            rows = await sb_get(client, "menu_items",
+                                params={"select": "id,name", "is_active": "eq.true", "limit": "1000"}) or []
+            hit, _ = _resolve_by_fuzzy(req.dish_name, rows)
+            if hit:
+                dish_id = hit["id"]
+                matched_dish = hit["name"]
+        if not dish_id:
+            raise HTTPException(status_code=404, detail="Nie znaleziono dania.")
+
+        # Fuzzy-match ingredient_name do istniejącego składnika w recepturze.
+        existing = await sb_get(client, "recipe_ingredients",
+                                params={"select": "id,ingredient_name,quantity,unit",
+                                        "menu_item_id": f"eq.{dish_id}"}) or []
+        hit, _score = _resolve_by_fuzzy(req.ingredient_name, existing,
+                                        key="ingredient_name", threshold=70)
+        unit = (req.unit or (hit or {}).get("unit") or "g").strip()
+
+        try:
+            if hit:
+                await sb_patch(client, "recipe_ingredients", {"id": f"eq.{hit['id']}"},
+                               {"quantity": float(req.quantity), "unit": unit})
+                action = "updated"
+            else:
+                if req.mode == "edit_qty":
+                    raise HTTPException(status_code=404, detail=f"Składnik '{req.ingredient_name}' nie występuje w recepturze.")
+                await sb_post(client, "recipe_ingredients", {
+                    "menu_item_id": dish_id,
+                    "ingredient_name": req.ingredient_name.strip(),
+                    "quantity": float(req.quantity),
+                    "unit": unit,
+                })
+                action = "created"
+        except HTTPException:
+            raise
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
+
+        # Po zmianie receptury: przelicz dostępność.
+        avail = await _recompute_menu_availability(client)
+        return {
+            "ok": True, "action": action, "dish_id": dish_id,
+            "matched_dish": matched_dish, "matched_ingredient": (hit or {}).get("ingredient_name"),
+            "quantity": float(req.quantity), "unit": unit,
+            "menu_availability": avail,
+        }
+
+
+class SetInventoryThresholdsRequest(BaseModel):
+    item_name: Optional[str] = None
+    inventory_id: Optional[str] = None
+    min_quantity: Optional[float] = None
+    current_quantity: Optional[float] = None
+    safety_buffer_percent: Optional[float] = None
+
+
+@app.post("/api/inventory/set-thresholds")
+async def set_inventory_thresholds(req: SetInventoryThresholdsRequest):
+    """Zmienia parametry produktu w magazynie (min_quantity, current_quantity, safety_buffer_percent)."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        inv_id = req.inventory_id
+        matched: Optional[str] = None
+        if not inv_id and req.item_name:
+            rows = await sb_get(client, "inventory_items",
+                                params={"select": "id,name", "limit": "5000"}) or []
+            hit, _ = _resolve_by_fuzzy(req.item_name, rows)
+            if hit:
+                inv_id = hit["id"]
+                matched = hit["name"]
+        if not inv_id:
+            raise HTTPException(status_code=404, detail="Nie znaleziono produktu w magazynie.")
+
+        updates: dict = {}
+        if req.min_quantity is not None:
+            updates["min_quantity"] = float(req.min_quantity)
+        if req.current_quantity is not None:
+            updates["quantity"] = float(req.current_quantity)
+        if req.safety_buffer_percent is not None:
+            updates["safety_buffer_percent"] = float(req.safety_buffer_percent)
+        if not updates:
+            raise HTTPException(status_code=400, detail="Brak parametrów do aktualizacji.")
+
+        try:
+            row = await sb_patch(client, "inventory_items", {"id": f"eq.{inv_id}"}, updates)
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
+
+        # POS Bottleneck: przelicz dostępność jeżeli zmieniono current_quantity.
+        avail = None
+        if "quantity" in updates:
+            avail = await _recompute_menu_availability(client, changed_inventory_ids={inv_id})
+
+        return {
+            "ok": True, "inventory_id": inv_id, "matched_name": matched,
+            "updates": updates, "row": row[0] if isinstance(row, list) and row else row,
+            "menu_availability": avail,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUPPLIER INTENTS — 5 endpointów dla intencji dostawców
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class FlipOrderRequest(BaseModel):
+    from_supplier: str
+    to_supplier: str
+    category: Optional[str] = None
+    items: Optional[list[dict]] = None  # opcjonalna lista {product_name, quantity, unit}
+
+
+@app.post("/api/suppliers/flip-order")
+async def supplier_flip_order(req: FlipOrderRequest):
+    """Przerzuca koszyk z jednego dostawcy do drugiego (fuzzy match po nazwach produktów).
+    Zwraca porównanie cen i sugerowany nowy koszyk u to_supplier."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
+        suppliers = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "500"}) or []
+        src, _ = _resolve_by_fuzzy(req.from_supplier, suppliers)
+        dst, _ = _resolve_by_fuzzy(req.to_supplier, suppliers)
+        if not src:
+            raise HTTPException(status_code=404, detail=f"Nie znaleziono dostawcy: {req.from_supplier}")
+        if not dst:
+            raise HTTPException(status_code=404, detail=f"Nie znaleziono dostawcy: {req.to_supplier}")
+
+        src_catalog = await sb_get(client, "supplier_catalog", params={
+            "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
+            "supplier_id": f"eq.{src['id']}",
+        }) or []
+        dst_catalog = await sb_get(client, "supplier_catalog", params={
+            "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
+            "supplier_id": f"eq.{dst['id']}",
+        }) or []
+
+        # Jeśli podano items — porównaj tylko te, w innym razie: cały koszyk jawny.
+        if req.items:
+            comparison = []
+            for it in req.items:
+                pname = (it.get("product_name") or "").strip()
+                qty = float(it.get("quantity") or 1)
+                src_hit, _ = _resolve_by_fuzzy(pname, src_catalog, key="name")
+                dst_hit, _ = _resolve_by_fuzzy(pname, dst_catalog, key="name")
+                comparison.append({
+                    "product_name": pname, "quantity": qty,
+                    "from": {"name": (src_hit or {}).get("name"),
+                             "price_pln": float((src_hit or {}).get("price_pln") or 0)} if src_hit else None,
+                    "to": {"name": (dst_hit or {}).get("name"),
+                           "price_pln": float((dst_hit or {}).get("price_pln") or 0)} if dst_hit else None,
+                    "matched_at_target": bool(dst_hit),
+                })
+        else:
+            # Cały jawny koszyk from_supplier → próbujemy zmapować na to_supplier.
+            comparison = []
+            for r in src_catalog:
+                if r.get("is_visible") is False:
+                    continue
+                dst_hit, _ = _resolve_by_fuzzy(r["name"], dst_catalog, key="name")
+                comparison.append({
+                    "product_name": r["name"], "quantity": 1,
+                    "from": {"name": r["name"], "price_pln": float(r.get("price_pln") or 0)},
+                    "to": ({"name": dst_hit["name"], "price_pln": float(dst_hit.get("price_pln") or 0)}
+                           if dst_hit else None),
+                    "matched_at_target": bool(dst_hit),
+                })
+
+        total_from = sum((c["from"] or {}).get("price_pln", 0) * c["quantity"] for c in comparison if c["from"])
+        total_to = sum((c["to"] or {}).get("price_pln", 0) * c["quantity"] for c in comparison if c["to"])
+        saving = total_from - total_to
+        matched = sum(1 for c in comparison if c["matched_at_target"])
+
+        return {
+            "from_supplier": {"id": src["id"], "name": src["name"]},
+            "to_supplier": {"id": dst["id"], "name": dst["name"]},
+            "category": req.category,
+            "items_matched": matched, "items_total": len(comparison),
+            "total_from_pln": round(total_from, 2),
+            "total_to_pln": round(total_to, 2),
+            "saving_pln": round(saving, 2),
+            "comparison": comparison,
+        }
+
+
+class BudgetCapOrderRequest(BaseModel):
+    max_budget: float
+    category: Optional[str] = None
+    supplier_id: Optional[str] = None
+
+
+@app.post("/api/suppliers/budget-cap-order")
+async def supplier_budget_cap_order(req: BudgetCapOrderRequest):
+    """Kompletuje zamówienie priorytetyzując najpilniejsze braki magazynowe (najniższy
+    stosunek quantity/min_quantity) do LIMITU KWOTOWEGO."""
+    if req.max_budget is None or req.max_budget <= 0:
+        raise HTTPException(status_code=400, detail="Nieprawidłowy budżet.")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
+        # 1) Ranking produktów magazynowych po pilności (im niższy stan / min, tym pilniej).
+        inv = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,min_quantity,safety_buffer_percent,unit",
+            "limit": "5000"
+        }) or []
+        prioritized = []
+        for r in inv:
+            q = float(r.get("quantity") or 0)
+            m = float(r.get("min_quantity") or 0)
+            sb = float(r.get("safety_buffer_percent") or 20) / 100.0
+            target = m * (1.0 + sb) if m > 0 else max(q * 1.5, 1.0)
+            deficit = max(0.0, target - q)
+            urgency = (q / m) if m > 0 else 999.0  # niższe = pilniejsze
+            prioritized.append({**r, "deficit": deficit, "urgency": urgency, "target": target})
+        prioritized = [p for p in prioritized if p["deficit"] > 0]
+        prioritized.sort(key=lambda x: x["urgency"])
+
+        # 2) Ceny — bierzemy najtańszą pozycję z supplier_catalog per produkt (fuzzy match).
+        cat_params = {"select": "id,supplier_id,name,price_pln,unit,volume_label,is_visible", "limit": "10000"}
+        if req.supplier_id:
+            cat_params["supplier_id"] = f"eq.{req.supplier_id}"
+        catalog = await sb_get(client, "supplier_catalog", params=cat_params) or []
+        catalog = [c for c in catalog if c.get("is_visible") is not False]
+
+        # 3) Wybieramy od najpilniejszych, aż wyczerpiemy budżet.
+        cart = []
+        spent = 0.0
+        for p in prioritized:
+            hit, _ = _resolve_by_fuzzy(p["name"], catalog, key="name", threshold=70)
+            if not hit:
+                continue
+            unit_price = float(hit.get("price_pln") or 0)
+            if unit_price <= 0:
+                continue
+            qty = p["deficit"]
+            line = qty * unit_price
+            if spent + line > req.max_budget:
+                # dorzuć tyle ile się zmieści
+                max_qty = max(0.0, (req.max_budget - spent) / unit_price)
+                if max_qty < 0.05:
+                    continue
+                qty = round(max_qty, 2)
+                line = qty * unit_price
+            cart.append({
+                "inventory_id": p["id"], "product_name": p["name"], "quantity": round(qty, 3),
+                "unit": p.get("unit"), "unit_price_pln": unit_price,
+                "line_total_pln": round(line, 2), "supplier_id": hit.get("supplier_id"),
+                "supplier_product_id": hit.get("id"), "urgency_score": round(p["urgency"], 3),
+            })
+            spent += line
+            if spent >= req.max_budget:
+                break
+
+        return {
+            "max_budget_pln": req.max_budget,
+            "category": req.category,
+            "items_count": len(cart),
+            "total_pln": round(spent, 2),
+            "remaining_pln": round(req.max_budget - spent, 2),
+            "cart": cart,
+        }
+
+
+@app.get("/api/suppliers/top-savings")
+async def supplier_top_savings(limit: int = 5):
+    """Zwraca TOP-{limit} największych rabatów procentowych — porównuje aktualną cenę
+    w `supplier_catalog` z historyczną (średnia z `pos_sales_log` / `cost_history` /
+    wcześniejsze wpisy tego samego produktu). Fallback: pokazuje najniższe ceny per produkt."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        catalog = await sb_get(client, "supplier_catalog", params={
+            "select": "id,supplier_id,name,price_pln,is_visible", "limit": "10000"
+        }) or []
+        catalog = [c for c in catalog if c.get("is_visible") is not False]
+        suppliers = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "500"}) or []
+        sup_by_id = {s["id"]: s["name"] for s in suppliers}
+
+        # Grupujemy po norm nazwy produktu; dla każdej grupy liczymy % różnicy vs. mediana.
+        groups: dict[str, list[dict]] = {}
+        for c in catalog:
+            k = _norm_pl(c.get("name") or "")
+            if not k:
+                continue
+            price = float(c.get("price_pln") or 0)
+            if price <= 0:
+                continue
+            groups.setdefault(k, []).append({**c, "_norm_name": k})
+
+        savings = []
+        for k, rows in groups.items():
+            if len(rows) < 2:
+                continue
+            prices = sorted(float(r["price_pln"]) for r in rows)
+            best = prices[0]
+            median = prices[len(prices) // 2]
+            if median <= 0:
+                continue
+            discount_pct = round((median - best) / median * 100.0, 1)
+            if discount_pct < 3:
+                continue  # nieznaczące
+            best_row = min(rows, key=lambda r: float(r["price_pln"]))
+            savings.append({
+                "product_name": best_row.get("name"),
+                "best_price_pln": best,
+                "median_price_pln": median,
+                "discount_pct": discount_pct,
+                "supplier_id": best_row.get("supplier_id"),
+                "supplier_name": sup_by_id.get(best_row.get("supplier_id"), "?"),
+                "compared_count": len(rows),
+            })
+        savings.sort(key=lambda x: -x["discount_pct"])
+        return {"top": savings[:limit], "compared_products": len(groups)}
+
+
+class PredictiveRestockRequest(BaseModel):
+    weeks_back: int = 4
+    day_of_week: Optional[int] = None  # 0=Mon..6=Sun. Domyślnie: dziś.
+    supplier_id: Optional[str] = None
+
+
+@app.post("/api/suppliers/predictive-restock")
+async def supplier_predictive_restock(req: PredictiveRestockRequest):
+    """Wylicza sugerowane zamówienie na podstawie sprzedaży POS z analogicznych dni tygodnia
+    z poprzednich `weeks_back` tygodni. Rozbija dania na składniki (recipe_ingredients)
+    i sumuje potrzebne surowce."""
+    await _guard_ai(needs_credits=False, needs_deal_hunter=True)
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    target_dow = req.day_of_week if req.day_of_week is not None else now.weekday()
+    weeks = max(1, min(int(req.weeks_back or 4), 12))
+
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        # Pobieramy sprzedaż z pos_sales_log od `weeks*7 + 3` dni wstecz.
+        since = (now - timedelta(days=weeks * 7 + 3)).isoformat()
+        sales = await sb_get(client, "pos_sales_log", params={
+            "select": "pos_external_id,pos_product_id,quantity_sold,processed_at",
+            "processed_at": f"gte.{since}", "limit": "20000",
+        }) or []
+
+        # Filtrujemy do analogicznych dni tygodnia (target_dow).
+        filtered = []
+        for s in sales:
+            try:
+                dt = datetime.fromisoformat(str(s["processed_at"]).replace("Z", "+00:00"))
+                if dt.weekday() == target_dow:
+                    filtered.append(s)
+            except Exception:
+                continue
+
+        # Mapujemy pos_external_id → menu_items.
+        menu_all = await sb_get(client, "menu_items",
+                                params={"select": "id,name,pos_id", "is_active": "eq.true", "limit": "5000"}) or []
+        by_pos = {m.get("pos_id"): m for m in menu_all if m.get("pos_id")}
+        by_id = {m["id"]: m for m in menu_all}
+
+        # Sumujemy sprzedaż per menu_item.
+        dish_totals: dict[str, float] = {}
+        for s in filtered:
+            mid = None
+            pos_ext = s.get("pos_external_id")
+            if pos_ext and pos_ext in by_pos:
+                mid = by_pos[pos_ext]["id"]
+            elif s.get("pos_product_id") in by_id:
+                mid = s["pos_product_id"]
+            if not mid:
+                continue
+            dish_totals[mid] = dish_totals.get(mid, 0.0) + float(s.get("quantity_sold") or 0)
+
+        # Średnia sprzedaż per dzień = suma / weeks.
+        forecasts = [{"menu_item_id": mid, "name": by_id[mid]["name"],
+                      "avg_daily_qty": round(qty / weeks, 2)}
+                     for mid, qty in dish_totals.items()]
+        forecasts.sort(key=lambda x: -x["avg_daily_qty"])
+
+        # Rozbicie na składniki (recipe_ingredients).
+        ri = await sb_get(client, "recipe_ingredients", params={"select": "menu_item_id,ingredient_name,quantity,unit",
+                                                                "limit": "20000"}) or []
+        by_menu: dict[str, list[dict]] = {}
+        for r in ri:
+            by_menu.setdefault(r["menu_item_id"], []).append(r)
+
+        # Sumujemy zapotrzebowanie na składniki (fuzzy do inventory dla obecnego stanu).
+        inv = await sb_get(client, "inventory_items",
+                           params={"select": "id,name,quantity,unit", "limit": "5000"}) or []
+        inv_norm = {_norm_pl(r["name"]): r for r in inv if r.get("name")}
+
+        needs: dict[str, dict] = {}  # klucz = norm ingredient_name
+        for f in forecasts:
+            for ing in by_menu.get(f["menu_item_id"], []):
+                key = _norm_pl(ing.get("ingredient_name") or "")
+                if not key:
+                    continue
+                need_qty = float(ing.get("quantity") or 0) * f["avg_daily_qty"]
+                if key not in needs:
+                    matched_inv = inv_norm.get(key)
+                    if not matched_inv:
+                        # fuzzy
+                        hit, _ = _fuzzy_match(key, list(inv_norm.keys()), threshold=70)
+                        matched_inv = inv_norm.get(hit) if hit else None
+                    needs[key] = {
+                        "ingredient_name": ing.get("ingredient_name"),
+                        "unit": ing.get("unit"),
+                        "forecast_qty": 0.0,
+                        "current_stock": float((matched_inv or {}).get("quantity") or 0),
+                        "inventory_id": (matched_inv or {}).get("id"),
+                        "inventory_name": (matched_inv or {}).get("name"),
+                    }
+                needs[key]["forecast_qty"] = round(needs[key]["forecast_qty"] + need_qty, 3)
+
+        # Sugerowane dorzucenia: forecast - current_stock (jeśli > 0).
+        suggestions = []
+        for n in needs.values():
+            gap = round(n["forecast_qty"] - n["current_stock"], 3)
+            if gap > 0:
+                suggestions.append({**n, "suggested_order_qty": gap})
+        suggestions.sort(key=lambda x: -x["suggested_order_qty"])
+
+        return {
+            "day_of_week": target_dow,
+            "weeks_analyzed": weeks,
+            "sales_records": len(filtered),
+            "dish_forecasts": forecasts[:15],
+            "ingredient_suggestions": suggestions[:30],
+        }
+
+
+class CheckMinOrderRequest(BaseModel):
+    supplier_id: Optional[str] = None
+    supplier_name: Optional[str] = None
+    current_cart_total: float = 0.0
+    category: Optional[str] = None
+
+
+@app.post("/api/suppliers/check-minimum-order")
+async def supplier_check_min_order(req: CheckMinOrderRequest):
+    """Sprawdza logistyczne minimum dostawy dostawcy (suppliers.min_order_value)
+    i sugeruje produkty do dorzucenia (sypkie / napoje) w celu darmowego transportu."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
+        # Graceful fallback: jeśli kolumna min_order_value nie istnieje w schemacie,
+        # wybieramy tylko id,name i przyjmujemy min_order_value=0.
+        has_min_col = True
+        select_cols = "id,name,min_order_value"
+        try:
+            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
+        except Exception:
+            has_min_col = False
+            select_cols = "id,name"
+
+        supplier = None
+        if req.supplier_id:
+            rows = await sb_get(client, "suppliers", params={
+                "select": select_cols, "id": f"eq.{req.supplier_id}", "limit": "1"}) or []
+            if rows:
+                supplier = rows[0]
+        if not supplier and req.supplier_name:
+            all_sup = await sb_get(client, "suppliers",
+                                   params={"select": select_cols, "limit": "500"}) or []
+            hit, _ = _resolve_by_fuzzy(req.supplier_name, all_sup)
+            supplier = hit
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+
+        min_val = float(supplier.get("min_order_value") or 0) if has_min_col else 0.0
+        gap = round(max(0.0, min_val - float(req.current_cart_total or 0)), 2)
+
+        suggestions = []
+        if gap > 0:
+            catalog = await sb_get(client, "supplier_catalog", params={
+                "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
+                "supplier_id": f"eq.{supplier['id']}",
+            }) or []
+            # Preferuj produkty sypkie/napoje (proste dorzucki).
+            keywords = ["ryż", "mąka", "sól", "cukier", "olej", "woda", "napój", "sok",
+                        "makaron", "ocet", "cola", "sprite", "pepsi"]
+
+            def score(name: str) -> int:
+                nl = (name or "").lower()
+                return sum(1 for k in keywords if k in nl)
+
+            candidates = sorted(
+                [c for c in catalog if c.get("is_visible") is not False and float(c.get("price_pln") or 0) > 0],
+                key=lambda c: (-score(c["name"]), float(c["price_pln"] or 0))
+            )
+            running = 0.0
+            for c in candidates:
+                price = float(c.get("price_pln") or 0)
+                if running >= gap:
+                    break
+                suggestions.append({
+                    "id": c["id"], "name": c["name"], "price_pln": price,
+                    "unit": c.get("unit"), "variant": c.get("variant"),
+                })
+                running += price
+
+        warnings: list[str] = []
+        if not has_min_col:
+            warnings.append("Kolumna suppliers.min_order_value nie istnieje — "
+                            "uruchom migrację ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql. "
+                            "Zwracam min_order_value=0.")
+
+        return {
+            "supplier": {"id": supplier["id"], "name": supplier["name"], "min_order_value": min_val},
+            "current_cart_total": float(req.current_cart_total or 0),
+            "gap_to_min": gap,
+            "meets_minimum": gap == 0,
+            "suggestions": suggestions,
+            "warnings": warnings,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BULK / DELETE / AVAILABILITY / SCALING / NAWIGACJA — nowe intencje Voice CRUD v2
+# Soft-delete: menu_items.is_active (istnieje), suppliers/inventory_items.is_active
+# (wymaga migracji ADD_SOFT_DELETE.sql — fallback z ostrzeżeniem gdy brak kolumny).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ALL_ROWS = {"id": "not.is.null"}  # PostgREST: filtr dopasowujący WSZYSTKIE wiersze
+
+
+def _is_missing_column_error(exc: httpx.HTTPStatusError) -> bool:
+    body = (exc.response.text or "").lower()
+    return "is_active" in body or "pgrst204" in body or (
+        "column" in body and ("does not exist" in body or "not found" in body))
+
+
+def _cat_matches(row_cat: str, wanted: str, threshold: int = 72) -> bool:
+    """Czy kategoria wiersza pasuje (fuzzy) do żądanej. Pusty `wanted` = pasują wszystkie."""
+    if not wanted:
+        return True
+    a, b = _norm_pl(row_cat or ""), _norm_pl(wanted)
+    if not a:
+        return False
+    return a == b or b in a or a in b or fuzz.WRatio(a, b) >= threshold
+
+
+async def _menu_id_from_payload(client, p):
+    """Zwraca (dish_id, dish_name) z payloadu; fallback ilike po nazwie."""
+    dish_id = p.get("dish_id")
+    name = p.get("dish_name_resolved") or p.get("dish_name")
+    if not dish_id and name:
+        rows = await sb_get(client, "menu_items",
+                            params={"select": "id,name", "name": f"ilike.%{name}%", "limit": "1"})
+        if rows:
+            dish_id, name = rows[0]["id"], rows[0]["name"]
+    return dish_id, name
+
+
+async def _exec_bulk_delete_menu(client):
+    rows = await sb_get(client, "menu_items", params={"select": "id", "is_active": "eq.true"}) or []
+    n = len(rows)
+    if n:
+        await sb_patch(client, "menu_items", {"is_active": "eq.true"},
+                       {"is_active": False, "is_available": False})
+    return {"ok": True, "action": "bulk_delete_menu", "affected": n, "restorable": True,
+            "message": f"Usunięto {n} pozycji z menu. Powiedz „przywróć menu”, aby cofnąć."}
+
+
+async def _exec_restore_menu(client):
+    rows = await sb_get(client, "menu_items", params={"select": "id", "is_active": "eq.false"}) or []
+    n = len(rows)
+    if n:
+        await sb_patch(client, "menu_items", {"is_active": "eq.false"},
+                       {"is_active": True, "is_available": True})
+    return {"ok": True, "action": "restore_last_deleted_menu", "affected": n,
+            "message": f"Przywrócono {n} pozycji menu." if n else "Brak usuniętych pozycji do przywrócenia."}
+
+
+async def _exec_bulk_delete_suppliers(client):
+    rows = await sb_get(client, "suppliers", params={"select": "id"}) or []
+    n = len(rows)
+    if n:
+        # Usuń najpierw powiązane katalogi (na wypadek FK), potem dostawców — twarde usunięcie.
+        try:
+            await sb_delete(client, "supplier_catalog", _ALL_ROWS)
+        except httpx.HTTPStatusError:
+            pass
+        await sb_delete(client, "suppliers", _ALL_ROWS)
+    return {"ok": True, "action": "bulk_delete_suppliers", "affected": n,
+            "message": f"Usunięto {n} dostawców."}
+
+
+async def _exec_bulk_delete_inventory(client):
+    """Soft-delete: is_active=false (przywracalne). Fallback: twarde usunięcie gdy brak kolumny."""
+    try:
+        rows = await sb_get(client, "inventory_items", params={
+            "select": "id", "is_active": "eq.true", "limit": "10000",
+        }) or []
+    except httpx.HTTPStatusError:
+        rows = await sb_get(client, "inventory_items", params={"select": "id", "limit": "10000"}) or []
+        n = len(rows)
+        if n:
+            await sb_delete(client, "inventory_items", _ALL_ROWS)
+        blocked = await _recompute_menu_availability(client)
+        return {
+            "ok": True, "action": "bulk_delete_inventory", "affected": n,
+            "blocked_dishes": blocked, "restorable": False,
+            "message": (
+                f"Usunięto {n} produktów z magazynu (trwale — baza bez soft-delete). "
+                "Przywrócenie niemożliwe."
+            ),
+        }
+    n = len(rows)
+    if n:
+        await sb_patch(client, "inventory_items", {"is_active": "eq.true"}, {"is_active": False})
+    blocked = await _recompute_menu_availability(client)
+    return {
+        "ok": True, "action": "bulk_delete_inventory", "affected": n,
+        "blocked_dishes": blocked, "restorable": True,
+        "message": (
+            f"Usunięto {n} produktów z magazynu (ukryte). "
+            "Powiedz „przywróć magazyn”, aby cofnąć."
+        ),
+    }
+
+
+async def _exec_restore_inventory(client):
+    try:
+        rows = await sb_get(client, "inventory_items", params={
+            "select": "id", "is_active": "eq.false", "limit": "10000",
+        }) or []
+    except httpx.HTTPStatusError:
+        return {
+            "ok": False, "action": "restore_deleted_inventory", "affected": 0,
+            "message": (
+                "Nie da się przywrócić magazynu — produkty zostały usunięte trwale "
+                "(brak soft-delete). Dodaj je ręcznie lub zeskanuj fakturę."
+            ),
+        }
+    n = len(rows)
+    if n:
+        await sb_patch(client, "inventory_items", {"is_active": "eq.false"}, {"is_active": True})
+    return {
+        "ok": True, "action": "restore_deleted_inventory", "affected": n,
+        "message": (
+            f"Przywrócono {n} produktów magazynu."
+            if n else "Brak ukrytych produktów magazynu do przywrócenia."
+        ),
+    }
+
+
+async def _exec_bulk_reset_inventory(client):
+    rows = await sb_get(client, "inventory_items", params={"select": "id", "limit": "10000"}) or []
+    n = len(rows)
+    if n:
+        await sb_patch(client, "inventory_items", _ALL_ROWS, {"quantity": 0})
+    blocked = await _recompute_menu_availability(client)
+    return {"ok": True, "action": "bulk_reset_inventory", "affected": n, "blocked_dishes": blocked,
+            "message": f"Wyzerowano stany {n} produktów. Zablokowano {blocked} dań (brak składników)."}
+
+
+async def _exec_delete_menu_item(client, p):
+    dish_id, name = await _menu_id_from_payload(client, p)
+    if not dish_id:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}” w menu.")
+    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"},
+                   {"is_active": False, "is_available": False})
+    return {"ok": True, "action": "delete_menu_item", "dish_id": dish_id, "restorable": True,
+            "message": f"Usunięto danie: {name}."}
+
+
+async def _exec_delete_supplier(client, p):
+    sid = p.get("supplier_name_id") or p.get("supplier_id")
+    name = p.get("supplier_name_resolved") or p.get("supplier_name")
+    if not sid and name:
+        rows = await sb_get(client, "suppliers",
+                            params={"select": "id,name", "name": f"ilike.%{name}%", "limit": "1"})
+        if rows:
+            sid, name = rows[0]["id"], rows[0]["name"]
+    if not sid:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono dostawcy „{name or '?'}”.")
+    try:
+        await sb_delete(client, "supplier_catalog", {"supplier_id": f"eq.{sid}"})
+    except httpx.HTTPStatusError:
+        pass
+    await sb_delete(client, "suppliers", {"id": f"eq.{sid}"})
+    return {"ok": True, "action": "delete_supplier", "message": f"Usunięto dostawcę: {name}."}
+
+
+async def _exec_delete_inventory_item(client, p):
+    iid = p.get("inventory_id") or p.get("item_name_id")
+    name = p.get("item_name_resolved") or p.get("item_name")
+    if not iid and name:
+        rows = await sb_get(client, "inventory_items",
+                            params={"select": "id,name", "name": f"ilike.%{name}%", "limit": "1"})
+        if rows:
+            iid, name = rows[0]["id"], rows[0]["name"]
+    if not iid:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono produktu „{name or '?'}” w magazynie.")
+    await sb_delete(client, "inventory_items", {"id": f"eq.{iid}"})
+    return {"ok": True, "action": "delete_inventory_item", "message": f"Usunięto produkt: {name}."}
+
+
+async def _exec_toggle_availability(client, p):
+    dish_id, name = await _menu_id_from_payload(client, p)
+    if not dish_id:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
+    available = bool(p.get("available")) if p.get("available") is not None else False
+    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"}, {"is_available": available})
+    verb = "Włączono" if available else "Wyłączono (zablokowano)"
+    return {"ok": True, "action": "toggle_menu_item_availability", "available": available,
+            "message": f"{verb} danie: {name}."}
+
+
+async def _exec_bulk_menu_prices(client, p, mode: str):
+    """mode: 'pct' | 'fixed'."""
+    category = (p.get("category") or "").strip()
+    action = (p.get("action") or "increase").lower()
+    sign = -1 if action == "decrease" else 1
+    rows = await sb_get(client, "menu_items",
+                        params={"select": "id,name,price_pln,category", "is_active": "eq.true"}) or []
+    rows = [r for r in rows if _cat_matches(r.get("category", ""), category)]
+    if mode == "pct":
+        factor = 1 + sign * float(p.get("percentage") or 0) / 100.0
+    else:
+        delta = sign * float(p.get("amount") or 0)
+    changed = []
+    for r in rows:
+        old = float(r.get("price_pln") or 0)
+        new = old * factor if mode == "pct" else old + delta
+        new = round(max(0.0, new), 2)
+        if new == old:
+            continue
+        await sb_patch(client, "menu_items", {"id": f"eq.{r['id']}"}, {"price_pln": new})
+        changed.append({"name": r["name"], "old": old, "new": new})
+    detail = (f"{p.get('percentage')}%" if mode == "pct" else f"{p.get('amount')} zł")
+    verb = "Obniżono" if sign < 0 else "Podniesiono"
+    scope = f" w kategorii „{category}”" if category else ""
+    return {"ok": True, "action": f"bulk_edit_menu_prices_{mode}", "affected": len(changed),
+            "changes": changed[:20],
+            "message": f"{verb} ceny {len(changed)} dań{scope} o {detail}."}
+
+
+async def _exec_bulk_inventory_buffers(client, p):
+    category = (p.get("category") or "").strip()
+    action = (p.get("action") or "increase").lower()
+    sign = -1 if action == "decrease" else 1
+    pts = sign * float(p.get("percentage") or 0)
+    cat_id = None
+    if category:
+        cats = await sb_get(client, "inventory_categories", params={"select": "id,name"}) or []
+        hit, _ = _resolve_by_fuzzy(category, cats, threshold=65)
+        cat_id = hit["id"] if hit else None
+        if category and not cat_id:
+            return {"ok": False, "action": "bulk_edit_inventory_buffers", "affected": 0,
+                    "message": f"Nie rozpoznano kategorii magazynu „{category}”."}
+    params = {"select": "id,name,safety_buffer_percent,category_id"}
+    if cat_id:
+        params["category_id"] = f"eq.{cat_id}"
+    rows = await sb_get(client, "inventory_items", params=params) or []
+    changed = []
+    for r in rows:
+        old = float(r.get("safety_buffer_percent") or 20)
+        new = round(max(10.0, old + pts), 1)
+        if new == old:
+            continue
+        try:
+            await sb_patch(client, "inventory_items", {"id": f"eq.{r['id']}"},
+                           {"safety_buffer_percent": new})
+            changed.append({"name": r["name"], "old": old, "new": new})
+        except httpx.HTTPStatusError:
+            pass
+    verb = "Zmniejszono" if sign < 0 else "Zwiększono"
+    scope = f" (kategoria „{category}”)" if category else ""
+    return {"ok": True, "action": "bulk_edit_inventory_buffers", "affected": len(changed),
+            "changes": changed[:20],
+            "message": f"{verb} bufory bezpieczeństwa {len(changed)} produktów{scope} o {abs(pts)} p.p."}
+
+
+async def _exec_edit_menu_category(client, p):
+    dish_id, name = await _menu_id_from_payload(client, p)
+    new_cat = (p.get("new_category") or p.get("category") or "").strip()
+    if not dish_id:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
+    if not new_cat:
+        raise HTTPException(status_code=400, detail="Brak nowej kategorii.")
+    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"}, {"category": new_cat})
+    return {"ok": True, "action": "edit_menu_item_category", "dish_id": dish_id,
+            "message": f"Zmieniono kategorię „{name}” → „{new_cat}”."}
+
+
+async def _exec_rename_menu_item(client, p):
+    dish_id, name = await _menu_id_from_payload(client, p)
+    new_name = (p.get("new_name") or "").strip()
+    if not dish_id:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Brak nowej nazwy dania.")
+    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"}, {"name": new_name})
+    return {"ok": True, "action": "rename_menu_item", "dish_id": dish_id,
+            "message": f"Zmieniono nazwę „{name}” → „{new_name}”."}
+
+
+async def _exec_scale_recipe(client, p):
+    dish_id, name = await _menu_id_from_payload(client, p)
+    portions = float(p.get("portions") or 0)
+    if not dish_id:
+        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
+    if portions <= 0:
+        raise HTTPException(status_code=400, detail="Podaj liczbę porcji > 0.")
+    ings = await sb_get(client, "recipe_ingredients", params={
+        "select": "ingredient_name,quantity,unit", "menu_item_id": f"eq.{dish_id}"}) or []
+    inv = await sb_get(client, "inventory_items", params={"select": "name,quantity,unit"}) or []
+    scaled = []
+    for ing in ings:
+        need = round(float(ing.get("quantity") or 0) * portions, 2)
+        hit, _ = _resolve_by_fuzzy(ing.get("ingredient_name"), inv, threshold=70)
+        have = float(hit.get("quantity")) if hit else None
+        scaled.append({
+            "ingredient_name": ing.get("ingredient_name"),
+            "unit": ing.get("unit"),
+            "per_portion": float(ing.get("quantity") or 0),
+            "total_needed": need,
+            "in_stock": have,
+            "enough": (have is not None and have >= need),
+        })
+    missing = [s["ingredient_name"] for s in scaled if not s["enough"]]
+    return {"ok": True, "action": "scale_recipe", "dish_id": dish_id, "dish_name": name,
+            "portions": portions, "ingredients": scaled, "missing": missing,
+            "message": f"Przeliczono „{name}” na {int(portions)} porcji "
+                       f"({len(scaled)} składników).{' Braki: ' + ', '.join(missing) if missing else ''}"}
+
+
+async def _recompute_menu_availability(client) -> int:
+    """POS Bottleneck: ustaw is_available=false dla dań, których składnik ma stan <= 0.
+    Zwraca liczbę zablokowanych dań. Best-effort."""
+    try:
+        recipes = await sb_get(client, "recipe_ingredients",
+                               params={"select": "menu_item_id,ingredient_name,quantity"}) or []
+        inv = await sb_get(client, "inventory_items", params={"select": "name,quantity"}) or []
+        blocked_ids: set[str] = set()
+        for r in recipes:
+            need = float(r.get("quantity") or 0)
+            hit, _ = _resolve_by_fuzzy(r.get("ingredient_name"), inv, threshold=70)
+            have = float(hit.get("quantity")) if hit else 0.0
+            if have < max(need, 0.0001):
+                if r.get("menu_item_id"):
+                    blocked_ids.add(r["menu_item_id"])
+        for mid in blocked_ids:
+            await sb_patch(client, "menu_items", {"id": f"eq.{mid}"}, {"is_available": False})
+        return len(blocked_ids)
+    except Exception:
+        return 0
+
+
+async def voice_dispatch_v2(intent: str, p: dict):
+    """Router nowych intencji v2. Zwraca dict wyniku lub None jeśli intencja nieobsługiwana tutaj."""
+    # Intencje UI — wykonywane na froncie, backend zwraca tylko potwierdzenie.
+    if intent == "navigate_screen":
+        return {"ok": True, "action": "navigate_screen", "screen": p.get("screen"),
+                "message": f"Nawigacja: {p.get('screen')}"}
+    if intent == "filter_ui_inventory":
+        return {"ok": True, "action": "filter_ui_inventory",
+                "category": p.get("category"), "supplier_id": p.get("supplier_id"),
+                "message": f"Filtr magazynu: {p.get('category')}"}
+    if intent == "filter_ui_menu_blocked":
+        return {"ok": True, "action": "filter_ui_menu_blocked", "message": "Filtr menu: zablokowane"}
+
+    async with httpx.AsyncClient(timeout=45.0, verify=_httpx_verify()) as client:
+        if intent == "bulk_delete_menu":
+            return await _exec_bulk_delete_menu(client)
+        if intent == "bulk_delete_suppliers":
+            return await _exec_bulk_delete_suppliers(client)
+        if intent == "bulk_reset_inventory":
+            return await _exec_bulk_reset_inventory(client)
+        if intent == "bulk_delete_inventory":
+            return await _exec_bulk_delete_inventory(client)
+        if intent == "restore_last_deleted_menu":
+            return await _exec_restore_menu(client)
+        if intent == "restore_deleted_inventory":
+            return await _exec_restore_inventory(client)
+        if intent == "delete_menu_item":
+            return await _exec_delete_menu_item(client, p)
+        if intent == "delete_supplier":
+            return await _exec_delete_supplier(client, p)
+        if intent == "delete_inventory_item":
+            return await _exec_delete_inventory_item(client, p)
+        if intent == "toggle_menu_item_availability":
+            return await _exec_toggle_availability(client, p)
+        if intent == "bulk_edit_menu_prices_percentage":
+            return await _exec_bulk_menu_prices(client, p, "pct")
+        if intent == "bulk_edit_menu_prices_fixed":
+            return await _exec_bulk_menu_prices(client, p, "fixed")
+        if intent == "bulk_edit_inventory_buffers":
+            return await _exec_bulk_inventory_buffers(client, p)
+        if intent == "edit_menu_item_category":
+            return await _exec_edit_menu_category(client, p)
+        if intent == "rename_menu_item":
+            return await _exec_rename_menu_item(client, p)
+        if intent == "scale_recipe":
+            return await _exec_scale_recipe(client, p)
+    return None
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Voice CRUD DISPATCH — wykonanie intencji z /api/voice/interpret za jednym zamachem.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class VoiceDispatchRequest(BaseModel):
+    intent: Intent
+    payload: dict
+
+
+@app.post("/api/voice/dispatch")
+async def voice_dispatch(req: VoiceDispatchRequest):
+    """Wykonanie intencji rozpoznanej przez /api/voice/interpret. Router do właściwego
+    endpointu wykonawczego. Frontend może użyć zamiast wywołania /interpret + drugiego call."""
+    p = req.payload or {}
+    it = req.intent
+    def _period_hint_from_payload(pl: dict) -> Optional[str]:
+        for k in ("period_1", "note", "_transcript"):
+            v = pl.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    if it == "summarize_custom_period":
+        sels = _merge_period_sels(p)
+        res = await _run_period_analysis(
+            p.get("period_type") or "month",
+            p.get("limit_days"),
+            period_hint=_period_hint_from_payload(p),
+            selected_periods=sels,
+        )
+        res.setdefault("action", "summarize_custom_period")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        if sels:
+            res["selected_periods_used"] = sels
+        return res
+    if it == "compare_two_periods":
+        sels = _merge_period_sels(p)
+        res = await _run_compare_periods(
+            p.get("period_1") or "",
+            p.get("period_2") or "",
+            selected_periods=sels,
+        )
+        res.setdefault("action", "compare_two_periods")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        if sels:
+            res["selected_periods_used"] = sels
+        return res
+    if it == "rank_menu_sales":
+        sels = _merge_period_sels(p)
+        res = await _run_rank_menu_sales(
+            rank=p.get("rank") or "best",
+            period_type=p.get("period_type") or "year",
+            limit_days=p.get("limit_days"),
+            top_n=p.get("top_n"),
+            category=p.get("category") or p.get("category_name"),
+            period_hint=_period_hint_from_payload(p),
+            selected_periods=sels,
+        )
+        res.setdefault("action", "rank_menu_sales")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        if sels:
+            res["selected_periods_used"] = sels
+        return res
+    if it == "rank_inventory_usage":
+        sels = _merge_period_sels(p)
+        res = await _run_rank_inventory_usage(
+            rank=p.get("rank") or "best",
+            period_type=p.get("period_type") or "year",
+            limit_days=p.get("limit_days"),
+            top_n=p.get("top_n"),
+            category=p.get("category") or p.get("category_name"),
+            period_hint=_period_hint_from_payload(p),
+            selected_periods=sels,
+        )
+        res.setdefault("action", "rank_inventory_usage")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        if sels:
+            res["selected_periods_used"] = sels
+        return res
+    if it == "rank_waste_cost":
+        sels = _merge_period_sels(p)
+        res = await _run_rank_waste_cost(
+            period_type=p.get("period_type") or "year",
+            limit_days=p.get("limit_days"),
+            top_n=p.get("top_n"),
+            period_hint=_period_hint_from_payload(p),
+            selected_periods=sels,
+        )
+        res.setdefault("action", "rank_waste_cost")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        if sels:
+            res["selected_periods_used"] = sels
+        return res
+    if it == "rank_dead_menu":
+        sels = _merge_period_sels(p)
+        res = await _run_rank_dead_menu(
+            period_type=p.get("period_type") or "year",
+            limit_days=p.get("limit_days"),
+            top_n=p.get("top_n"),
+            category=p.get("category") or p.get("category_name"),
+            period_hint=_period_hint_from_payload(p),
+            selected_periods=sels,
+        )
+        res.setdefault("action", "rank_dead_menu")
+        res.setdefault("message", res.get("message") or res.get("assistant_speech", ""))
+        if sels:
+            res["selected_periods_used"] = sels
+        return res
+    if it == "list_expiring_soon":
+        res = await _run_list_expiring_soon(
+            within_days=p.get("limit_days") or 3,
+            top_n=p.get("top_n"),
+        )
+        res.setdefault("action", "list_expiring_soon")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        return res
+    if it == "rank_supplier_spend":
+        res = await _run_rank_supplier_spend(
+            period_type=p.get("period_type") or "month",
+            limit_days=p.get("limit_days"),
+            top_n=p.get("top_n"),
+            period_hint=p.get("period_1") or p.get("note"),
+            supplier_name=p.get("supplier_name") or p.get("item_name"),
+        )
+        res.setdefault("action", "rank_supplier_spend")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        return res
+    if it == "manager_core_alerts":
+        res = await _run_manager_core_alerts(
+            period_type=p.get("period_type") or "week",
+            limit_days=p.get("limit_days"),
+            period_hint=p.get("period_1") or p.get("note"),
+        )
+        res.setdefault("action", "manager_core_alerts")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        return res
+    if it == "haccp_tip":
+        res = _run_haccp_tip(
+            p.get("item_name") or p.get("product_name") or p.get("note") or p.get("reason_text") or "",
+        )
+        res.setdefault("action", "haccp_tip")
+        res.setdefault("message", res.get("assistant_speech", ""))
+        return res
+    if it in ("upload_invoice", "upload_offer", "upload_document", "upload_menu"):
+        kind = (
+            "menu" if it == "upload_menu"
+            else "invoice" if it == "upload_invoice"
+            else ("offer" if it == "upload_offer" else "document")
+        )
+        return {
+            "ok": True,
+            "action": it,
+            "doc_kind": kind,
+            "open_scan": True,
+            "message": (
+                "Otwieram skaner menu restauracji (karta dań)."
+                if kind == "menu"
+                else (
+                    "Otwieram skaner — wgraj ofertę/gazetkę dostawcy."
+                    if kind == "offer"
+                    else "Otwieram skaner dokumentów — wgraj fakturę lub ofertę."
+                )
+            ),
+        }
+    v2 = await voice_dispatch_v2(it, p)
+    if v2 is not None:
+        return v2
+    if it == "edit_menu_item_price":
+        return await set_menu_price(SetMenuPriceRequest(
+            dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
+            new_price=float(p.get("new_price") or 0),
+        ))
+    if it == "add_recipe_ingredient":
+        return await set_recipe_ingredient(SetRecipeIngredientRequest(
+            dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
+            ingredient_name=(p.get("ingredient_name") or p.get("ingredient_name_resolved") or "").strip(),
+            quantity=float(p.get("quantity") or 0),
+            unit=p.get("unit"),
+            mode="upsert",
+        ))
+    if it == "edit_recipe_ingredient_qty":
+        return await set_recipe_ingredient(SetRecipeIngredientRequest(
+            dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
+            ingredient_name=(p.get("ingredient_name") or p.get("ingredient_name_resolved") or "").strip(),
+            quantity=float(p.get("quantity") or 0),
+            unit=p.get("unit"),
+            mode="edit_qty",
+        ))
+    if it == "edit_inventory_item":
+        return await set_inventory_thresholds(SetInventoryThresholdsRequest(
+            inventory_id=p.get("inventory_id"),
+            item_name=p.get("item_name") or p.get("item_name_resolved"),
+            min_quantity=(float(p["min_quantity"]) if p.get("min_quantity") is not None else None),
+            current_quantity=(float(p["current_quantity"]) if p.get("current_quantity") is not None else None),
+            safety_buffer_percent=(float(p["safety_buffer_percent"]) if p.get("safety_buffer_percent") is not None else None),
+        ))
+    if it == "supplier_flip_order":
+        return await supplier_flip_order(FlipOrderRequest(
+            from_supplier=p.get("from_supplier") or "",
+            to_supplier=p.get("to_supplier") or "",
+            category=p.get("category"),
+            items=p.get("items"),
+        ))
+    if it == "budget_cap_order":
+        return await supplier_budget_cap_order(BudgetCapOrderRequest(
+            max_budget=float(p.get("max_budget") or 0),
+            category=p.get("category"),
+            supplier_id=p.get("supplier_id"),
+        ))
+    if it == "compare_catalogs_top_savings":
+        return await supplier_top_savings(limit=5)
+    if it == "predictive_weekend_restock":
+        return await supplier_predictive_restock(PredictiveRestockRequest(
+            weeks_back=4, day_of_week=None, supplier_id=p.get("supplier_id"),
+        ))
+    if it == "check_minimum_order_value":
+        return await supplier_check_min_order(CheckMinOrderRequest(
+            supplier_id=p.get("supplier_id"),
+            supplier_name=p.get("supplier_name") or p.get("supplier_name_resolved"),
+            current_cart_total=float(p.get("current_cart_total") or 0),
+            category=p.get("category"),
+        ))
+    if it == "order_product":
+        raw_items = p.get("items") or []
+        if not isinstance(raw_items, list):
+            raw_items = []
+        compare_items: list[CompareItem] = []
+        for itx in raw_items:
+            if not isinstance(itx, dict):
+                continue
+            name = (itx.get("product_name") or itx.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                qty = float(itx.get("quantity") or 1)
+            except (TypeError, ValueError):
+                qty = 1.0
+            if qty <= 0:
+                qty = 1.0
+            unit = (itx.get("unit") or "szt").strip() or "szt"
+            compare_items.append(CompareItem(
+                product_name_or_id=name,
+                quantity=qty,
+                unit=unit,
+            ))
+        if not compare_items:
+            return {
+                "ok": False,
+                "action": "order_product",
+                "compare": None,
+                "message": "Dodaj co najmniej jeden produkt do zamówienia (nazwa + ilość).",
+            }
+        try:
+            compare = await compare_offers(CompareOffersRequest(
+                items=compare_items,
+                restaurant_name=p.get("restaurant_name"),
+            ))
+        except HTTPException as e:
+            return {
+                "ok": False,
+                "action": "order_product",
+                "compare": None,
+                "message": f"Łowca Okazji: {e.detail}",
+            }
+        except Exception as e:  # noqa: BLE001
+            return {
+                "ok": False,
+                "action": "order_product",
+                "compare": None,
+                "message": f"Łowca Okazji: {str(e)[:160]}",
+            }
+        found = sum(1 for x in (compare.get("items_requested") or []) if x.get("found"))
+        return {
+            "ok": True,
+            "action": "order_product",
+            "compare": compare,
+            "message": (
+                f"Koszyk: {len(compare_items)} pozycji · "
+                f"znaleziono oferty dla {found}/{len(compare_items)}. "
+                "Otwieram Łowcę Okazji."
+            ),
+        }
+    if it == "order_critical_items_by_category":
+        cats = p.get("categories") or []
+        if isinstance(cats, str):
+            cats = [cats]
+        return await orders_critical_by_category(CriticalByCategoryRequest(
+            categories=list(cats),
+            restaurant_name=p.get("restaurant_name"),
+            stock_target=str(p.get("stock_target") or "critical"),
+        ))
+    raise HTTPException(status_code=400, detail=f"Intencja {it!r} nie obsługiwana przez /voice/dispatch.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Migracja info — informacja dla FE o brakujących kolumnach/tabelach Supabase.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/admin/migration-status")
+async def admin_migration_status():
+    """Sprawdza czy migracja `ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql` została uruchomiona.
+    Zwraca listę brakujących kolumn/tabel i pełny SQL do wklejenia w Supabase SQL Editor."""
+    async with httpx.AsyncClient(timeout=15.0, verify=_httpx_verify()) as client:
+        checks = {}
+        try:
+            await sb_get(client, "menu_items", params={"select": "is_available", "limit": "1"})
+            checks["menu_items.is_available"] = True
+        except Exception:
+            checks["menu_items.is_available"] = False
+        try:
+            await sb_get(client, "inventory_items", params={"select": "synonyms", "limit": "1"})
+            checks["inventory_items.synonyms"] = True
+        except Exception:
+            checks["inventory_items.synonyms"] = False
+        try:
+            await sb_get(client, "token_usage", params={"select": "id", "limit": "1"})
+            checks["token_usage table"] = True
+        except Exception:
+            checks["token_usage table"] = False
+        try:
+            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
+            checks["suppliers.min_order_value"] = True
+        except Exception:
+            checks["suppliers.min_order_value"] = False
+
+    all_ok = all(checks.values())
+    sql_path = Path(__file__).resolve().parent.parent / "supabase_migrations" / "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"
+    sql_content = sql_path.read_text(encoding="utf-8") if sql_path.exists() else ""
+    return {
+        "ok": all_ok,
+        "checks": checks,
+        "instructions": "Otwórz Supabase Dashboard → SQL Editor → New query → wklej poniższy SQL → Run." if not all_ok else "Wszystkie migracje uruchomione.",
+        "sql": sql_content if not all_ok else "",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTOMATYCZNE RAPORTY DOBOWE (End-of-Day Reports)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CloseDayRequest(BaseModel):
+    date: Optional[str] = None           # YYYY-MM-DD; domyślnie dziś (UTC)
+    total_revenue: Optional[float] = None
+    total_waste_cost: Optional[float] = None
+    total_invoice_cost: Optional[float] = None
+
+
+def _week_of_month(d) -> int:
+    return min(5, (int(d.day) - 1) // 7 + 1)
+
+
+async def _sum_amount_for_day(client, table: str, day: str, extra: dict | None = None) -> float:
+    """Best-effort suma amount_pln z tabeli dla danego dnia (po created_at)."""
+    from datetime import date as _d, timedelta as _td
+    try:
+        next_day = (_d.fromisoformat(day) + _td(days=1)).isoformat()
+        params = [("select", "amount_pln"),
+                  ("created_at", f"gte.{day}T00:00:00"),
+                  ("created_at", f"lt.{next_day}T00:00:00")]
+        if extra:
+            for k, v in extra.items():
+                params.append((k, v))
+        rows = await sb_get(client, table, params=params) or []
+        return round(sum(float(r.get("amount_pln") or 0) for r in rows), 2)
+    except Exception:
+        return 0.0
+
+
+async def _generate_day_summary(httpx_c: httpx.AsyncClient,
+                                revenue: float, waste: float, invoice: float,
+                                day: str) -> tuple[str, dict]:
+    profit = round(revenue - waste - invoice, 2)
+    try:
+        client = _openai()
+        prompt = (
+            f"Przeanalizuj dzień pracy restauracji ({day}). "
+            f"Utarg: {revenue} zł, Straty (waste): {waste} zł, Koszty faktur: {invoice} zł, "
+            f"Zysk netto: {profit} zł. "
+            "Wygeneruj profesjonalne, dokładnie 3-zdaniowe podsumowanie managerskie po polsku: "
+            "co poszło dobrze, gdzie uciekły pieniądze i jedna konkretna rekomendacja na jutro."
+        )
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL, temperature=0.5,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        billing = await _bill_openai_response(
+            httpx_c, resp, endpoint="/api/pos/close-day", model=CHAT_MODEL,
+            extras={"date": day},
+        )
+        return (resp.choices[0].message.content or "").strip(), billing
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_generate_day_summary failed: {e}")
+        return (f"Utarg {revenue} zł, straty {waste} zł, koszty faktur {invoice} zł, "
+                f"zysk netto {profit} zł.", {"credits_deducted": 0})
+
+
+@app.post("/api/pos/close-day")
+async def pos_close_day(req: CloseDayRequest):
+    """Zamknięcie dnia: agreguje utarg/straty/koszty, generuje podsumowanie AI (GPT-4o-mini)
+    i zapisuje rekord do daily_reports (z rokiem/miesiącem/tygodniem miesiąca)."""
+    from datetime import datetime as _dt, timezone as _tz, date as _date
+    day = (req.date or _dt.now(_tz.utc).strftime("%Y-%m-%d")).strip()
+    try:
+        d_obj = _date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Nieprawidłowa data (YYYY-MM-DD).")
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        revenue = req.total_revenue if req.total_revenue is not None else \
+            await _sum_amount_for_day(client, "revenue_entries", day)
+        invoice = req.total_invoice_cost if req.total_invoice_cost is not None else \
+            await _sum_amount_for_day(client, "variable_cost_entries", day, {"type": "eq.materials"})
+        waste = req.total_waste_cost if req.total_waste_cost is not None else \
+            await _sum_amount_for_day(client, "variable_cost_entries", day, {"type": "eq.waste"})
+
+        summary, billing = await _generate_day_summary(client, revenue, waste, invoice, day)
+        record = {
+            "date": day, "total_revenue": revenue, "total_waste_cost": waste,
+            "total_invoice_cost": invoice, "ai_summary": summary,
+            "year": d_obj.year, "month": d_obj.month, "week_of_month": _week_of_month(d_obj),
+        }
+        try:
+            existing = await sb_get(client, "daily_reports",
+                                    params={"select": "id", "date": f"eq.{day}", "limit": "1"})
+            if existing:
+                await sb_patch(client, "daily_reports", {"date": f"eq.{day}"}, record)
+                rec_id = existing[0]["id"]
+            else:
+                row = await sb_post(client, "daily_reports", record)
+                rec_id = (row[0] if isinstance(row, list) else row).get("id")
+        except httpx.HTTPStatusError as e:
+            if _is_missing_column_error(e) or "daily_reports" in (e.response.text or "").lower() \
+                    or e.response.status_code == 404:
+                return {"ok": False, "needs_migration": True,
+                        "message": "Uruchom migrację ADD_DAILY_REPORTS.sql w Supabase (tabela daily_reports).",
+                        "report": record}
+            raise HTTPException(status_code=502, detail=f"daily_reports: {e.response.text}") from e
+
+    return _with_billing({"ok": True, "id": rec_id, "report": record,
+            "message": f"Raport dobowy {day} zapisany. Zysk netto: {round(revenue - waste - invoice, 2)} zł."},
+                         billing)
+
+
+@app.get("/api/reports/daily")
+async def reports_daily():
+    """Zwraca wszystkie raporty dobowe (sort malejąco po dacie) do archiwum w UI."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            rows = await sb_get(client, "daily_reports",
+                                params={"select": "*", "order": "date.desc", "limit": "2000"})
+            return {"ok": True, "reports": rows or []}
+        except httpx.HTTPStatusError:
+            return {"ok": True, "reports": [], "needs_migration": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI TREND & ANALYTICS ORCHESTRATOR — podsumowania i porównania okresowe
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PL_MONTHS = {
+    "styczen": 1, "stycznia": 1, "luty": 2, "lutego": 2, "marzec": 3, "marca": 3,
+    "kwiecien": 4, "kwietnia": 4, "maj": 5, "maja": 5, "czerwiec": 6, "czerwca": 6,
+    "lipiec": 7, "lipca": 7, "sierpien": 8, "sierpnia": 8, "wrzesien": 9, "wrzesnia": 9,
+    "pazdziernik": 10, "pazdziernika": 10, "listopad": 11, "listopada": 11,
+    "grudzien": 12, "grudnia": 12,
+}
+_PL_MONTH_NAMES = ["", "styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec",
+                   "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień"]
+
+
+class AnalyzePeriodRequest(BaseModel):
+    period_type: Literal["week", "month", "year", "custom"] = "week"
+    limit_days: Optional[int] = None
+    selected_periods: Optional[list] = None
+    period_hint: Optional[str] = None
+
+
+class ComparePeriodsRequest(BaseModel):
+    period_1: str
+    period_2: str
+
+
+# Rok symulacji finansowej / POS (seed_sim_restaurant_2025). Gdy użytkownik
+# nie poda roku („zyski z lipca”, „top sprzedaż”), bierzemy ten rok — nie bieżący kalendarzowy.
+SIM_FINANCE_YEAR = 2025
+
+
+def _period_days(period_type: str, limit_days) -> int:
+    try:
+        if limit_days and int(limit_days) > 0:
+            return int(limit_days)
+    except (TypeError, ValueError):
+        pass
+    return {"day": 1, "week": 7, "month": 30, "year": 365, "custom": 7}.get(period_type, 7)
+
+
+def _period_label(period_type: str, days: int) -> str:
+    return {
+        "day": "ostatni dzień",
+        "week": "ostatni tydzień",
+        "month": "ostatni miesiąc",
+        "year": "ostatni rok",
+        "custom": f"ostatnie {days} dni",
+    }.get(period_type, f"ostatnie {days} dni")
+
+
+_MONTHS_PL = {
+    "styczen": 1, "stycznia": 1, "sty": 1,
+    "luty": 2, "lutego": 2, "lut": 2,
+    "marzec": 3, "marca": 3, "mar": 3,
+    "kwiecien": 4, "kwietnia": 4, "kwi": 4,
+    "maj": 5, "maja": 5,
+    "czerwiec": 6, "czerwca": 6, "cze": 6,
+    "lipiec": 7, "lipca": 7, "lip": 7,
+    "sierpien": 8, "sierpnia": 8, "sie": 8,
+    "wrzesien": 9, "wrzesnia": 9, "wrz": 9,
+    "pazdziernik": 10, "pazdziernika": 10, "paz": 10,
+    "listopad": 11, "listopada": 11, "lis": 11,
+    "grudzien": 12, "grudnia": 12, "grudznia": 12, "gru": 12,
+}
+_MONTH_NAMES_PL = [
+    "", "styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec",
+    "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień",
+]
+
+
+def _strip_pl_month(s: str) -> str:
+    t = (s or "").lower().strip()
+    for a, b in (("ą", "a"), ("ć", "c"), ("ę", "e"), ("ł", "l"), ("ń", "n"),
+                 ("ó", "o"), ("ś", "s"), ("ź", "z"), ("ż", "z")):
+        t = t.replace(a, b)
+    return t
+
+
+def _resolve_period_window(
+    period_type: Optional[str] = None,
+    limit_days=None,
+    period_hint: Optional[str] = None,
+):
+    """Zwraca (since_iso, until_iso, label). Obsługuje miesiące kalendarzowe (lipiec, lipiec 2025, 2026-07)."""
+    from datetime import datetime, timezone, timedelta
+    from calendar import monthrange
+
+    now = datetime.now(timezone.utc)
+    hint = (period_hint or "").strip()
+
+    # YYYY-MM
+    m_iso = re.match(r"^(\d{4})-(\d{1,2})$", hint)
+    if m_iso:
+        y, mo = int(m_iso.group(1)), int(m_iso.group(2))
+        if 1 <= mo <= 12:
+            last = monthrange(y, mo)[1]
+            since = datetime(y, mo, 1, tzinfo=timezone.utc)
+            until = datetime(y, mo, last, 23, 59, 59, tzinfo=timezone.utc)
+            return since.isoformat(), until.isoformat(), f"{_MONTH_NAMES_PL[mo]} {y}"
+
+    # rok w tekście (np. „lipiec 2025”, „zyski z lipca 2025”)
+    y_hint = None
+    m_yr = re.search(r"(20\d{2})", hint)
+    if m_yr:
+        y_hint = int(m_yr.group(1))
+
+    # nazwa miesiąca PL — szukaj w całym tekście (nie tylko exact match)
+    # UWAGA: nie używaj 3-literowych skrótów (sie=się→fałszywy sierpień, lip, mar…)
+    key = _strip_pl_month(hint)
+    mo = None
+    month_tokens = sorted(
+        ((n, num) for n, num in _MONTHS_PL.items() if len(n) >= 4 or n in ("maj",)),
+        key=lambda kv: -len(kv[0]),
+    )
+    for name, num in month_tokens:
+        if name == "sie":
+            continue  # „się” po strip → sie
+        if len(name) <= 3:
+            if re.search(rf"\b{re.escape(name)}\b", key):
+                mo = num
+                break
+        elif name in key:
+            mo = num
+            break
+    if mo is None and key in _MONTHS_PL and key != "sie":
+        mo = _MONTHS_PL[key]
+
+    if mo is not None:
+        # Bez roku w komendzie → rok symulacji (nie „lipiec 2026” gdy dane są w 2025).
+        y = y_hint if y_hint is not None else SIM_FINANCE_YEAR
+        last = monthrange(y, mo)[1]
+        since = datetime(y, mo, 1, tzinfo=timezone.utc)
+        until = datetime(y, mo, last, 23, 59, 59, tzinfo=timezone.utc)
+        return since.isoformat(), until.isoformat(), f"{_MONTH_NAMES_PL[mo]} {y}"
+
+    # sam rok: „2025” / „rok 2025” / „w 2025 roku”
+    if y_hint is not None and mo is None:
+        since = datetime(y_hint, 1, 1, tzinfo=timezone.utc)
+        until = datetime(y_hint, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        return since.isoformat(), until.isoformat(), f"rok {y_hint}"
+
+    # period_type z UI (tydzień / miesiąc / rok) — mapuj na rok symulacji,
+    # żeby w 2026 nie wychodziło puste okno przy danych seed [SIM2025].
+    pt = (period_type or "").strip().lower()
+    try:
+        sim_anchor = now.replace(year=SIM_FINANCE_YEAR)
+    except ValueError:
+        sim_anchor = now.replace(year=SIM_FINANCE_YEAR, day=28)
+
+    if pt == "week":
+        until = sim_anchor.replace(hour=23, minute=59, second=59, microsecond=0)
+        since = (sim_anchor - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return (
+            since.isoformat(),
+            until.isoformat(),
+            f"ostatnie 7 dni · {_MONTH_NAMES_PL[sim_anchor.month]} {SIM_FINANCE_YEAR}",
+        )
+    if pt == "month":
+        y, mo = SIM_FINANCE_YEAR, sim_anchor.month
+        last = monthrange(y, mo)[1]
+        since = datetime(y, mo, 1, tzinfo=timezone.utc)
+        until = datetime(y, mo, last, 23, 59, 59, tzinfo=timezone.utc)
+        return since.isoformat(), until.isoformat(), f"{_MONTH_NAMES_PL[mo]} {y}"
+    if pt == "year":
+        since = datetime(SIM_FINANCE_YEAR, 1, 1, tzinfo=timezone.utc)
+        until = datetime(SIM_FINANCE_YEAR, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        return since.isoformat(), until.isoformat(), f"rok {SIM_FINANCE_YEAR}"
+
+    # Hint bez miesiąca/roku (np. „ranking sprzedaży”) — cały rok symulacji.
+    y = SIM_FINANCE_YEAR
+    since = datetime(y, 1, 1, tzinfo=timezone.utc)
+    until = datetime(y, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    return since.isoformat(), until.isoformat(), f"rok {y}"
+
+
+async def _pos_sales_in_window(
+    client: httpx.AsyncClient,
+    days: int = 7,
+    *,
+    since_iso: Optional[str] = None,
+    until_iso: Optional[str] = None,
+) -> list[dict]:
+    from datetime import datetime, timezone, timedelta
+
+    def _as_aware(iso: str, *, end: bool) -> datetime:
+        raw = (iso or "").strip()
+        if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+            raw = raw + ("T23:59:59+00:00" if end else "T00:00:00+00:00")
+        elif raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    if since_iso:
+        since_dt = _as_aware(since_iso, end=False)
+        since = _pg_ts(since_dt.isoformat())
+    else:
+        since_dt = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        since = _pg_ts(since_dt.isoformat())
+
+    until_dt = _as_aware(until_iso, end=True) if until_iso else None
+    until_s = _pg_ts(until_dt.isoformat()) if until_dt is not None else None
+    # PostgREST: filtr zakresu — dwa parametry processed_at (bez and= + bez '+' w URL)
+    params_list: list[tuple[str, str]] = [
+        ("select", "pos_external_id,pos_product_id,quantity_sold,processed_at"),
+        ("processed_at", f"gte.{since}"),
+        ("limit", "30000"),
+        ("order", "processed_at.asc"),
+    ]
+    if until_s:
+        params_list.insert(2, ("processed_at", f"lte.{until_s}"))
+    try:
+        rows = await sb_get(client, "pos_sales_log", params=params_list) or []
+    except httpx.HTTPStatusError:
+        # Fallback: and= z timestampami Z
+        try:
+            and_parts = [f"processed_at.gte.{since}"]
+            if until_s:
+                and_parts.append(f"processed_at.lte.{until_s}")
+            rows = await sb_get(client, "pos_sales_log", params={
+                "select": "pos_external_id,pos_product_id,quantity_sold,processed_at",
+                "and": f"({','.join(and_parts)})",
+                "limit": "30000",
+                "order": "processed_at.asc",
+            }) or []
+        except httpx.HTTPStatusError:
+            return []
+        if until_dt is not None:
+            filtered = []
+            for r in rows:
+                raw = r.get("processed_at") or ""
+                try:
+                    dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if dt <= until_dt:
+                    filtered.append(r)
+            return filtered
+    # Client-side until gdy PostgREST złączył dwa processed_at w jeden
+    if until_dt is not None and rows:
+        filtered = []
+        for r in rows:
+            raw = r.get("processed_at") or ""
+            try:
+                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if dt <= until_dt:
+                filtered.append(r)
+        return filtered
+    return rows or []
+
+
+async def _aggregate_menu_sales(
+    client: httpx.AsyncClient,
+    days: int,
+    category: Optional[str] = None,
+    *,
+    since_iso: Optional[str] = None,
+    until_iso: Optional[str] = None,
+) -> list[dict]:
+    """Sumuje sprzedaż POS → menu_items (qty + revenue).
+
+    Bierze też nieaktywne dania (soft-delete), żeby historyczny POS
+    po „usuń menu / przywróć / skan” nadal się sumował po starych id/pos_id.
+    """
+    sales = await _pos_sales_in_window(client, days, since_iso=since_iso, until_iso=until_iso)
+    try:
+        menu_all = await sb_get(client, "menu_items", params={
+            "select": "id,name,category,pos_id,price_pln,is_active",
+            "limit": "8000",
+        }) or []
+    except httpx.HTTPStatusError:
+        menu_all = await sb_get(client, "menu_items", params={
+            "select": "id,name,category,pos_id,price_pln",
+            "limit": "8000",
+        }) or []
+    by_pos = {m.get("pos_id"): m for m in menu_all if m.get("pos_id")}
+    by_id = {m["id"]: m for m in menu_all}
+    by_name = {_norm_name(m.get("name") or ""): m for m in menu_all if m.get("name")}
+
+    totals: dict[str, dict] = {}
+    unmatched = 0
+    for s in sales:
+        mid = None
+        pos_ext = s.get("pos_external_id")
+        if pos_ext and pos_ext in by_pos:
+            mid = by_pos[pos_ext]["id"]
+        elif s.get("pos_product_id") in by_id:
+            mid = s["pos_product_id"]
+        if not mid or mid not in by_id:
+            unmatched += 1
+            continue
+        m = by_id[mid]
+        if category and not _cat_matches(m.get("category") or "", category):
+            continue
+        qty = float(s.get("quantity_sold") or 0)
+        price = float(m.get("price_pln") or 0)
+        slot = totals.setdefault(mid, {
+            "menu_item_id": mid,
+            "name": m.get("name"),
+            "category": m.get("category"),
+            "qty_sold": 0.0,
+            "revenue_pln": 0.0,
+        })
+        slot["qty_sold"] = round(slot["qty_sold"] + qty, 2)
+        slot["revenue_pln"] = round(slot["revenue_pln"] + qty * price, 2)
+    # Debug hint w loggerze gdy sprzedaż jest, ale nic nie zmapowano (rozjechane pos_id)
+    if sales and not totals and unmatched:
+        logger.warning(
+            "POS: %s wierszy w oknie, 0 dopasowań do menu (pos_id/id) — "
+            "uruchom seed_sim_restaurant_2025.py --wipe albo zmapuj POS w Ustawieniach.",
+            len(sales),
+        )
+    return list(totals.values())
+
+
+def _sels_from_hint(hint: Optional[str]) -> Optional[list[dict]]:
+    """Z hintu „zyski z grudnia 2025” zbuduj selected_periods (gdy drzewko puste)."""
+    if not hint or not str(hint).strip():
+        return None
+    since, until, label = _resolve_period_window("month", None, str(hint).strip())
+    # Wyciągnij rok/miesiąc z okna
+    try:
+        y = int(since[:4])
+        m = int(since[5:7])
+        # cały rok?
+        if since[5:10] == "01-01" and until[5:10] == "12-31":
+            return [{"kind": "year", "year": y}]
+        return [{"kind": "month", "year": y, "month": m}]
+    except Exception:
+        return None
+
+
+def _merge_period_sels(p: dict) -> Optional[list[dict]]:
+    """Drzewko ma priorytet; gdy puste / niespójne z transcriptem — buduj z hintu."""
+    sels = _coerce_selected_periods(p.get("selected_periods"))
+    hint = None
+    for k in ("period_1", "note", "_transcript"):
+        v = p.get(k)
+        if isinstance(v, str) and v.strip():
+            hint = v.strip()
+            break
+    from_hint = _sels_from_hint(hint)
+    if not sels:
+        return from_hint
+    if from_hint:
+        # Jeśli transcript ma jawny rok, a drzewko inny — bierz transcript (częsty bug 2026 vs 2025)
+        hy = from_hint[0].get("year")
+        if hy and any(int(s.get("year") or 0) != int(hy) for s in sels):
+            y_in_hint = bool(re.search(r"20\d{2}", hint or ""))
+            if y_in_hint:
+                return from_hint
+    return sels
+
+
+async def _run_rank_menu_sales(
+    *,
+    rank: str = "best",
+    period_type: str = "week",
+    limit_days=None,
+    top_n=None,
+    category: Optional[str] = None,
+    period_hint: Optional[str] = None,
+    selected_periods: Optional[list] = None,
+) -> dict:
+    n = 5
+    try:
+        if top_n and int(top_n) > 0:
+            n = min(int(top_n), 20)
+    except (TypeError, ValueError):
+        pass
+    want_best = (rank or "best").lower() != "worst"
+    days = _period_days(period_type or "week", limit_days)
+    sels = _coerce_selected_periods(selected_periods)
+
+    async def _one(since_iso: str, until_iso: str, label: str) -> dict:
+        rows = await _aggregate_menu_sales(
+            client, days, category=category, since_iso=since_iso, until_iso=until_iso,
+        )
+        if not rows:
+            return {
+                "label": label,
+                "period_label": label,
+                "items": [],
+                "message": f"Brak sprzedaży POS za {label}.",
+            }
+        rows.sort(key=lambda r: (r["qty_sold"], r["revenue_pln"]), reverse=want_best)
+        top = rows[:n]
+        return {"label": label, "period_label": label, "items": top, "message": ""}
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        periods_out: list[dict] = []
+        if sels:
+            for sel in sels[:12]:
+                s, u, lbl = _window_from_period_sel(sel)
+                periods_out.append(await _one(s, u, lbl))
+        else:
+            s, u, lbl = _resolve_period_window(period_type, limit_days, period_hint)
+            periods_out.append(await _one(s, u, lbl))
+
+        kind = "najlepiej" if want_best else "najsłabiej"
+        # Bez ściany tekstu — FE pokazuje periods[].items
+        return {
+            "ok": True,
+            "rank": "best" if want_best else "worst",
+            "category": category,
+            "period_label": " · ".join(p["label"] for p in periods_out),
+            "periods": periods_out,
+            "items": periods_out[0]["items"] if len(periods_out) == 1 else [],
+            "assistant_speech": "",
+            "message": f"Ranking {kind} sprzedających się dań — każdy okres osobno.",
+        }
+
+
+def _norm_name_key(s: str) -> str:
+    t = (s or "").lower().strip()
+    for a, b in (("ą", "a"), ("ć", "c"), ("ę", "e"), ("ł", "l"), ("ń", "n"),
+                 ("ó", "o"), ("ś", "s"), ("ź", "z"), ("ż", "z")):
+        t = t.replace(a, b)
+    return re.sub(r"\s+", " ", t)
+
+
+async def _lookup_unit_cost_pln(
+    client: httpx.AsyncClient,
+    *,
+    inv_row: Optional[dict],
+    item_name: str,
+    around_iso: Optional[str] = None,
+) -> float:
+    """Koszt 1 jednostki magazynowej: unit_cost → variable_cost → invoices.note."""
+    if inv_row:
+        uc = float(inv_row.get("unit_cost") or 0)
+        if uc > 0:
+            return uc
+    name_key = _norm_name_key(item_name)
+    # variable_cost_entries — best-effort po nazwie w description/note
+    try:
+        params: list[tuple[str, str]] = [
+            ("select", "amount_pln,note,description,created_at,year_month"),
+            ("order", "created_at.desc"),
+            ("limit", "300"),
+        ]
+        if around_iso:
+            params.append(("created_at", f"lte.{_pg_ts(around_iso)}"))
+        rows = await sb_get(client, "variable_cost_entries", params=params) or []
+        for r in rows:
+            blob = _norm_name_key(f"{r.get('note') or ''} {r.get('description') or ''}")
+            if name_key and name_key in blob:
+                amt = float(r.get("amount_pln") or 0)
+                m = re.search(r"(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml|szt)", blob)
+                if m and amt > 0:
+                    q = float(m.group(1).replace(",", "."))
+                    u = m.group(2)
+                    if u == "g":
+                        q = q / 1000.0
+                    elif u == "ml":
+                        q = q / 1000.0
+                    if q > 0:
+                        return round(amt / q, 4)
+                if amt > 0:
+                    return round(amt, 4)
+    except Exception:
+        pass
+    # invoices.note często zawiera linie „Burak 10 kg = 50.00 zł”
+    try:
+        params2: list[tuple[str, str]] = [
+            ("select", "total_cost,note,created_at"),
+            ("order", "created_at.desc"),
+            ("limit", "200"),
+        ]
+        if around_iso:
+            params2.append(("created_at", f"lte.{_pg_ts(around_iso)}"))
+        invs = await sb_get(client, "invoices", params=params2) or []
+        for inv in invs:
+            note = _norm_name_key(inv.get("note") or "")
+            if not name_key or name_key not in note:
+                continue
+            # szukaj fragmentu z ilością i kwotą przy nazwie
+            raw = str(inv.get("note") or "")
+            for part in re.split(r"[;|]", raw):
+                if name_key not in _norm_name_key(part):
+                    continue
+                m = re.search(
+                    r"(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml|szt).{0,12}?(\d+(?:[.,]\d+)?)\s*zl",
+                    _norm_name_key(part),
+                )
+                if m:
+                    q = float(m.group(1).replace(",", "."))
+                    u = m.group(2)
+                    amt = float(m.group(3).replace(",", "."))
+                    if u == "g":
+                        q /= 1000.0
+                    elif u == "ml":
+                        q /= 1000.0
+                    if q > 0 and amt > 0:
+                        return round(amt / q, 4)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _dish_portions_from_waste(qty: float, unit: str, portion_size_grams: float) -> float:
+    """Ile porcji reprezentuje strata dania (porcja/szt albo l/ml/kg/g vs gramatura)."""
+    u = (unit or "").strip().lower()
+    portion_g = float(portion_size_grams or 0)
+    if u in ("porcja", "porcje", "szt") or _is_piece_unit(u):
+        return float(qty)
+    if u in ("l", "ml") and portion_g > 0:
+        ml = qty * (1000.0 if u == "l" else 1.0)
+        return ml / portion_g
+    if u in ("kg", "g") and portion_g > 0:
+        g = qty * (1000.0 if u == "kg" else 1.0)
+        return g / portion_g
+    return float(qty)
+
+
+def _ingredient_qty_in_inv_unit(
+    qty: float,
+    from_unit: str,
+    inv_row: Optional[dict],
+) -> float:
+    """Przelicz ilość straty składnika na jednostkę magazynową (pod unit_cost)."""
+    if not inv_row:
+        return float(qty)
+    inv_u = (inv_row.get("unit") or "").strip().lower()
+    waste_u = (from_unit or inv_u or "").strip().lower()
+    if not inv_u or not waste_u or inv_u == waste_u:
+        return float(qty)
+    size = inv_row.get("unit_weight_volume") or inv_row.get("portion_size")
+    converted = _convert_culinary(float(qty), waste_u, inv_u, size)
+    return float(converted) if converted is not None else float(qty)
+
+
+async def _dish_waste_cost_pln(
+    client: httpx.AsyncClient,
+    *,
+    dish_name: str,
+    qty: float,
+    unit: str,
+    around_iso: Optional[str],
+    inv_by_name: dict,
+) -> float:
+    """Koszt straty dania: receptura × koszt składników × przelicznik porcji/litrów."""
+    menu = await sb_get(client, "menu_items", params={
+        "select": "id,name,portion_size_grams",
+        "limit": "5000",
+    }) or []
+    hit, _ = _resolve_by_fuzzy(dish_name, menu, threshold=72)
+    if not hit:
+        return 0.0
+    mid = hit["id"]
+    ings = await sb_get(client, "recipe_ingredients", params={
+        "select": "ingredient_name,quantity,unit",
+        "menu_item_id": f"eq.{mid}",
+        "limit": "200",
+    }) or []
+    if not ings:
+        return 0.0
+    portions = _dish_portions_from_waste(qty, unit, float(hit.get("portion_size_grams") or 0))
+    total = 0.0
+    for ing in ings:
+        iname = (ing.get("ingredient_name") or "").strip()
+        if _is_porcja_row(iname):
+            continue
+        iq = float(ing.get("quantity") or 0) * portions
+        iunit = (ing.get("unit") or "g").strip().lower()
+        inv = inv_by_name.get(_norm_name_key(iname))
+        base_qty = _ingredient_qty_in_inv_unit(iq, iunit, inv)
+        uc = await _lookup_unit_cost_pln(
+            client, inv_row=inv, item_name=iname, around_iso=around_iso,
+        )
+        total += base_qty * uc
+    return round(total, 2)
+
+
+async def _waste_log_event_cost_pln(
+    client: httpx.AsyncClient,
+    w: dict,
+    *,
+    by_id: dict,
+    by_name: dict,
+    around_iso: Optional[str],
+) -> tuple[float, float]:
+    """Koszt jednego wpisu waste_logs → (cost_pln, unit_cost_display)."""
+    name = (w.get("item_name") or "Nieznany").strip()
+    qty = float(w.get("quantity") or 0)
+    if qty <= 0:
+        return 0.0, 0.0
+    item_type = (w.get("item_type") or "ingredient").strip().lower()
+    ca = str(w.get("created_at") or around_iso or "")
+    inv_row = None
+    iid = w.get("item_id") or (w.get("related_id") if item_type == "ingredient" else None)
+    if iid and str(iid) in by_id:
+        inv_row = by_id[str(iid)]
+    else:
+        inv_row = by_name.get(_norm_name_key(name))
+
+    if item_type == "dish":
+        cost = await _dish_waste_cost_pln(
+            client,
+            dish_name=name,
+            qty=qty,
+            unit=w.get("unit") or "porcja",
+            around_iso=ca or around_iso,
+            inv_by_name=by_name,
+        )
+        unit_cost = round(cost / qty, 4) if qty else 0.0
+        return cost, unit_cost
+
+    unit_cost = await _lookup_unit_cost_pln(
+        client, inv_row=inv_row, item_name=name, around_iso=ca or around_iso,
+    )
+    base_qty = _ingredient_qty_in_inv_unit(qty, w.get("unit") or "", inv_row)
+    return round(base_qty * unit_cost, 2), unit_cost
+
+
+async def _sum_waste_logs_cost_pln(
+    client: httpx.AsyncClient,
+    *,
+    since_iso: str,
+    until_iso: str,
+    d0_iso: Optional[str] = None,
+    d1_iso: Optional[str] = None,
+) -> dict:
+    """Suma strat z waste_logs w oknie (dania + składniki, z przeliczeniem jednostek)."""
+    logs = await sb_get(client, "waste_logs", params={
+        "select": "item_name,quantity,unit,created_at,item_id,item_type,related_id",
+        "created_at": f"gte.{_pg_ts(since_iso)}",
+        "order": "created_at.desc",
+        "limit": "10000",
+    }) or []
+    until_s = _pg_ts(until_iso) if until_iso else None
+    if until_s:
+        logs = [r for r in logs if str(r.get("created_at") or "") <= until_s]
+    if d0_iso and d1_iso:
+        logs = [
+            r for r in logs
+            if d0_iso <= str(r.get("created_at") or "")[:10] <= d1_iso
+        ]
+
+    inv = await sb_get(client, "inventory_items", params={
+        "select": "id,name,unit_cost,unit,unit_weight_volume,portion_size",
+        "limit": "5000",
+    }) or []
+    by_id = {str(i["id"]): i for i in inv if i.get("id")}
+    by_name = {_norm_name_key(i.get("name") or ""): i for i in inv if i.get("name")}
+
+    total = 0.0
+    events = 0
+    missing = 0
+    for w in logs:
+        cost, _uc = await _waste_log_event_cost_pln(
+            client, w, by_id=by_id, by_name=by_name, around_iso=since_iso,
+        )
+        if cost <= 0:
+            missing += 1
+        else:
+            total += cost
+            events += 1
+    return {
+        "total_cost_pln": round(total, 2),
+        "events_costed": events,
+        "missing_unit_cost_rows": missing,
+        "events_total": len(logs),
+    }
+
+
+async def _run_rank_waste_cost(
+    *,
+    period_type: str = "week",
+    limit_days=None,
+    top_n=None,
+    period_hint: Optional[str] = None,
+    selected_periods: Optional[list] = None,
+) -> dict:
+    """Ranking strat w zł: unit_cost / faktury / receptura dania."""
+    n = 5
+    try:
+        if top_n and int(top_n) > 0:
+            n = min(int(top_n), 20)
+    except (TypeError, ValueError):
+        pass
+    sels = _coerce_selected_periods(selected_periods)
+
+    async def _one(client, since_iso: str, until_iso: str, label: str) -> dict:
+        logs = await sb_get(client, "waste_logs", params={
+            "select": "item_name,quantity,unit,created_at,item_id,item_type,related_id",
+            "created_at": f"gte.{_pg_ts(since_iso)}",
+            "order": "created_at.desc",
+            "limit": "5000",
+        }) or []
+        until_s = _pg_ts(until_iso) if until_iso else None
+        if until_s:
+            logs = [r for r in logs if str(r.get("created_at") or "") <= until_s]
+
+        inv = await sb_get(client, "inventory_items", params={
+            "select": "id,name,unit_cost,unit",
+            "limit": "5000",
+        }) or []
+        by_id = {str(i["id"]): i for i in inv if i.get("id")}
+        by_name = {_norm_name_key(i.get("name") or ""): i for i in inv if i.get("name")}
+
+        totals: dict[str, dict] = {}
+        missing_cost = 0
+        for w in logs:
+            name = (w.get("item_name") or "Nieznany").strip()
+            qty = float(w.get("quantity") or 0)
+            if qty <= 0:
+                continue
+            ca = str(w.get("created_at") or "") or since_iso
+            cost, unit_cost = await _waste_log_event_cost_pln(
+                client, w, by_id=by_id, by_name=by_name, around_iso=ca,
+            )
+            inv_row = None
+            iid = w.get("item_id") or w.get("related_id")
+            if iid and str(iid) in by_id:
+                inv_row = by_id[str(iid)]
+            else:
+                inv_row = by_name.get(_norm_name_key(name))
+
+            if cost <= 0:
+                missing_cost += 1
+            key = _norm_name_key(name) or name
+            slot = totals.setdefault(key, {
+                "name": name,
+                "qty": 0.0,
+                "unit": w.get("unit") or (inv_row or {}).get("unit") or "",
+                "cost_pln": 0.0,
+                "unit_cost": unit_cost,
+            })
+            slot["qty"] = round(slot["qty"] + qty, 2)
+            slot["cost_pln"] = round(slot["cost_pln"] + cost, 2)
+            if unit_cost > 0:
+                slot["unit_cost"] = unit_cost
+
+        rows = sorted(totals.values(), key=lambda r: r["cost_pln"], reverse=True)
+        top = rows[:n]
+        total_pln = round(sum(r["cost_pln"] for r in rows), 2)
+        return {
+            "label": label,
+            "period_label": label,
+            "items": top,
+            "total_cost_pln": total_pln,
+            "missing_unit_cost_rows": missing_cost,
+            "message": "",
+        }
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        periods_out: list[dict] = []
+        if sels:
+            for sel in sels[:12]:
+                s, u, lbl = _window_from_period_sel(sel)
+                periods_out.append(await _one(client, s, u, lbl))
+        else:
+            s, u, lbl = _resolve_period_window(period_type, limit_days, period_hint)
+            periods_out.append(await _one(client, s, u, lbl))
+
+        return {
+            "ok": True,
+            "period_label": " · ".join(p["label"] for p in periods_out),
+            "periods": periods_out,
+            "items": periods_out[0]["items"] if len(periods_out) == 1 else [],
+            "total_cost_pln": periods_out[0]["total_cost_pln"] if len(periods_out) == 1 else None,
+            "assistant_speech": "",
+            "message": "Straty w złotówkach — każdy okres osobno.",
+        }
+
+
+async def _run_rank_dead_menu(
+    *,
+    period_type: str = "week",
+    limit_days=None,
+    top_n=None,
+    category: Optional[str] = None,
+    period_hint: Optional[str] = None,
+    selected_periods: Optional[list] = None,
+) -> dict:
+    """Najsłabiej sprzedające się dania (z qty>0) — nie „zero sprzedaży”."""
+    n = 8
+    try:
+        if top_n and int(top_n) > 0:
+            n = min(int(top_n), 30)
+    except (TypeError, ValueError):
+        pass
+    days = _period_days(period_type or "week", limit_days)
+    sels = _coerce_selected_periods(selected_periods)
+
+    async def _one(client, since_iso: str, until_iso: str, label: str) -> dict:
+        sold = await _aggregate_menu_sales(
+            client, days, category=category, since_iso=since_iso, until_iso=until_iso,
+        )
+        rows = [r for r in sold if float(r.get("qty_sold") or 0) > 0]
+        if category:
+            rows = [r for r in rows if _cat_matches(r.get("category") or "", category)]
+        rows.sort(key=lambda r: (float(r.get("qty_sold") or 0), float(r.get("revenue_pln") or 0)))
+        top = rows[:n]
+        if not top:
+            return {
+                "label": label,
+                "period_label": label,
+                "items": [],
+                "message": f"Brak sprzedaży POS za {label} — nie da się zbudować rankingu najsłabszych.",
+            }
+        return {"label": label, "period_label": label, "items": top, "message": ""}
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        periods_out: list[dict] = []
+        if sels:
+            for sel in sels[:12]:
+                s, u, lbl = _window_from_period_sel(sel)
+                periods_out.append(await _one(client, s, u, lbl))
+        else:
+            s, u, lbl = _resolve_period_window(period_type, limit_days, period_hint)
+            periods_out.append(await _one(client, s, u, lbl))
+
+        return {
+            "ok": True,
+            "period_label": " · ".join(p["label"] for p in periods_out),
+            "category": category,
+            "periods": periods_out,
+            "items": periods_out[0]["items"] if len(periods_out) == 1 else [],
+            "assistant_speech": "",
+            "message": "Najsłabiej sprzedające się dania — każdy okres osobno.",
+        }
+
+
+async def _run_list_expiring_soon(
+    *,
+    within_days=3,
+    top_n=None,
+) -> dict:
+    """Drabina dat ważności z warehouse_inventory (bez żargonu T-N)."""
+    from datetime import date as _date, timedelta
+
+    try:
+        horizon = max(1, min(int(within_days or 3), 14))
+    except (TypeError, ValueError):
+        horizon = 3
+    n = 20
+    try:
+        if top_n and int(top_n) > 0:
+            n = min(int(top_n), 40)
+    except (TypeError, ValueError):
+        pass
+
+    today = _date.today()
+    until = today + timedelta(days=horizon)
+
+    def _ladder_label(days_left: int) -> str:
+        if days_left <= 0:
+            return "dziś"
+        if days_left == 1:
+            return "jutro"
+        if days_left == 2:
+            return "pojutrze"
+        return f"za {days_left} dni"
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        try:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/warehouse_inventory_refresh_status",
+                headers=SB_HEADERS,
+                json={},
+            )
+        except Exception:
+            pass
+
+        rows = await sb_get(client, "warehouse_inventory", params={
+            "select": "id,product_name,quantity,unit,expiration_date,status",
+            "expiration_date": f"lte.{until.isoformat()}",
+            "quantity": "gt.0",
+            "order": "expiration_date.asc",
+            "limit": "500",
+        }) or []
+
+        ladder: dict[str, list] = {}
+        items = []
+        for r in rows:
+            try:
+                exp = _date.fromisoformat(str(r.get("expiration_date"))[:10])
+            except Exception:
+                continue
+            days_left = (exp - today).days
+            if days_left < 0:
+                continue
+            if days_left > horizon:
+                continue
+            # Bogate tipy + gry: frontend pickExpiryTips (expiryTipsCatalog).
+            # Tu tylko krótki fallback fazy (gdy FE nie podmieni / API klient).
+            if days_left <= 1:
+                tip_phase = "t1"
+                tip = "T-1: ratuj agresywnie (katalog tipów w aplikacji)."
+            elif days_left == 2:
+                tip_phase = "t2"
+                tip = "T-2: Happy Hour / przeróbka (katalog tipów w aplikacji)."
+            elif days_left == 3:
+                tip_phase = "t3"
+                tip = "T-3: łagodna promocja / combo (katalog tipów w aplikacji)."
+            else:
+                tip_phase = None
+                tip = "Monitoruj datę — tipy katalogowe dla T-3/T-2/T-1."
+            label = _ladder_label(days_left)
+            entry = {
+                "id": r.get("id"),
+                "name": r.get("product_name"),
+                "qty": float(r.get("quantity") or 0),
+                "unit": r.get("unit") or "",
+                "expiration_date": exp.isoformat(),
+                "days_left": days_left,
+                "ladder": label,
+                "tip": tip,
+                "tip_phase": tip_phase,
+                "tips_source": "frontend_catalog",
+            }
+            items.append(entry)
+            ladder.setdefault(label, []).append(entry)
+
+        items = items[:n]
+        if not items:
+            return {
+                "ok": True,
+                "within_days": horizon,
+                "items": [],
+                "ladder": ladder,
+                "assistant_speech": "",
+                "message": (
+                    f"Brak partii kończących się w ciągu {horizon} dni. "
+                    "Dodawaj daty ważności przy dostawie."
+                ),
+            }
+
+        return {
+            "ok": True,
+            "within_days": horizon,
+            "items": items,
+            "ladder": ladder,
+            "assistant_speech": "",
+            "message": f"Produkty kończące się w ciągu {horizon} dni — lista poniżej.",
+        }
+
+
+async def _run_rank_supplier_spend(
+    *,
+    period_type: str = "month",
+    limit_days=None,
+    top_n=None,
+    period_hint: Optional[str] = None,
+    supplier_name: Optional[str] = None,
+) -> dict:
+    """Suma invoices.total_cost per dostawca w oknie."""
+    since_iso, until_iso, label = _resolve_period_window(period_type, limit_days, period_hint)
+    n = 5
+    try:
+        if top_n and int(top_n) > 0:
+            n = min(int(top_n), 20)
+    except (TypeError, ValueError):
+        pass
+    filt = (supplier_name or "").strip().lower()
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        rows = await sb_get(client, "invoices", params={
+            "select": "supplier_id,supplier_name,total_cost,created_at",
+            "created_at": f"gte.{since_iso}",
+            "order": "created_at.desc",
+            "limit": "5000",
+        }) or []
+        if until_iso:
+            rows = [r for r in rows if str(r.get("created_at") or "") <= until_iso]
+
+        totals: dict[str, dict] = {}
+        for r in rows:
+            name = (r.get("supplier_name") or "Nieznany dostawca").strip()
+            if filt and filt not in name.lower() and filt not in _norm_name_key(name):
+                continue
+            key = str(r.get("supplier_id") or _norm_name_key(name) or name)
+            slot = totals.setdefault(key, {
+                "supplier_id": r.get("supplier_id"),
+                "name": name,
+                "spend_pln": 0.0,
+                "invoice_count": 0,
+            })
+            slot["spend_pln"] = round(slot["spend_pln"] + float(r.get("total_cost") or 0), 2)
+            slot["invoice_count"] += 1
+
+        ranked = sorted(totals.values(), key=lambda x: x["spend_pln"], reverse=True)
+        top = ranked[:n]
+        total = round(sum(x["spend_pln"] for x in ranked), 2)
+        if not ranked:
+            return {
+                "ok": True,
+                "period_label": label,
+                "total_spend_pln": 0,
+                "items": [],
+                "assistant_speech": "",
+                "message": f"Brak faktur za {label}. Wgraj faktury zakupowe.",
+            }
+        return {
+            "ok": True,
+            "period_label": label,
+            "total_spend_pln": total,
+            "items": top,
+            "assistant_speech": "",
+            "message": f"Wydatki u dostawców za {label} — lista poniżej.",
+        }
+
+
+_HACCP_RULES = [
+    {
+        "id": "fifo",
+        "keys": ["fifo", "kolejnosc", "rotacja"],
+        "title": "Zasada FIFO",
+        "body": (
+            "First In, First Out: produkty z najkrótszą datą ważności na przód półki "
+            "i zużywane jako pierwsze. Etykietuj każdą partię datą przyjęcia."
+        ),
+    },
+    {
+        "id": "ryby",
+        "keys": ["ryb", "losos", "dorsz", "krewet", "malz"],
+        "title": "Świeże ryby",
+        "body": "Lodówka 0–2°C, osobna strefa. Zużyj w 24–48 h. Nie trzymaj na rampie w upale.",
+    },
+    {
+        "id": "mieso",
+        "keys": ["mieso", "wolow", "wieprz", "kurczak", "indyk"],
+        "title": "Mięso świeże",
+        "body": "0–4°C, dolna półka. Surowy kurczak osobno. Po otwarciu 24–48 h lub mrożenie.",
+    },
+    {
+        "id": "nabial",
+        "keys": ["mleko", "smietan", "jogurt", "ser", "twarog", "jajk"],
+        "title": "Nabiał",
+        "body": "2–6°C, nie w drzwiach lodówki. Po otwarciu mleka/śmietany — 2–3 dni.",
+    },
+    {
+        "id": "salata",
+        "keys": ["salat", "rukol", "szpinak"],
+        "title": "Sałaty",
+        "body": "Przed podaniem namocz w zimnej wodzie — będą chrupiące. Osusz, trzymaj 2–5°C.",
+    },
+    {
+        "id": "ryz",
+        "keys": ["ryz", "risotto"],
+        "title": "Ryż ugotowany",
+        "body": "Szybko schłodź. Do sypkości przepłucz zimną wodą. W lodówce max 24 h.",
+    },
+    {
+        "id": "polprodukt",
+        "keys": ["sos", "wywar", "bulion", "polprodukt", "gulasz"],
+        "title": "Półprodukty / sosy",
+        "body": "Schłodź do ≤5°C w max 2 h. Etykieta: data produkcji + ważności. Regeneracja ≥75°C.",
+    },
+]
+
+
+def _run_haccp_tip(query: str) -> dict:
+    q = _norm_name_key(query or "")
+    hits = []
+    for rule in _HACCP_RULES:
+        if any(k in q for k in rule["keys"]):
+            hits.append(rule)
+    if not hits:
+        hits = [_HACCP_RULES[0], _HACCP_RULES[1], _HACCP_RULES[2]]
+    hits = hits[:3]
+    lines = " ".join(f"{h['title']}: {h['body']}" for h in hits)
+    topic = query.strip() or "ogólne"
+    return {
+        "ok": True,
+        "items": [{"name": h["title"], "tip": h["body"], "id": h["id"]} for h in hits],
+        "assistant_speech": f"HACCP / przechowywanie ({topic}): {lines}",
+    }
+
+
+async def _run_manager_core_alerts(
+    *,
+    period_type: str = "week",
+    limit_days=None,
+    period_hint: Optional[str] = None,
+) -> dict:
+    """4 pary CORE: POS↔Mag, Mag↔Waste/expiry, Waste↔zł, Mag↔Dostawy (overstock)."""
+    from datetime import date as _date, timedelta
+
+    since_iso, until_iso, label = _resolve_period_window(period_type, limit_days, period_hint)
+    days = _period_days(period_type or "week", limit_days)
+    alerts: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        # 1) POS ↔ Magazyn — top dish coverage in hours (rough)
+        sales = await _aggregate_menu_sales(
+            client, days, since_iso=since_iso, until_iso=until_iso,
+        )
+        sales_sorted = sorted(sales, key=lambda r: r.get("qty_sold", 0), reverse=True)[:5]
+        inv = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,min_quantity,unit",
+            "limit": "3000",
+        }) or []
+        inv_by_name = {_norm_name_key(i.get("name") or ""): i for i in inv}
+        recipes = await sb_get(client, "recipe_ingredients", params={
+            "select": "menu_item_id,ingredient_name,quantity,inventory_item_id",
+            "limit": "8000",
+        }) or []
+        by_menu: dict[str, list] = {}
+        for ri in recipes:
+            mid = ri.get("menu_item_id")
+            if mid:
+                by_menu.setdefault(mid, []).append(ri)
+
+        hours_open = max(1.0, float(days) * 8.0)  # rough service hours in window
+        for dish in sales_sorted:
+            mid = dish.get("menu_item_id")
+            qty_sold = float(dish.get("qty_sold") or 0)
+            if qty_sold < 3:
+                continue
+            rate = qty_sold / hours_open  # portions per hour
+            if rate <= 0:
+                continue
+            # weakest ingredient coverage
+            worst_h = None
+            worst_name = None
+            for ri in by_menu.get(mid, []):
+                iname = ri.get("ingredient_name") or ""
+                inv_row = inv_by_name.get(_norm_name_key(iname))
+                if not inv_row and ri.get("inventory_item_id"):
+                    inv_row = next((x for x in inv if str(x.get("id")) == str(ri.get("inventory_item_id"))), None)
+                if not inv_row:
+                    continue
+                per_portion = float(ri.get("quantity") or 0) or 1.0
+                stock = float(inv_row.get("quantity") or 0)
+                portions_left = stock / per_portion if per_portion > 0 else 0
+                hours_left = portions_left / rate if rate > 0 else 999
+                if worst_h is None or hours_left < worst_h:
+                    worst_h = hours_left
+                    worst_name = inv_row.get("name") or iname
+            if worst_h is not None and worst_h < 3:
+                alerts.append({
+                    "pair": "POS↔Magazyn",
+                    "name": dish.get("name"),
+                    "detail": (
+                        f"Przy obecnym tempie zapas „{worst_name}” wystarczy ~{worst_h:.1f} h "
+                        f"({dish.get('qty_sold')} szt sprzedanych w okresie)."
+                    ),
+                    "severity": "critical" if worst_h < 1.5 else "warn",
+                })
+
+        # 2) Magazyn ↔ Waste / expiry — batches ≤48h
+        today = _date.today()
+        batches = await sb_get(client, "warehouse_inventory", params={
+            "select": "product_name,quantity,unit,expiration_date",
+            "expiration_date": f"lte.{(today + timedelta(days=2)).isoformat()}",
+            "quantity": "gt.0",
+            "limit": "200",
+        }) or []
+        for b in batches[:8]:
+            try:
+                exp = _date.fromisoformat(str(b.get("expiration_date"))[:10])
+            except Exception:
+                continue
+            left = (exp - today).days
+            if left < 0:
+                continue
+            alerts.append({
+                "pair": "Magazyn↔Ważność",
+                "name": b.get("product_name"),
+                "detail": (
+                    f"Partia {b.get('quantity')} {b.get('unit') or ''} kończy się za {left} dni "
+                    f"({exp.isoformat()}). Rozważ promocję / przeróbkę."
+                ),
+                "severity": "critical" if left <= 1 else "warn",
+            })
+
+        # 3) Waste ↔ zł — threshold
+        waste = await _run_rank_waste_cost(
+            period_type=period_type, limit_days=limit_days, top_n=3, period_hint=period_hint,
+        )
+        total_w = float(waste.get("total_cost_pln") or 0)
+        if total_w >= 100:
+            top = (waste.get("items") or [{}])[0]
+            alerts.append({
+                "pair": "Straty↔Zł",
+                "name": top.get("name") or "Kosz",
+                "detail": (
+                    f"Za {label} strata ~{total_w:.0f} zł. Lider: {top.get('name')} "
+                    f"({top.get('cost_pln', 0):.0f} zł)."
+                ),
+                "severity": "critical" if total_w >= 500 else "warn",
+            })
+
+        # 4) Magazyn ↔ Dostawy — recent invoice while stock >> min
+        invs = await sb_get(client, "invoices", params={
+            "select": "supplier_name,total_cost,created_at,note",
+            "created_at": f"gte.{(today - timedelta(days=3)).isoformat()}",
+            "order": "created_at.desc",
+            "limit": "20",
+        }) or []
+        overstock = [
+            i for i in inv
+            if float(i.get("min_quantity") or 0) > 0
+            and float(i.get("quantity") or 0) >= float(i.get("min_quantity") or 0) * 3
+        ][:5]
+        if invs and overstock:
+            names = ", ".join(o.get("name") or "?" for o in overstock[:3])
+            alerts.append({
+                "pair": "Magazyn↔Dostawy",
+                "name": "Możliwe dublowanie",
+                "detail": (
+                    f"W ostatnich 3 dniach są nowe faktury, a stany wysokie (×3 próg): {names}. "
+                    "Sprawdź, czy nie zamawiasz w nadmiarze."
+                ),
+                "severity": "info",
+            })
+
+        # 5) POS ↔ Waste — dead menu + waste money both present
+        dead = await _run_rank_dead_menu(
+            period_type=period_type, limit_days=limit_days, top_n=3, period_hint=period_hint,
+        )
+        weak = dead.get("items") or []
+        if len(weak) >= 3 and total_w >= 50:
+            dnames = ", ".join(x.get("name") or "?" for x in weak[:3])
+            alerts.append({
+                "pair": "POS↔Straty",
+                "name": "Słaba sprzedaż + kosz",
+                "detail": (
+                    f"Najsłabsze dania: {dnames}… przy stratach {total_w:.0f} zł. "
+                    "Rozważ rotację karty i mniejsze zamówienia składników."
+                ),
+                "severity": "warn",
+            })
+
+    if not alerts:
+        return {
+            "ok": True,
+            "period_label": label,
+            "items": [],
+            "alerts": [],
+            "assistant_speech": (
+                f"Za {label} brak krytycznych alertów korelacji CORE. "
+                "Magazyn, POS i straty wyglądają stabilnie."
+            ),
+        }
+
+    alerts.sort(key=lambda a: {"critical": 0, "warn": 1, "info": 2}.get(a.get("severity"), 3))
+    lines = "; ".join(f"[{a['pair']}] {a['name']}: {a['detail']}" for a in alerts[:6])
+    return {
+        "ok": True,
+        "period_label": label,
+        "items": [{"name": a["name"], "detail": a["detail"], "pair": a["pair"], "severity": a["severity"]} for a in alerts],
+        "alerts": alerts,
+        "assistant_speech": f"Alerty managera ({label}): {lines}",
+    }
+
+
+async def _run_rank_inventory_usage(
+    *,
+    rank: str = "best",
+    period_type: str = "week",
+    limit_days=None,
+    top_n=None,
+    category: Optional[str] = None,
+    period_hint: Optional[str] = None,
+    selected_periods: Optional[list] = None,
+) -> dict:
+    """Zużycie magazynu = sprzedaż dań × gramatury z recipe_ingredients."""
+    since_iso, until_iso, label = _resolve_selected_or_hint(
+        period_type, limit_days, period_hint, selected_periods,
+    )
+    days = _period_days(period_type or "week", limit_days)
+    n = 5
+    try:
+        if top_n and int(top_n) > 0:
+            n = min(int(top_n), 20)
+    except (TypeError, ValueError):
+        pass
+    want_most = (rank or "best").lower() != "worst"
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        dish_sales = await _aggregate_menu_sales(
+            client, days, category=None, since_iso=since_iso, until_iso=until_iso,
+        )
+        if not dish_sales:
+            return {
+                "ok": True,
+                "period_label": label,
+                "rank": "best" if want_most else "worst",
+                "items": [],
+                "assistant_speech": (
+                    f"Brak sprzedaży POS za {label} — nie policzę zużycia magazynu."
+                ),
+            }
+        ri = await sb_get(client, "recipe_ingredients", params={
+            "select": "menu_item_id,ingredient_name,quantity,unit",
+            "limit": "30000",
+        }) or []
+        by_menu: dict[str, list] = {}
+        for r in ri:
+            by_menu.setdefault(r["menu_item_id"], []).append(r)
+
+        inv = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,unit,inventory_categories(name)",
+            "limit": "5000",
+        }) or []
+        inv_norm = {_norm_pl(r["name"]): r for r in inv if r.get("name")}
+
+        usage: dict[str, dict] = {}
+        for d in dish_sales:
+            sold = float(d.get("qty_sold") or 0)
+            if sold <= 0:
+                continue
+            for ing in by_menu.get(d["menu_item_id"], []):
+                iname = (ing.get("ingredient_name") or "").strip()
+                key = _norm_pl(iname)
+                if not key:
+                    continue
+                used = float(ing.get("quantity") or 0) * sold
+                if key not in usage:
+                    matched = inv_norm.get(key)
+                    if not matched:
+                        hit, _ = _fuzzy_match(key, list(inv_norm.keys()), threshold=78)
+                        matched = inv_norm.get(hit) if hit else None
+                    cat_name = None
+                    if matched:
+                        cats = matched.get("inventory_categories")
+                        if isinstance(cats, dict):
+                            cat_name = cats.get("name")
+                        elif isinstance(cats, list) and cats:
+                            cat_name = cats[0].get("name")
+                    usage[key] = {
+                        "ingredient_name": iname,
+                        "unit": ing.get("unit") or "g",
+                        "qty_used": 0.0,
+                        "inventory_id": (matched or {}).get("id"),
+                        "inventory_name": (matched or {}).get("name") or iname,
+                        "category": cat_name,
+                        "current_stock": float((matched or {}).get("quantity") or 0),
+                    }
+                usage[key]["qty_used"] = round(usage[key]["qty_used"] + used, 3)
+
+        rows = list(usage.values())
+        if category:
+            rows = [
+                r for r in rows
+                if _cat_matches(r.get("category") or r.get("ingredient_name") or "", category)
+            ]
+        if not rows:
+            return {
+                "ok": True,
+                "period_label": label,
+                "rank": "best" if want_most else "worst",
+                "items": [],
+                "assistant_speech": (
+                    f"Nie udało się zmapować zużycia składników za {label}. "
+                    "Upewnij się, że dania mają receptury w Menu."
+                ),
+            }
+        rows.sort(key=lambda r: r["qty_used"], reverse=want_most)
+        top = rows[:n]
+        kind = "największe" if want_most else "najmniejsze"
+        lines = ", ".join(
+            f"{i+1}. {r['inventory_name']} ({r['qty_used']:g} {r['unit']})"
+            for i, r in enumerate(top)
+        )
+        speech = f"Za {label} {kind} zużycie z magazynu: {lines}."
+        return {
+            "ok": True,
+            "period_label": label,
+            "rank": "best" if want_most else "worst",
+            "category": category,
+            "items": top,
+            "assistant_speech": speech,
+        }
+
+
+def _report_net(r: dict) -> float:
+    return (float(r.get("total_revenue") or 0)
+            - float(r.get("total_waste_cost") or 0)
+            - float(r.get("total_invoice_cost") or 0))
+
+
+def _agg_reports(rows: list) -> dict:
+    rev = round(sum(float(r.get("total_revenue") or 0) for r in rows), 2)
+    waste = round(sum(float(r.get("total_waste_cost") or 0) for r in rows), 2)
+    inv = round(sum(float(r.get("total_invoice_cost") or 0) for r in rows), 2)
+    return {
+        "total_revenue": rev, "total_waste_cost": waste, "total_invoice_cost": inv,
+        "net_profit": round(rev - waste - inv, 2), "days_count": len(rows),
+    }
+
+
+def _iter_days(d0, d1):
+    from datetime import timedelta
+    cur = d0
+    while cur <= d1:
+        yield cur
+        cur += timedelta(days=1)
+
+
+async def _compute_true_pnl(
+    client: httpx.AsyncClient,
+    since_d: str,
+    until_d: str,
+) -> dict:
+    """Rzetelny P&L okna [since_d, until_d] (YYYY-MM-DD, włącznie).
+
+    - Przychód: POS / revenue_entries / daily_reports
+    - Koszty stałe: fixed_costs × proporcja dni
+    - Koszty zmienne brutto: variable_cost_entries type≠waste × proporcja dni
+      (zakupy materiałów — tu już jest koszt zapłaconych produktów)
+    - Straty produktowe: waste_logs (dania+składniki, receptura/unit_cost)
+    - Koszty zmienne netto = max(0, zmienne_brutto − straty)
+      (nie liczymy drugi raz produktów już zapłaconych w zakupach)
+    - Zysk = przychód − stałe − straty − zmienne_netto
+            = przychód − stałe − zmienne_brutto
+    """
+    from datetime import date as _date
+    from calendar import monthrange
+    from collections import defaultdict
+
+    d0 = _date.fromisoformat(since_d[:10])
+    d1 = _date.fromisoformat(until_d[:10])
+    if d1 < d0:
+        d0, d1 = d1, d0
+    days_selected = (d1 - d0).days + 1
+    since_iso = _pg_ts(f"{d0.isoformat()}T00:00:00+00:00")
+    until_iso = _pg_ts(f"{d1.isoformat()}T23:59:59+00:00")
+
+    # ── Miesiące przecinające okno ──
+    months: dict[str, int] = defaultdict(int)  # YYYY-MM -> days overlap
+    for d in _iter_days(d0, d1):
+        months[f"{d.year:04d}-{d.month:02d}"] += 1
+
+    # ── Przychód ──
+    # 1) POS (ta sama baza co rankingi menu) — zawsze w oknie since..until
+    # 2) revenue_entries z created_at w oknie
+    # 3) year_month + data w note (seed SIM)
+    # 4) daily_reports
+    revenue = 0.0
+    revenue_source = "none"
+    try:
+        menu_agg = await _aggregate_menu_sales(
+            client,
+            days_selected,
+            since_iso=since_iso,
+            until_iso=until_iso,
+        )
+        pos_rev = round(sum(float(r.get("revenue_pln") or 0) for r in menu_agg), 2)
+        if pos_rev > 0:
+            revenue = pos_rev
+            revenue_source = "pos_sales_log"
+    except Exception:
+        pass
+
+    seen_rev = 0.0
+    if revenue <= 0:
+        try:
+            rev_rows = await sb_get(client, "revenue_entries", params=[
+                ("select", "amount_pln,created_at,year_month"),
+                ("created_at", f"gte.{since_iso}"),
+                ("created_at", f"lte.{until_iso}"),
+                ("limit", "20000"),
+            ]) or []
+            for r in rev_rows:
+                ca = str(r.get("created_at") or "")
+                if ca and d0.isoformat() <= ca[:10] <= d1.isoformat():
+                    revenue += float(r.get("amount_pln") or 0)
+                    seen_rev += 1
+            if revenue > 0:
+                revenue_source = "revenue_entries"
+        except Exception:
+            # Fallback bez podwójnego created_at
+            try:
+                rev_rows = await sb_get(client, "revenue_entries", params={
+                    "select": "amount_pln,created_at,year_month",
+                    "created_at": f"gte.{since_iso}",
+                    "limit": "20000",
+                }) or []
+                for r in rev_rows:
+                    ca = str(r.get("created_at") or "")
+                    if ca and d0.isoformat() <= ca[:10] <= d1.isoformat():
+                        revenue += float(r.get("amount_pln") or 0)
+                        seen_rev += 1
+                if revenue > 0:
+                    revenue_source = "revenue_entries"
+            except Exception:
+                pass
+
+    # dociągnij po year_month (gdy created_at = data insertu, a nie dzień sprzedaży)
+    if revenue <= 0:
+        for ym in months:
+            try:
+                ym_rows = await sb_get(client, "revenue_entries", params={
+                    "select": "amount_pln,created_at,year_month,note,description",
+                    "year_month": f"eq.{ym}",
+                    "limit": "5000",
+                }) or []
+            except Exception:
+                ym_rows = []
+            for r in ym_rows:
+                ca = str(r.get("created_at") or "")
+                if ca and d0.isoformat() <= ca[:10] <= d1.isoformat():
+                    continue  # już w sumie z created_at
+                note = str(r.get("note") or "") + " " + str(r.get("description") or "")
+                mday = re.search(r"(20\d{2}-\d{2}-\d{2})", note)
+                if mday:
+                    day_s = mday.group(1)
+                    if d0.isoformat() <= day_s <= d1.isoformat():
+                        revenue += float(r.get("amount_pln") or 0)
+                    continue
+                y, m = int(ym[:4]), int(ym[5:7])
+                dim = monthrange(y, m)[1]
+                overlap = months[ym]
+                if dim and seen_rev == 0:
+                    revenue += float(r.get("amount_pln") or 0) * (overlap / dim)
+        if revenue > 0:
+            revenue_source = "revenue_entries_ym"
+
+    if revenue <= 0:
+        # fallback: daily_reports
+        try:
+            dr = await sb_get(client, "daily_reports", params={
+                "select": "date,total_revenue",
+                "date": f"gte.{d0.isoformat()}",
+                "limit": "400",
+            }) or []
+            for r in dr:
+                if (r.get("date") or "") <= d1.isoformat():
+                    revenue += float(r.get("total_revenue") or 0)
+            if revenue > 0:
+                revenue_source = "daily_reports"
+        except Exception:
+            pass
+    revenue = round(revenue, 2)
+
+    # ── Koszty stałe (proporcja) ──
+    fixed_alloc = 0.0
+    fixed_detail = []
+    for ym, overlap_days in months.items():
+        y, m = int(ym[:4]), int(ym[5:7])
+        dim = monthrange(y, m)[1]
+        rows = await sb_get(client, "fixed_costs", params={
+            "select": "amount_pln,name,year_month",
+            "year_month": f"eq.{ym}",
+            "limit": "2000",
+        }) or []
+        month_sum = round(sum(float(r.get("amount_pln") or 0) for r in rows), 2)
+        part = round(month_sum * (overlap_days / dim), 2) if dim else 0.0
+        fixed_alloc += part
+        if month_sum:
+            fixed_detail.append({
+                "year_month": ym, "month_total": month_sum,
+                "days_in_month": dim, "days_selected": overlap_days, "allocated": part,
+            })
+    fixed_alloc = round(fixed_alloc, 2)
+
+    # ── Koszty zmienne bez waste (proporcja po year_month) — brutto / zakupy ──
+    variable_gross = 0.0
+    variable_detail = []
+    for ym, overlap_days in months.items():
+        y, m = int(ym[:4]), int(ym[5:7])
+        dim = monthrange(y, m)[1]
+        rows = await sb_get(client, "variable_cost_entries", params={
+            "select": "amount_pln,type,name,year_month",
+            "year_month": f"eq.{ym}",
+            "limit": "5000",
+        }) or []
+        month_sum = round(sum(
+            float(r.get("amount_pln") or 0)
+            for r in rows
+            if str(r.get("type") or "").lower() != "waste"
+        ), 2)
+        part = round(month_sum * (overlap_days / dim), 2) if dim else 0.0
+        variable_gross += part
+        if month_sum:
+            variable_detail.append({
+                "year_month": ym, "month_total": month_sum,
+                "days_in_month": dim, "days_selected": overlap_days, "allocated": part,
+            })
+    variable_gross = round(variable_gross, 2)
+
+    # ── Straty produktowe (waste_logs: dania + składniki) ──
+    waste_actual = 0.0
+    waste_meta: dict = {}
+    try:
+        waste_meta = await _sum_waste_logs_cost_pln(
+            client,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            d0_iso=d0.isoformat(),
+            d1_iso=d1.isoformat(),
+        )
+        waste_actual = float(waste_meta.get("total_cost_pln") or 0)
+    except Exception:
+        waste_actual = 0.0
+
+    if waste_actual <= 0:
+        # fallback: variable type=waste w oknie po created_at
+        try:
+            wrows = await sb_get(client, "variable_cost_entries", params={
+                "select": "amount_pln,type,created_at",
+                "type": "eq.waste",
+                "created_at": f"gte.{since_iso}",
+                "limit": "5000",
+            }) or []
+            for r in wrows:
+                ca = str(r.get("created_at") or "")
+                if ca and d0.isoformat() <= ca[:10] <= d1.isoformat():
+                    waste_actual += float(r.get("amount_pln") or 0)
+        except Exception:
+            pass
+    waste_actual = round(waste_actual, 2)
+
+    # Zmienne netto: zakupy już zawierają koszt zmarnowanych produktów —
+    # odejmujemy straty od zmiennych, żeby nie liczyć ich drugi raz.
+    variable_net = round(max(0.0, variable_gross - waste_actual), 2)
+    net_profit = round(revenue - fixed_alloc - waste_actual - variable_net, 2)
+    # Równoważnie: revenue - fixed - variable_gross
+    operating = round(revenue - fixed_alloc - variable_gross, 2)
+
+    return {
+        "since": d0.isoformat(),
+        "until": d1.isoformat(),
+        "days_count": days_selected,
+        "total_revenue": revenue,
+        "revenue_source": revenue_source,
+        "fixed_costs_allocated": fixed_alloc,
+        "variable_costs_allocated": variable_gross,  # brutto (zakupy) — kompatybilność
+        "variable_costs_gross": variable_gross,
+        "variable_costs_net": variable_net,
+        "total_waste_cost": waste_actual,
+        "operating_profit": operating,
+        "net_profit": net_profit,
+        # aliases for older UI
+        "total_invoice_cost": variable_gross,
+        "fixed_detail": fixed_detail,
+        "variable_detail": variable_detail,
+        "waste_events_costed": waste_meta.get("events_costed"),
+        "waste_events_total": waste_meta.get("events_total"),
+    }
+
+
+def _coerce_selected_periods(raw) -> Optional[list[dict]]:
+    """Normalizuje selected_periods z frontu (drzewko dat) do listy dictów."""
+    if not raw or not isinstance(raw, list):
+        return None
+    out: list[dict] = []
+    for sel in raw[:24]:
+        if not isinstance(sel, dict):
+            continue
+        kind = str(sel.get("kind") or "month").strip().lower()
+        if kind not in ("year", "month", "week", "day"):
+            continue
+        try:
+            y = int(sel.get("year"))
+        except (TypeError, ValueError):
+            continue
+        if y < 2000 or y > 2100:
+            continue
+        item: dict = {"kind": kind, "year": y}
+        if kind in ("month", "week", "day"):
+            try:
+                m = int(sel.get("month") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= m <= 12):
+                continue
+            item["month"] = m
+        if kind == "week":
+            try:
+                item["week"] = max(1, min(5, int(sel.get("week") or 1)))
+            except (TypeError, ValueError):
+                item["week"] = 1
+        if kind == "day":
+            try:
+                item["day"] = max(1, min(31, int(sel.get("day") or 1)))
+            except (TypeError, ValueError):
+                item["day"] = 1
+        out.append(item)
+    return out or None
+
+
+def _window_from_period_sel(sel: dict) -> tuple[str, str, str]:
+    """{kind, year, month?, week?, day?} → (since_iso, until_iso, label) z czasem UTC (Z)."""
+    from calendar import monthrange
+    kind = (sel.get("kind") or "month").lower()
+    y = int(sel.get("year") or SIM_FINANCE_YEAR)
+    if kind == "year":
+        return (
+            f"{y}-01-01T00:00:00Z",
+            f"{y}-12-31T23:59:59Z",
+            f"rok {y}",
+        )
+    m = int(sel.get("month") or 1)
+    last = monthrange(y, m)[1]
+    if kind == "month":
+        return (
+            f"{y}-{m:02d}-01T00:00:00Z",
+            f"{y}-{m:02d}-{last:02d}T23:59:59Z",
+            f"{_MONTH_NAMES_PL[m]} {y}",
+        )
+    if kind == "day":
+        d = max(1, min(last, int(sel.get("day") or 1)))
+        return (
+            f"{y}-{m:02d}-{d:02d}T00:00:00Z",
+            f"{y}-{m:02d}-{d:02d}T23:59:59Z",
+            f"{d:02d}.{m:02d}.{y}",
+        )
+    w = max(1, min(5, int(sel.get("week") or 1)))
+    start_day = 1 + (w - 1) * 7
+    end_day = min(last, start_day + 6)
+    if start_day > last:
+        start_day = max(1, last - 6)
+        end_day = last
+    return (
+        f"{y}-{m:02d}-{start_day:02d}T00:00:00Z",
+        f"{y}-{m:02d}-{end_day:02d}T23:59:59Z",
+        f"tydzień {w} · {_MONTH_NAMES_PL[m]} {y}",
+    )
+
+
+def _resolve_selected_or_hint(
+    period_type: Optional[str],
+    limit_days,
+    period_hint: Optional[str],
+    selected_periods: Optional[list],
+) -> tuple[str, str, str]:
+    """Jedno okno: suma zaznaczeń z drzewka (min..max) albo hint/period_type."""
+    coerced = _coerce_selected_periods(selected_periods)
+    if coerced:
+        ranges = []
+        labels = []
+        for sel in coerced:
+            s, u, lbl = _window_from_period_sel(sel)
+            ranges.append((s, u))
+            labels.append(lbl)
+        if ranges:
+            since = min(r[0] for r in ranges)
+            until = max(r[1] for r in ranges)
+            return since, until, " + ".join(labels)
+    return _resolve_period_window(period_type, limit_days, period_hint)
+
+
+async def _run_period_analysis(
+    period_type: str,
+    limit_days,
+    period_hint: Optional[str] = None,
+    selected_periods: Optional[list] = None,
+) -> dict:
+    """Analiza P&L. selected_periods: lista {kind, year, month?, week?, day?} z pickera."""
+    from datetime import date as _date
+    from calendar import monthrange
+
+    async def _window_from_sel(sel: dict) -> tuple[str, str, str]:
+        return _window_from_period_sel(sel if isinstance(sel, dict) else {})
+
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        await _check_ai_access(client)
+
+        periods_out = []
+        sels = _coerce_selected_periods(selected_periods)
+        if sels:
+            for sel in sels[:12]:
+                s, u, lbl = await _window_from_sel(sel)
+                pnl = await _compute_true_pnl(client, s[:10], u[:10])
+                periods_out.append({"label": lbl, "aggregates": pnl})
+            label = " · ".join(p["label"] for p in periods_out)
+            # NIE sumuj nakładających się okresów (rok + miesiąc = podwójne liczenie).
+            # FE pokazuje każdy okres osobno; aggregates zostawiamy tylko przy 1 okresie.
+            agg = periods_out[0]["aggregates"] if len(periods_out) == 1 else {
+                "total_revenue": None,
+                "fixed_costs_allocated": None,
+                "variable_costs_allocated": None,
+                "total_waste_cost": None,
+                "operating_profit": None,
+                "net_profit": None,
+                "days_count": sum(p["aggregates"].get("days_count") or 0 for p in periods_out),
+                "total_invoice_cost": None,
+            }
+        else:
+            since_iso, until_iso, label = _resolve_period_window(period_type, limit_days, period_hint)
+            pnl = await _compute_true_pnl(client, since_iso[:10], until_iso[:10])
+            agg = pnl
+            periods_out = [{"label": label, "aggregates": pnl}]
+
+        # Krótki komunikat bez ściany tekstu AI
+        if len(periods_out) > 1:
+            speech = ""
+            billing = {}
+        else:
+            sign = "na plusie" if (agg.get("net_profit") or 0) >= 0 else "na minusie"
+            speech = (
+                f"Za {label}: przychód {agg.get('total_revenue') or 0:.0f} zł, "
+                f"straty {agg.get('total_waste_cost') or 0:.0f} zł, "
+                f"zysk {agg.get('net_profit') or 0:.0f} zł ({sign})."
+            )
+            billing = {}
+
+    return _with_billing({
+        "ok": True,
+        "period_label": label,
+        "reports_count": agg.get("days_count", 0) if isinstance(agg, dict) else 0,
+        "aggregates": agg if len(periods_out) == 1 else None,
+        "periods": periods_out,
+        "assistant_speech": "",
+        "message": speech if speech else f"P&L — {len(periods_out)} okresów osobno poniżej.",
+    }, billing)
+
+
+async def _chat_and_bill(httpx_c: httpx.AsyncClient, prompt: str, *,
+                         endpoint: str, temperature: float = 0.4,
+                         extras: Optional[dict] = None) -> tuple[str, dict]:
+    """Wywołanie GPT-4o-mini + rozliczenie tokenów (Token-to-Credit Billing)."""
+    client = _openai()
+    resp = await client.chat.completions.create(
+        model=CHAT_MODEL, temperature=temperature,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    billing = await _bill_openai_response(
+        httpx_c, resp, endpoint=endpoint, model=CHAT_MODEL, extras=extras,
+    )
+    return (resp.choices[0].message.content or "").strip(), billing
+
+
+async def _run_compare_periods(
+    period_1: str,
+    period_2: str,
+    selected_periods: Optional[list] = None,
+) -> dict:
+    """Porównanie dwóch okresów na rzetelnym P&L (przychód − stałe − zmienne − straty)."""
+    from calendar import monthrange
+    from datetime import date as _date
+
+    def _parse_one(period: str):
+        """Zwraca (since, until, label) lub (None, None, raw)."""
+        # reuse calendar resolver
+        since, until, label = _resolve_period_window("month", None, period)
+        # jeśli resolver spadł do „ostatni tydzień” — fail
+        if label.startswith("ostatni") or label.startswith("ostatnie"):
+            return None, period
+        return (since[:10], until[:10]), label
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        await _check_ai_access(client)
+        # Preferuj selected_periods: pierwsze dwa okna
+        if selected_periods and isinstance(selected_periods, list) and len(selected_periods) >= 2:
+            from calendar import monthrange as _mr
+            async def _win(sel):
+                kind = (sel.get("kind") or "month").lower()
+                y = int(sel.get("year") or _date.today().year)
+                if kind == "year":
+                    return f"{y}-01-01", f"{y}-12-31", f"rok {y}"
+                m = int(sel.get("month") or 1)
+                last = _mr(y, m)[1]
+                if kind == "month":
+                    return f"{y}-{m:02d}-01", f"{y}-{m:02d}-{last:02d}", f"{_MONTH_NAMES_PL[m]} {y}"
+                if kind == "day":
+                    d = max(1, min(last, int(sel.get("day") or 1)))
+                    iso = f"{y}-{m:02d}-{d:02d}"
+                    return iso, iso, f"{d:02d}.{m:02d}.{y}"
+                w = max(1, min(5, int(sel.get("week") or 1)))
+                sd = 1 + (w - 1) * 7
+                ed = min(last, sd + 6)
+                return f"{y}-{m:02d}-{sd:02d}", f"{y}-{m:02d}-{ed:02d}", f"tydzień {w} · {_MONTH_NAMES_PL[m]} {y}"
+            s1, u1, lbl1 = await _win(selected_periods[0] if isinstance(selected_periods[0], dict) else {})
+            s2, u2, lbl2 = await _win(selected_periods[1] if isinstance(selected_periods[1], dict) else {})
+            w1, w2 = (s1, u1), (s2, u2)
+        else:
+            w1, lbl1 = _parse_one(period_1)
+            w2, lbl2 = _parse_one(period_2)
+            if w1 is None or w2 is None:
+                return {"ok": False,
+                        "assistant_speech": f"Nie rozpoznałem okresów „{period_1}” i „{period_2}”. "
+                                            "Podaj miesiące z rokiem, np. lipiec 2025 i sierpień 2025."}
+
+        a1 = await _compute_true_pnl(client, w1[0], w1[1])
+        a2 = await _compute_true_pnl(client, w2[0], w2[1])
+        prompt = (
+            "Działasz jako dyrektor finansowy restauracji. Porównaj dwa okresy.\n"
+            f"Okres 1 ({lbl1}): przychód {a1['total_revenue']} zł, koszty stałe {a1['fixed_costs_allocated']} zł, "
+            f"straty produktowe {a1['total_waste_cost']} zł, "
+            f"koszty zmienne netto {a1.get('variable_costs_net', a1['variable_costs_allocated'])} zł "
+            f"(brutto {a1['variable_costs_allocated']} zł), zysk {a1['net_profit']} zł.\n"
+            f"Okres 2 ({lbl2}): przychód {a2['total_revenue']} zł, koszty stałe {a2['fixed_costs_allocated']} zł, "
+            f"straty produktowe {a2['total_waste_cost']} zł, "
+            f"koszty zmienne netto {a2.get('variable_costs_net', a2['variable_costs_allocated'])} zł "
+            f"(brutto {a2['variable_costs_allocated']} zł), zysk {a2['net_profit']} zł.\n\n"
+            "NIGDY nie nazywaj przychodu „zyskiem”. Wskaż różnicę w zysku, co się poprawiło/pogorszyło "
+            "i jedną managerską radę. Maks. 5 zdań po polsku."
+        )
+        speech, billing = await _chat_and_bill(client, prompt,
+                                      endpoint="/api/reports/compare-periods",
+                                      extras={"p1": lbl1, "p2": lbl2})
+
+    return _with_billing({
+        "ok": True,
+        "period_1": {"label": lbl1, "aggregates": a1},
+        "period_2": {"label": lbl2, "aggregates": a2},
+        "aggregates": {
+            "total_revenue": round(a1["total_revenue"] + a2["total_revenue"], 2),
+            "fixed_costs_allocated": round(a1["fixed_costs_allocated"] + a2["fixed_costs_allocated"], 2),
+            "variable_costs_allocated": round(a1["variable_costs_allocated"] + a2["variable_costs_allocated"], 2),
+            "variable_costs_gross": round(
+                a1.get("variable_costs_gross", a1["variable_costs_allocated"])
+                + a2.get("variable_costs_gross", a2["variable_costs_allocated"]),
+                2,
+            ),
+            "variable_costs_net": round(
+                a1.get("variable_costs_net", a1["variable_costs_allocated"])
+                + a2.get("variable_costs_net", a2["variable_costs_allocated"]),
+                2,
+            ),
+            "total_waste_cost": round(a1["total_waste_cost"] + a2["total_waste_cost"], 2),
+            "operating_profit": round(a1["operating_profit"] + a2["operating_profit"], 2),
+            "net_profit": round(a1["net_profit"] + a2["net_profit"], 2),
+        },
+        "period_label": f"{lbl1} vs {lbl2}",
+        "assistant_speech": speech,
+    }, billing)
+
+
+@app.post("/api/reports/analyze-period")
+async def reports_analyze_period(req: AnalyzePeriodRequest):
+    """Analiza P&L (przychód − koszty stałe/zmienne − straty) dla okresu / zaznaczonych okien."""
+    return await _run_period_analysis(
+        req.period_type,
+        req.limit_days,
+        period_hint=req.period_hint,
+        selected_periods=req.selected_periods,
+    )
+
+
+@app.post("/api/reports/compare-periods")
+async def reports_compare_periods(req: ComparePeriodsRequest):
+    """Porównanie dwóch okresów finansowych (np. maj vs czerwiec)."""
+    return await _run_compare_periods(req.period_1, req.period_2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subskrypcje i Portfel Kredytowy — API
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TopupRequest(BaseModel):
+    package: Literal["small", "medium", "large"]
+
+
+class SubscribeRequest(BaseModel):
+    tier_level: int
+
+
+def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
+    tier = int(sub.get("tier_level") or 0)
+    cfg = TIER_CONFIG.get(tier, TIER_CONFIG[0])
+    bal = int(sub.get("credits_balance") or 0)
+    features = []
+    for f in FEATURE_CATALOG:
+        needs_dh = f["requires_deal_hunter"]
+        reason = None
+        if needs_dh and tier < 2:
+            reason = "Wymaga planu Profesjonalny"
+        elif bal <= 0:
+            reason = "Brak kredytów"
+        features.append({**f, "locked": reason is not None, "locked_reason": reason})
+    return {
+        "tier_level": tier,
+        "tier_name": cfg["name"],
+        "credits_balance": bal,
+        "max_credits": cfg["max_credits"],
+        "credits_pln": round(bal / 100.0, 2),
+        "status": sub.get("status") or "active",
+        "current_period_end": sub.get("current_period_end"),
+        "deal_hunter_unlocked": tier >= 2,
+        "features": features,
+        "topup_packages": [{"key": k, **v} for k, v in TOPUP_PACKAGES.items()],
+        "plans": [
+            {"tier_level": t, "name": c["name"], "price_pln": c["price_pln"],
+             "price_note": c.get("price_note"),
+             "monthly_grant": c["monthly_grant"], "max_credits": c["max_credits"],
+             "deal_hunter": c["deal_hunter"], "perks": c.get("perks", [])}
+            for t, c in TIER_CONFIG.items()
+        ],
+        "message": message,
+    }
+
+
+def _parse_usage_ts(iso: Optional[str]) -> float:
+    if not iso:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _aggregate_credit_history(items: list[dict], *, window_sec: int = 150) -> list[dict]:
+    """
+    Scala wiele mikropłatności (np. 13× −1 w Łowcy) w jedną akcję z pełną kwotą.
+    1) grupuje po extras.request_id
+    2) legacy: ten sam endpoint w oknie czasowym ~window_sec
+    Wejście: najnowsze pierwsze.
+    """
+    if not items:
+        return []
+
+    by_req: dict[str, list[dict]] = {}
+    orphans: list[dict] = []
+    for it in items:
+        ex = it.get("extras") if isinstance(it.get("extras"), dict) else {}
+        rid = ex.get("request_id") if ex else None
+        if rid:
+            by_req.setdefault(str(rid), []).append(it)
+        else:
+            orphans.append(it)
+
+    def _merge_group(group: list[dict]) -> dict:
+        group = sorted(group, key=lambda x: _parse_usage_ts(x.get("created_at")), reverse=True)
+        head = dict(group[0])
+        head["credits"] = sum(int(g.get("credits") or 0) for g in group)
+        head["cost_pln"] = round(sum(float(g.get("cost_pln") or 0) for g in group), 6)
+        head["id"] = head.get("id") or group[0].get("id")
+        ex = dict(head.get("extras") or {}) if isinstance(head.get("extras"), dict) else {}
+        ex["aggregated_calls"] = len(group)
+        head["extras"] = ex
+        return head
+
+    merged: list[dict] = [_merge_group(g) for g in by_req.values()]
+
+    # Legacy burst merge (newest-first walk)
+    orphans_sorted = sorted(orphans, key=lambda x: _parse_usage_ts(x.get("created_at")), reverse=True)
+    i = 0
+    while i < len(orphans_sorted):
+        cluster = [orphans_sorted[i]]
+        j = i + 1
+        while j < len(orphans_sorted):
+            prev = cluster[-1]
+            cur = orphans_sorted[j]
+            if (cur.get("endpoint") or "") != (prev.get("endpoint") or ""):
+                break
+            dt = abs(_parse_usage_ts(prev.get("created_at")) - _parse_usage_ts(cur.get("created_at")))
+            if dt > window_sec:
+                break
+            cluster.append(cur)
+            j += 1
+        merged.append(_merge_group(cluster))
+        i = j
+
+    merged.sort(key=lambda x: _parse_usage_ts(x.get("created_at")), reverse=True)
+    return merged
+
+
+@app.get("/api/subscription/usage-history")
+async def subscription_usage_history(limit: int = 500):
+    """Historia zużycia kredytów AI (token_usage), najnowsze wpisy pierwsze.
+    Wiele wywołań LLM z jednej akcji użytkownika jest scalanych w jeden wiersz."""
+    import math
+    # Pobierz więcej surowych wierszy, by po agregacji nadal mieć sensowny limit.
+    cap = max(1, min(int(limit), 1000))
+    raw_cap = min(3000, max(cap * 4, cap))
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            rows = await sb_get(client, "token_usage", params=[
+                ("select", "id,endpoint,model,prompt_tokens,completion_tokens,total_tokens,cost_usd,cost_pln,extras,created_at"),
+                ("order", "created_at.desc"),
+                ("limit", str(raw_cap)),
+            ])
+        except httpx.HTTPStatusError:
+            return {
+                "ok": False,
+                "needs_migration": True,
+                "items": [],
+                "count": 0,
+                "message": "Brak tabeli token_usage. Uruchom migrację ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql w Supabase.",
+            }
+        items = []
+        for r in rows or []:
+            ex = r.get("extras") or {}
+            if not isinstance(ex, dict):
+                ex = {}
+            credits = ex.get("credits_charged")
+            if credits is None:
+                credits = int(math.ceil(float(r.get("cost_pln") or 0) * 100))
+            else:
+                credits = int(credits)
+            items.append({
+                "id": r.get("id"),
+                "endpoint": r.get("endpoint") or "",
+                "model": r.get("model") or "",
+                "credits": credits,
+                "cost_pln": float(r.get("cost_pln") or 0),
+                "created_at": r.get("created_at"),
+                "extras": ex,
+            })
+        aggregated = _aggregate_credit_history(items)[:cap]
+        return {"ok": True, "items": aggregated, "count": len(aggregated)}
+
+
+@app.get("/api/subscription")
+async def get_subscription():
+    """Zwraca stan portfela, plan, listę funkcji (z blokadami) i pakiety doładowań."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            sub = await _get_subscription(client)
+        except httpx.HTTPStatusError:
+            return {"ok": False, "needs_migration": True,
+                    "message": "Brak tabeli subscriptions. Uruchom migrację ADD_SUBSCRIPTIONS.sql w Supabase."}
+        view = _subscription_view(sub)
+        view["ok"] = True
+        return view
+
+
+@app.post("/api/subscription/topup")
+async def subscription_topup(req: TopupRequest):
+    """MOCK doładowanie — tylko gdy ALLOW_MOCK_BILLING=true. Produkcyjnie: Stripe Checkout."""
+    if os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=400,
+            detail="Płatności MOCK wyłączone. Użyj POST /api/billing/create-checkout-session.",
+        )
+    pkg = TOPUP_PACKAGES[req.package]
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        sub = await _ensure_subscription(client)
+        new_bal = int(sub.get("credits_balance") or 0) + pkg["credits"]
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"},
+                       {"credits_balance": new_bal})
+        sub["credits_balance"] = new_bal
+        view = _subscription_view(sub, message=f"Doładowano {pkg['label']} za {pkg['price_pln']} zł (MOCK).")
+        view["ok"] = True
+        return view
+
+
+@app.post("/api/subscription/subscribe")
+async def subscription_subscribe(req: SubscribeRequest):
+    """MOCK subskrypcja — tylko gdy ALLOW_MOCK_BILLING=true. Produkcyjnie: Stripe Checkout."""
+    from datetime import datetime, timezone, timedelta
+    if os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=400,
+            detail="Płatności MOCK wyłączone. Użyj POST /api/billing/create-checkout-session.",
+        )
+    if req.tier_level not in (1, 2):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy tier (dozwolone: 1 lub 2).")
+    cfg = TIER_CONFIG[req.tier_level]
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        sub = await _ensure_subscription(client)
+        grant = cfg["monthly_grant"]
+        new_bal = int(sub.get("credits_balance") or 0) + grant
+        cpe = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        upd = {"tier_level": req.tier_level, "credits_balance": new_bal,
+               "status": "active", "current_period_end": cpe}
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"}, upd)
+        view = _subscription_view({**sub, **upd},
+                                  message=f"Aktywowano plan {cfg['name']} (+{grant} kredytów). MOCK.")
+        view["ok"] = True
+        return view
+
+
+# ── Stripe Billing (Checkout + Webhooks) ─────────────────────────────────────
+
+class CheckoutSessionRequest(BaseModel):
+    kind: Literal["subscription", "topup"]
+    tier_level: Optional[int] = None
+    package: Optional[str] = None
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+class PortalSessionRequest(BaseModel):
+    return_url: Optional[str] = None
+
+
+@app.post("/api/billing/create-checkout-session")
+async def billing_create_checkout(req: CheckoutSessionRequest):
+    """Tworzy Stripe Checkout Session. Kredyty dolicza TYLKO webhook / confirm-session po płatności."""
+    from billing_stripe import create_checkout_session, stripe_configured
+    if not stripe_configured():
+        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
+    success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
+    cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or "myapp://billing/cancel").strip()
+    # Stripe wymaga https lub http localhost — deep linki Expo: użyj https success page z redirect
+    if success.startswith("myapp://"):
+        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
+        success = f"{public}/billing-success?session_id={{CHECKOUT_SESSION_ID}}"
+    if cancel.startswith("myapp://"):
+        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
+        cancel = f"{public}/billing-cancel"
+    try:
+        session = await create_checkout_session(
+            account_key=_ACCOUNT_KEY,
+            kind=req.kind,
+            tier_level=req.tier_level,
+            package=req.package,
+            success_url=success,
+            cancel_url=cancel,
+            idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("create-checkout-session failed")
+        raise HTTPException(status_code=502, detail=str(e)[:300])
+    return {"ok": True, **session}
+
+
+class ConfirmSessionRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/api/billing/confirm-session")
+async def billing_confirm_session(req: ConfirmSessionRequest):
+    """
+    Potwierdzenie płatności bez Stripe CLI / webhooka.
+    Backend odpytuje Stripe API — jeśli session jest opłacona, dolicza kredyty/tier.
+    Frontend NIE może podać kwoty kredytów — tylko session_id.
+    """
+    from billing_stripe import (
+        apply_paid_checkout_session,
+        retrieve_checkout_session,
+        stripe_configured,
+    )
+    if not stripe_configured():
+        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
+    sid = (req.session_id or "").strip()
+    if not sid.startswith("cs_"):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy session_id")
+    try:
+        session = await retrieve_checkout_session(sid)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)[:300])
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        result = await apply_paid_checkout_session(
+            session,
+            client=client,
+            sb_get=sb_get,
+            sb_post=sb_post,
+            sb_patch=sb_patch,
+            account_key_default=_ACCOUNT_KEY,
+            tier_config=TIER_CONFIG,
+        )
+        if result.get("paid"):
+            sub = await _get_subscription(client)
+            view = _subscription_view(sub, message="Płatność potwierdzona. Portfel zaktualizowany.")
+            view["ok"] = True
+            view["billing"] = result
+            return view
+        return {"ok": False, **result}
+
+
+@app.post("/api/billing/portal")
+async def billing_portal(req: PortalSessionRequest):
+    """Stripe Customer Portal — zarządzanie kartą / anulowanie / faktury."""
+    from billing_stripe import create_billing_portal_session, stripe_configured
+    if not stripe_configured():
+        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        sub = await _ensure_subscription(client)
+        cid = sub.get("stripe_customer_id")
+        if not cid:
+            raise HTTPException(status_code=400, detail="Brak klienta Stripe — najpierw wykup plan.")
+        ret = (req.return_url or os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").strip()
+        try:
+            portal = await create_billing_portal_session(customer_id=cid, return_url=ret)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e)[:300])
+        return {"ok": True, **portal}
+
+
+@app.post("/api/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe Webhook — jedyne miejsce dodawania kredytów / zmiany tieru."""
+    from billing_stripe import construct_event, handle_stripe_event
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature") or ""
+    try:
+        event = construct_event(payload, sig)
+    except Exception as e:
+        logger.warning("Stripe webhook signature failed: %s", e)
+        raise HTTPException(status_code=400, detail=f"Webhook signature: {e}")
+    if hasattr(event, "to_dict"):
+        event_dict = event.to_dict()
+    else:
+        event_dict = dict(event)
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        result = await handle_stripe_event(
+            event_dict,
+            client=client,
+            sb_get=sb_get,
+            sb_post=sb_post,
+            sb_patch=sb_patch,
+            account_key_default=_ACCOUNT_KEY,
+            tier_config=TIER_CONFIG,
+        )
+    return result
+
+
+@app.get("/api/billing/status")
+async def billing_status():
+    from billing_stripe import stripe_configured, DEFAULT_PRICES
+    return {
+        "ok": True,
+        "stripe_configured": stripe_configured(),
+        "webhook_secret_set": bool(
+            (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip().startswith("whsec_")
+        ),
+        "confirm_session_available": True,
+        "mock_billing": os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() in ("1", "true", "yes"),
+        "prices": DEFAULT_PRICES,
+        "scraper_credits_per_check": int(os.getenv("SCRAPER_CREDITS_PER_CHECK", "5") or 5),
+    }
+
+
+@app.post("/api/subscription/resign")
+async def subscription_resign():
+    """Rezygnacja z subskrypcji — natychmiast Tier 0 Free, bez ponownego pakietu 100 kredytów."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        sub = await _ensure_subscription(client)
+        upd = {"tier_level": 0, "status": "active", "current_period_end": None, "free_starter_claimed": True}
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"}, upd)
+        view = _subscription_view({**sub, **upd},
+                                  message=f"Przełączono na plan Free. Saldo: {sub.get('credits_balance')} kredytów "
+                                          f"(bez ponownego pakietu startowego).")
+        view["ok"] = True
+        return view
+
+
+@app.post("/api/subscription/cancel")
+async def subscription_cancel():
+    """Anulowanie — brak dalszych doładowań; kredyty i tier zostają do końca okresu."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        sub = await _ensure_subscription(client)
+        await sb_patch(client, "subscriptions", {"account_key": f"eq.{_ACCOUNT_KEY}"},
+                       {"status": "canceled"})
+        view = _subscription_view({**sub, "status": "canceled"},
+                                  message="Subskrypcja anulowana. Kredyty i plan pozostają do końca "
+                                          "bieżącego okresu, bez kolejnych doładowań.")
+        view["ok"] = True
+        return view
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Delta-Scraper — monitorowanie zmian na stronach hurtowni (MD5 + delta JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from delta_scraper.engine import (  # noqa: E402
+    check_all_targets,
+    check_target_record,
+    _products_to_offer_format,
+)
+
+
+class ScrapeTargetIn(BaseModel):
+    url: str
+    supplier_id: Optional[str] = None
+    label: Optional[str] = None
+    fetch_mode: Literal["auto", "httpx", "playwright"] = "auto"
+    css_selector: Optional[str] = None
+    check_interval_hours: int = 24
+
+
+class ScrapeCheckRequest(BaseModel):
+    target_ids: Optional[list[str]] = None
+    force: bool = False
+
+
+async def _scraper_catalog_sync(client: httpx.AsyncClient, supplier_id: str, products) -> dict:
+    """Synchronizuje wykryte produkty z supplier_catalog (widoczność fuzzy)."""
+    return await _process_offer(client, supplier_id, {
+        "products": _products_to_offer_format(products),
+    })
+
+
+# ─── Delta-Scraper API ───────────────────────────────────────────────────────
+# WYŁĄCZONE W UI Gastro Manager (2026-07). Silnik: backend/delta_scraper.
+# Endpointy zwracają 410 — kod zostaje na ewentualny powrót w innych aplikacjach.
+_SCRAPER_UI_DISABLED = True
+
+
+def _assert_scraper_enabled() -> None:
+    if _SCRAPER_UI_DISABLED:
+        raise HTTPException(
+            status_code=410,
+            detail="Delta-Scraper jest wyłączony w tej aplikacji. Silnik zachowany w backend/delta_scraper.",
+        )
+
+
+@app.get("/api/scraper/targets")
+async def scraper_list_targets():
+    _assert_scraper_enabled()
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            rows = await sb_get(client, "scrape_targets", params={
+                "select": "*",
+                "order": "created_at.desc",
+            })
+        except httpx.HTTPStatusError:
+            return {"ok": False, "needs_migration": True, "targets": []}
+        return {"ok": True, "targets": rows or []}
+
+
+@app.post("/api/scraper/targets")
+async def scraper_add_target(req: ScrapeTargetIn):
+    _assert_scraper_enabled()
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        if req.supplier_id:
+            sup = await sb_get(client, "suppliers",
+                               params={"select": "id", "id": f"eq.{req.supplier_id}", "limit": "1"})
+            if not sup:
+                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+        try:
+            row = await sb_post(client, "scrape_targets", {
+                "url": req.url.strip(),
+                "supplier_id": req.supplier_id,
+                "label": req.label,
+                "fetch_mode": req.fetch_mode,
+                "css_selector": req.css_selector,
+                "check_interval_hours": max(1, int(req.check_interval_hours)),
+                "is_active": True,
+            })
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                raise HTTPException(status_code=409, detail="Ten URL jest już monitorowany.")
+            raise
+        created = row[0] if isinstance(row, list) else row
+        return {"ok": True, "target": created}
+
+
+@app.delete("/api/scraper/targets/{target_id}")
+async def scraper_remove_target(target_id: str):
+    _assert_scraper_enabled()
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        await sb_delete(client, "scrape_targets", {"id": f"eq.{target_id}"})
+        return {"ok": True}
+
+
+async def _bill_scraper_check(client: httpx.AsyncClient, *, checks: int = 1) -> dict:
+    """Opłata w kredytach za skan stron (+ opcjonalny filtr AI kulinarny).
+    Kwota: SCRAPER_CREDITS_PER_CHECK × liczba celów. AI: SCRAPER_AI_INTERPRET=1 (domyślnie)."""
+
+    per = max(0, int(os.getenv("SCRAPER_CREDITS_PER_CHECK", "5") or 5))
+    total = per * max(1, int(checks))
+    if total <= 0:
+        return {"credits_deducted": 0, "credits_remaining": None}
+    sub = await _get_subscription(client)
+    bal = int(sub.get("credits_balance") or 0)
+    if bal < total:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Brak kredytów na skan stron (potrzeba {total}, masz {bal}). Doładuj portfel.",
+        )
+    new_bal = await _deduct_credits(client, total, endpoint="/api/scraper/check")
+    try:
+        await sb_post(client, "token_usage", {
+            "endpoint": "/api/scraper/check",
+            "model": "delta-scraper",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0,
+            "cost_pln": 0,
+            "extras": {
+                "credits_charged": total,
+                "scraper_checks": checks,
+                "per_check": per,
+                "request_id": str(uuid.uuid4()),
+            },
+        })
+    except Exception:
+        pass
+    return {"credits_deducted": total, "credits_remaining": new_bal}
+
+
+@app.post("/api/scraper/check")
+async def scraper_check_all(req: ScrapeCheckRequest):
+    _assert_scraper_enabled()
+    """Sprawdza aktywne cele (lub podane target_ids). Cron: raz na dobę.
+    Każdy cel może przejść crawl podstron — dłuższy timeout. Płatne w kredytach."""
+    async with httpx.AsyncClient(timeout=480.0, verify=_httpx_verify()) as client:
+        try:
+            params: dict = {
+                "select": "id",
+                "is_active": "eq.true",
+            }
+            rows = await sb_get(client, "scrape_targets", params=params)
+            if req.target_ids:
+                ids_set = set(req.target_ids)
+                rows = [r for r in (rows or []) if str(r.get("id")) in ids_set]
+            n = len(rows or [])
+            billing = await _bill_scraper_check(client, checks=max(1, n) if n else 1) if n else {"credits_deducted": 0}
+            results = await check_all_targets(
+                client,
+                sb_get=sb_get, sb_post=sb_post, sb_patch=sb_patch,
+                httpx_verify=_httpx_verify,
+                catalog_sync_fn=_scraper_catalog_sync,
+                force=req.force,
+                target_ids=req.target_ids,
+            )
+        except HTTPException:
+            raise
+        except httpx.HTTPStatusError:
+            return {"ok": False, "needs_migration": True,
+                    "message": "Uruchom ADD_DELTA_SCRAPER.sql w Supabase."}
+        return {
+            "ok": True,
+            "checked": len(results),
+            "results": [r.to_dict() for r in results],
+            **billing,
+        }
+
+
+@app.post("/api/scraper/check/{target_id}")
+async def scraper_check_one(target_id: str, force: bool = False):
+    _assert_scraper_enabled()
+    async with httpx.AsyncClient(timeout=480.0, verify=_httpx_verify()) as client:
+        rows = await sb_get(client, "scrape_targets", params={
+            "select": "*", "id": f"eq.{target_id}", "limit": "1",
+        })
+        if not rows:
+            raise HTTPException(status_code=404, detail="Nie znaleziono celu monitoringu.")
+        billing = await _bill_scraper_check(client, checks=1)
+        result = await check_target_record(
+            client, rows[0],
+            sb_get=sb_get, sb_post=sb_post, sb_patch=sb_patch,
+            httpx_verify=_httpx_verify,
+            catalog_sync_fn=_scraper_catalog_sync,
+            force=force,
+        )
+        out = result.to_dict()
+        out.update(billing)
+        return {"ok": True, "result": out}
+
+
+@app.get("/api/scraper/alerts")
+async def scraper_list_alerts(limit: int = 50, supplier_id: Optional[str] = None):
+    _assert_scraper_enabled()
+    cap = max(1, min(int(limit), 200))
+    params = [("select", "*"), ("order", "detected_at.desc"), ("limit", str(cap))]
+    if supplier_id:
+        params.append(("supplier_id", f"eq.{supplier_id}"))
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            rows = await sb_get(client, "price_alerts", params=params)
+        except httpx.HTTPStatusError:
+            return {"ok": False, "needs_migration": True, "alerts": []}
+        return {"ok": True, "alerts": rows or [], "count": len(rows or [])}
+
+
+@app.delete("/api/scraper/alerts/{alert_id}")
+async def scraper_delete_alert(alert_id: str):
+    _assert_scraper_enabled()
+    """Ręczne usunięcie alertu cenowego."""
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        try:
+            await sb_delete(client, "price_alerts", params={"id": f"eq.{alert_id}"})
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Alert nie istnieje.")
+            raise HTTPException(status_code=400, detail=e.response.text[:200])
+    return {"ok": True, "deleted": alert_id}
+
+
+@app.post("/api/suppliers/{supplier_id}/refresh-catalog-visibility")
+async def refresh_catalog_visibility(supplier_id: str):
+    """Ponownie przelicza is_visible wg MENU/receptur (bez magazynu)."""
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        rows = await sb_get(client, "supplier_catalog", params={
+            "select": "id,name,price_pln,unit,volume_label,variant",
+            "supplier_id": f"eq.{supplier_id}",
+        })
+        if not rows:
+            return {"ok": True, "updated": 0, "message": "Pusty katalog."}
+        products = [
+            {"product_name": r["name"], "price_netto": float(r.get("price_pln") or 0),
+             "unit": r.get("unit") or "szt", "volume_label": r.get("volume_label") or ""}
+            for r in rows
+        ]
+        result = await _process_offer(client, supplier_id, {"products": products})
+        return {"ok": True, "updated": len(rows), **result}

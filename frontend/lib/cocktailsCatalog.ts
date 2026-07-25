@@ -1,0 +1,32 @@
+/**
+ * Katalog grafik — drinki i koktajle (plansza 5×5).
+ */
+import type { DishImageEntry } from '@/lib/dishImagesCatalog';
+
+export const COCKTAILS_CATALOG: DishImageEntry[] = [
+  { slug: 'mojito', category: 'kuchnia_polska', labelPl: 'Mojito', aliases: ['mojito', 'mohito'], storagePath: 'dania/cocktails/cocktail_01.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_01.webp') },
+  { slug: 'aperol_spritz', category: 'kuchnia_polska', labelPl: 'Aperol Spritz', aliases: ['aperol', 'aperol spritz', 'spritz'], storagePath: 'dania/cocktails/cocktail_02.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_02.webp') },
+  { slug: 'margarita', category: 'kuchnia_polska', labelPl: 'Margarita', aliases: ['margarita'], storagePath: 'dania/cocktails/cocktail_03.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_03.webp') },
+  { slug: 'old_fashioned', category: 'kuchnia_polska', labelPl: 'Old Fashioned', aliases: ['old fashioned', 'oldfashioned'], storagePath: 'dania/cocktails/cocktail_04.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_04.webp') },
+  { slug: 'cosmopolitan', category: 'kuchnia_polska', labelPl: 'Cosmopolitan', aliases: ['cosmopolitan', 'cosmo'], storagePath: 'dania/cocktails/cocktail_05.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_05.webp') },
+  { slug: 'cuba_libre', category: 'kuchnia_polska', labelPl: 'Cuba Libre', aliases: ['cuba libre', 'rum cola'], storagePath: 'dania/cocktails/cocktail_06.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_06.webp') },
+  { slug: 'pina_colada', category: 'kuchnia_polska', labelPl: 'Piña Colada', aliases: ['pina colada', 'piña colada', 'pinacolada'], storagePath: 'dania/cocktails/cocktail_07.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_07.webp') },
+  { slug: 'negroni', category: 'kuchnia_polska', labelPl: 'Negroni', aliases: ['negroni'], storagePath: 'dania/cocktails/cocktail_08.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_08.webp') },
+  { slug: 'long_island', category: 'kuchnia_polska', labelPl: 'Long Island Iced Tea', aliases: ['long island', 'long island iced tea', 'liit'], storagePath: 'dania/cocktails/cocktail_09.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_09.webp') },
+  { slug: 'tequila_sunrise', category: 'kuchnia_polska', labelPl: 'Tequila Sunrise', aliases: ['tequila sunrise'], storagePath: 'dania/cocktails/cocktail_10.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_10.webp') },
+  { slug: 'gin_tonic', category: 'kuchnia_polska', labelPl: 'Gin z tonikiem (Gin & Tonic)', aliases: ['gin tonic', 'gin and tonic', 'g&t', 'gin z tonikiem'], storagePath: 'dania/cocktails/cocktail_11.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_11.webp') },
+  { slug: 'espresso_martini', category: 'kuchnia_polska', labelPl: 'Espresso Martini', aliases: ['espresso martini', 'martini kawowe'], storagePath: 'dania/cocktails/cocktail_12.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_12.webp') },
+  { slug: 'blue_hawaiian', category: 'kuchnia_polska', labelPl: 'Blue Hawaiian', aliases: ['blue hawaiian', 'niebieski hawaiian'], storagePath: 'dania/cocktails/cocktail_13.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_13.webp') },
+  { slug: 'whiskey_sour', category: 'kuchnia_polska', labelPl: 'Whiskey Sour', aliases: ['whiskey sour', 'whisky sour'], storagePath: 'dania/cocktails/cocktail_14.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_14.webp') },
+  { slug: 'moscow_mule', category: 'kuchnia_polska', labelPl: 'Moscow Mule', aliases: ['moscow mule', 'moskiewski muł'], storagePath: 'dania/cocktails/cocktail_15.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_15.webp') },
+  { slug: 'bloody_mary', category: 'kuchnia_polska', labelPl: 'Krwawa Mary (Bloody Mary)', aliases: ['bloody mary', 'krwawa mary'], storagePath: 'dania/cocktails/cocktail_16.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_16.webp') },
+  { slug: 'dry_martini', category: 'kuchnia_polska', labelPl: 'Dry Martini', aliases: ['dry martini', 'martini', 'martini wytrawne'], storagePath: 'dania/cocktails/cocktail_17.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_17.webp') },
+  { slug: 'mint_julep', category: 'kuchnia_polska', labelPl: 'Mint Julep', aliases: ['mint julep', 'julep'], storagePath: 'dania/cocktails/cocktail_18.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_18.webp') },
+  { slug: 'pisco_sour', category: 'kuchnia_polska', labelPl: 'Pisco Sour', aliases: ['pisco sour', 'pisco'], storagePath: 'dania/cocktails/cocktail_19.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_19.webp') },
+  { slug: 'dark_n_stormy', category: 'kuchnia_polska', labelPl: "Dark 'n' Stormy", aliases: ['dark and stormy', 'dark n stormy', 'dark stormy'], storagePath: 'dania/cocktails/cocktail_20.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_20.webp') },
+  { slug: 'daiquiri', category: 'kuchnia_polska', labelPl: 'Klasyczne Daiquiri', aliases: ['daiquiri', 'dajkiri'], storagePath: 'dania/cocktails/cocktail_21.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_21.webp') },
+  { slug: 'mai_tai', category: 'kuchnia_polska', labelPl: 'Mai Tai', aliases: ['mai tai', 'maitai'], storagePath: 'dania/cocktails/cocktail_22.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_22.webp') },
+  { slug: 'white_russian', category: 'kuchnia_polska', labelPl: 'White Russian (Biały Rosjanin)', aliases: ['white russian', 'biały rosjanin'], storagePath: 'dania/cocktails/cocktail_23.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_23.webp') },
+  { slug: 'french_75', category: 'kuchnia_polska', labelPl: 'French 75', aliases: ['french 75', 'french seventy five'], storagePath: 'dania/cocktails/cocktail_24.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_24.webp') },
+  { slug: 'dodatki_barowe', category: 'kuchnia_polska', labelPl: 'Miseczka z dodatkami barowymi', aliases: ['dodatki barowe', 'garnish', 'oliwki limonki'], storagePath: 'dania/cocktails/cocktail_25.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_25.webp'), recipeEligible: false },
+];

@@ -1,0 +1,35 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_SUPABASE_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "SET_VIA_scripts/sync-eas-preview-env.js"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

@@ -1,0 +1,245 @@
+/**
+ * Subskrypcja — operacje bezpośrednio przez Supabase (bez wymagania backendu).
+ */
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import {
+  FEATURE_CATALOG, TOPUP_PACKAGES, TIER_PLANS, tierName, type TopupKey,
+} from '@/lib/subscriptionCatalog';
+
+const ACCOUNT_KEY = 'default';
+const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
+const STARTER_CREDITS = 1000;
+
+export type SubscriptionRow = {
+  id: string;
+  account_key: string;
+  tier_level: number;
+  credits_balance: number;
+  status: string;
+  current_period_end: string | null;
+  free_starter_claimed?: boolean | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SubscriptionState = {
+  ok: boolean;
+  needs_migration?: boolean;
+  load_error?: 'config' | 'network' | 'migration';
+  tier_level: number;
+  tier_name: string;
+  credits_balance: number;
+  status: string;
+  current_period_end: string | null;
+  deal_hunter_unlocked: boolean;
+  /** Dark premium UI — kredyty > 0 lub aktywna płatna subskrypcja */
+  premium_ui: boolean;
+  features: Array<{
+    key: string; icon: string; name: string; cost: string;
+    requires_deal_hunter: boolean; locked: boolean; locked_reason: string | null;
+  }>;
+  topup_packages: typeof TOPUP_PACKAGES;
+  plans: typeof TIER_PLANS;
+  message?: string | null;
+};
+
+export type WalletSnapshot = Pick<
+  SubscriptionState,
+  'tier_level' | 'tier_name' | 'credits_balance' | 'status' | 'current_period_end' | 'ok' | 'needs_migration' | 'load_error'
+> & { load_message?: string };
+
+function buildView(row: SubscriptionRow, message?: string | null): SubscriptionState {
+  const tier = Number(row.tier_level ?? 0);
+  const bal = Number(row.credits_balance ?? 0);
+  /** Startowy pakiet 1000 kr. na tier 0: pełny dostęp (w tym Łowca) dopóki są kredyty. */
+  const starterFullAccess = tier === 0 && bal > 0;
+  const features = FEATURE_CATALOG.map((f) => {
+    let reason: string | null = null;
+    if (bal <= 0) {
+      reason = 'Brak kredytów — dostępne tylko funkcje manualne';
+    } else if (starterFullAccess) {
+      reason = null;
+    } else if (f.requires_deal_hunter && tier < 2) {
+      reason = 'Wymaga planu Profesjonalny';
+    }
+    return { ...f, locked: reason !== null, locked_reason: reason };
+  });
+  return {
+    ok: true,
+    tier_level: tier,
+    tier_name: tierName(tier),
+    credits_balance: bal,
+    status: row.status ?? 'active',
+    current_period_end: row.current_period_end ?? null,
+      deal_hunter_unlocked: starterFullAccess || tier >= 2,
+      premium_ui: bal > 0,
+    features,
+    topup_packages: TOPUP_PACKAGES,
+    plans: TIER_PLANS,
+    message: message ?? null,
+  };
+}
+
+async function fetchRow(): Promise<SubscriptionRow | null> {
+  if (!isSupabaseConfigured) return null;
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .select('*')
+    .eq('account_key', ACCOUNT_KEY)
+    .maybeSingle();
+  if (error) {
+    if (error.code === 'PGRST205' || error.message?.includes('schema cache')) return null;
+    throw error;
+  }
+  return data as SubscriptionRow | null;
+}
+
+async function ensureRow(): Promise<SubscriptionRow> {
+  const existing = await fetchRow();
+  if (existing) return existing;
+
+  const payload = {
+    account_key: ACCOUNT_KEY,
+    tier_level: 0,
+    credits_balance: STARTER_CREDITS,
+    status: 'active',
+    current_period_end: null,
+    free_starter_claimed: true,
+  };
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .insert(payload)
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data as SubscriptionRow;
+}
+
+async function patchRow(changes: Partial<SubscriptionRow>): Promise<SubscriptionRow> {
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .update(changes)
+    .eq('account_key', ACCOUNT_KEY)
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data as SubscriptionRow;
+}
+
+export async function fetchSubscriptionState(): Promise<SubscriptionState> {
+  try {
+    const row = await ensureRow();
+    return buildView(row);
+  } catch {
+    return {
+      ok: false,
+      needs_migration: true,
+      load_error: 'migration',
+      tier_level: 0,
+      tier_name: '—',
+      credits_balance: 0,
+      status: 'unknown',
+      current_period_end: null,
+      deal_hunter_unlocked: false,
+      premium_ui: false,
+      features: FEATURE_CATALOG.map((f) => ({ ...f, locked: true, locked_reason: 'Brak migracji' })),
+      topup_packages: TOPUP_PACKAGES,
+      plans: TIER_PLANS,
+      message: 'Uruchom ADD_SUBSCRIPTIONS.sql i FIX_SUBSCRIPTIONS_RLS.sql w Supabase SQL Editor.',
+    };
+  }
+}
+
+export async function fetchWalletSnapshot(): Promise<WalletSnapshot> {
+  const state = await fetchSubscriptionState();
+  return {
+    tier_level: state.tier_level,
+    tier_name: state.tier_name,
+    credits_balance: state.credits_balance,
+    status: state.status,
+    current_period_end: state.current_period_end,
+    ok: state.ok,
+    needs_migration: state.needs_migration,
+    load_error: state.load_error,
+    load_message: state.message ?? undefined,
+  };
+}
+
+export async function subscribeTier(tierLevel: 1 | 2): Promise<SubscriptionState> {
+  const { createCheckoutAndOpen } = await import('@/lib/billingClient');
+  const checkout = await createCheckoutAndOpen({ kind: 'subscription', tier_level: tierLevel });
+  const row = await ensureRow();
+  return buildView(
+    row,
+    checkout.ok
+      ? checkout.message
+      : (checkout.message || 'Nie udało się otworzyć płatności Stripe.'),
+  );
+}
+
+export async function cancelSubscription(): Promise<SubscriptionState> {
+  // Preferuj portal Stripe, gdy jest customer_id — lokalnie oznacz canceled jako fallback
+  try {
+    const { openBillingPortal } = await import('@/lib/billingClient');
+    const portal = await openBillingPortal();
+    if (portal.ok) {
+      const row = await ensureRow();
+      return buildView(row, portal.message);
+    }
+  } catch { /* fall through */ }
+  const row = await ensureRow();
+  const updated = await patchRow({ status: 'canceled' });
+  return buildView(
+    updated,
+    'Subskrypcja oznaczona jako anulowana lokalnie. W Stripe: Zarządzaj subskrypcją.',
+  );
+}
+
+/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu 100 kredytów. */
+export async function resignToFreeTier(): Promise<SubscriptionState> {
+  const row = await ensureRow();
+  const updated = await patchRow({
+    tier_level: 0,
+    status: 'active',
+    current_period_end: null,
+    free_starter_claimed: true,
+  });
+  return buildView(
+    updated,
+    `Przełączono na plan Free. Saldo kredytów: ${updated.credits_balance} (bez ponownego pakietu startowego).`,
+  );
+}
+
+export async function topupCredits(packageKey: TopupKey): Promise<SubscriptionState> {
+  const pkg = TOPUP_PACKAGES.find((p) => p.key === packageKey);
+  if (!pkg) throw new Error('Nieprawidłowy pakiet');
+  const { createCheckoutAndOpen } = await import('@/lib/billingClient');
+  const checkout = await createCheckoutAndOpen({ kind: 'topup', package: packageKey });
+  const row = await ensureRow();
+  return buildView(
+    row,
+    checkout.ok
+      ? checkout.message
+      : (checkout.message || 'Nie udało się otworzyć płatności Stripe.'),
+  );
+}
+
+export async function grantRewardCredit(): Promise<{ ok: boolean; credits_balance: number; message: string }> {
+  const row = await ensureRow();
+  const updated = await patchRow({
+    credits_balance: Number(row.credits_balance ?? 0) + 1,
+  });
+  return { ok: true, credits_balance: updated.credits_balance, message: '+1 kredyt AI' };
+}
+
+/** Opcjonalnie synchronizuj z backendem (AI billing) — nie blokuje UI. */
+export async function syncBackendSubscription(): Promise<void> {
+  if (!BACKEND_URL) return;
+  try {
+    await fetch(`${BACKEND_URL}/api/subscription`, { method: 'GET' });
+  } catch {
+    /* ignore */
+  }
+}
+
+export { BACKEND_URL, ACCOUNT_KEY };

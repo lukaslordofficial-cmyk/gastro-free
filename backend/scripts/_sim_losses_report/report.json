@@ -1,0 +1,110 @@
+{
+  "pass": 4,
+  "fail": 0,
+  "results": [
+    {
+      "verdict": "PASS",
+      "id": "march_2025_mixed",
+      "title": "Marzec 2025 — mieszane straty (składniki + dania)",
+      "window": [
+        "2025-03-01",
+        "2025-03-31"
+      ],
+      "checks": {
+        "net_equals_rev_minus_fixed_minus_var_gross": true,
+        "not_double_counting_waste": true,
+        "waste_events_costed": true
+      },
+      "pnl": {
+        "revenue": 52000.0,
+        "fixed": 27800.0,
+        "variable_gross": 15600.0,
+        "variable_net": 15415.82,
+        "waste": 184.18,
+        "net_profit": 8600.0,
+        "net_equiv_gross": 8600.0,
+        "wrong_double_count": 8415.82
+      },
+      "waste_total": 184.18,
+      "events": 16
+    },
+    {
+      "verdict": "PASS",
+      "id": "july_2025_peak",
+      "title": "Lipiec 2025 — szczyt sezonu, straty zup/sosów",
+      "window": [
+        "2025-07-01",
+        "2025-07-31"
+      ],
+      "checks": {
+        "net_equals_rev_minus_fixed_minus_var_gross": true,
+        "not_double_counting_waste": true,
+        "waste_events_costed": true
+      },
+      "pnl": {
+        "revenue": 68500.0,
+        "fixed": 29200.0,
+        "variable_gross": 20550.0,
+        "variable_net": 19987.2,
+        "waste": 562.8,
+        "net_profit": 18750.0,
+        "net_equiv_gross": 18750.0,
+        "wrong_double_count": 18187.2
+      },
+      "waste_total": 562.8,
+      "events": 12
+    },
+    {
+      "verdict": "PASS",
+      "id": "year_2025_sample",
+      "title": "Rok 2025 — próbka strat po kwartałach",
+      "window": [
+        "2025-01-01",
+        "2025-12-31"
+      ],
+      "checks": {
+        "net_equals_rev_minus_fixed_minus_var_gross": true,
+        "not_double_counting_waste": true,
+        "waste_events_costed": true
+      },
+      "pnl": {
+        "revenue": 620000.0,
+        "fixed": 340000.0,
+        "variable_gross": 186000.0,
+        "variable_net": 185586.76,
+        "waste": 413.24,
+        "net_profit": 94000.0,
+        "net_equiv_gross": 94000.0,
+        "wrong_double_count": 93586.76
+      },
+      "waste_total": 413.24,
+      "events": 20
+    },
+    {
+      "verdict": "PASS",
+      "id": "units_edge_2025",
+      "title": "Krawędzie jednostek g/kg/ml/l/porcja",
+      "window": [
+        "2025-03-01",
+        "2025-03-03"
+      ],
+      "checks": {
+        "net_equals_rev_minus_fixed_minus_var_gross": true,
+        "not_double_counting_waste": true,
+        "waste_events_costed": true
+      },
+      "pnl": {
+        "revenue": 9000.0,
+        "fixed": 2700.0,
+        "variable_gross": 2500.0,
+        "variable_net": 2475.65,
+        "waste": 24.35,
+        "net_profit": 3800.0,
+        "net_equiv_gross": 3800.0,
+        "wrong_double_count": 3775.65
+      },
+      "waste_total": 24.35,
+      "events": 5
+    }
+  ]
+}

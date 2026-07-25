@@ -1,0 +1,21 @@
+# Kolejność = siatka 5×4 (lewo→prawo, góra→dół)
+losos_stek_fillet
+pstrag_caly_surowy
+krewetki_szare_surowe
+tunczyk_stek_surowy
+dorsz_poledwica_filet
+dorada_cala_surowa
+makrela_cala_dwie_sztuki
+mule_malze_czarne
+kalmar_caly_z_mackami
+przegrzebki_malze_swiete
+karmazyn_lub_dorada_rozowa
+krazki_kalmarow
+osmiornica_macki_ugotowane
+wenery_malze_w_muszelkach
+ostrygi_zamkniete_muszle
+okon_morski_dwie_ryby
+krewetki_gotowane_rozowe
+tilapia_filet_rozowy
+szproty_lub_sardynki_starka
+krab_nogi_szczypce

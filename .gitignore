@@ -1,0 +1,51 @@
+# Secrets — nigdy nie commitować
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+memory/test_credentials.md
+
+# EAS: lokalnie sync-eas-preview-env.js wstawia klucze — nie commituj wypełnionego env
+# (w repo trzymamy placeholdery SET_VIA_...)
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env.local
+
+# Node / Expo
+node_modules/
+.expo/
+.metro-cache/
+dist/
+web-build/
+expo-env.d.ts
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Build / caches
+*.apk
+*.aab
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Local caches
+backend/.inspiration_recipe_cache.json
+**/.inspiration_recipe_cache.json

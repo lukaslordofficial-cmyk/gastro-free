@@ -1,5 +1,5 @@
 import 'react-native-gesture-handler';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, InteractionManager, LogBox, View } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -17,8 +17,10 @@ import { JarvisVoiceHost } from '@/components/JarvisVoiceHost';
 import { DocumentScanHost } from '@/components/DocumentScanHost';
 import { PremiumAlertProvider } from '@/components/PremiumAlert';
 import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
+import { BrandSplash, BRAND_SPLASH_MIN_MS } from '@/components/BrandSplash';
 import { warmProductImageIndexes } from '@/lib/productImages';
 import { DS } from '@/constants/premiumTheme';
+
 
 LogBox.ignoreLogs(['Unable to activate keep awake', 'KeepAwake']);
 // Produkcja: nie spamuj LogBoxem (Metro i tak nie działa w store build).
@@ -54,7 +56,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       <View
         style={{
           flex: 1,
-          backgroundColor: DS.color.bgPrimary,
+          backgroundColor: '#0A120E',
           alignItems: 'center',
           justifyContent: 'center',
         }}
@@ -95,11 +97,22 @@ function RootLayoutNav() {
 export default function RootLayout() {
   useFrameworkReady();
   const [loaded, error] = useIconFonts();
+  const [showBrandSplash, setShowBrandSplash] = useState(true);
+  const splashStarted = useRef(Date.now());
+  const nativeHidden = useRef(false);
 
   useEffect(() => {
-    if (loaded || error) {
-      void SplashScreen.hideAsync().catch(() => {});
-    }
+    if (!(loaded || error) || nativeHidden.current) return;
+    nativeHidden.current = true;
+    void SplashScreen.hideAsync().catch(() => {});
+  }, [loaded, error]);
+
+  useEffect(() => {
+    if (!(loaded || error)) return;
+    const elapsed = Date.now() - splashStarted.current;
+    const wait = Math.max(0, BRAND_SPLASH_MIN_MS - elapsed);
+    const t = setTimeout(() => setShowBrandSplash(false), wait);
+    return () => clearTimeout(t);
   }, [loaded, error]);
 
   // Po starcie UI: tylko indeks katalogów składników (bez ciężkiego dishCatalog).
@@ -120,7 +133,10 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <ThemeModeProvider>
         <AuthProvider>
-          <RootLayoutNav />
+          <View style={{ flex: 1, backgroundColor: '#0A120E' }}>
+            <RootLayoutNav />
+            {showBrandSplash ? <BrandSplash /> : null}
+          </View>
         </AuthProvider>
       </ThemeModeProvider>
     </SafeAreaProvider>

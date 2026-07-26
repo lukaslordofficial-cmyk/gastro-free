@@ -191,13 +191,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           data: {
             restaurant_name: (restaurantName ?? '').trim() || null,
           },
-          // Preferujemy natychmiastową sesję (gdy Confirm email wyłączone w Supabase).
+          // Closed beta: Confirm email OFF w Supabase → sesja od razu.
+          // Nie ustawiamy emailRedirectTo — unikamy przepływu „sprawdź skrzynkę”.
         },
       });
       if (error) return { ok: false as const, message: polishAuthError(error) };
 
-      // Closed beta: bez maila potwierdzającego — Admin API na backendzie, potem login.
-      if (!data.session && data.user?.id && BACKEND_URL) {
+      if (data.session?.user) {
+        await applySession(data.session);
+        return { ok: true as const };
+      }
+
+      // Closed beta: gdy Confirm email jeszcze włączone — Admin API, potem login.
+      if (data.user?.id && BACKEND_URL) {
         const conf = await fetchJson(`${BACKEND_URL}/api/auth/auto-confirm`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -216,12 +222,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      if (data.session?.user) {
-        await applySession(data.session);
-        return { ok: true as const };
+      // Ostatnia próba: czasem sesja pojawia się po krótkiej chwili bez confirm.
+      const { error: retryErr } = await supabase.auth.signInWithPassword({
+        email: e,
+        password,
+      });
+      if (!retryErr) {
+        const { data: sess } = await supabase.auth.getSession();
+        if (sess.session) {
+          await applySession(sess.session);
+          return { ok: true as const };
+        }
       }
 
-      // Fallback tylko gdy Confirm email nadal włączone i auto-confirm nie zadziałał
+      // Tylko gdy Confirm email nadal blokuje logowanie
       return {
         ok: true as const,
         needsEmailConfirm: true,

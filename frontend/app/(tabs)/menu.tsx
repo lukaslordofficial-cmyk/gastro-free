@@ -1243,6 +1243,9 @@ export default function MenuScreen() {
 
     setInvSaving(true);
     try {
+      if (!accountKey || accountKey === 'default') {
+        throw new Error('Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
+      }
       const { data: newRow, error: insertError } = await supabase
         .from('inventory_items')
         .insert({
@@ -1254,11 +1257,20 @@ export default function MenuScreen() {
           portion_size: invForm.portionSize.trim() ? (parseFloat(invForm.portionSize) || null) : null,
           is_combo_polprodukt: invForm.isCombo,
           unit_cost: 0,
+          account_key: accountKey,
         })
         .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
         .single();
 
-      if (insertError) throw insertError;
+      if (insertError) {
+        const msg = insertError.message || '';
+        if (/row-level security|RLS/i.test(msg)) {
+          throw new Error(
+            'Brak uprawnień do zapisu magazynu (RLS). Uruchom w Supabase migrację FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.',
+          );
+        }
+        throw insertError;
+      }
 
       const newInvItem = mapInvDbRow(newRow);
       setInventory((prev) => [...prev, newInvItem]);

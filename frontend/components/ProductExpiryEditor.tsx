@@ -151,6 +151,8 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
     setSaving(true);
     try {
       await supabase.from('warehouse_inventory').delete().eq('inventory_item_id', inventoryItemId);
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
       const payload = valid.map((b) => ({
         inventory_item_id: inventoryItemId,
         product_name: productName,
@@ -160,6 +162,7 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
         status: statusOf(b.expiration_date),
         alert_triggers: alertDays,
         source: 'manual_edit',
+        account_key: ak,
       }));
       const { error } = await supabase.from('warehouse_inventory').insert(payload);
       if (error) throw error;

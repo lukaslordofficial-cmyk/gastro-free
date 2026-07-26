@@ -42,9 +42,9 @@ export default function RegisterScreen() {
       }
       if (res.needsEmailConfirm) {
         setInfo(
-          'Konto utworzone. Zaloguj się tym samym e-mailem i hasłem. ' +
-            'Jeśli logowanie nie działa, w Supabase wyłącz „Confirm email” ' +
-            '(Authentication → Providers → Email).',
+          'Konto utworzone, ale brak aktywnej sesji. Zaloguj się tym samym e-mailem i hasłem. ' +
+            'Na closed beta wyłącz w Supabase „Confirm email” ' +
+            '(Authentication → Providers → Email → Confirm email OFF).',
         );
         return;
       }
@@ -74,7 +74,8 @@ export default function RegisterScreen() {
             <Text style={styles.brand}>GASTRO MANAGER</Text>
             <Text style={styles.title}>Nowe konto</Text>
             <Text style={styles.sub}>
-              Rejestracja e-mail + hasło. Po założeniu konta otrzymujesz 1000 kredytów AI na start.
+              Rejestracja e-mail + hasło — bez potwierdzenia maila (beta). Po założeniu konta
+              otrzymujesz 1000 kredytów AI i własny magazyn / menu.
             </Text>
 
             {!isSupabaseConfigured && (

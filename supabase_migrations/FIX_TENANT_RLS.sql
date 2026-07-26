@@ -1,7 +1,8 @@
--- =============================================================================
--- FIX: RLS tenant — insert/update działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działa działają nawet gdy wiersz w profiles
+﻿-- =============================================================================
+-- FIX: RLS tenant — insert/update działają nawet gdy wiersz w profiles
 -- jeszcze nie istnieje (np. race po rejestracji).
 -- Uruchom w Supabase SQL Editor PO ADD_TENANT_ISOLATION.sql
+-- Idempotentne — można odpalać wielokrotnie.
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.current_account_key()
@@ -36,12 +37,14 @@ GRANT EXECUTE ON FUNCTION public.current_account_key() TO service_role;
 DO $$
 DECLARE
   t text;
+  p text;
   tables text[] := ARRAY[
     'inventory_items',
     'inventory_categories',
     'menu_items',
     'suppliers',
-    'waste_logs'
+    'waste_logs',
+    'warehouse_inventory'
   ];
 BEGIN
   FOREACH t IN ARRAY tables LOOP
@@ -52,7 +55,26 @@ BEGIN
       CONTINUE;
     END IF;
 
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = t AND column_name = 'account_key'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE public.%I ADD COLUMN account_key text NOT NULL DEFAULT %L',
+        t, 'default'
+      );
+    END IF;
+
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+
+    FOR p IN
+      SELECT policyname FROM pg_policies
+      WHERE schemaname = 'public' AND tablename = t
+        AND policyname NOT LIKE '%tenant%'
+        AND policyname NOT LIKE 'service_%'
+    LOOP
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', p, t);
+    END LOOP;
 
     EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_tenant_select', t);
     EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_tenant_insert', t);
@@ -80,17 +102,31 @@ BEGIN
        USING (account_key = public.current_account_key())',
       t || '_tenant_delete', t
     );
+
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO authenticated', t);
   END LOOP;
 END $$;
 
 -- recipe_ingredients: brak account_key — dostęp przez menu_item właściciela
 DO $$
+DECLARE
+  p text;
 BEGIN
   IF EXISTS (
     SELECT 1 FROM information_schema.tables
     WHERE table_schema = 'public' AND table_name = 'recipe_ingredients'
   ) THEN
     ALTER TABLE public.recipe_ingredients ENABLE ROW LEVEL SECURITY;
+
+    FOR p IN
+      SELECT policyname FROM pg_policies
+      WHERE schemaname = 'public' AND tablename = 'recipe_ingredients'
+        AND policyname NOT LIKE '%tenant%'
+        AND policyname NOT LIKE 'service_%'
+    LOOP
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.recipe_ingredients', p);
+    END LOOP;
+
     DROP POLICY IF EXISTS recipe_ingredients_tenant_all ON public.recipe_ingredients;
     CREATE POLICY recipe_ingredients_tenant_all ON public.recipe_ingredients
       FOR ALL TO authenticated
@@ -106,5 +142,9 @@ BEGIN
           WHERE m.account_key = public.current_account_key()
         )
       );
+
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.recipe_ingredients TO authenticated;
   END IF;
 END $$;
+
+NOTIFY pgrst, 'reload schema';

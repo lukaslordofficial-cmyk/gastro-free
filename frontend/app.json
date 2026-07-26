@@ -2,14 +2,20 @@
   "expo": {
     "name": "Gastro Manager",
     "slug": "gastro-manager",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
     "scheme": "myapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/premium/gastro-manager-logo.webp",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A120E"
+    },
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "1",
+      "buildNumber": "2",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
         "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
@@ -19,9 +25,10 @@
       "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
     },
     "android": {
-      "versionCode": 1,
+      "versionCode": 2,
       "adaptiveIcon": {
-        "backgroundColor": "#ffffff"
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#0A120E"
       },
       "usesCleartextTraffic": false,
       "permissions": [

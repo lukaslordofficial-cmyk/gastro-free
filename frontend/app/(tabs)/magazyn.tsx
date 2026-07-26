@@ -904,13 +904,25 @@ export default function MagazynScreen() {
     const color = CAT_AUTO_COLORS.find((c) => !usedColors.includes(c))
       ?? CAT_AUTO_COLORS[dbCategories.length % CAT_AUTO_COLORS.length];
     const maxOrder = dbCategories.reduce((m, c) => Math.max(m, (c as any).sort_order ?? 0), 0);
-    const { getAccountKey } = await import('@/lib/accountKey');
+    if (!accountKey || accountKey === 'default') {
+      Alert.alert('Konto', 'Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
+      return;
+    }
     const { data: newCat, error } = await supabase.from('inventory_categories').insert({
-      name, color, icon_name: 'box', sort_order: maxOrder + 10, account_key: getAccountKey(),
+      name, color, icon_name: 'box', sort_order: maxOrder + 10, account_key: accountKey,
     }).select('id, name, color').single();
     savingCatRef.current = false;
     setSavingCat(false);
-    if (error) { Alert.alert('Błąd', error.message); return; }
+    if (error) {
+      const msg = error.message || '';
+      Alert.alert(
+        'Błąd',
+        /row-level security|RLS/i.test(msg)
+          ? 'Brak uprawnień do kategorii (RLS). Uruchom w Supabase FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.'
+          : msg,
+      );
+      return;
+    }
     setNewCatName('');
     setAddingCat(false);
     if (newCat) {

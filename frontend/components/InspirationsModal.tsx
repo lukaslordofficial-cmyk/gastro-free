@@ -80,7 +80,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
   const [category, setCategory] = useState<InspirationCategory | null>(null);
   const [dish, setDish] = useState<InspirationDish | null>(null);
   const [recipe, setRecipe] = useState<InspirationRecipe | null>(null);
-  const [portions, setPortions] = useState(2);
+  const [portions, setPortions] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [unlocked, setUnlocked] = useState<Record<string, { recipe: InspirationRecipe }>>({});
 
@@ -127,7 +127,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
     const hit = unlocked[d.slug];
     if (hit?.recipe) {
       setRecipe(hit.recipe);
-      setPortions(hit.recipe.default_portions || 2);
+      setPortions(1);
       setStage('recipe');
       return;
     }
@@ -169,7 +169,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
       }
       const data = (await res.json()) as InspirationRecipe;
       setRecipe(data);
-      setPortions(data.default_portions || 2);
+      setPortions(1);
       setStage('recipe');
       await saveUnlockedInspiration(dish.slug, dish.labelPl, data);
       setUnlocked((prev) => ({ ...prev, [dish.slug]: { recipe: { ...data, cached: true } } }));

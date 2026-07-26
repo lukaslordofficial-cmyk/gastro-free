@@ -84,7 +84,7 @@ export function SubscriptionPanel() {
       }
       testID="subscription-panel"
     >
-      <CreditsWalletCard showRewardedButton />
+      <CreditsWalletCard />
 
       {toast && (
         <View style={styles.toast} testID="subscription-toast">

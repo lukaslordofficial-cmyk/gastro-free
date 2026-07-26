@@ -196,7 +196,12 @@ export function CatalogScanModal({
         const form = new FormData();
         form.append('file', { uri, name, type: mimeType } as any);
         if (supplierId) form.append('supplier_id', supplierId);
-        const res = await fetch(`${BACKEND_URL}/api/documents/process`, { method: 'POST', body: form });
+        const { backendTenantHeaders } = await import('@/lib/tenantScope');
+        const res = await fetch(`${BACKEND_URL}/api/documents/process`, {
+          method: 'POST',
+          headers: backendTenantHeaders(),
+          body: form,
+        });
         if (!res.ok) {
           const txt = await res.text();
           let detail = txt;
@@ -268,9 +273,10 @@ export function CatalogScanModal({
     setError(null);
     try {
       const products = productsOverride ?? invProducts;
+      const { apiJsonHeaders } = await import('@/lib/apiHeaders');
       const res = await fetch(`${BACKEND_URL}/api/documents/confirm-invoice`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({
           supplier_id: invSupplierId,
           supplier_name: invSupplierName,
@@ -326,7 +332,7 @@ export function CatalogScanModal({
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
-      <SafeAreaView style={[styles.container, { backgroundColor: scanBg }]} edges={['top']}>
+      <SafeAreaView style={[styles.container, { backgroundColor: scanBg }]} edges={['top', 'bottom']}>
         <View style={[styles.header, { backgroundColor: scanCard, borderBottomColor: scanBorder }]}>
           <View style={styles.headerLeft}>
             <View style={[styles.headerIcon, prem && { backgroundColor: 'rgba(0,255,120,0.12)' }]}>
@@ -667,7 +673,7 @@ const styles = StyleSheet.create({
   editSuffix: { fontSize: 11, fontWeight: '600', color: Colors.textTertiary, marginLeft: 4 },
   catChip: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.accentLight, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#BFDBFE' },
   catChipText: { fontSize: 12, fontWeight: '700', color: Colors.accent },
-  footer: { padding: 16, paddingBottom: Platform.OS === 'ios' ? 28 : 16, borderTopWidth: 1, borderTopColor: Colors.border, backgroundColor: Colors.card },
+  footer: { padding: 16, paddingBottom: Platform.OS === 'ios' ? 12 : 20, borderTopWidth: 1, borderTopColor: Colors.border, backgroundColor: Colors.card },
   destLabel: { fontSize: 12, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8 },
   destRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   destChip: {

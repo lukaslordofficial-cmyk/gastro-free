@@ -21,8 +21,8 @@ import {
   CalendarClock,
   Bell,
   Check,
-  Lightbulb,
 } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { formatPln } from '@/lib/format';
@@ -122,6 +122,7 @@ export function InvoiceExpiryReviewForm({
   committing,
 }: Props) {
   const theme = useAppTheme();
+  const insets = useSafeAreaInsets();
   const [localError, setLocalError] = useState<string | null>(null);
 
   const c = useMemo(() => {
@@ -277,15 +278,6 @@ export function InvoiceExpiryReviewForm({
 
   return (
     <View style={{ flex: 1 }}>
-      <View style={[styles.tip, { backgroundColor: c.soft, borderColor: c.accent }]}>
-        <Lightbulb size={16} color={c.accent} strokeWidth={2.2} />
-        <Text style={[styles.tipText, { color: c.muted }]}>
-          Oszczędzaj kredyty: zamiast skanować każdy produkt Vision AI, uzupełnij daty tutaj
-          (lub później głosem: „dodaj do twarogu datę ważności 20.08.2026, 4 sztuki”).
-          Jedno skanowanie faktury = wszystkie pozycje.
-        </Text>
-      </View>
-
       {localError ? (
         <Text style={[styles.error, { color: c.danger }]}>{localError}</Text>
       ) : null}
@@ -416,7 +408,16 @@ export function InvoiceExpiryReviewForm({
         <View style={{ height: 24 }} />
       </ScrollView>
 
-      <View style={[styles.footer, { backgroundColor: c.card, borderTopColor: c.border }]}>
+      <View
+        style={[
+          styles.footer,
+          {
+            backgroundColor: c.card,
+            borderTopColor: c.border,
+            paddingBottom: Math.max(insets.bottom, 14) + 8,
+          },
+        ]}
+      >
         <Text style={[styles.total, { color: c.text }]}>
           Suma faktury: {formatPln(totalCost)}
         </Text>

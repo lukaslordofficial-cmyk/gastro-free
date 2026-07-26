@@ -14,9 +14,10 @@ Data: 2026-07-25 (aktualizacja: tenant isolation + bez maila confirm).
 
 1. `ADD_SUBSCRIPTIONS.sql` / `FIX_SUBSCRIPTIONS_RLS.sql` (jeśli nie było)
 2. **`ADD_AUTH_PROFILES.sql`**
-3. **`ADD_TENANT_ISOLATION.sql`** ← kolumna `account_key` + RLS na inventory/menu/suppliers/waste
+3. **`ADD_TENANT_ISOLATION.sql`** ← kolumna `account_key` + RLS na inventory/menu/suppliers/waste  
+4. **`FIX_TENANT_RLS.sql`** ← naprawa insertów (funkcja `current_account_key()`) — **obowiązkowe**, inaczej błąd „violates row level security”
 
-Bez pkt 3 nowi użytkownicy mogą nadal widzieć wspólne dane demo (`default`).
+Bez pkt 3–4 nowi użytkownicy mogą widzieć wspólne dane albo nie móc nic zapisać.
 
 ## Supabase Auth (dashboard) — wyłączenie maila
 

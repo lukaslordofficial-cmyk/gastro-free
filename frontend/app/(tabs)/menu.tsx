@@ -54,6 +54,7 @@ import { DS } from '@/constants/premiumTheme';
 import { assignUniqueDishImageSources } from '@/lib/productImages';
 import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
+import { normalizeMenuUnit } from '@/lib/recipeUnits';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1169,7 +1170,9 @@ export default function MenuScreen() {
         // ── Insert new dish ──
         const posId = makePosId(form.category, dishes.length + 1);
 
-        const { getAccountKey } = await import('@/lib/accountKey');
+        if (!accountKey || accountKey === 'default') {
+          throw new Error('Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
+        }
         const { data: newItem, error: itemError } = await supabase
           .from('menu_items')
           .insert({
@@ -1178,11 +1181,19 @@ export default function MenuScreen() {
             price_pln: price,
             pos_id: posId,
             is_active: true,
-            account_key: getAccountKey(),
+            account_key: accountKey,
           })
           .select('id')
           .single();
-        if (itemError) throw itemError;
+        if (itemError) {
+          const msg = itemError.message || '';
+          if (/row-level security|RLS/i.test(msg)) {
+            throw new Error(
+              'Brak uprawnień do zapisu menu (RLS). Uruchom w Supabase migrację FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.',
+            );
+          }
+          throw itemError;
+        }
 
         if (validIngredients.length > 0) {
           const { error: ingError } = await supabase.from('recipe_ingredients').insert(
@@ -2007,7 +2018,7 @@ export default function MenuScreen() {
                       key: String(Date.now() + Math.random()),
                       name: ing.name,
                       quantity: String(ing.quantity),
-                      unit: ing.unit || 'g',
+                      unit: normalizeMenuUnit(ing.unit),
                     }))
                   : [newDraftIngredient()],
               );
@@ -2032,7 +2043,7 @@ export default function MenuScreen() {
                       key: String(Date.now() + Math.random()),
                       name: ing.name,
                       quantity: String(ing.quantity),
-                      unit: ing.unit || 'g',
+                      unit: normalizeMenuUnit(ing.unit),
                     }))
                   : [newDraftIngredient()],
               );

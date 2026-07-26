@@ -2573,8 +2573,11 @@ export default function DostawcyScreen() {
       const shipVal = parseFloat(formShipping.replace(',', '.'));
       const freeVal = parseFloat(formFreeShipFrom.replace(',', '.'));
       const leadVal = parseFloat(formLeadTime.replace(',', '.'));
-      const { getAccountKey } = await import('@/lib/accountKey');
-      const ak = getAccountKey();
+      const ak = accountKey;
+      if (!ak || ak === 'default') {
+        Alert.alert('Konto', 'Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
+        return;
+      }
       const payload: Record<string, unknown> = {
         name: formName.trim(),
         nip: formNip.trim() || null,

@@ -72,7 +72,8 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     loading,
     tier: state?.tier_level ?? 0,
     credits: state?.credits_balance ?? 0,
-    hasAds: (state?.tier_level ?? 0) === 0,
+    // Closed beta / Internal Testing: bez reklam (AdMob wyłączony w UI).
+    hasAds: false,
     premiumUi: !!state?.premium_ui,
     dealHunterUnlocked: !!state?.deal_hunter_unlocked,
     refresh,

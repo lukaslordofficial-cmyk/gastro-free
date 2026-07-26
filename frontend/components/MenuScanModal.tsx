@@ -155,12 +155,14 @@ async function fetchSuggestionsChunked(
   if (!BACKEND_URL) {
     throw new Error('Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).');
   }
+  const { apiJsonHeaders } = await import('@/lib/apiHeaders');
+  const headers = await apiJsonHeaders();
   const byName: Record<string, Suggestion> = {};
   for (let i = 0; i < askDishes.length; i += SUGGEST_CHUNK) {
     const chunk = askDishes.slice(i, i + SUGGEST_CHUNK);
     const res = await fetch(`${BACKEND_URL}/api/menu/suggest-recipe`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ dishes: chunk }),
     });
     if (!res.ok) {
@@ -249,7 +251,12 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     try {
       const form = new FormData();
       form.append('file', { uri, name, type: mimeType } as any);
-      const res = await fetch(`${BACKEND_URL}/api/menu/scan`, { method: 'POST', body: form });
+      const { backendTenantHeaders } = await import('@/lib/tenantScope');
+      const res = await fetch(`${BACKEND_URL}/api/menu/scan`, {
+        method: 'POST',
+        headers: backendTenantHeaders(),
+        body: form,
+      });
       if (!res.ok) {
         const detail = await parseErrorDetail(res);
         throw new Error(friendlyApiError(res.status, detail));
@@ -547,9 +554,10 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         }
       }
 
+      const { apiJsonHeaders } = await import('@/lib/apiHeaders');
       const res = await fetch(`${BACKEND_URL}/api/menu/confirm-scan`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({ dishes: finalPayload }),
       });
       if (!res.ok) {

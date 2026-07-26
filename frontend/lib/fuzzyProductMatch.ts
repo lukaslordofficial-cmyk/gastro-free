@@ -70,6 +70,11 @@ const SYNONYM: Record<string, string> = {
   jajka: 'jajko',
   jajek: 'jajko',
   jaja: 'jajko',
+  zoltko: 'jajko',
+  zoltka: 'jajko',
+  bialko: 'jajko',
+  bialka: 'jajko',
+  yolk: 'jajko',
 };
 
 const NORM_CACHE = new Map<string, string>();

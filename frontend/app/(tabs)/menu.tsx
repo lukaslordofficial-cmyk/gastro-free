@@ -672,9 +672,6 @@ function IngredientRow({
                 onChangeText={(v) => onChange(draft.key, 'pieceWeightG', v)}
                 keyboardType="decimal-pad"
               />
-              <Text style={[ingStyles.pieceWeightHint, prem && { color: DS.color.muted }]}>
-                Potrzebne do kosztu i magazynu (np. 1 jajko ≈ 60 g)
-              </Text>
             </View>
           )}
         </View>
@@ -803,7 +800,7 @@ const BLANK_INV_FORM = {
 
 export default function MenuScreen() {
   const theme = useAppTheme();
-  const { openVoiceReport } = useUiOverlay();
+  const { openVoiceReport, documentScanRevision } = useUiOverlay();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [utensils, setUtensils] = useState<KitchenUtensil[]>([]);
@@ -922,6 +919,11 @@ export default function MenuScreen() {
     setLoading(true);
     void fetchData();
   }, [fetchData, authReady, isAuthenticated, accountKey]);
+
+  // Odśwież listę po skanie menu (DocumentScanHost / globalny modal) — jak magazyn po fakturze.
+  useEffect(() => {
+    if (documentScanRevision > 0) void fetchData();
+  }, [documentScanRevision, fetchData]);
 
   const editingDishRef = useRef<Dish | null>(null);
   editingDishRef.current = editingDish;

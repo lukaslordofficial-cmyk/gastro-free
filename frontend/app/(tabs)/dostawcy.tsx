@@ -2466,6 +2466,7 @@ export default function DostawcyScreen() {
       const { data: costs } = await supabase
         .from('variable_cost_entries')
         .select('amount_pln, note')
+        .eq('account_key', ak)
         .eq('type', 'materials');
       const totals: Record<string, number> = {};
       (costs ?? []).forEach((c: any) => {

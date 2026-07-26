@@ -101,11 +101,18 @@ function AddRevenueModal({ visible, onClose, onSaved }: { visible: boolean; onCl
     if (isNaN(val) || val <= 0) { Alert.alert('Błąd', 'Podaj poprawną kwotę.'); return; }
     setSaving(true);
     try {
-      const { error } = await supabase.from('revenue_entries').insert({
+      const ak = (await import('@/lib/accountKey')).getAccountKey();
+      const payload: Record<string, unknown> = {
         year_month: CURRENT_MONTH,
         description: desc.trim() || null,
         amount_pln: val,
-      });
+        account_key: ak,
+      };
+      let { error } = await supabase.from('revenue_entries').insert(payload);
+      if (error && /account_key/i.test(error.message ?? '')) {
+        delete payload.account_key;
+        ({ error } = await supabase.from('revenue_entries').insert(payload));
+      }
       if (error) throw error;
       setDesc(''); setAmount('');
       onSaved(); onClose();
@@ -194,7 +201,15 @@ function AddFixedCostModal({ visible, onClose, onSaved }: { visible: boolean; on
 
     setSaving(true);
     try {
-      const { error } = await supabase.from('fixed_costs').insert({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
+      const ak = (await import('@/lib/accountKey')).getAccountKey();
+      const payload: Record<string, unknown> = {
+        year_month: CURRENT_MONTH, type, name, amount_pln: val, account_key: ak,
+      };
+      let { error } = await supabase.from('fixed_costs').insert(payload);
+      if (error && /account_key/i.test(error.message ?? '')) {
+        delete payload.account_key;
+        ({ error } = await supabase.from('fixed_costs').insert(payload));
+      }
       if (error) throw error;
       setAmount('');
       setNewCatName('');
@@ -322,7 +337,15 @@ function AddVariableCostModal({ visible, onClose, onSaved }: { visible: boolean;
 
     setSaving(true);
     try {
-      const { error } = await supabase.from('variable_cost_entries').insert({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
+      const ak = (await import('@/lib/accountKey')).getAccountKey();
+      const payload: Record<string, unknown> = {
+        year_month: CURRENT_MONTH, type, name, amount_pln: val, account_key: ak,
+      };
+      let { error } = await supabase.from('variable_cost_entries').insert(payload);
+      if (error && /account_key/i.test(error.message ?? '')) {
+        delete payload.account_key;
+        ({ error } = await supabase.from('variable_cost_entries').insert(payload));
+      }
       if (error) throw error;
       setAmount('');
       setNewCatName('');
@@ -437,20 +460,35 @@ export default function FinanseScreen() {
     try {
       const { getAccountKey } = await import('@/lib/accountKey');
       const ak = getAccountKey();
-      const [
-        revRes, fixedRes, varRes, revHistRes, varHistRes, inventoryRes,
-        revAllRes, fixedAllRes, varAllRes,
-      ] = await Promise.all([
-        supabase.from('revenue_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
-        supabase.from('fixed_costs').select('*').eq('year_month', CURRENT_MONTH).order('type'),
-        supabase.from('variable_cost_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
-        supabase.from('revenue_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-        supabase.from('variable_cost_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-        supabase.from('inventory_items').select('id, name, quantity, min_quantity, unit').eq('account_key', ak),
-        supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-        supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
-        supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-      ]);
+      const scoped = <T,>(q: T & { eq: (col: string, val: string) => T }, col = 'account_key') =>
+        (ak && ak !== 'default' ? q.eq(col, ak) : q);
+
+      let revRes = await scoped(supabase.from('revenue_entries').select('*')).eq('year_month', CURRENT_MONTH).order('created_at');
+      let fixedRes = await scoped(supabase.from('fixed_costs').select('*')).eq('year_month', CURRENT_MONTH).order('type');
+      let varRes = await scoped(supabase.from('variable_cost_entries').select('*')).eq('year_month', CURRENT_MONTH).order('created_at');
+      let revHistRes = await scoped(supabase.from('revenue_entries').select('year_month, amount_pln')).order('year_month').limit(2000);
+      let varHistRes = await scoped(supabase.from('variable_cost_entries').select('year_month, amount_pln')).order('year_month').limit(2000);
+      const inventoryRes = await supabase.from('inventory_items').select('id, name, quantity, min_quantity, unit').eq('account_key', ak);
+      let revAllRes = await scoped(supabase.from('revenue_entries').select('*')).order('created_at', { ascending: false }).limit(1500);
+      let fixedAllRes = await scoped(supabase.from('fixed_costs').select('*')).order('created_at', { ascending: false }).limit(1000);
+      let varAllRes = await scoped(supabase.from('variable_cost_entries').select('*')).order('created_at', { ascending: false }).limit(1500);
+
+      // Fallback gdy brak kolumny account_key (przed migracją FIX_FINANCE_TENANT_RLS.sql)
+      const missingAk = [revRes, fixedRes, varRes].some(
+        (r) => r.error && /account_key/i.test(r.error.message ?? ''),
+      );
+      if (missingAk) {
+        [revRes, fixedRes, varRes, revHistRes, varHistRes, revAllRes, fixedAllRes, varAllRes] = await Promise.all([
+          supabase.from('revenue_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
+          supabase.from('fixed_costs').select('*').eq('year_month', CURRENT_MONTH).order('type'),
+          supabase.from('variable_cost_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
+          supabase.from('revenue_entries').select('year_month, amount_pln').order('year_month').limit(2000),
+          supabase.from('variable_cost_entries').select('year_month, amount_pln').order('year_month').limit(2000),
+          supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
+          supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
+          supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),
+        ]);
+      }
       if (revRes.error) throw revRes.error;
       if (fixedRes.error) throw fixedRes.error;
       if (varRes.error) throw varRes.error;

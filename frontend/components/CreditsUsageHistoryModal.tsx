@@ -48,7 +48,9 @@ export function CreditsUsageHistoryModal({ visible, onClose }: Props) {
   const fetchHistory = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${BACKEND_URL}/api/subscription/usage-history?limit=500`);
+      const r = await fetch(`${BACKEND_URL}/api/subscription/usage-history?limit=500`, {
+        headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
+      });
       const d = await r.json();
       if (d.needs_migration) {
         setNeedsMigration(true);

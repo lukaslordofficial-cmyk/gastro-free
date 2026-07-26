@@ -475,7 +475,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     try {
       const res = await fetch(`${base}/api/menu/suggest-recipe`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
         body: JSON.stringify({
           dishes: [
             {
@@ -939,9 +939,6 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
                       placeholderTextColor={textMuted}
                       keyboardType="decimal-pad"
                     />
-                    <Text style={[styles.pieceWeightHint, { color: textMuted }]}>
-                      Do kosztu i magazynu (1 szt. = X g)
-                    </Text>
                   </View>
                 )}
 

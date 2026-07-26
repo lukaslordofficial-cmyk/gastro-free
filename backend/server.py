@@ -197,7 +197,7 @@ def _require_supabase() -> None:
         )
 
 
-# Tabele z kolumną account_key (migracja ADD_TENANT_ISOLATION.sql).
+# Tabele z kolumną account_key (ADD_TENANT_ISOLATION / FIX_FINANCE_TENANT_RLS).
 _TENANT_TABLES = frozenset({
     "inventory_items",
     "inventory_categories",
@@ -206,6 +206,13 @@ _TENANT_TABLES = frozenset({
     "waste_logs",
     "warehouse_inventory",
     "supplier_offers",
+    "revenue_entries",
+    "fixed_costs",
+    "variable_cost_entries",
+    "daily_reports",
+    "token_usage",
+    "sales_log",
+    "financial_records",
 })
 
 
@@ -215,15 +222,24 @@ def _table_name(path: str) -> str:
 
 def _with_tenant_params(path: str, params: dict | list | None) -> dict | list | None:
     """Dokleja filtr account_key do zapytań tenantowych (service_role omija RLS)."""
-    if not isinstance(params, dict):
-        return params
     if _table_name(path) not in _TENANT_TABLES:
         return params
-    if "account_key" in params:
-        return params
-    out = dict(params)
-    out["account_key"] = f"eq.{get_account_key()}"
-    return out
+    ak_filter = f"eq.{get_account_key()}"
+    if isinstance(params, dict):
+        if "account_key" in params:
+            return params
+        out = dict(params)
+        out["account_key"] = ak_filter
+        return out
+    if isinstance(params, list):
+        if any(
+            (isinstance(p, (list, tuple)) and len(p) >= 1 and p[0] == "account_key")
+            or (isinstance(p, str) and p.startswith("account_key"))
+            for p in params
+        ):
+            return params
+        return list(params) + [("account_key", ak_filter)]
+    return params
 
 
 def _with_tenant_payload(path: str, payload):
@@ -238,14 +254,49 @@ def _with_tenant_payload(path: str, payload):
         return {**payload, "account_key": ak}
     return payload
 
+def _missing_account_key_error(resp: httpx.Response) -> bool:
+    body = (resp.text or "").lower()
+    return "account_key" in body and (
+        "does not exist" in body or "schema cache" in body or "pgrst204" in body or "42703" in body
+    )
+
+
+def _strip_account_key_payload(payload):
+    if isinstance(payload, list):
+        return [{k: v for k, v in row.items() if k != "account_key"} for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        return {k: v for k, v in payload.items() if k != "account_key"}
+    return payload
+
+
+def _strip_account_key_params(params: dict | list | None) -> dict | list | None:
+    if isinstance(params, dict):
+        return {k: v for k, v in params.items() if k != "account_key"}
+    if isinstance(params, list):
+        return [
+            p for p in params
+            if not (
+                (isinstance(p, (list, tuple)) and len(p) >= 1 and p[0] == "account_key")
+                or (isinstance(p, str) and p.startswith("account_key"))
+            )
+        ]
+    return params
+
 
 async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
     _require_supabase()
+    tenant_params = _with_tenant_params(path, params)
     r = await client.get(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        params=_with_tenant_params(path, params) or {},
+        params=tenant_params or {},
     )
+    if r.status_code >= 400 and _missing_account_key_error(r):
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/{path}",
+            headers=_sb_headers(),
+            params=_strip_account_key_params(tenant_params) or {},
+        )
     r.raise_for_status()
     return r.json()
 
@@ -274,34 +325,56 @@ def _pg_ts(iso: str) -> str:
 
 async def sb_post(client: httpx.AsyncClient, path: str, payload):
     _require_supabase()
+    body = _with_tenant_payload(path, payload)
     r = await client.post(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        json=_with_tenant_payload(path, payload),
+        json=body,
     )
+    if r.status_code >= 400 and _missing_account_key_error(r):
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/{path}",
+            headers=_sb_headers(),
+            json=_strip_account_key_payload(body),
+        )
     r.raise_for_status()
     return r.json() if r.text else None
 
 
 async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
     _require_supabase()
+    tenant_params = _with_tenant_params(path, params)
     r = await client.patch(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        params=_with_tenant_params(path, params) or {},
+        params=tenant_params or {},
         json=payload,
     )
+    if r.status_code >= 400 and _missing_account_key_error(r):
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/{path}",
+            headers=_sb_headers(),
+            params=_strip_account_key_params(tenant_params) or {},
+            json=_strip_account_key_payload(payload),
+        )
     r.raise_for_status()
     return r.json() if r.text else None
 
 
 async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
     _require_supabase()
+    tenant_params = _with_tenant_params(path, params)
     r = await client.delete(
         f"{SUPABASE_URL}/rest/v1/{path}",
         headers=_sb_headers(),
-        params=_with_tenant_params(path, params) or {},
+        params=tenant_params or {},
     )
+    if r.status_code >= 400 and _missing_account_key_error(r):
+        r = await client.delete(
+            f"{SUPABASE_URL}/rest/v1/{path}",
+            headers=_sb_headers(),
+            params=_strip_account_key_params(tenant_params) or {},
+        )
     r.raise_for_status()
     return r.json() if r.text else None
 
@@ -1832,10 +1905,82 @@ def _norm_name(s: str) -> str:
     return " ".join((s or "").lower().split())
 
 
+# Części produktu → cały produkt (magazyn/receptura kupuje całość, nie części).
+_PART_TO_WHOLE: dict[str, str] = {
+    # jajko
+    "zoltko": "jajko", "zoltka": "jajko", "zoltek": "jajko",
+    "zoltkajaja": "jajko", "zoltkojaja": "jajko", "zoltkojajka": "jajko",
+    "zoltkajajka": "jajko", "zoltkojaj": "jajko", "zoltkajaj": "jajko",
+    "bialko": "jajko", "bialka": "jajko",
+    "bialkojaja": "jajko", "bialkojajka": "jajko", "bialkojaj": "jajko",
+    "eggyolk": "jajko", "eggwhite": "jajko", "yolk": "jajko",
+    "melanz": "jajko", "melanz jajeczny": "jajko",
+    # cytrusy / owoce
+    "skorka cytryny": "cytryna", "skorkacytryny": "cytryna",
+    "sok z cytryny": "cytryna", "sokzcytryny": "cytryna", "sok cytrynowy": "cytryna",
+    "skorka pomaranczy": "pomarańcza", "skorkapomaranczy": "pomarańcza",
+    "sok z pomaranczy": "pomarańcza", "skorka limonki": "limonka",
+    "sok z limonki": "limonka", "skorka limetki": "limonka",
+    # warzywa / zioła
+    "lisc pietruszki": "pietruszka", "natka pietruszki": "pietruszka",
+    "korzen pietruszki": "pietruszka", "lisc selera": "seler",
+    "zabek czosnku": "czosnek", "zabki czosnku": "czosnek",
+    # mięso / inne
+    "skorka kurczaka": "kurczak", "kosci kurczaka": "kurczak",
+    "skorka indyka": "indyk", "miazsz awokado": "awokado",
+}
+
+
+def _strip_diacritics_pl(s: str) -> str:
+    table = str.maketrans({
+        "ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n",
+        "ó": "o", "ś": "s", "ź": "z", "ż": "z",
+    })
+    return (s or "").lower().translate(table)
+
+
+def _whole_product_name(name: str) -> str:
+    """Mapuje część produktu (np. żółtko) na cały produkt magazynowy (jajko)."""
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    key = _strip_diacritics_pl(_norm_name(raw))
+    key_compact = key.replace(" ", "")
+    mapped = _PART_TO_WHOLE.get(key) or _PART_TO_WHOLE.get(key_compact)
+    if mapped:
+        return mapped
+    # „żółtko jaja / żółtko z jajka / białko jajka” itp.
+    if "zoltko" in key_compact or key_compact.startswith("bialkojaj") or (
+        "bialko" in key_compact and "jaj" in key_compact
+    ):
+        return "jajko"
+    if key_compact.startswith("skorkacytr") or key_compact.startswith("sokzcytr"):
+        return "cytryna"
+    if key_compact.startswith("skorkapomar") or key_compact.startswith("sokzpomar"):
+        return "pomarańcza"
+    return raw
+
+
+def _apply_whole_product_names_to_dishes(dishes: list) -> None:
+    """In-place: suggested_ingredients / ingredients → nazwy całych produktów."""
+    for d in dishes or []:
+        ings = getattr(d, "suggested_ingredients", None)
+        if ings is None and isinstance(d, dict):
+            ings = d.get("suggested_ingredients") or d.get("ingredients")
+        if not ings:
+            ings = getattr(d, "ingredients", None)
+        if not ings:
+            continue
+        for ing in ings:
+            if hasattr(ing, "name"):
+                ing.name = _whole_product_name(getattr(ing, "name", "") or "")
+            elif isinstance(ing, dict) and "name" in ing:
+                ing["name"] = _whole_product_name(ing.get("name") or "")
+
+
 def _is_porcja_row(name: str) -> bool:
     return _norm_name(name) in ("porcja", "porcje", "wielkosc porcji", "wielkość porcji",
                                 "wielkosc porc) i", "gramatura", "gramatura porcji")
-
 
 def _to_gml(qty: float, unit: str, unit_size: float) -> Optional[float]:
     """Zamiana na wspólną bazę g/ml (gęstość kulinarna 1:1). None dla nieznanej jednostki."""
@@ -2380,7 +2525,7 @@ async def _apply_menu_item(client, p, transcript, source):
     price = float(p.get("price_pln") or 0)
     if price <= 0:
         raise HTTPException(status_code=400, detail="Menu item: price_pln musi być > 0.")
-    # Dedup: nie twórz drugiej potrawy o tej samej nazwie
+    # Dedup: tylko aktywne dania (bez restore soft-deleted)
     try:
         existing = await sb_get(client, "menu_items", params={
             "select": "id,name,is_active,price_pln,category", "limit": "5000",
@@ -2389,20 +2534,10 @@ async def _apply_menu_item(client, p, transcript, source):
         existing = await sb_get(client, "menu_items", params={
             "select": "id,name,price_pln,category", "limit": "5000",
         }) or []
-    hit, _score = _resolve_by_fuzzy(name, existing, threshold=88)
+    active = [m for m in existing if m.get("is_active") is not False]
+    hit, _score = _resolve_by_fuzzy(name, active, threshold=88)
     if hit:
         menu_id = hit["id"]
-        if hit.get("is_active") is False:
-            await sb_patch(client, "menu_items", {"id": f"eq.{menu_id}"}, {
-                "is_active": True, "is_available": True,
-                "price_pln": price,
-                "category": p.get("menu_category") or hit.get("category") or "Inne",
-            })
-            warnings.append(
-                f"Potrawa „{hit.get('name')}” już była (nieaktywna) — przywrócono zamiast dublować."
-            )
-            return menu_id, {"name": hit.get("name") or name, "price_pln": price,
-                             "ingredients_count": 0, "restored": True}, warnings
         warnings.append(f"Potrawa „{hit.get('name')}” już jest w menu — pominięto duplikat.")
         return menu_id, {"name": hit.get("name") or name, "price_pln": float(hit.get("price_pln") or price),
                          "ingredients_count": 0, "skipped_duplicate": True}, warnings
@@ -2418,7 +2553,7 @@ async def _apply_menu_item(client, p, transcript, source):
         for idx, ing in enumerate(ingredients):
             rows.append({
                 "menu_item_id": menu_id,
-                "ingredient_name": ing.get("ingredient_name") or "",
+                "ingredient_name": _whole_product_name(ing.get("ingredient_name") or ""),
                 "quantity": float(ing.get("quantity") or 0),
                 "unit": ing.get("unit") or "szt",
                 "sort_order": idx + 1,
@@ -2428,7 +2563,6 @@ async def _apply_menu_item(client, p, transcript, source):
         except httpx.HTTPStatusError as e:
             warnings.append(f"Receptura nie została w pełni zapisana: {e.response.text}")
     return menu_id, {"name": name, "price_pln": price, "ingredients_count": len(ingredients)}, warnings
-
 
 async def _apply_supplier(client, p, transcript, source):
     name = (p.get("supplier_name") or p.get("name") or "").strip()
@@ -5169,6 +5303,9 @@ _MENU_SUGGEST_SYSTEM_PROMPT = (
     "liczone na sztuki (jajko, plaster, bułka) w 'szt'. Nigdy nie mieszaj g i ml dla "
     "tego samego produktu.\n"
     "   * Ilości > 0.\n"
+    "   * CAŁY PRODUKT (KRYTYCZNE): jeśli przepis używa części (żółtko, białko, skórka cytryny, "
+    "sok z cytryny, ząbek czosnku, miąższ awokado), podaj nazwę CAŁEGO produktu magazynowego "
+    "(jajko, cytryna, czosnek, awokado) — nie części.\n"
     "   * KATEGORYCZNIE ZAKAZANE: 'Porcja', 'Porcje', 'Wielkość porcji', 'Gramatura', "
     "'Gramatura porcji' NIE MOGĄ pojawić się w `suggested_ingredients`. Wielkość porcji "
     "zapisuj TYLKO w `suggested_portion_weight_value` + `suggested_portion_weight_unit`.\n\n"
@@ -5279,6 +5416,8 @@ async def menu_suggest_recipe(req: SuggestRecipeRequest):
 
     # Ujednolić jednostki: ten sam składnik = ta sama jednostka we wszystkich potrawach.
     _canonicalize_ingredient_units(out)
+    # Części produktu (żółtko…) → cały produkt magazynowy (jajko).
+    _apply_whole_product_names_to_dishes(out)
     return SuggestRecipeResponse(
         dishes=out,
         credits_deducted=credits_deducted,
@@ -5609,7 +5748,7 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     # unikalne, pomijając 'Porcja'/'Wielkość porcji'/'Gramatura' (parametr potrawy, nie produkt).
     seen: dict[str, str] = {}
     for n in ingredient_names:
-        nm = (n or "").strip()
+        nm = _whole_product_name((n or "").strip())
         if not nm or _is_porcja_row(nm):
             continue
         key = _norm_name(nm)
@@ -5667,10 +5806,10 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
 
     # Ostatnia bramka spójności jednostek przed zapisem receptur.
     _canonicalize_ingredient_units(req.dishes)
+    _apply_whole_product_names_to_dishes(req.dishes)
 
     inserted = 0
     skipped = 0
-    restored = 0
     saved: list[dict] = []
     warnings: list[str] = []
     all_ingredient_names: list[str] = []
@@ -5685,7 +5824,9 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
             existing_menu = await sb_get(client, "menu_items", params={
                 "select": "id,name,category,price_pln", "limit": "10000",
             }) or []
-        existing_count_rows = existing_menu
+        # Dedup tylko względem AKTYWNYCH dań — usunięte nie są przywracane.
+        active_menu = [m for m in existing_menu if m.get("is_active") is not False]
+        existing_count_rows = active_menu
         base_offset = len(existing_count_rows or [])
 
         for idx, dish in enumerate(req.dishes):
@@ -5695,26 +5836,11 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
             category = dish.category or "Inne"
             price = float(dish.price_pln or 0)
 
-            # Deduplikacja: ta sama potrawa już w menu → pomiń / przywróć nieaktywną
-            hit, _sc = _resolve_by_fuzzy(name, existing_menu, threshold=88)
+            # Deduplikacja: ta sama AKTYWNA potrawa już w menu → pomiń (bez restore)
+            hit, _sc = _resolve_by_fuzzy(name, active_menu, threshold=88)
             if hit:
-                if hit.get("is_active") is False:
-                    patch = {"is_active": True, "is_available": True}
-                    if price > 0:
-                        patch["price_pln"] = price
-                    if category:
-                        patch["category"] = category
-                    try:
-                        await sb_patch(client, "menu_items", {"id": f"eq.{hit['id']}"}, patch)
-                        restored += 1
-                        saved.append({"id": hit["id"], "name": hit.get("name") or name,
-                                      "action": "restored"})
-                        warnings.append(f"„{hit.get('name')}” już była w menu (ukryta) — przywrócono.")
-                    except httpx.HTTPStatusError as e:
-                        warnings.append(f"{name}: nie udało się przywrócić ({e.response.text[:80]})")
-                else:
-                    skipped += 1
-                    warnings.append(f"„{hit.get('name') or name}” już jest w menu — pominięto duplikat.")
+                skipped += 1
+                warnings.append(f"„{hit.get('name') or name}” już jest w menu — pominięto duplikat.")
                 continue
 
             pos_id = _make_pos_id_for_category(category, base_offset + idx + 1)
@@ -5810,7 +5936,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
 
             inserted += 1
             saved.append({"id": menu_id, "name": name, "category": category, "price_pln": price, "action": "inserted"})
-            existing_menu.append({"id": menu_id, "name": name, "is_active": True, "category": category, "price_pln": price})
+            active_menu.append({"id": menu_id, "name": name, "is_active": True, "category": category, "price_pln": price})
 
         # Automatyczny onboarding magazynu: utwórz brakujące składniki jako produkty (stan 0).
         inv_created_count = 0
@@ -5832,14 +5958,12 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     msg_parts = [f"Dodano {inserted} nowych potraw."]
     if skipped:
         msg_parts.append(f"Pominięto {skipped} duplikatów (już w menu).")
-    if restored:
-        msg_parts.append(f"Przywrócono {restored} ukrytych.")
 
     return {
         "ok": True,
         "inserted": inserted,
         "skipped_duplicates": skipped,
-        "restored": restored,
+        "restored": 0,
         "saved": saved,
         "inventory_created": inv_created_count,
         "inventory_items": inv_created_items,
@@ -8652,23 +8776,32 @@ async def _menu_id_from_payload(client, p):
 
 
 async def _exec_bulk_delete_menu(client):
-    rows = await sb_get(client, "menu_items", params={"select": "id", "is_active": "eq.true"}) or []
+    """Trwałe usunięcie całego menu (bez soft-restore / „przywróć ukryte”)."""
+    rows = await sb_get(client, "menu_items", params={"select": "id", "limit": "10000"}) or []
     n = len(rows)
     if n:
-        await sb_patch(client, "menu_items", {"is_active": "eq.true"},
-                       {"is_active": False, "is_available": False})
-    return {"ok": True, "action": "bulk_delete_menu", "affected": n, "restorable": True,
-            "message": f"Usunięto {n} pozycji z menu. Powiedz „przywróć menu”, aby cofnąć."}
+        ids = [r["id"] for r in rows if r.get("id")]
+        # Najpierw receptury (FK), potem dania.
+        for mid in ids:
+            try:
+                await sb_delete(client, "recipe_ingredients", {"menu_item_id": f"eq.{mid}"})
+            except httpx.HTTPStatusError:
+                pass
+        await sb_delete(client, "menu_items", _ALL_ROWS)
+    return {"ok": True, "action": "bulk_delete_menu", "affected": n, "restorable": False,
+            "message": f"Usunięto trwale {n} pozycji z menu. Przywrócenie nie jest możliwe."}
 
 
 async def _exec_restore_menu(client):
-    rows = await sb_get(client, "menu_items", params={"select": "id", "is_active": "eq.false"}) or []
-    n = len(rows)
-    if n:
-        await sb_patch(client, "menu_items", {"is_active": "eq.false"},
-                       {"is_active": True, "is_available": True})
-    return {"ok": True, "action": "restore_last_deleted_menu", "affected": n,
-            "message": f"Przywrócono {n} pozycji menu." if n else "Brak usuniętych pozycji do przywrócenia."}
+    return {
+        "ok": False,
+        "action": "restore_last_deleted_menu",
+        "affected": 0,
+        "message": (
+            "Przywracanie usuniętego menu zostało wyłączone. "
+            "Usunięte dania nie wracają ze skanu ani komendy głosowej — dodaj je ponownie."
+        ),
+    }
 
 
 async def _exec_bulk_delete_suppliers(client):
@@ -8758,10 +8891,13 @@ async def _exec_delete_menu_item(client, p):
     dish_id, name = await _menu_id_from_payload(client, p)
     if not dish_id:
         raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}” w menu.")
-    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"},
-                   {"is_active": False, "is_available": False})
-    return {"ok": True, "action": "delete_menu_item", "dish_id": dish_id, "restorable": True,
-            "message": f"Usunięto danie: {name}."}
+    try:
+        await sb_delete(client, "recipe_ingredients", {"menu_item_id": f"eq.{dish_id}"})
+    except httpx.HTTPStatusError:
+        pass
+    await sb_delete(client, "menu_items", {"id": f"eq.{dish_id}"})
+    return {"ok": True, "action": "delete_menu_item", "dish_id": dish_id, "restorable": False,
+            "message": f"Usunięto trwale danie: {name}."}
 
 
 async def _exec_delete_supplier(client, p):

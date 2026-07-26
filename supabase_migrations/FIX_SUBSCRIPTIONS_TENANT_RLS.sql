@@ -3,9 +3,9 @@
 -- Uruchom w Supabase SQL Editor (project tucmmrcwwcltkqwyvzxa)
 -- Idempotentne.
 --
--- UWAGA: wcześniejsza wersja tego pliku tworzyła "anon_all_subscriptions"
--- (USING true) → wyciek Premium z konta testowego. Ta wersja to naprawia.
--- Alias: FIX_SUBSCRIPTIONS_TENANT_RLS.sql (ta sama treść).
+-- Problem: polityka "anon_all_subscriptions" (USING true) OR-uje się z
+-- "subscriptions_own_account" → każdy anon/authenticated widzi WSZYSTKIE
+-- portfele (w tym Premium pierwszego konta testowego).
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.current_account_key()
@@ -49,11 +49,13 @@ CREATE POLICY "subscriptions_own_account" ON public.subscriptions
   USING (account_key = public.current_account_key())
   WITH CHECK (account_key = public.current_account_key());
 
+-- service_role omija RLS; jawna polityka dla jasności ops.
 DROP POLICY IF EXISTS "service_all_subscriptions" ON public.subscriptions;
 CREATE POLICY "service_all_subscriptions" ON public.subscriptions
   FOR ALL TO service_role
   USING (true) WITH CHECK (true);
 
+-- Anon NIE ma dostępu do portfeli.
 REVOKE ALL ON public.subscriptions FROM anon;
 GRANT SELECT, INSERT, UPDATE ON public.subscriptions TO authenticated;
 GRANT ALL ON public.subscriptions TO service_role;

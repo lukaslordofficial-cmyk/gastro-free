@@ -8,7 +8,7 @@ import React, {
 } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
-import { setAccountKey, getAccountKey } from '@/lib/accountKey';
+import { setAccountKey, getAccountKey, accountKeyFromUserId } from '@/lib/accountKey';
 import { polishAuthError } from '@/lib/authErrors';
 import { fetchJson } from '@/lib/safeFetch';
 import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
@@ -64,7 +64,9 @@ async function ensureLocalProfile(user: User): Promise<UserProfile> {
   const existing = await fetchProfile(user.id);
   if (existing?.account_key) return existing;
 
-  const account_key = `ak_${user.id.replace(/-/g, '')}`;
+  const account_key = accountKeyFromUserId(user.id);
+  // Ustaw od razu — zanim async upsert skończy się, żeby skany/subskrypcja nie trafiły na „default”.
+  setAccountKey(account_key);
   const restaurant_name =
     (user.user_metadata?.restaurant_name as string | undefined)?.trim() || null;
   const row = {
@@ -115,6 +117,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setAccountKey('default');
       return;
     }
+    // Synchronicznie — zanim await — żeby SubscriptionContext / skany nie czytały „default”.
+    const immediateKey = accountKeyFromUserId(next.user.id);
+    setAccountKey(immediateKey);
     try {
       const p = await ensureLocalProfile(next.user);
       setProfile(p);
@@ -125,7 +130,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
     } catch (e) {
       if (__DEV__) console.warn('[Auth] profile bootstrap', e);
-      const fallback = `ak_${next.user.id.replace(/-/g, '')}`;
+      const fallback = immediateKey;
       setProfile({
         id: next.user.id,
         email: next.user.email ?? null,

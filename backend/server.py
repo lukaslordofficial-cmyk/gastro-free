@@ -70,6 +70,10 @@ INSPIRATIONS_MODEL = (
 # Authenticated app clients send X-Account-Key from profiles.account_key.
 _ACCOUNT_KEY_DEFAULT = (os.environ.get("ACCOUNT_KEY") or "default").strip() or "default"
 _account_key_ctx: ContextVar[str] = ContextVar("account_key", default=_ACCOUNT_KEY_DEFAULT)
+_SUPABASE_ANON_KEY = (
+    os.environ.get("SUPABASE_ANON_KEY", "").strip()
+    or os.environ.get("EXPO_PUBLIC_SUPABASE_ANON_KEY", "").strip()
+)
 
 
 def get_account_key() -> str:
@@ -78,6 +82,20 @@ def get_account_key() -> str:
         return _account_key_ctx.get() or _ACCOUNT_KEY_DEFAULT
     except LookupError:
         return _ACCOUNT_KEY_DEFAULT
+
+
+def require_tenant_account_key() -> str:
+    """Blokuje zapis na shared „default” — skany / faktury / menu muszą mieć ak_*."""
+    key = (get_account_key() or "").strip()
+    if not key or key == "default":
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Brak X-Account-Key zalogowanego konta. "
+                "Zaloguj się ponownie i spróbuj jeszcze raz."
+            ),
+        )
+    return key
 
 
 # Back-compat alias for imports/tests — prefer get_account_key() at runtime.
@@ -118,13 +136,51 @@ app.add_middleware(
 
 @app.middleware("http")
 async def account_key_middleware(request: Request, call_next):
-    """Multi-tenant: X-Account-Key from logged-in app, else ACCOUNT_KEY env."""
+    """Multi-tenant: X-Account-Key from logged-in app, else JWT→profiles, else ACCOUNT_KEY env."""
     raw = (request.headers.get("x-account-key") or "").strip()
     # Allow only safe slug chars (ak_<uuid> / default / custom deploy slugs)
     if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw):
         key = raw
     else:
         key = _ACCOUNT_KEY_DEFAULT
+
+    # Jeśli klient wysłał „default” (race przed AuthProvider) — spróbuj odzyskać z JWT.
+    if key == "default" or not raw:
+        auth = (request.headers.get("authorization") or "").strip()
+        if auth.lower().startswith("bearer ") and SUPABASE_URL:
+            user_jwt = auth[7:].strip()
+            if user_jwt and user_jwt != SUPABASE_KEY:
+                try:
+                    apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
+                    async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
+                        uresp = await httpx_c.get(
+                            f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+                            headers={
+                                "Authorization": f"Bearer {user_jwt}",
+                                "apikey": apikey,
+                            },
+                        )
+                        if uresp.status_code == 200:
+                            uid = (uresp.json() or {}).get("id")
+                            if uid:
+                                pref = await httpx_c.get(
+                                    f"{SUPABASE_URL.rstrip('/')}/rest/v1/profiles",
+                                    params={"select": "account_key", "id": f"eq.{uid}", "limit": "1"},
+                                    headers={
+                                        "Authorization": f"Bearer {SUPABASE_KEY}",
+                                        "apikey": SUPABASE_KEY,
+                                        "Accept": "application/json",
+                                    },
+                                )
+                                if pref.status_code == 200:
+                                    rows = pref.json() or []
+                                    if rows and rows[0].get("account_key"):
+                                        key = str(rows[0]["account_key"]).strip() or key
+                                if key == "default":
+                                    key = f"ak_{str(uid).replace('-', '')}"
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("account_key JWT resolve skipped: %s", exc)
+
     token = _account_key_ctx.set(key)
     try:
         return await call_next(request)
@@ -213,6 +269,7 @@ _TENANT_TABLES = frozenset({
     "token_usage",
     "sales_log",
     "financial_records",
+    "subscriptions",
 })
 
 
@@ -1605,11 +1662,22 @@ def _parse_dt(val):
 
 async def _ensure_subscription(client: httpx.AsyncClient) -> dict:
     """Pobiera (lub tworzy) pojedynczy wiersz subskrypcji dla konta restauracji."""
+    key = get_account_key()
+    if not key or key == "default":
+        # Nie twórz / nie czytaj shared demo wallet przy braku prawdziwego tenanta.
+        return {
+            "account_key": "default",
+            "tier_level": 0,
+            "credits_balance": 0,
+            "status": "active",
+            "current_period_end": None,
+            "free_starter_claimed": True,
+        }
     rows = await sb_get(client, "subscriptions",
-                        params={"select": "*", "account_key": f"eq.{get_account_key()}", "limit": "1"})
+                        params={"select": "*", "account_key": f"eq.{key}", "limit": "1"})
     if rows:
         return rows[0]
-    payload = {"account_key": get_account_key(), "tier_level": 0, "credits_balance": 1000,
+    payload = {"account_key": key, "tier_level": 0, "credits_balance": 1000,
                "status": "active", "current_period_end": None, "free_starter_claimed": True}
     created = await sb_post(client, "subscriptions", payload)
     if isinstance(created, list) and created:
@@ -4303,6 +4371,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
     - OFERTA → od razu zapisuje do katalogu dostawcy.
     supplier_id jest opcjonalny — jeśli brak, dostawca zostanie rozpoznany/utworzony z dokumentu.
     Plik żyje wyłącznie w RAM i jest niszczony po zakończeniu funkcji."""
+    require_tenant_account_key()
     client = _openai()
     contents = await file.read()
     if not contents:
@@ -4440,6 +4509,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
 async def confirm_invoice(req: ConfirmInvoiceRequest):
     """Zatwierdzenie faktury z podglądu (po ewentualnej korekcie kategorii).
     Zwiększa magazyn + dopisuje koszt. Tworzy dostawcę jeśli podano tylko nazwę."""
+    require_tenant_account_key()
     if not req.products:
         raise HTTPException(status_code=400, detail="Brak pozycji do zaksięgowania.")
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
@@ -5090,6 +5160,7 @@ async def manager_core_alerts_job(push: bool = True):
 async def menu_scan(file: UploadFile = File(...)):
     """Skanuje wgrane menu (obraz lub PDF) modelem GPT-4o Vision i zwraca podgląd potraw.
     Nic nie zapisuje — użytkownik zatwierdza po edycji (potwierdzenie w /menu/confirm-scan)."""
+    require_tenant_account_key()
     client = _openai()
     await _guard_ai()
     contents = await file.read()
@@ -5861,6 +5932,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     Wielkość porcji jest zapisywana jako parametr nadrzędny w
     `menu_items.portion_size_grams` (i opcjonalnie `portion_size_unit`), NIGDY
     jako wiersz 'Porcja' w recipe_ingredients ani jako produkt w inventory_items."""
+    require_tenant_account_key()
     if not req.dishes:
         raise HTTPException(status_code=400, detail="Brak potraw do zapisania.")
 

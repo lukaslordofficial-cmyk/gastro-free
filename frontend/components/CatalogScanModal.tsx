@@ -9,7 +9,6 @@ import {
   ActivityIndicator,
   Platform,
   TextInput,
-  Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
@@ -35,7 +34,9 @@ import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useAds } from '@/contexts/AdsProvider';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+
 import {
   InvoiceExpiryReviewForm,
   buildExpiryDrafts,
@@ -164,6 +165,7 @@ export function CatalogScanModal({
   const { setCameraOverlay } = useUiOverlay();
   const { showInterstitial } = useAds();
   const { tier, credits } = useSubscription();
+  const { alert: premiumAlert } = usePremiumAlert();
   const [showCreditsGate, setShowCreditsGate] = useState(false);
   const [stage, setStage] = useState<Stage>('choose');
   const [error, setError] = useState<string | null>(null);
@@ -279,20 +281,27 @@ export function CatalogScanModal({
       setScanBusy(false);
       setResult(data);
       setStage('result');
+      // Zawsze odśwież Magazyn / Menu / Dostawców (także po „Kontynuuj w tle”).
       onConfirmed();
       if (backgroundRef.current) {
         backgroundRef.current = false;
         const isOffer = data.document_type === 'OFERTA_HANDLOWA';
-        Alert.alert(
-          isOffer ? 'Oferta handlowa gotowa' : 'Dokument gotowy',
-          isOffer
-            ? `AI zapisało ofertę${data.supplier_name ? ` dla „${data.supplier_name}”` : ''} w zakładce Dostawcy. Listy odświeżono.`
-            : 'AI zapisało dane w odpowiednich zakładkach. Listy odświeżono.',
-          [{ text: 'OK' }],
+        const isInvoice = data.document_type === 'FAKTURA_ZAKUPOWA';
+        const refreshHint =
+          ' Jeśli produkty nie pojawią się od razu, odśwież aplikację (przeciągnij listę w dół lub otwórz zakładkę ponownie).';
+        const message = isOffer
+          ? `AI zapisało ofertę${data.supplier_name ? ` dla „${data.supplier_name}”` : ''} w zakładce Dostawcy. Listy odświeżono.${refreshHint}`
+          : isInvoice
+            ? `AI zaksięgowało fakturę${data.supplier_name ? ` od „${data.supplier_name}”` : ''} w Magazynie. Listy odświeżono.${refreshHint}`
+            : `AI zapisało dane w odpowiednich zakładkach. Listy odświeżono.${refreshHint}`;
+        premiumAlert(
+          isOffer ? 'Oferta handlowa gotowa' : isInvoice ? 'Faktura gotowa' : 'Dokument gotowy',
+          message,
+          [{ text: 'OK', style: 'primary' }],
         );
       }
     },
-    [onConfirmed],
+    [onConfirmed, premiumAlert],
   );
 
   const processFile = useCallback(
@@ -316,10 +325,10 @@ export function CatalogScanModal({
         const form = new FormData();
         form.append('file', { uri, name, type: mimeType } as any);
         if (supplierId) form.append('supplier_id', supplierId);
-        const { backendTenantHeaders } = await import('@/lib/tenantScope');
+        const { apiMultipartHeaders } = await import('@/lib/apiHeaders');
         const res = await fetch(`${BACKEND_URL}/api/documents/process`, {
           method: 'POST',
-          headers: backendTenantHeaders(),
+          headers: await apiMultipartHeaders(),
           body: form,
           signal: ctrl.signal,
         });
@@ -356,10 +365,10 @@ export function CatalogScanModal({
           setStage('invoice_preview');
           if (backgroundRef.current) {
             backgroundRef.current = false;
-            Alert.alert(
+            premiumAlert(
               'Faktura rozpoznana',
               'Otwórz ponownie skaner, aby sprawdzić pozycje i zatwierdzić.',
-              [{ text: 'OK' }],
+              [{ text: 'OK', style: 'primary' }],
             );
           }
         } else {
@@ -376,13 +385,13 @@ export function CatalogScanModal({
         setStage('choose');
         if (backgroundRef.current) {
           backgroundRef.current = false;
-          Alert.alert('Skan nieudany', msg, [{ text: 'OK' }]);
+          premiumAlert('Skan nieudany', msg, [{ text: 'OK', style: 'primary' }]);
         }
       } finally {
         clearTimeout(timer);
       }
     },
-    [supplierId, ensureCredits, onMenuDetected, onClose, finishWithResult]
+    [supplierId, ensureCredits, onMenuDetected, onClose, finishWithResult, premiumAlert]
   );
 
   const handlePickFile = useCallback(async () => {

@@ -88,6 +88,8 @@ function buildView(row: SubscriptionRow, message?: string | null): SubscriptionS
 async function fetchRow(): Promise<SubscriptionRow | null> {
   if (!isSupabaseConfigured) return null;
   const key = accountKey();
+  // Nigdy nie czytaj shared „default” — to portfel demo / pierwszego testu.
+  if (!key || key === 'default') return null;
   const { data, error } = await supabase
     .from('subscriptions')
     .select('*')
@@ -101,11 +103,15 @@ async function fetchRow(): Promise<SubscriptionRow | null> {
 }
 
 async function ensureRow(): Promise<SubscriptionRow> {
+  const key = accountKey();
+  if (!key || key === 'default') {
+    throw new Error('Brak account_key — zaloguj się ponownie.');
+  }
   const existing = await fetchRow();
   if (existing) return existing;
 
   const payload = {
-    account_key: accountKey(),
+    account_key: key,
     tier_level: 0,
     credits_balance: STARTER_CREDITS,
     status: 'active',

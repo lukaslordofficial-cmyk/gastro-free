@@ -595,10 +595,9 @@ export function VoiceReportModal({
         form.append('audio', source as any, `voice.${ext}`);
       }
       form.append('language', 'pl');
-      const { backendTenantHeaders } = await import('@/lib/tenantScope');
       const result = await fetchJson<{ text?: string }>(`${BACKEND_URL}/api/voice/transcribe`, {
         method: 'POST',
-        headers: backendTenantHeaders(),
+        headers: await (await import('@/lib/apiHeaders')).apiMultipartHeaders(),
         body: form,
       });
       if (!result.ok) throw new Error(result.error);

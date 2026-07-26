@@ -4,6 +4,10 @@
  */
 let _accountKey = 'default';
 
+export function accountKeyFromUserId(userId: string): string {
+  return `ak_${userId.replace(/-/g, '')}`;
+}
+
 export function getAccountKey(): string {
   return _accountKey || 'default';
 }

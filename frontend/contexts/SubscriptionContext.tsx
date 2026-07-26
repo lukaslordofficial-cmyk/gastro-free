@@ -43,6 +43,11 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
       await setAppearance('free');
       return;
     }
+    // Czekaj na prawdziwy account_key — inaczej wczytamy portfel „default” (wyciek testowego konta).
+    if (!accountKey || accountKey === 'default') {
+      setLoading(true);
+      return;
+    }
     try {
       const next = await fetchSubscriptionState();
       setState(next);

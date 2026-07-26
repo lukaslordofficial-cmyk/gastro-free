@@ -1,10 +1,12 @@
-import { backendTenantHeaders } from '@/lib/tenantScope';
+import { backendTenantHeaders, requireTenantAccountKey } from '@/lib/tenantScope';
 import { supabase } from '@/lib/supabase';
 
-/** JSON + tenant + opcjonalny Bearer JWT do wywołań backendu. */
-export async function apiJsonHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
+async function withAuthTenantHeaders(
+  extra?: Record<string, string>,
+): Promise<Record<string, string>> {
+  // Wymuś prawdziwy account_key zalogowanego usera (nigdy „default” przy sesji).
+  requireTenantAccountKey();
   const headers = backendTenantHeaders({
-    'Content-Type': 'application/json',
     Accept: 'application/json',
     ...(extra ?? {}),
   });
@@ -16,4 +18,20 @@ export async function apiJsonHeaders(extra?: Record<string, string>): Promise<Re
     /* ignore */
   }
   return headers;
+}
+
+/** JSON + tenant + Bearer JWT do wywołań backendu. */
+export async function apiJsonHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
+  return withAuthTenantHeaders({
+    'Content-Type': 'application/json',
+    ...(extra ?? {}),
+  });
+}
+
+/** Multipart (FormData) + tenant + Bearer JWT — skany dokumentów / menu / voice. */
+export async function apiMultipartHeaders(
+  extra?: Record<string, string>,
+): Promise<Record<string, string>> {
+  // Nie ustawiaj Content-Type — fetch/RN doda boundary dla FormData.
+  return withAuthTenantHeaders(extra);
 }

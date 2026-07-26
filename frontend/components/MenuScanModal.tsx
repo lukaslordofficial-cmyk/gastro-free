@@ -252,10 +252,10 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     try {
       const form = new FormData();
       form.append('file', { uri, name, type: mimeType } as any);
-      const { backendTenantHeaders } = await import('@/lib/tenantScope');
+      const { apiMultipartHeaders } = await import('@/lib/apiHeaders');
       const res = await fetch(`${BACKEND_URL}/api/menu/scan`, {
         method: 'POST',
-        headers: backendTenantHeaders(),
+        headers: await apiMultipartHeaders(),
         body: form,
       });
       if (!res.ok) {

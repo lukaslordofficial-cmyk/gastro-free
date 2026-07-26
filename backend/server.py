@@ -2060,6 +2060,53 @@ def _iter_ingredients(dish):
     return []
 
 
+def _normalize_recipe_quantity(qty, unit: str = "") -> int:
+    """Ilości w recepturze: zawsze całkowite ≥ 1.
+    Ułamki typu 0.25 g pieprzu/soli → minimum 1 (idealnie 1–2 na porcję)."""
+    try:
+        q = float(qty)
+    except (TypeError, ValueError):
+        return 1
+    if q <= 0:
+        return 1
+    if q < 1:
+        return 1
+    return max(1, int(round(q)))
+
+
+def _apply_integer_quantities_to_dishes(dishes: list) -> None:
+    """In-place: quantity → int ≥ 1 dla suggest-recipe / confirm-scan."""
+    for d in dishes:
+        for ing in _iter_ingredients(d):
+            if isinstance(ing, dict):
+                if ing.get("quantity") is None:
+                    continue
+                ing["quantity"] = _normalize_recipe_quantity(ing.get("quantity"), ing.get("unit") or "")
+            else:
+                q = getattr(ing, "quantity", None)
+                if q is None:
+                    continue
+                setattr(ing, "quantity", _normalize_recipe_quantity(q, getattr(ing, "unit", "") or ""))
+
+
+def _normalize_inspiration_quantities(recipe) -> None:
+    """Inspiracje: base_quantity → całkowite; min. 1 jednostka na porcję."""
+    portions = max(1, int(getattr(recipe, "default_portions", None) or 1))
+    for sec in getattr(recipe, "ingredients_sections", None) or []:
+        ings = getattr(sec, "ingredients", None) or []
+        for ing in ings:
+            try:
+                base = float(getattr(ing, "base_quantity", 0) or 0)
+            except (TypeError, ValueError):
+                base = 0.0
+            per = base / portions
+            if per < 1:
+                # mikroilości (sól/pieprz) → 1 na porcję
+                setattr(ing, "base_quantity", float(portions))
+            else:
+                setattr(ing, "base_quantity", float(max(1, int(round(base)))))
+
+
 def _canonicalize_ingredient_units(dishes: list) -> None:
     """In-place: ujednolica jednostkę każdego składnika w obrębie całego skanu.
     Wszystkie wystąpienia „śmietana” dostaną tę samą jednostkę (g LUB ml),
@@ -5302,7 +5349,9 @@ _MENU_SUGGEST_SYSTEM_PROMPT = (
     "olej, sos, bulion, woda, sok, krem) ZAWSZE w 'ml'; produkty stałe ZAWSZE w 'g'; "
     "liczone na sztuki (jajko, plaster, bułka) w 'szt'. Nigdy nie mieszaj g i ml dla "
     "tego samego produktu.\n"
-    "   * Ilości > 0.\n"
+    "   * Ilości > 0 — WYŁĄCZNIE liczby całkowite (integer). Zakaz ułamków typu 0.25.\n"
+    "   * Przyprawy / małe ilości (sól, pieprz, przyprawy): minimum 1–2 jednostki na porcję "
+    "(np. 1 g lub 2 g), nigdy ułamki gramów.\n"
     "   * CAŁY PRODUKT (KRYTYCZNE): jeśli przepis używa części (żółtko, białko, skórka cytryny, "
     "sok z cytryny, ząbek czosnku, miąższ awokado), podaj nazwę CAŁEGO produktu magazynowego "
     "(jajko, cytryna, czosnek, awokado) — nie części.\n"
@@ -5418,6 +5467,8 @@ async def menu_suggest_recipe(req: SuggestRecipeRequest):
     _canonicalize_ingredient_units(out)
     # Części produktu (żółtko…) → cały produkt magazynowy (jajko).
     _apply_whole_product_names_to_dishes(out)
+    # Ilości: zawsze całkowite ≥ 1 (bez 0.25 g pieprzu).
+    _apply_integer_quantities_to_dishes(out)
     return SuggestRecipeResponse(
         dishes=out,
         credits_deducted=credits_deducted,
@@ -5443,6 +5494,9 @@ _INSPIRATION_SYSTEM = (
     "All ingredients must use strict metric units (g, ml, pcs, tbsp, tsp) as separate "
     "numeric values and text labels to allow frontend scaling. "
     "Use Polish unit labels: g, ml, szt, łyżeczka, łyżka.\n"
+    "3b. QUANTITIES (CRITICAL): base_quantity MUST be whole integers ≥ 1. "
+    "Never use fractions like 0.25. For spices/salt/pepper use at least 1–2 units "
+    "PER PORTION (so for 2 portions: base_quantity ≥ 2–4).\n"
     "4. Tone: Impersonal verbs for steps (e.g., \"Pokroić\", \"Rozgrzać\")."
 )
 
@@ -5568,8 +5622,12 @@ async def inspiration_recipe(req: InspirationRecipeRequest):
         hit = cache.get(key)
         if isinstance(hit, dict) and hit.get("dish_name"):
             try:
-                return InspirationRecipeResponse(**{**hit, "cached": True, "slug": slug,
-                                                    "credits_deducted": 0, "credits_remaining": None})
+                cached_recipe = InspirationRecipeResponse(
+                    **{**hit, "cached": True, "slug": slug,
+                       "credits_deducted": 0, "credits_remaining": None}
+                )
+                _normalize_inspiration_quantities(cached_recipe)
+                return cached_recipe
             except Exception:
                 pass
 
@@ -5620,6 +5678,8 @@ async def inspiration_recipe(req: InspirationRecipeRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Niepoprawna struktura przepisu: {e}") from e
+
+    _normalize_inspiration_quantities(recipe)
 
     cache = _read_inspiration_cache()
     cache[key] = recipe.model_dump(exclude={"cached", "credits_deducted", "credits_remaining"})
@@ -5807,6 +5867,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     # Ostatnia bramka spójności jednostek przed zapisem receptur.
     _canonicalize_ingredient_units(req.dishes)
     _apply_whole_product_names_to_dishes(req.dishes)
+    _apply_integer_quantities_to_dishes(req.dishes)
 
     inserted = 0
     skipped = 0

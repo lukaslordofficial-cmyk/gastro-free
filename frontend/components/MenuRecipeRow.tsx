@@ -8,7 +8,6 @@ import {
   Modal,
   FlatList,
   ActivityIndicator,
-  Alert,
   Switch,
 } from 'react-native';
 import {
@@ -30,9 +29,13 @@ import { useAppTheme } from '@/hooks/useAppTheme';
 import { emitRecipeIngredientsChanged } from '@/lib/recipeSync';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { bestProductMatch } from '@/lib/fuzzyProductMatch';
+import { normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 
 const RECIPE_WH_MAP_KEY = '@gm/recipe_wh_map';
 const UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
+const PIECE_WEIGHT_HINT =
+  'Pole nieobowiązkowe — wpisz, jeśli ten produkt kupujesz u dostawcy na wagę. Dzięki temu możliwe będzie monitorowanie stanu tego produktu na magazynie.';
 
 async function loadSoftMap(): Promise<Record<string, string>> {
   try {
@@ -142,6 +145,7 @@ function newEditable(): EditableIngredient {
 export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
+  const { alert: premiumAlert } = usePremiumAlert();
 
   const [expanded, setExpanded] = useState(false);
   const [ingredients, setIngredients] = useState<RecipeIngredientRow[]>(
@@ -375,14 +379,14 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         const d = valid[idx];
         const payload: Record<string, unknown> = {
           ingredient_name: d.name.trim(),
-          quantity: parseFloat(d.quantity.replace(',', '.')) || 0,
+          quantity: normalizeRecipeQuantity(parseFloat(d.quantity.replace(',', '.')) || 0),
           unit: d.unit || 'g',
           sort_order: idx + 1,
           warehouse_product_id: d.warehouse_product_id,
         };
-        if ((d.unit === 'szt' || d.unit === 'sztuka') && d.pieceWeightG.trim()) {
-          const pw = parseFloat(d.pieceWeightG.replace(',', '.'));
-          if (!isNaN(pw) && pw > 0) payload.piece_weight_g = pw;
+        const pw = parseOptionalPieceWeightG(d.pieceWeightG);
+        if ((d.unit === 'szt' || d.unit === 'sztuka') && pw != null) {
+          payload.piece_weight_g = pw;
         } else {
           payload.piece_weight_g = null;
         }
@@ -459,7 +463,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       emitRecipeIngredientsChanged(menuItem.id);
       onChanged();
     } catch (e: any) {
-      Alert.alert('Błąd zapisu', e?.message ?? 'Nie udało się zapisać receptury.');
+      premiumAlert('Błąd zapisu', e?.message ?? 'Nie udało się zapisać receptury.');
     } finally {
       setRecipeSaving(false);
     }
@@ -468,7 +472,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
   const handleSuggestRecipe = async () => {
     const base = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
     if (!base) {
-      Alert.alert('Brak backendu', 'Ustaw EXPO_PUBLIC_BACKEND_URL, aby AI mogło zaproponować recepturę.');
+      premiumAlert('Brak backendu', 'Ustaw EXPO_PUBLIC_BACKEND_URL, aby AI mogło zaproponować recepturę.');
       return;
     }
     setSuggesting(true);
@@ -507,7 +511,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         (json?.dishes?.[0]?.suggested_ingredients as { name: string; quantity: number; unit: string }[]) ??
         [];
       if (!suggested.length) {
-        Alert.alert('Brak propozycji', 'AI nie zwróciło składników dla tego dania.');
+        premiumAlert('Brak propozycji', 'AI nie zwróciło składników dla tego dania.');
         return;
       }
       await supabase.from('recipe_ingredients').delete().eq('menu_item_id', menuItem.id);
@@ -516,7 +520,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         .map((s, i) => ({
           menu_item_id: menuItem.id,
           ingredient_name: s.name.trim(),
-          quantity: Number(s.quantity) || 0,
+          quantity: normalizeRecipeQuantity(Number(s.quantity) || 0),
           unit: s.unit || 'g',
           sort_order: i + 1,
         }));
@@ -526,7 +530,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       emitRecipeIngredientsChanged(menuItem.id);
       onChanged();
     } catch (e: any) {
-      Alert.alert('Błąd AI', e?.message ?? 'Nie udało się zaproponować receptury.');
+      premiumAlert('Błąd AI', e?.message ?? 'Nie udało się zaproponować receptury.');
     } finally {
       setSuggesting(false);
     }
@@ -552,7 +556,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       .eq('id', menuItem.id);
     setAvailSaving(false);
     if (error) {
-      Alert.alert('Błąd', error.message);
+      premiumAlert('Błąd', error.message);
       return;
     }
     setIsAvailable(value);
@@ -600,7 +604,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         onChanged();
         return;
       }
-      Alert.alert('Błąd', error.message);
+      premiumAlert('Błąd', error.message);
     } else {
       emitRecipeIngredientsChanged(menuItem.id);
       onChanged();
@@ -628,7 +632,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     if (error) {
       const msg = (error.message || '').toLowerCase();
       if (!(msg.includes('warehouse_product_id') || msg.includes('schema cache'))) {
-        Alert.alert('Błąd', error.message);
+        premiumAlert('Błąd', error.message);
         return;
       }
     }
@@ -645,7 +649,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       .eq('id', menuItem.id);
     setPosIdSaving(false);
     if (error) {
-      Alert.alert('Błąd', error.message);
+      premiumAlert('Błąd', error.message);
     } else {
       setPosIdDirty(false);
       onChanged();
@@ -933,12 +937,15 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
                         styles.pieceWeightInput,
                         { backgroundColor: inputBg, borderColor: inputBorder, color: textPrimary },
                       ]}
-                      value={ing.pieceWeightG}
+                      value={ing.pieceWeightG ?? ''}
                       onChangeText={(v) => updateDraft(ing.key, { pieceWeightG: v })}
-                      placeholder="np. 180"
+                      placeholder="opcjonalnie, np. 180"
                       placeholderTextColor={textMuted}
                       keyboardType="decimal-pad"
                     />
+                    <Text style={[styles.pieceWeightHint, { color: textMuted }]}>
+                      {PIECE_WEIGHT_HINT}
+                    </Text>
                   </View>
                 )}
 

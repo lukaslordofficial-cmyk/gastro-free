@@ -35,6 +35,7 @@ import {
   saveUnlockedInspiration,
   type InspirationRecipe,
 } from '@/lib/inspirationUnlocks';
+import { normalizeRecipeQuantity } from '@/lib/recipeUnits';
 
 export type { InspirationRecipe };
 
@@ -59,9 +60,8 @@ type Props = {
 };
 
 function scaleQty(base: number, portions: number, defaultPortions: number): string {
-  const q = (base * portions) / Math.max(1, defaultPortions);
-  if (Number.isInteger(q)) return String(q);
-  return q < 10 ? q.toFixed(1).replace(/\.0$/, '') : String(Math.round(q));
+  const q = normalizeRecipeQuantity((base * portions) / Math.max(1, defaultPortions));
+  return String(q);
 }
 
 export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
@@ -407,7 +407,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
                   const ingredients = recipe.ingredients_sections.flatMap((sec) =>
                     sec.ingredients.map((ing) => ({
                       name: ing.name,
-                      quantity: Math.round(ing.base_quantity * scale * 100) / 100,
+                      quantity: normalizeRecipeQuantity(ing.base_quantity * scale),
                       unit: ing.unit,
                     })),
                   );

@@ -54,8 +54,9 @@ import { DS } from '@/constants/premiumTheme';
 import { assignUniqueDishImageSources } from '@/lib/productImages';
 import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
-import { normalizeMenuUnit } from '@/lib/recipeUnits';
+import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -151,6 +152,18 @@ function makePosId(category: string, total: number): string {
 function newDraftIngredient(): IngredientDraft {
   return { key: String(Date.now() + Math.random()), name: '', quantity: '', unit: 'g', pieceWeightG: '' };
 }
+
+function normIngredientName(name: string): string {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const PIECE_WEIGHT_HINT =
+  'Pole nieobowiązkowe — wpisz, jeśli ten produkt kupujesz u dostawcy na wagę. Dzięki temu możliwe będzie monitorowanie stanu tego produktu na magazynie.';
 
 function mapDbToDish(row: any): Dish {
   const ingredients = (row.recipe_ingredients ?? []).sort((a: any, b: any) => a.sort_order - b.sort_order);
@@ -666,12 +679,15 @@ function IngredientRow({
               </Text>
               <TextInput
                 style={[ingStyles.input, ingStyles.pieceWeightInput, inputPrem]}
-                placeholder="np. 180"
+                placeholder="opcjonalnie, np. 180"
                 placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-                value={draft.pieceWeightG}
+                value={draft.pieceWeightG ?? ''}
                 onChangeText={(v) => onChange(draft.key, 'pieceWeightG', v)}
                 keyboardType="decimal-pad"
               />
+              <Text style={[ingStyles.pieceWeightHint, prem && { color: DS.color.muted }]}>
+                {PIECE_WEIGHT_HINT}
+              </Text>
             </View>
           )}
         </View>
@@ -802,6 +818,7 @@ export default function MenuScreen() {
   const theme = useAppTheme();
   const { openVoiceReport, documentScanRevision } = useUiOverlay();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
+  const { alert: premiumAlert } = usePremiumAlert();
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [utensils, setUtensils] = useState<KitchenUtensil[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -1094,7 +1111,7 @@ export default function MenuScreen() {
   // ── Delete dish ───────────────────────────────────────────────────────────
 
   function handleDeleteDish(dish: Dish) {
-    Alert.alert(
+    premiumAlert(
       'Usuń danie',
       `Czy na pewno chcesz usunąć "${dish.name}" z menu?`,
       [
@@ -1104,6 +1121,18 @@ export default function MenuScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
+              const { data: linkedRows } = await supabase
+                .from('recipe_ingredients')
+                .select('warehouse_product_id')
+                .eq('menu_item_id', dish.id);
+              const linkedIds = [
+                ...new Set(
+                  (linkedRows ?? [])
+                    .map((r: any) => r.warehouse_product_id as string | null)
+                    .filter((id): id is string => !!id),
+                ),
+              ];
+
               await supabase.from('recipe_ingredients').delete().eq('menu_item_id', dish.id);
               const { error: delError } = await supabase
                 .from('menu_items')
@@ -1111,12 +1140,30 @@ export default function MenuScreen() {
                 .eq('id', dish.id);
               if (delError) throw delError;
               setDishes((prev) => prev.filter((d) => d.id !== dish.id));
+
+              // Auto-usuń z magazynu produkty utworzone pod to danie, jeśli nadal mają stan 0
+              // i nie są używane w innych recepturach.
+              for (const wid of linkedIds) {
+                const { data: inv } = await supabase
+                  .from('inventory_items')
+                  .select('id, quantity')
+                  .eq('id', wid)
+                  .maybeSingle();
+                if (!inv || Number(inv.quantity) > 0) continue;
+                const { count } = await supabase
+                  .from('recipe_ingredients')
+                  .select('id', { count: 'exact', head: true })
+                  .eq('warehouse_product_id', wid);
+                if ((count ?? 0) > 0) continue;
+                await supabase.from('inventory_items').delete().eq('id', wid);
+                setInventory((prev) => prev.filter((i) => i.id !== wid));
+              }
             } catch (e: any) {
-              Alert.alert('Błąd', e.message ?? 'Nie udało się usunąć dania.');
+              premiumAlert('Błąd', e.message ?? 'Nie udało się usunąć dania.');
             }
           },
         },
-      ]
+      ],
     );
   }
 
@@ -1153,33 +1200,93 @@ export default function MenuScreen() {
 
   // ── Save / update dish ────────────────────────────────────────────────────
 
+  async function ensureWarehouseLinks(
+    validIngredients: IngredientDraft[],
+  ): Promise<Map<string, string>> {
+    /** normName → inventory_items.id — tworzy brakujące produkty ze stanem 0. */
+    const linkMap = new Map<string, string>();
+    if (!accountKey || accountKey === 'default') return linkMap;
+
+    const working = [...inventory];
+    const findLocal = (key: string) => working.find((i) => normIngredientName(i.product_name) === key);
+
+    for (const ing of validIngredients) {
+      const name = ing.name.trim();
+      const key = normIngredientName(name);
+      if (!key || linkMap.has(key)) continue;
+      const existing = findLocal(key);
+      if (existing) {
+        linkMap.set(key, existing.id);
+        continue;
+      }
+      const unit = normalizeMenuUnit(ing.unit);
+      const insertPayload: Record<string, unknown> = {
+        name,
+        category_id: categoryMap['Inne'] ?? categoryMap['Przyprawy'] ?? null,
+        quantity: 0,
+        unit,
+        min_quantity: 1,
+        is_combo_polprodukt: false,
+        unit_cost: 0,
+        account_key: accountKey,
+      };
+      const { data: newRow, error } = await supabase
+        .from('inventory_items')
+        .insert(insertPayload)
+        .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name)')
+        .single();
+      if (error || !newRow?.id) continue;
+      const mapped = mapInvDbRow(newRow);
+      working.push(mapped);
+      linkMap.set(key, newRow.id);
+      setInventory((prev) => (prev.some((p) => p.id === mapped.id) ? prev : [...prev, mapped]));
+    }
+    return linkMap;
+  }
+
+  function buildIngredientRows(
+    menuItemId: string,
+    validIngredients: IngredientDraft[],
+    linkMap: Map<string, string>,
+  ) {
+    return validIngredients.map((ing, idx) => {
+      const row: Record<string, unknown> = {
+        menu_item_id: menuItemId,
+        ingredient_name: ing.name.trim(),
+        quantity: normalizeRecipeQuantity(parseFloat((ing.quantity || '').replace(',', '.')) || 0),
+        unit: normalizeMenuUnit(ing.unit),
+        sort_order: idx + 1,
+      };
+      const pw = parseOptionalPieceWeightG(ing.pieceWeightG);
+      if ((ing.unit === 'szt' || ing.unit === 'sztuka') && pw != null) {
+        row.piece_weight_g = pw;
+      }
+      const wid = linkMap.get(normIngredientName(ing.name));
+      if (wid) row.warehouse_product_id = wid;
+      return row;
+    });
+  }
+
   async function handleSave() {
-    if (!form.name.trim()) { Alert.alert('Wymagane pole', 'Podaj nazwę dania.'); return; }
+    if (saving) return;
+    if (!form.name.trim()) { premiumAlert('Wymagane pole', 'Podaj nazwę dania.'); return; }
     const price = parseFloat(form.price);
-    if (isNaN(price) || price <= 0) { Alert.alert('Błąd', 'Cena sprzedaży musi być liczbą większą od zera.'); return; }
+    if (isNaN(price) || price <= 0) {
+      premiumAlert('Błąd', 'Cena sprzedaży musi być liczbą większą od zera.');
+      return;
+    }
 
     // Uwaga: zapis jest możliwy nawet gdy składnik nie znajduje się w magazynie.
-    // Status magazynowy (zielony ptaszek / czerwony X) jest tylko informacyjny.
+    // Brakujące produkty tworzymy ze stanem 0 i linkujemy do dania.
 
     const nameTrim = form.name.trim();
-    const nameKey = nameTrim
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const nameKey = normIngredientName(nameTrim);
     const dupDish = dishes.find((d) => {
       if (editingDish && d.id === editingDish.id) return false;
-      const k = (d.name || '')
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return k === nameKey;
+      return normIngredientName(d.name || '') === nameKey;
     });
     if (dupDish) {
-      Alert.alert(
+      premiumAlert(
         'Danie już w menu',
         `„${dupDish.name}” już istnieje. Edytuj istniejące danie zamiast tworzyć duplikat.`,
       );
@@ -1188,7 +1295,8 @@ export default function MenuScreen() {
 
     setSaving(true);
     try {
-      const validIngredients = ingredients.filter((i) => i.name.trim());
+      const validIngredients = ingredients.filter((i) => (i.name ?? '').trim());
+      const linkMap = await ensureWarehouseLinks(validIngredients);
 
       if (editingDish) {
         // ── Update existing dish ──
@@ -1198,36 +1306,14 @@ export default function MenuScreen() {
           .eq('id', editingDish.id);
         if (updateError) throw updateError;
 
-        // Replace recipe ingredients
         await supabase.from('recipe_ingredients').delete().eq('menu_item_id', editingDish.id);
         if (validIngredients.length > 0) {
-          const { error: ingError } = await supabase.from('recipe_ingredients').insert(
-            validIngredients.map((ing, idx) => {
-              const row: Record<string, unknown> = {
-                menu_item_id: editingDish.id,
-                ingredient_name: ing.name.trim(),
-                quantity: parseFloat(ing.quantity) || 0,
-                unit: ing.unit,
-                sort_order: idx + 1,
-              };
-              if ((ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()) {
-                const pw = parseFloat(ing.pieceWeightG.replace(',', '.'));
-                if (!isNaN(pw) && pw > 0) row.piece_weight_g = pw;
-              }
-              return row;
-            })
-          );
+          const rows = buildIngredientRows(editingDish.id, validIngredients, linkMap);
+          const { error: ingError } = await supabase.from('recipe_ingredients').insert(rows);
           if (ingError) {
-            if (/piece_weight_g/i.test(ingError.message ?? '')) {
-              const { error: e2 } = await supabase.from('recipe_ingredients').insert(
-                validIngredients.map((ing, idx) => ({
-                  menu_item_id: editingDish.id,
-                  ingredient_name: ing.name.trim(),
-                  quantity: parseFloat(ing.quantity) || 0,
-                  unit: ing.unit,
-                  sort_order: idx + 1,
-                }))
-              );
+            if (/piece_weight_g|warehouse_product_id|schema cache/i.test(ingError.message ?? '')) {
+              const fallback = rows.map(({ piece_weight_g: _pw, warehouse_product_id: _w, ...rest }) => rest);
+              const { error: e2 } = await supabase.from('recipe_ingredients').insert(fallback);
               if (e2) throw e2;
             } else {
               throw ingError;
@@ -1242,12 +1328,9 @@ export default function MenuScreen() {
           price_pln: price,
           recipe: validIngredients.map((ing) => ({
             name: ing.name.trim(),
-            quantity: parseFloat(ing.quantity) || 0,
-            unit: ing.unit,
-            piece_weight_g:
-              (ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()
-                ? parseFloat(ing.pieceWeightG.replace(',', '.')) || null
-                : null,
+            quantity: normalizeRecipeQuantity(parseFloat((ing.quantity || '').replace(',', '.')) || 0),
+            unit: normalizeMenuUnit(ing.unit),
+            piece_weight_g: parseOptionalPieceWeightG(ing.pieceWeightG),
           })),
         };
         setDishes((prev) => prev.map((d) => (d.id === editingDish.id ? updatedDish : d)));
@@ -1284,33 +1367,12 @@ export default function MenuScreen() {
         }
 
         if (validIngredients.length > 0) {
-          const { error: ingError } = await supabase.from('recipe_ingredients').insert(
-            validIngredients.map((ing, idx) => {
-              const row: Record<string, unknown> = {
-                menu_item_id: newItem.id,
-                ingredient_name: ing.name.trim(),
-                quantity: parseFloat(ing.quantity) || 0,
-                unit: ing.unit,
-                sort_order: idx + 1,
-              };
-              if ((ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()) {
-                const pw = parseFloat(ing.pieceWeightG.replace(',', '.'));
-                if (!isNaN(pw) && pw > 0) row.piece_weight_g = pw;
-              }
-              return row;
-            })
-          );
+          const rows = buildIngredientRows(newItem.id, validIngredients, linkMap);
+          const { error: ingError } = await supabase.from('recipe_ingredients').insert(rows);
           if (ingError) {
-            if (/piece_weight_g/i.test(ingError.message ?? '')) {
-              const { error: e2 } = await supabase.from('recipe_ingredients').insert(
-                validIngredients.map((ing, idx) => ({
-                  menu_item_id: newItem.id,
-                  ingredient_name: ing.name.trim(),
-                  quantity: parseFloat(ing.quantity) || 0,
-                  unit: ing.unit,
-                  sort_order: idx + 1,
-                }))
-              );
+            if (/piece_weight_g|warehouse_product_id|schema cache/i.test(ingError.message ?? '')) {
+              const fallback = rows.map(({ piece_weight_g: _pw, warehouse_product_id: _w, ...rest }) => rest);
+              const { error: e2 } = await supabase.from('recipe_ingredients').insert(fallback);
               if (e2) throw e2;
             } else {
               throw ingError;
@@ -1326,12 +1388,9 @@ export default function MenuScreen() {
           pos_id: posId,
           recipe: validIngredients.map((ing) => ({
             name: ing.name.trim(),
-            quantity: parseFloat(ing.quantity) || 0,
-            unit: ing.unit,
-            piece_weight_g:
-              (ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()
-                ? parseFloat(ing.pieceWeightG.replace(',', '.')) || null
-                : null,
+            quantity: normalizeRecipeQuantity(parseFloat((ing.quantity || '').replace(',', '.')) || 0),
+            unit: normalizeMenuUnit(ing.unit),
+            piece_weight_g: parseOptionalPieceWeightG(ing.pieceWeightG),
           })),
         };
         setDishes((prev) => [...prev, newDish]);
@@ -1340,7 +1399,7 @@ export default function MenuScreen() {
         handleCloseAddModal();
       }
     } catch (e: any) {
-      Alert.alert('Błąd zapisu', e.message ?? 'Nieznany błąd');
+      premiumAlert('Błąd zapisu', e.message ?? 'Nieznany błąd');
     } finally {
       setSaving(false);
     }
@@ -2143,8 +2202,9 @@ export default function MenuScreen() {
                   ? ings.map((ing) => ({
                       key: String(Date.now() + Math.random()),
                       name: ing.name,
-                      quantity: String(ing.quantity),
+                      quantity: String(normalizeRecipeQuantity(ing.quantity)),
                       unit: normalizeMenuUnit(ing.unit),
+                      pieceWeightG: '',
                     }))
                   : [newDraftIngredient()],
               );
@@ -2168,8 +2228,9 @@ export default function MenuScreen() {
                   ? ings.map((ing) => ({
                       key: String(Date.now() + Math.random()),
                       name: ing.name,
-                      quantity: String(ing.quantity),
+                      quantity: String(normalizeRecipeQuantity(ing.quantity)),
                       unit: normalizeMenuUnit(ing.unit),
+                      pieceWeightG: '',
                     }))
                   : [newDraftIngredient()],
               );

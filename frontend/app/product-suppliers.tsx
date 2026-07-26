@@ -35,6 +35,7 @@ import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { formatPlnNumber } from '@/lib/format';
 import { namesMatch } from '@/lib/fuzzyProductMatch';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface OfferRow {
   id: string;
@@ -92,6 +93,7 @@ export default function ProductSuppliersScreen() {
   const router = useRouter();
   const theme = useAppTheme();
   const prem = theme.isPremium;
+  const { accountKey } = useAuth();
   const { productId, productName } = useLocalSearchParams<{ productId: string; productName: string }>();
 
   const [tab, setTab] = useState<TabKey>('suppliers');
@@ -144,37 +146,59 @@ export default function ProductSuppliersScreen() {
     if (!productId) return;
     setLoading(true);
     try {
+      const ak = accountKey && accountKey !== 'default' ? accountKey : null;
+
+      // Tenant: tylko dostawcy tego konta (zapobiega wyciekowi ofert z innych account_key)
+      let tenantSupplierIds: Set<string> | null = null;
+      if (ak) {
+        const { data: mySuppliers } = await supabase
+          .from('suppliers')
+          .select('id')
+          .eq('account_key', ak);
+        tenantSupplierIds = new Set((mySuppliers ?? []).map((s: any) => s.id as string));
+      }
+      const isTenantSupplier = (sid: string | null | undefined) =>
+        !tenantSupplierIds || (!!sid && tenantSupplierIds.has(sid));
+
       // 1) Oferty już zlinkowane do produktu magazynowego
       const { data: linked } = await supabase
         .from('supplier_offer_items')
-        .select('id, supplier_id, raw_product_name, price_net, unit, warehouse_product_id, suppliers(name, icon_color)')
+        .select('id, supplier_id, raw_product_name, price_net, unit, warehouse_product_id, suppliers(name, icon_color, account_key)')
         .eq('warehouse_product_id', productId)
         .order('price_net', { ascending: true, nullsFirst: false });
 
-      const rows: OfferRow[] = (linked ?? []).map((r: any) => ({
-        id: r.id,
-        supplier_id: r.supplier_id,
-        supplier_name: r.suppliers?.name ?? 'Nieznany dostawca',
-        supplier_color: r.suppliers?.icon_color ?? Colors.textSecondary,
-        raw_product_name: r.raw_product_name,
-        price_net: r.price_net != null ? Number(r.price_net) : null,
-        unit: r.unit,
-      }));
+      const rows: OfferRow[] = (linked ?? [])
+        .filter((r: any) => isTenantSupplier(r.supplier_id))
+        .map((r: any) => ({
+          id: r.id,
+          supplier_id: r.supplier_id,
+          supplier_name: r.suppliers?.name ?? 'Nieznany dostawca',
+          supplier_color: r.suppliers?.icon_color ?? Colors.textSecondary,
+          raw_product_name: r.raw_product_name,
+          price_net: r.price_net != null ? Number(r.price_net) : null,
+          unit: r.unit,
+        }));
 
       // 2) Fuzzy: oferty bez warehouse_product_id + katalog dostawcy (nazwa ≈ produkt)
       const productLabel = (productName || '').trim();
       if (productLabel) {
         const seen = new Set(rows.map((r) => r.id));
 
-        const { data: unlinked } = await supabase
+        let unlinkedQuery = supabase
           .from('supplier_offer_items')
-          .select('id, supplier_id, raw_product_name, price_net, unit, warehouse_product_id, suppliers(name, icon_color)')
+          .select('id, supplier_id, raw_product_name, price_net, unit, warehouse_product_id, suppliers(name, icon_color, account_key)')
           .is('warehouse_product_id', null)
           .limit(2000);
+        // Preferuj filtr po supplier_id z tenanta (gdy znamy listę)
+        if (tenantSupplierIds && tenantSupplierIds.size > 0) {
+          unlinkedQuery = unlinkedQuery.in('supplier_id', [...tenantSupplierIds]);
+        }
+        const { data: unlinked } = await unlinkedQuery;
 
         const toLink: string[] = [];
         for (const r of unlinked ?? []) {
           if (!r?.raw_product_name || seen.has(r.id)) continue;
+          if (!isTenantSupplier(r.supplier_id)) continue;
           if (!namesMatch(productLabel, r.raw_product_name, 72)) continue;
           seen.add(r.id);
           toLink.push(r.id);
@@ -197,12 +221,20 @@ export default function ProductSuppliersScreen() {
         }
 
         // Katalog dostawców (cennik) — gdy nie ma wierszy w offer_items
-        const { data: catalog } = await supabase
+        let catalogQuery = supabase
           .from('supplier_catalog')
-          .select('id, supplier_id, name, price_pln, unit, suppliers(name, icon_color)')
+          .select('id, supplier_id, name, price_pln, unit, suppliers(name, icon_color, account_key)')
           .limit(3000);
+        if (tenantSupplierIds && tenantSupplierIds.size > 0) {
+          catalogQuery = catalogQuery.in('supplier_id', [...tenantSupplierIds]);
+        } else if (tenantSupplierIds && tenantSupplierIds.size === 0) {
+          // Brak własnych dostawców — nie pokazuj cudzego katalogu
+          catalogQuery = catalogQuery.in('supplier_id', ['00000000-0000-0000-0000-000000000000']);
+        }
+        const { data: catalog } = await catalogQuery;
         for (const c of catalog ?? []) {
           if (!c?.name || !namesMatch(productLabel, c.name, 72)) continue;
+          if (!isTenantSupplier(c.supplier_id)) continue;
           const synId = `cat-${c.id}`;
           if (seen.has(synId)) continue;
           // Unikaj duplikatu tego samego dostawcy + zbliżonej nazwy
@@ -230,7 +262,7 @@ export default function ProductSuppliersScreen() {
     } finally {
       setLoading(false);
     }
-  }, [productId, productName]);
+  }, [productId, productName, accountKey]);
 
   const loadProduct = useCallback(async () => {
     if (!productId) return;

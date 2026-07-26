@@ -1205,10 +1205,21 @@ export default function MagazynScreen() {
 
   async function autoUnlockOfferItems(newItemId: string, newItemName: string) {
     try {
-      const { data: sleeping } = await supabase
+      // Tylko oferty własnych dostawców — bez wycieku z innych tenantów
+      let sleepingQuery = supabase
         .from('supplier_offer_items')
-        .select('id, raw_product_name')
+        .select('id, raw_product_name, supplier_id')
         .is('warehouse_product_id', null);
+      if (accountKey && accountKey !== 'default') {
+        const { data: mySuppliers } = await supabase
+          .from('suppliers')
+          .select('id')
+          .eq('account_key', accountKey);
+        const ids = (mySuppliers ?? []).map((s: any) => s.id as string);
+        if (ids.length === 0) return;
+        sleepingQuery = sleepingQuery.in('supplier_id', ids);
+      }
+      const { data: sleeping } = await sleepingQuery;
       if (!sleeping || sleeping.length === 0) return;
       const toUnlock = sleeping
         .filter((item: any) => namesMatch(newItemName, item.raw_product_name || '', 72))

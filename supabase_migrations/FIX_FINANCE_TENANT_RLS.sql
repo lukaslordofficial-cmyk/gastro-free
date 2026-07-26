@@ -5,6 +5,9 @@
 --
 -- Problem: revenue/fixed/variable/daily_reports/token_usage miały otwarte RLS
 -- (lub brak account_key) → nowi użytkownicy widzieli dane demo z 'default'.
+--
+-- UWAGA (2026-07): nadal aktualne przy wyciekach tenantowych.
+-- Dla ofert/katalogu dostawców uruchom też FIX_SUPPLIER_TENANT_RLS.sql.
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.current_account_key()

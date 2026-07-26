@@ -30,6 +30,7 @@ import {
 } from 'lucide-react-native';
 import { DS } from '@/constants/premiumTheme';
 import { parsePln, formatPlnNumber } from '@/lib/format';
+import { parseOptionalPieceWeightG, normalizeRecipeQuantity } from '@/lib/recipeUnits';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useAds } from '@/contexts/AdsProvider';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -364,12 +365,14 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             piece_weight_g?: number | null;
           } = {
             name: i.name.trim(),
-            quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
+            quantity: i.quantity.trim()
+              ? normalizeRecipeQuantity(parsePln(i.quantity))
+              : null,
             unit: i.unit,
           };
-          if ((i.unit === 'szt') && i.pieceWeightG.trim()) {
-            const pw = parsePln(i.pieceWeightG);
-            if (pw > 0) row.piece_weight_g = pw;
+          if (i.unit === 'szt') {
+            const pw = parseOptionalPieceWeightG(i.pieceWeightG);
+            if (pw != null) row.piece_weight_g = pw;
           }
           return row;
         }),
@@ -401,7 +404,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             ingredients: s.suggested_ingredients.map((si) =>
               newIngredient(
                 si.name,
-                si.quantity != null ? String(si.quantity) : '',
+                si.quantity != null ? String(normalizeRecipeQuantity(si.quantity)) : '',
                 si.unit === 'ml' || si.unit === 'szt' ? si.unit : 'g'
               )
             ),
@@ -446,7 +449,9 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             .filter((i) => i.name.trim())
             .map((i) => ({
               name: i.name.trim(),
-              quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
+              quantity: i.quantity.trim()
+              ? normalizeRecipeQuantity(parsePln(i.quantity))
+              : null,
               unit: i.unit,
             })),
           portion_weight_value: d.portionWeightInput.trim() ? parsePln(d.portionWeightInput) : null,
@@ -509,12 +514,14 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
                   piece_weight_g?: number | null;
                 } = {
                   name: i.name.trim(),
-                  quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
+                  quantity: i.quantity.trim()
+              ? normalizeRecipeQuantity(parsePln(i.quantity))
+              : null,
                   unit: i.unit,
                 };
-                if (i.unit === 'szt' && i.pieceWeightG.trim()) {
-                  const pw = parsePln(i.pieceWeightG);
-                  if (pw > 0) row.piece_weight_g = pw;
+                if (i.unit === 'szt') {
+                  const pw = parseOptionalPieceWeightG(i.pieceWeightG);
+                  if (pw != null) row.piece_weight_g = pw;
                 }
                 return row;
               }),
@@ -532,7 +539,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             if (ingredients.length === 0 && (s.suggested_ingredients ?? []).length > 0) {
               ingredients = s.suggested_ingredients.map((si) => ({
                 name: si.name,
-                quantity: Number(si.quantity ?? 0),
+                quantity: normalizeRecipeQuantity(Number(si.quantity ?? 0)),
                 unit: si.unit || 'g',
                 piece_weight_g: null as number | null,
               }));

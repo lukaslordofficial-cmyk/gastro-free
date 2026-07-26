@@ -9,7 +9,7 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/premium/gastro-manager-logo.webp",
+      "image": "./assets/splash-image.png",
       "resizeMode": "contain",
       "backgroundColor": "#0A120E"
     },

@@ -42,6 +42,7 @@ import {
   type ExpiryProductDraft,
   type CommitProduct,
 } from '@/components/InvoiceExpiryReviewForm';
+import { DOC_WAREHOUSE_CATEGORIES } from '@/lib/warehouseCategories';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
@@ -67,10 +68,7 @@ const C = {
   inputBg: DS.color.bgTertiary,
 };
 
-export const DOC_CATEGORIES = [
-  'Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', 'Alkohole', 'Napoje',
-  'Mrożonki', 'Chemia i czystość', 'Opakowania', 'Inne',
-];
+export const DOC_CATEGORIES = DOC_WAREHOUSE_CATEGORIES;
 
 type Stage = 'choose' | 'processing' | 'invoice_preview' | 'expiry_review' | 'result';
 

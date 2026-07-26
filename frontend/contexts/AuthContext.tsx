@@ -11,6 +11,7 @@ import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { setAccountKey, getAccountKey } from '@/lib/accountKey';
 import { polishAuthError } from '@/lib/authErrors';
 import { fetchJson } from '@/lib/safeFetch';
+import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
@@ -118,6 +119,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const p = await ensureLocalProfile(next.user);
       setProfile(p);
       setAccountKey(p.account_key);
+      // Seed pustych kategorii magazynowych per tenant (nie nadpisuje własnych).
+      void ensureDefaultWarehouseCategories(supabase, p.account_key).then((r) => {
+        if (r.error && __DEV__) console.warn('[Auth] warehouse category seed', r.error);
+      });
     } catch (e) {
       if (__DEV__) console.warn('[Auth] profile bootstrap', e);
       const fallback = `ak_${next.user.id.replace(/-/g, '')}`;
@@ -128,6 +133,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         restaurant_name: null,
       });
       setAccountKey(fallback);
+      void ensureDefaultWarehouseCategories(supabase, fallback);
     }
   }, []);
 

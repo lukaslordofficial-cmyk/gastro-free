@@ -56,6 +56,7 @@ import {
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
 import { namesMatch } from '@/lib/fuzzyProductMatch';
+import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
 import { useAuth } from '@/contexts/AuthContext';
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
@@ -733,6 +734,9 @@ export default function MagazynScreen() {
     }
     const ak = accountKey;
     try {
+      // Uzupełnij brakujące kategorie systemowe (nie kasuje własnych użytkownika).
+      await ensureDefaultWarehouseCategories(supabase, ak);
+
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase
           .from('inventory_items')

@@ -1076,16 +1076,22 @@ DOSTĘPNE INTENCJE:
     „ile brakuje", „braki magazynowe", „zamów wszystko czego brakuje".
     * pole `categories: string[]` — twarda lista nazw kategorii magazynowych.
       Sztywne nazwy do dopasowania (użyj dokładnie tych stringów):
-        'Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', 'Alkohole', 'Napoje',
-        'Mrożonki', 'Suchy magazyn', 'Chemia i czystość', 'Opakowania', 'Inne'.
+        'Mięso i wędliny', 'Ryby i owoce morza', 'Nabiał', 'Warzywa i owoce', 'Pieczywo',
+        'Suchy magazyn', 'Oleje i tłuszcze', 'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole',
+        'Wywary i sosy', 'Chemia i czystość', 'Opakowania', 'Inne'.
     * Fuzzy dopasowanie po potocznych słowach użytkownika:
         „mięso"/„wędliny"/„wołowinę" → 'Mięso i wędliny'
+        „ryby"/„łosoś"/„krewetki"    → 'Ryby i owoce morza'
         „nabiał"/„mleko"/„sery"      → 'Nabiał'
         „warzywa"/„owoce"/„jarzyny"  → 'Warzywa i owoce'
+        „pieczywo"/„chleb"           → 'Pieczywo'
         „napoje"/„soki"/„woda"       → 'Napoje'
         „alkohole"/„wódka"/„piwo"    → 'Alkohole'
         „mrożonki"/„mrożone"          → 'Mrożonki'
         „suchy"/„makarony"/„mąka"    → 'Suchy magazyn'
+        „olej"/„oliwa"/„tłuszcze"    → 'Oleje i tłuszcze'
+        „przyprawy"                  → 'Przyprawy'
+        „wywary"/„sosy"/„bulion"     → 'Wywary i sosy'
         „chemia"/„środki czystości"  → 'Chemia i czystość'
         „opakowania"/„kubki"/„folie" → 'Opakowania'
     * Jeśli użytkownik mówi „zamów WSZYSTKIE braki"/„zamów wszystko czego brakuje"
@@ -3088,8 +3094,9 @@ async def confirm_catalog(supplier_id: str, req: ConfirmCatalogRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 DOCUMENT_CATEGORIES = [
-    "Mięso i wędliny", "Nabiał", "Warzywa i owoce", "Alkohole", "Napoje",
-    "Mrożonki", "Chemia i czystość", "Opakowania", "Inne",
+    "Mięso i wędliny", "Ryby i owoce morza", "Nabiał", "Warzywa i owoce", "Pieczywo",
+    "Suchy magazyn", "Oleje i tłuszcze", "Przyprawy", "Mrożonki", "Napoje", "Alkohole",
+    "Wywary i sosy", "Chemia i czystość", "Opakowania", "Inne",
 ]
 
 _DOCUMENT_JSON_SCHEMA = {
@@ -3143,8 +3150,12 @@ _DOCUMENT_SYSTEM_PROMPT = (
     "- products[]: dla faktury/oferty pozycje towarowe; dla MENU_RESTAURACYJNE wpisz potrawy "
     "(product_name = nazwa dania, price_netto = cena dla gościa, quantity=0, unit='szt', "
     "category najlepiej dopasuj lub 'Inne').\n\n"
-    "KATEGORYZACJA (pole category): dozwolone: 'Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', "
-    "'Alkohole', 'Napoje', 'Mrożonki', 'Chemia i czystość', 'Opakowania', 'Inne'.\n"
+    "KATEGORYZACJA (pole category): dozwolone: 'Mięso i wędliny', 'Ryby i owoce morza', "
+    "'Nabiał', 'Warzywa i owoce', 'Pieczywo', 'Suchy magazyn', 'Oleje i tłuszcze', "
+    "'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole', 'Wywary i sosy', 'Chemia i czystość', "
+    "'Opakowania', 'Inne'.\n"
+    "WAŻNE: oliwa / olive oil / olej / masło klarowane / smalec → 'Oleje i tłuszcze' "
+    "(NIGDY 'Alkohole'). Extra Virgin ≠ alkohol.\n"
     "Nie wymyślaj pozycji. Zwróć wyłącznie poprawny JSON zgodny ze schematem."
 )
 
@@ -3217,8 +3228,13 @@ async def _resolve_category_id_cached(client: httpx.AsyncClient, cat_name: str, 
         return None
 
 
-# Słowa kluczowe → kategoria magazynowa (bezpłatna heurystyka, bez LLM)
+# Słowa kluczowe → kategoria magazynowa (bezpłatna heurystyka, bez LLM).
+# UWAGA: dopasowanie tokenowe (nie substring) — „gin” NIE łapie się w „virgin”.
 _CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("Oleje i tłuszcze", (
+        "oliwa", "oliw", "olive", "olej", "oleju", "olejem", "rzepak", "slonecznik",
+        "smalec", "tluszcz", "frytur", "ghee", "klarowan", "oil",
+    )),
     ("Warzywa i owoce", (
         "pomidor", "cebula", "czosnek", "salat", "ogorek", "baklazan", "jabl", "banan",
         "cytryn", "marchew", "ziemniak", "papryk", "brokul", "kalafior", "burak", "kapust",
@@ -3228,18 +3244,34 @@ _CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     )),
     ("Nabiał", (
         "mleko", "ser", "smietan", "jogurt", "maslo", "twarog", "mozarella", "mozzarella",
-        "parmezan", "jajk", "jaj ", "jajec", "kefir", "maślank", "maslank", "ricotta", "feta",
+        "parmezan", "jajk", "jajec", "kefir", "maslank", "ricotta", "feta",
         "goud", "cheddar", "camembert",
     )),
     ("Mięso i wędliny", (
         "kurczak", "wolow", "wieprz", "indyk", "schab", "karkow", "wedlin", "boczek", "kielbas",
-        "szynk", "filet", "udziec", "mieso", "wolovina", "ryba", "losos", "dorsz", "krewet",
-        "kaczka", "ges", "baranin", "cielęcin", "cielecin", "mielon", "parowk", "kabanos",
-        "salami", "prosciutto", "tuna", "tunczyk", "sledz", "makrel",
+        "szynk", "filet", "udziec", "mieso", "wolovina", "kaczka", "ges", "baranin",
+        "cielecin", "mielon", "parowk", "kabanos", "salami", "prosciutto",
+    )),
+    ("Ryby i owoce morza", (
+        "ryba", "ryby", "losos", "dorsz", "krewet", "tuna", "tunczyk", "sledz", "makrel",
+        "kalmar", "osmiornic", "malz", "krewetki", "owoc morza", "mintaj", "pstrag",
+    )),
+    ("Pieczywo", (
+        "chleb", "bulka", "bagiet", "ciabatta", "tortilla", "wrap", "pieczyw", "croissant",
+        "rogal", "focacci", "pita",
+    )),
+    ("Przyprawy", (
+        "przypraw", "pieprz", "papryka mielona", "curry", "oregano", "tymianek", "kminek",
+        "cynamon", "kurkum", "chili", "przyprawa", "ziola", "lisc laurowy",
+    )),
+    ("Wywary i sosy", (
+        "bulion", "wywar", "fond", "sos ", "sosy", "demi-glace", "demi glace", "passata",
+        "koncentrat pomidor", "musztard", "ketchup", "majonez",
     )),
     ("Alkohole", (
         "wino", "piwo", "wodka", "whisky", "whiskey", "rum", "gin", "likier", "prosecco",
-        "szampan", "cydr", "aperol", "campari", "alkohol",
+        "szampan", "cydr", "aperol", "campari", "alkohol", "tequila", "brandy", "koniak",
+        "cognac", "wermut", "porto", "martini",
     )),
     ("Napoje", (
         "sok", "woda", "cola", "napoj", "kawa", "herbata", "syrop", "tonik", "lemoniad",
@@ -3257,10 +3289,9 @@ _CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
         "serwetk", "talerz jednoraz", "sztucce",
     )),
     ("Suchy magazyn", (
-        "maka", "ryz", "makaron", "cukier", "sol", "olej", "oliw", "ocet", "przypraw",
-        "pieprz", "papryka mielona", "curry", "oregano", "tymianek", "kminek", "musztard",
-        "ketchup", "majonez", "koncentrat", "pasztet", "konserw", "fasola such", "soczewic",
-        "kasza", "platki", "bulion", "drozdze", "proszek do pieczenia", "skrobia",
+        "maka", "ryz", "makaron", "cukier", "sol", "ocet", "konserw", "fasola such",
+        "soczewic", "kasza", "platki", "drozdze", "proszek do pieczenia", "skrobia",
+        "pasztet", "cukier puder", "maka pszen",
     )),
 ]
 
@@ -3288,6 +3319,27 @@ def _food_match_key(text: str) -> str:
         if len(base) >= 3:
             out.append(base)
     return " ".join(sorted(set(out)))
+
+
+def _keyword_token_hit(word: str, key: str) -> bool:
+    """Tokenowe dopasowanie słowa kluczowego.
+
+    - exact token: „gin” ↔ „gin”
+    - stem (len≥4): „oliw” ↔ „oliwa” / „oliwek” (token zaczyna się od stemu)
+    - NIE substring w środku tokenu: „gin” ↛ „virgin”
+    - NIE odwrotny stem: „winogron” ↛ „wino”
+    """
+    w = (word or "").strip().lower()
+    if not w or not key:
+        return False
+    if " " in w:
+        return f" {w} " in f" {key} " or key.startswith(w) or key.endswith(w)
+    for t in key.split():
+        if t == w:
+            return True
+        if len(w) >= 4 and t.startswith(w):
+            return True
+    return False
 
 
 def _guess_category_free(
@@ -3319,27 +3371,35 @@ def _guess_category_free(
             unp = _norm_pl(un)
             if wn and unp and (wn in unp or unp in wn):
                 return un
-        return wanted if wanted != "Inne" else (user_names[0] if False else "Inne")
+        return wanted if wanted != "Inne" else "Inne"
 
     # 1) kategoria z podobnego produktu już w magazynie
     if neighbor_category and neighbor_category.strip() and _norm(neighbor_category) != "inne":
         return _map_to_user(neighbor_category.strip())
 
-    # 2) słowa kluczowe w nazwie produktu
+    # 2) słowa kluczowe — najdłuższy stem wygrywa remisy (oliwa > gin-w-virgin)
     key = _food_match_key(product_name) + " " + _norm_pl(product_name)
     best_cat = None
-    best_hits = 0
+    best_score = 0
     for cat_label, words in _CAT_KEYWORDS:
-        hits = sum(1 for w in words if w in key)
-        if hits > best_hits:
-            best_hits = hits
+        hits = [(w, len(w)) for w in words if _keyword_token_hit(w, key)]
+        if not hits:
+            continue
+        score = len(hits) * 10 + max(L for _, L in hits)
+        if score > best_score:
+            best_score = score
             best_cat = cat_label
-    if best_cat and best_hits > 0:
+    if best_cat and best_score > 0:
         return _map_to_user(best_cat)
 
-    # 3) hint z AI (jeśli nie „Inne”)
+    # 3) hint z AI — korekta oczywistych pomyłek olej ↔ alkohol
     ai = (ai_category or "").strip()
     if ai and _norm(ai) != "inne":
+        oilish = any(_keyword_token_hit(w, key) for w in (
+            "oliwa", "oliw", "olive", "olej", "oil", "smalec", "frytur", "ghee",
+        ))
+        if oilish and _norm_pl(ai) == "alkohole":
+            return _map_to_user("Oleje i tłuszcze")
         return _map_to_user(ai)
 
     return _map_to_user("Inne")
@@ -3825,6 +3885,7 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
             invoice_id = None
 
         cat_cache: dict = {}
+        await _ensure_warehouse_categories(client)
         user_cats = await _load_user_inventory_categories(client)
         cat_cache["_rows"] = list(user_cats)
         for r in user_cats:
@@ -4142,6 +4203,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
         enriched: list[dict] = []
         user_cat_names: list[str] = []
         async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client_db:
+            await _ensure_warehouse_categories(client_db)
             user_cats = await _load_user_inventory_categories(client_db)
             user_cat_names = [c.get("name") for c in user_cats if c.get("name")]
             inv_all = await sb_get(client_db, "inventory_items", params={
@@ -5461,14 +5523,17 @@ def _make_pos_id_for_category(category: str, offset: int) -> str:
 # Sztywne kategorie systemowe (Menu-to-Inventory Onboarding).
 MENU_CATEGORIES = ['Burgery', 'Pizze', 'Zupy', 'Dania obiadowe', 'Sałatki',
                    'Desery', 'Napoje', 'Inne']
-WAREHOUSE_CATEGORIES = ['Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', 'Alkohole',
-                        'Napoje', 'Mrożonki', 'Suchy magazyn', 'Chemia i czystość',
-                        'Opakowania', 'Inne']
+WAREHOUSE_CATEGORIES = [
+    'Mięso i wędliny', 'Ryby i owoce morza', 'Nabiał', 'Warzywa i owoce', 'Pieczywo',
+    'Suchy magazyn', 'Oleje i tłuszcze', 'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole',
+    'Wywary i sosy', 'Chemia i czystość', 'Opakowania', 'Inne',
+]
 _WAREHOUSE_CAT_COLORS = {
-    'Mięso i wędliny': '#DC2626', 'Nabiał': '#F59E0B', 'Warzywa i owoce': '#16A34A',
-    'Alkohole': '#7C3AED', 'Napoje': '#0891B2', 'Mrożonki': '#0EA5E9',
-    'Suchy magazyn': '#B45309', 'Chemia i czystość': '#6366F1',
-    'Opakowania': '#64748B', 'Inne': '#94A3B8',
+    'Mięso i wędliny': '#DC2626', 'Ryby i owoce morza': '#0284C7', 'Nabiał': '#F59E0B',
+    'Warzywa i owoce': '#16A34A', 'Pieczywo': '#78716C', 'Suchy magazyn': '#B45309',
+    'Oleje i tłuszcze': '#CA8A04', 'Przyprawy': '#D97706', 'Mrożonki': '#0EA5E9',
+    'Napoje': '#0891B2', 'Alkohole': '#7C3AED', 'Wywary i sosy': '#EA580C',
+    'Chemia i czystość': '#6366F1', 'Opakowania': '#64748B', 'Inne': '#94A3B8',
 }
 
 
@@ -7289,18 +7354,24 @@ _CATEGORY_SYNONYMS: dict[str, list[str]] = {
     'Mięso i wędliny':   ['mieso', 'mięso', 'wedliny', 'wędliny', 'wolowina', 'wołowina',
                           'wieprzowina', 'drob', 'drób', 'kurczak', 'szynka', 'kielbasa',
                           'kiełbasa', 'boczek', 'salami'],
+    'Ryby i owoce morza': ['ryby', 'ryba', 'owoce morza', 'losos', 'łosoś', 'krewetki', 'dorsz'],
     'Nabiał':            ['nabial', 'nabiał', 'mleko', 'jogurt', 'ser', 'sery', 'masło',
                           'maslo', 'smietana', 'śmietana', 'jajka', 'twarog', 'twaróg'],
     'Warzywa i owoce':   ['warzywa', 'owoce', 'jarzyny', 'sałata', 'salata', 'pomidor',
                           'ogorek', 'ogórek', 'cebula', 'ziemniaki', 'marchew', 'papryka',
                           'jablka', 'jabłka', 'banany', 'cytryny'],
+    'Pieczywo':          ['pieczywo', 'chleb', 'bulki', 'bułki', 'bagietka'],
     'Alkohole':          ['alkohol', 'alkohole', 'wodka', 'wódka', 'piwo', 'wino',
                           'whisky', 'gin', 'rum'],
     'Napoje':            ['napoje', 'napoj', 'napój', 'soki', 'sok', 'woda', 'kola',
                           'cola', 'tonik', 'lemoniada'],
     'Mrożonki':          ['mrozonki', 'mrożonki', 'mrozone', 'mrożone', 'lody', 'frytki mrozone'],
     'Suchy magazyn':     ['suchy', 'makaron', 'makarony', 'maka', 'mąka', 'ryż', 'ryz',
-                          'kasza', 'cukier', 'sol', 'sól', 'przyprawy', 'konserwy'],
+                          'kasza', 'cukier', 'sol', 'sól', 'konserwy'],
+    'Oleje i tłuszcze':  ['olej', 'oleje', 'oliwa', 'oliwy', 'tluszcze', 'tłuszcze', 'smalec',
+                          'frytura', 'olive oil'],
+    'Przyprawy':         ['przyprawy', 'przyprawa', 'pieprz', 'solniczka', 'ziola', 'zioła'],
+    'Wywary i sosy':     ['wywary', 'sosy', 'bulion', 'wywar', 'sos'],
     'Chemia i czystość': ['chemia', 'srodki czystosci', 'środki czystości', 'plyn',
                           'płyn', 'mydlo', 'mydło', 'reczniki', 'ręczniki'],
     'Opakowania':        ['opakowania', 'kubki', 'talerze', 'folie', 'folia', 'sztucce',

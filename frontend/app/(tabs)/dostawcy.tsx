@@ -18,7 +18,7 @@ import {
 import * as Linking from 'expo-linking';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Truck,
   Sparkles,
@@ -330,6 +330,7 @@ function SupplierCard({
   onRefresh: () => Promise<void>;
 }) {
   const theme = useAppTheme();
+  const insets = useSafeAreaInsets();
   const { notifyDocumentScanComplete } = useUiOverlay();
   const [expanded, setExpanded] = useState(false);
   const [offer, setOffer] = useState<SupplierOffer | null>(null);
@@ -462,20 +463,30 @@ function SupplierCard({
         else if (manualSizeUnit === 'l') litersTotal = sizeVal;
         else if (manualSizeUnit === 'g') kgTotal = sizeVal / 1000;
         else if (manualSizeUnit === 'kg') kgTotal = sizeVal;
+      } else if (manualUnit === 'kg') {
+        kgTotal = 1;
+      } else if (manualUnit === 'g') {
+        kgTotal = 0.001;
+      } else if (manualUnit === 'l') {
+        litersTotal = 1;
+      } else if (manualUnit === 'ml') {
+        litersTotal = 0.001;
       }
       // Czytelna etykieta zawartości, np. "400 g" / "1 l" — trafia do variant/volume_label.
+      // Dla kg/g/l (bez osobnego size) volume_label = jednostka — kolumna jest NOT NULL.
       const sizeLabel = hasSize
         ? `${manualSizeValue.trim().replace(',', '.')} ${manualSizeUnit}`
         : '';
       // `variant` ma w bazie ograniczenie NOT NULL — nigdy nie zapisujemy null.
-      const variant = sizeLabel || manualUnit;
+      const variant = sizeLabel || manualUnit || '';
+      const volumeLabel = sizeLabel || manualUnit || '';
       // Zapis do GŁÓWNEGO katalogu dostawcy (supplier_catalog) — dzięki temu produkt
       // jest brany pod uwagę przez AI podczas tworzenia ofert zamówień (compare-offers).
       const basePayload = {
         supplier_id: supplier.id,
         name: manualName.trim(),
         variant,
-        volume_label: sizeLabel || null,
+        volume_label: volumeLabel,
         unit: manualUnit,
         unit_count: 1,
         price_pln: isFinite(price) && price > 0 ? price : 0,
@@ -530,7 +541,7 @@ function SupplierCard({
   };
 
   const manualAddButton = (
-    <View style={{ paddingHorizontal: 14, paddingVertical: 10 }}>
+    <View style={{ paddingHorizontal: 14, paddingTop: 10, paddingBottom: Math.max(insets.bottom, 12) }}>
       <TouchableOpacity
         style={[
           cardStyles.manualAddBtn,
@@ -1083,6 +1094,7 @@ function SupplierCard({
           <View
             style={[
               cardStyles.manualSheet,
+              { paddingBottom: Math.max(insets.bottom, 20) + 12 },
               theme.isPremium && {
                 backgroundColor: DS.color.surfaceCard,
                 borderTopWidth: StyleSheet.hairlineWidth,

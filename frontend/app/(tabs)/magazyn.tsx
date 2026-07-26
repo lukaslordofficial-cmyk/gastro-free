@@ -56,8 +56,13 @@ import {
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
 import { namesMatch } from '@/lib/fuzzyProductMatch';
-import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
+import {
+  dedupeWarehouseCategories,
+  ensureDefaultWarehouseCategories,
+  normCategoryName,
+} from '@/lib/warehouseCategories';
 import { useAuth } from '@/contexts/AuthContext';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
 
@@ -73,6 +78,7 @@ interface MockInventoryItem {
   id: string;
   product_name: string;
   category: string;
+  category_id: string | null;
   current_qty: number;
   critical_threshold: number;
   /** Docelowy zapas — Łowca dobija do tej wartości (±10%). 0 = wylicz z progu krytycznego + bufor. */
@@ -82,6 +88,27 @@ interface MockInventoryItem {
   portion_size: number | null;
   supplier?: string;
   safety_buffer_percent: number; // min 10, default 20
+  shelf_life_days?: number | null;
+}
+
+type ComboIngredientDraft = {
+  key: string;
+  name: string;
+  quantity: string;
+  unit: string;
+  warehouse_product_id: string | null;
+};
+
+const COMBO_UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
+
+function newComboIngredient(): ComboIngredientDraft {
+  return {
+    key: `combo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: '',
+    quantity: '',
+    unit: 'g',
+    warehouse_product_id: null,
+  };
 }
 
 type MagListRow =
@@ -149,6 +176,7 @@ function mapDbRow(row: any): MockInventoryItem {
     id: row.id,
     product_name: row.name,
     category: row.inventory_categories?.name ?? 'Inne',
+    category_id: row.category_id ?? null,
     current_qty: Number(row.quantity),
     critical_threshold: Number(row.min_quantity),
     optimal_threshold: row.optimal_quantity != null ? Number(row.optimal_quantity) : 0,
@@ -157,6 +185,7 @@ function mapDbRow(row: any): MockInventoryItem {
     portion_size: row.portion_size != null ? Number(row.portion_size) : null,
     supplier: row.suppliers?.name ?? undefined,
     safety_buffer_percent: Number(row.safety_buffer_percent ?? 20),
+    shelf_life_days: row.shelf_life_days != null ? Number(row.shelf_life_days) : null,
   };
 }
 
@@ -680,6 +709,7 @@ const BLANK_FORM = {
   safetyBuffer: '20', // % — min 10
   unitWeightVolume: '', // waga/objętość 1 szt/op
   weightVolumeUnit: 'g' as 'g' | 'ml',
+  shelfLifeDays: '',
 };
 
 // ─── Main Screen ─────────────────────────────────────────────────────────────────────────────
@@ -687,6 +717,7 @@ const BLANK_FORM = {
 export default function MagazynScreen() {
   const router = useRouter();
   const theme = useAppTheme();
+  const { alert: premiumAlert } = usePremiumAlert();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const focusParams = useLocalSearchParams<{
     focusProductId?: string | string[];
@@ -707,6 +738,7 @@ export default function MagazynScreen() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [fabOpen, setFabOpen] = useState(false);
   const [form, setForm] = useState(BLANK_FORM);
+  const [comboIngredients, setComboIngredients] = useState<ComboIngredientDraft[]>([newComboIngredient()]);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [addingCat, setAddingCat] = useState(false);
@@ -736,12 +768,14 @@ export default function MagazynScreen() {
     try {
       // Uzupełnij brakujące kategorie systemowe (nie kasuje własnych użytkownika).
       await ensureDefaultWarehouseCategories(supabase, ak);
+      // Soft-dedupe: ta sama nazwa → jeden category_id (produkty przenoszone, puste dupy usuwane).
+      await dedupeWarehouseCategories(supabase, ak);
 
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase
           .from('inventory_items')
           .select(
-            'id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)',
+            'id, name, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)',
           )
           .eq('account_key', ak)
           .eq('is_active', true)
@@ -764,11 +798,11 @@ export default function MagazynScreen() {
       let itemsData = itemsRes.data;
       let itemsErr = itemsRes.error;
       // Jedna szybka ścieżka awaryjna (bez łańcucha 4× requestów)
-      if (itemsErr && /is_active|optimal_quantity|safety_buffer_percent/.test(itemsErr.message ?? '')) {
+      if (itemsErr && /is_active|optimal_quantity|safety_buffer_percent|shelf_life_days/.test(itemsErr.message ?? '')) {
         const slim = await supabase
           .from('inventory_items')
           .select(
-            'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)',
+            'id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)',
           )
           .eq('account_key', ak)
           .order('name')
@@ -822,35 +856,55 @@ export default function MagazynScreen() {
 
   const categoryIdMap = useMemo<Record<string, string>>(() => {
     const map: Record<string, string> = {};
-    dbCategories.forEach((c) => { map[c.name] = c.id; });
+    // Pierwszy wpis wygrywa — po dedupe nazwy są unikalne; przy race bierzemy stabilnie pierwsze id.
+    dbCategories.forEach((c) => {
+      if (!map[c.name]) map[c.name] = c.id;
+    });
     return map;
+  }, [dbCategories]);
+
+  const uniqueCategories = useMemo<CategoryRow[]>(() => {
+    const seen = new Set<string>();
+    const out: CategoryRow[] = [];
+    for (const c of dbCategories) {
+      const key = normCategoryName(c.name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+    }
+    return out;
   }, [dbCategories]);
 
   const categoryProductCounts = useMemo<Record<string, number>>(() => {
     const counts: Record<string, number> = {};
-    inventory.forEach((item) => { counts[item.category] = (counts[item.category] ?? 0) + 1; });
+    inventory.forEach((item) => {
+      const key = item.category_id
+        ? (uniqueCategories.find((c) => c.id === item.category_id)?.name ?? item.category)
+        : item.category;
+      counts[key] = (counts[key] ?? 0) + 1;
+    });
     return counts;
-  }, [inventory]);
+  }, [inventory, uniqueCategories]);
 
   const categorySections = useMemo(() => {
-    return [...dbCategories]
+    return [...uniqueCategories]
       .sort((a, b) => (categoryProductCounts[b.name] ?? 0) - (categoryProductCounts[a.name] ?? 0))
-      .map((c) => (
-        {
-          cat: c,
-          items: inventory.filter((item) => item.category === c.name),
-        }
-      ));
-  }, [dbCategories, inventory, categoryProductCounts]);
+      .map((c) => ({
+        cat: c,
+        items: inventory.filter((item) =>
+          item.category_id ? item.category_id === c.id : item.category === c.name,
+        ),
+      }));
+  }, [uniqueCategories, inventory, categoryProductCounts]);
 
   const formCategories = useMemo<string[]>(() => {
-    return [...dbCategories]
+    return [...uniqueCategories]
       .sort((a, b) => {
         const diff = (categoryProductCounts[b.name] ?? 0) - (categoryProductCounts[a.name] ?? 0);
         return diff !== 0 ? diff : a.name.localeCompare(b.name, 'pl');
       })
       .map((c) => c.name);
-  }, [dbCategories, categoryProductCounts]);
+  }, [uniqueCategories, categoryProductCounts]);
 
   useEffect(() => {
     if (formCategories.length > 0 && !form.category) {
@@ -872,8 +926,14 @@ export default function MagazynScreen() {
   }, [inventory, search]);
 
   const uncategorizedItems = useMemo(
-    () => inventory.filter((item) => !dbCategories.some((c) => c.name === item.category)),
-    [inventory, dbCategories],
+    () =>
+      inventory.filter((item) => {
+        if (item.category_id) {
+          return !uniqueCategories.some((c) => c.id === item.category_id);
+        }
+        return !uniqueCategories.some((c) => c.name === item.category);
+      }),
+    [inventory, uniqueCategories],
   );
 
   const magRows = useMemo((): MagListRow[] => {
@@ -908,6 +968,14 @@ export default function MagazynScreen() {
     if (savingCatRef.current) return;
     const name = newCatName.trim();
     if (!name) return;
+    const dup = uniqueCategories.find((c) => normCategoryName(c.name) === normCategoryName(name));
+    if (dup) {
+      premiumAlert('Kategoria istnieje', `Masz już kategorię „${dup.name}". Wybierz ją z listy zamiast tworzyć duplikat.`);
+      setForm((f) => ({ ...f, category: dup.name }));
+      setNewCatName('');
+      setAddingCat(false);
+      return;
+    }
     savingCatRef.current = true;
     setSavingCat(true);
     const usedColors = dbCategories.map((c) => c.color);
@@ -915,7 +983,9 @@ export default function MagazynScreen() {
       ?? CAT_AUTO_COLORS[dbCategories.length % CAT_AUTO_COLORS.length];
     const maxOrder = dbCategories.reduce((m, c) => Math.max(m, (c as any).sort_order ?? 0), 0);
     if (!accountKey || accountKey === 'default') {
-      Alert.alert('Konto', 'Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
+      premiumAlert('Konto', 'Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
+      savingCatRef.current = false;
+      setSavingCat(false);
       return;
     }
     const { data: newCat, error } = await supabase.from('inventory_categories').insert({
@@ -925,7 +995,12 @@ export default function MagazynScreen() {
     setSavingCat(false);
     if (error) {
       const msg = error.message || '';
-      Alert.alert(
+      if (/duplicate|unique|23505/i.test(msg)) {
+        premiumAlert('Kategoria istnieje', 'Kategoria o tej nazwie już jest na koncie.');
+        fetchData();
+        return;
+      }
+      premiumAlert(
         'Błąd',
         /row-level security|RLS/i.test(msg)
           ? 'Brak uprawnień do kategorii (RLS). Uruchom w Supabase FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.'
@@ -949,13 +1024,13 @@ export default function MagazynScreen() {
     const msg = count > 0
       ? `Ta kategoria zawiera ${count} ${count === 1 ? 'produkt' : 'produktów'}. Po usunięciu produkty pozostaną bez kategorii.`
       : 'Czy na pewno chcesz usunąć tę kategorię?';
-    Alert.alert('Usuń kategorię', msg, [
+    premiumAlert('Usuń kategorię', msg, [
       { text: 'Anuluj', style: 'cancel' },
       {
         text: 'Usuń', style: 'destructive',
         onPress: async () => {
           const { error } = await supabase.from('inventory_categories').delete().eq('id', cat.id);
-          if (error) Alert.alert('Błąd', error.message);
+          if (error) premiumAlert('Błąd', error.message);
           else fetchData();
         },
       },
@@ -1263,7 +1338,7 @@ export default function MagazynScreen() {
         .trim();
       const dup = inventory.find((i) => {
         if (editingId && i.id === editingId) return false;
-        const k = (i.name || '')
+        const k = (i.product_name || '')
           .toLowerCase()
           .normalize('NFD')
           .replace(/[\u0300-\u036f]/g, '')
@@ -1274,7 +1349,7 @@ export default function MagazynScreen() {
       if (dup) {
         Alert.alert(
           'Produkt już istnieje',
-          `W magazynie jest już „${dup.name}”. Edytuj istniejący wpis zamiast tworzyć duplikat (Łowca Okazji scala oferty po nazwie).`,
+          `W magazynie jest już „${dup.product_name}”. Edytuj istniejący wpis zamiast tworzyć duplikat (Łowca Okazji scala oferty po nazwie).`,
         );
         setSaving(false);
         return;
@@ -1282,6 +1357,11 @@ export default function MagazynScreen() {
 
       const isPiece = form.unit === 'szt' || form.unit === 'opak';
       const uwv = isPiece && form.unitWeightVolume.trim() ? parseFloat(form.unitWeightVolume) : null;
+      let shelfLifeDays: number | null = null;
+      if (form.isCombo && form.shelfLifeDays.trim()) {
+        const d = parseInt(form.shelfLifeDays, 10);
+        if (!isNaN(d) && d > 0) shelfLifeDays = d;
+      }
       const { getAccountKey } = await import('@/lib/accountKey');
       const ak = getAccountKey();
       const payload: any = {
@@ -1293,36 +1373,84 @@ export default function MagazynScreen() {
         optimal_quantity: optimalThreshold,
         is_combo_polprodukt: form.isCombo,
         safety_buffer_percent: safetyBuffer,
+        shelf_life_days: form.isCombo ? shelfLifeDays : null,
         unit_cost: 0,
         unit_weight_volume: uwv && !isNaN(uwv) ? uwv : null,
         weight_volume_unit: uwv && !isNaN(uwv) ? form.weightVolumeUnit : null,
         account_key: ak,
       };
-      const selectCols = 'id, name, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)';
+      const selectCols = 'id, name, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)';
       let row: any = null;
       let saveError: any = null;
       if (editingId) {
-        const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, account_key: _ak, ...core } = payload;
+        const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, shelf_life_days, account_key: _ak, ...core } = payload;
         let upd = await supabase.from('inventory_items').update(payload).eq('id', editingId).eq('account_key', ak).select(selectCols).single();
-        if (upd.error && /optimal_quantity/.test(upd.error.message ?? '')) {
-          upd = await supabase.from('inventory_items').update({ ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit }).eq('id', editingId).eq('account_key', ak).select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)').single();
+        if (upd.error && /optimal_quantity|shelf_life_days/.test(upd.error.message ?? '')) {
+          const soft = { ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit };
+          if (!/shelf_life/.test(upd.error.message ?? '')) {
+            (soft as any).shelf_life_days = shelf_life_days;
+          }
+          if (!/optimal_quantity/.test(upd.error.message ?? '')) {
+            (soft as any).optimal_quantity = optimal_quantity;
+          }
+          upd = await supabase.from('inventory_items').update(soft).eq('id', editingId).eq('account_key', ak).select('id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)').single();
         }
         row = upd.data;
         saveError = upd.error;
       } else {
         let insertRes = await supabase.from('inventory_items').insert(payload).select(selectCols).single();
-        if (insertRes.error && /optimal_quantity|safety_buffer_percent|unit_weight_volume|weight_volume_unit/.test(insertRes.error.message ?? '')) {
-          const { optimal_quantity, safety_buffer_percent, unit_weight_volume, weight_volume_unit, ...fallback } = payload;
+        if (insertRes.error && /optimal_quantity|safety_buffer_percent|unit_weight_volume|weight_volume_unit|shelf_life_days/.test(insertRes.error.message ?? '')) {
+          const { optimal_quantity, safety_buffer_percent, unit_weight_volume, weight_volume_unit, shelf_life_days, ...fallback } = payload;
           insertRes = await supabase
             .from('inventory_items')
             .insert(fallback)
-            .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+            .select('id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
             .single();
         }
         row = insertRes.data;
         saveError = insertRes.error;
       }
       if (saveError) throw saveError;
+
+      // Persist combo recipe (best-effort if tabela jeszcze nie zmigrowana)
+      const itemId = row.id as string;
+      try {
+        await supabase.from('inventory_combo_ingredients').delete().eq('inventory_item_id', itemId);
+        if (form.isCombo) {
+          const rows = comboIngredients
+            .filter((i) => i.name.trim())
+            .map((ing, idx) => {
+              const matchId =
+                ing.warehouse_product_id ||
+                inventory.find(
+                  (p) =>
+                    p.id !== itemId &&
+                    normCategoryName(p.product_name) === normCategoryName(ing.name),
+                )?.id ||
+                null;
+              return {
+                inventory_item_id: itemId,
+                ingredient_name: ing.name.trim(),
+                quantity: parseFloat(ing.quantity) || 0,
+                unit: ing.unit || 'g',
+                warehouse_product_id: matchId,
+                sort_order: idx,
+                account_key: ak,
+              };
+            });
+          if (rows.length) {
+            const { error: comboErr } = await supabase.from('inventory_combo_ingredients').insert(rows);
+            if (comboErr && !/does not exist|schema cache|relation/i.test(comboErr.message ?? '')) {
+              throw comboErr;
+            }
+          }
+        }
+      } catch (comboEx: any) {
+        if (!/does not exist|schema cache|relation/i.test(comboEx?.message ?? '')) {
+          throw comboEx;
+        }
+      }
+
       const mapped = mapDbRow(row);
       if (editingId) {
         setInventory((prev) => prev.map((i) => (i.id === editingId ? mapped : i)));
@@ -1334,6 +1462,7 @@ export default function MagazynScreen() {
         setExpandedCategories((prev) => new Set([...prev, form.category]));
       }
       setForm({ ...BLANK_FORM, category: formCategories[0] ?? '' });
+      setComboIngredients([newComboIngredient()]);
       setEditingId(null);
       setShowAddModal(false);
     } catch (e: any) {
@@ -1345,11 +1474,12 @@ export default function MagazynScreen() {
 
   function handleCloseAddModal() {
     setForm({ ...BLANK_FORM, category: formCategories[0] ?? '' });
+    setComboIngredients([newComboIngredient()]);
     setEditingId(null);
     setShowAddModal(false);
   }
 
-  function openEditItem(item: MockInventoryItem) {
+  async function openEditItem(item: MockInventoryItem) {
     setEditingId(item.id);
     setForm({
       ...BLANK_FORM,
@@ -1361,8 +1491,32 @@ export default function MagazynScreen() {
       unit: item.unit,
       isCombo: item.is_combo_półprodukt,
       safetyBuffer: String(item.safety_buffer_percent ?? 20),
+      shelfLifeDays: item.shelf_life_days != null && item.shelf_life_days > 0 ? String(item.shelf_life_days) : '',
     });
+    setComboIngredients([newComboIngredient()]);
     setShowAddModal(true);
+    if (item.is_combo_półprodukt) {
+      try {
+        const { data } = await supabase
+          .from('inventory_combo_ingredients')
+          .select('id, ingredient_name, quantity, unit, warehouse_product_id, sort_order')
+          .eq('inventory_item_id', item.id)
+          .order('sort_order');
+        if (data?.length) {
+          setComboIngredients(
+            data.map((r: any) => ({
+              key: r.id,
+              name: r.ingredient_name ?? '',
+              quantity: r.quantity != null ? String(r.quantity) : '',
+              unit: r.unit || 'g',
+              warehouse_product_id: r.warehouse_product_id ?? null,
+            })),
+          );
+        }
+      } catch {
+        /* tabela może jeszcze nie istnieć */
+      }
+    }
   }
 
   // Portion size hint
@@ -1642,7 +1796,7 @@ export default function MagazynScreen() {
                       const active = form.category === cat;
                       const color = categoryColorMap[cat] ?? FALLBACK_COLOR;
                       const count = categoryProductCounts[cat] ?? 0;
-                      const catRow = dbCategories.find((c) => c.name === cat);
+                      const catRow = uniqueCategories.find((c) => c.name === cat);
                       return (
                         <View
                           key={cat}
@@ -1732,8 +1886,7 @@ export default function MagazynScreen() {
                   placeholder="np. 5000 (docelowy zapas)"
                 />
                 <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                  Docelowy zapas do wyrobienia zamówień. Łowca Okazji dobija stan do tego progu (±10% jeśli opakowanie będzie tańsze).
-                  Puste = próg krytyczny + bufor bezpieczeństwa.
+                  Docelowa ilość, do której Łowca okazji będzie robił zakupy, gdy produkt spadnie poniżej stanu krytycznego.
                 </Text>
               </View>
               <View style={styles.fieldWrap}>
@@ -1873,13 +2026,18 @@ export default function MagazynScreen() {
                       Półprodukt / Combo
                     </Text>
                     <Text style={[styles.switchHint, theme.isPremium && { color: DS.color.muted }]}>
-                      Przygotowywany wewnętrznie z innych składników
+                      Przygotowywany wewnętrznie z innych produktów z magazynu np. Sos kurkowy do Penne z kurkami i kozim serem.
                     </Text>
                   </View>
                 </View>
                 <Switch
                   value={form.isCombo}
-                  onValueChange={(v) => setForm((f) => ({ ...f, isCombo: v }))}
+                  onValueChange={(v) => {
+                    setForm((f) => ({ ...f, isCombo: v }));
+                    if (v && comboIngredients.length === 0) {
+                      setComboIngredients([newComboIngredient()]);
+                    }
+                  }}
                   trackColor={{
                     false: theme.isPremium ? DS.color.borderSubtle : Colors.borderLight,
                     true: theme.isPremium ? 'rgba(0,230,118,0.45)' : Colors.accentLight,
@@ -1895,6 +2053,218 @@ export default function MagazynScreen() {
                   }
                 />
               </View>
+
+              {form.isCombo && (
+                <View style={{ gap: 10, marginBottom: 8 }}>
+                  <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>
+                    Receptura półproduktu
+                  </Text>
+                  {comboIngredients.map((ing, idx) => {
+                    const q = ing.name.trim().toLowerCase();
+                    const suggestions =
+                      q.length >= 2
+                        ? inventory
+                            .filter((p) => p.id !== editingId && p.product_name.toLowerCase().includes(q))
+                            .slice(0, 5)
+                        : [];
+                    return (
+                      <View
+                        key={ing.key}
+                        style={[
+                          styles.comboIngCard,
+                          theme.isPremium && {
+                            backgroundColor: DS.color.surfaceCard,
+                            borderColor: DS.color.borderSubtle,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.comboIngIndex,
+                            theme.isPremium && { color: DS.color.greenEnd },
+                          ]}
+                        >
+                          {idx + 1}
+                        </Text>
+                        <View style={{ flex: 1, gap: 8 }}>
+                          <TextInput
+                            style={[
+                              formStyles.input,
+                              { marginBottom: 0 },
+                              theme.isPremium && {
+                                backgroundColor: DS.color.bgTertiary,
+                                borderColor: DS.color.borderSubtle,
+                                color: DS.color.heading,
+                              },
+                            ]}
+                            value={ing.name}
+                            onChangeText={(v) =>
+                              setComboIngredients((prev) =>
+                                prev.map((x) =>
+                                  x.key === ing.key
+                                    ? { ...x, name: v, warehouse_product_id: null }
+                                    : x,
+                                ),
+                              )
+                            }
+                            placeholder="Nazwa składnika"
+                            placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
+                          />
+                          {suggestions.length > 0 && (
+                            <View
+                              style={[
+                                styles.comboSuggestBox,
+                                theme.isPremium && {
+                                  backgroundColor: DS.color.bgTertiary,
+                                  borderColor: DS.color.borderSubtle,
+                                },
+                              ]}
+                            >
+                              {suggestions.map((s) => (
+                                <TouchableOpacity
+                                  key={s.id}
+                                  onPress={() =>
+                                    setComboIngredients((prev) =>
+                                      prev.map((x) =>
+                                        x.key === ing.key
+                                          ? {
+                                              ...x,
+                                              name: s.product_name,
+                                              unit: s.unit === 'opak' ? 'szt' : s.unit,
+                                              warehouse_product_id: s.id,
+                                            }
+                                          : x,
+                                      ),
+                                    )
+                                  }
+                                  style={styles.comboSuggestRow}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.comboSuggestText,
+                                      theme.isPremium && { color: DS.color.heading },
+                                    ]}
+                                  >
+                                    {s.product_name}
+                                  </Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          )}
+                          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                            <TextInput
+                              style={[
+                                formStyles.input,
+                                { flex: 1, marginBottom: 0 },
+                                theme.isPremium && {
+                                  backgroundColor: DS.color.bgTertiary,
+                                  borderColor: DS.color.borderSubtle,
+                                  color: DS.color.heading,
+                                },
+                              ]}
+                              value={ing.quantity}
+                              onChangeText={(v) =>
+                                setComboIngredients((prev) =>
+                                  prev.map((x) =>
+                                    x.key === ing.key ? { ...x, quantity: v.replace(',', '.') } : x,
+                                  ),
+                                )
+                              }
+                              placeholder="Ilość"
+                              placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
+                              keyboardType="decimal-pad"
+                            />
+                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, flex: 1.4 }}>
+                              {COMBO_UNIT_OPTIONS.map((u) => {
+                                const active = ing.unit === u;
+                                return (
+                                  <TouchableOpacity
+                                    key={u}
+                                    style={[
+                                      styles.unitBtn,
+                                      { paddingHorizontal: 8, paddingVertical: 6 },
+                                      theme.isPremium && {
+                                        backgroundColor: DS.color.bgTertiary,
+                                        borderColor: DS.color.borderSubtle,
+                                      },
+                                      active &&
+                                        (theme.isPremium
+                                          ? {
+                                              backgroundColor: DS.color.greenEnd,
+                                              borderColor: DS.color.greenEnd,
+                                            }
+                                          : styles.unitBtnActive),
+                                    ]}
+                                    onPress={() =>
+                                      setComboIngredients((prev) =>
+                                        prev.map((x) =>
+                                          x.key === ing.key ? { ...x, unit: u } : x,
+                                        ),
+                                      )
+                                    }
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.unitBtnText,
+                                        theme.isPremium && !active && { color: DS.color.muted },
+                                        active &&
+                                          (theme.isPremium
+                                            ? { color: '#0A0A0A', fontWeight: '800' }
+                                            : styles.unitBtnTextActive),
+                                      ]}
+                                    >
+                                      {u}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                            <TouchableOpacity
+                              onPress={() =>
+                                setComboIngredients((prev) =>
+                                  prev.length <= 1
+                                    ? [newComboIngredient()]
+                                    : prev.filter((x) => x.key !== ing.key),
+                                )
+                              }
+                              hitSlop={8}
+                            >
+                              <Trash2 size={14} color={Colors.danger} strokeWidth={2} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      </View>
+                    );
+                  })}
+                  <TouchableOpacity
+                    style={[
+                      styles.addIngBtn,
+                      theme.isPremium && {
+                        borderColor: DS.color.greenEnd,
+                        backgroundColor: 'rgba(0,255,120,0.1)',
+                      },
+                    ]}
+                    onPress={() => setComboIngredients((prev) => [...prev, newComboIngredient()])}
+                    activeOpacity={0.8}
+                  >
+                    <Plus size={15} color={theme.isPremium ? DS.color.greenEnd : Colors.accent} strokeWidth={2.5} />
+                    <Text style={[styles.addIngBtnText, theme.isPremium && { color: DS.color.greenEnd }]}>
+                      Dodaj składnik
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={styles.fieldWrap}>
+                    <FieldLabel text="Trwałość (dni w chłodni)" />
+                    <NumericInput
+                      value={form.shelfLifeDays}
+                      onChange={(v) => setForm((f) => ({ ...f, shelfLifeDays: v }))}
+                      placeholder="np. 3"
+                    />
+                    <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
+                      Ile dni półprodukt utrzymuje jakość w idealnych warunkach chłodniczych.
+                    </Text>
+                  </View>
+                </View>
+              )}
 
               <View style={styles.fieldWrap}>
                 <FieldLabel text={`Bufor bezpieczeństwa (%) — min 10, domyślnie 20`} />
@@ -1918,6 +2288,7 @@ export default function MagazynScreen() {
                       id: '__preview__',
                       product_name: form.name.trim(),
                       category: form.category,
+                      category_id: categoryIdMap[form.category] ?? null,
                       current_qty: parseFloat(form.currentQty) || 0,
                       critical_threshold: parseFloat(form.criticalThreshold) || 1,
                       optimal_threshold: parseFloat(form.optimalThreshold) || 0,
@@ -1925,6 +2296,7 @@ export default function MagazynScreen() {
                       is_combo_półprodukt: form.isCombo,
                       portion_size: null,
                       safety_buffer_percent: parseFloat(form.safetyBuffer) || 20,
+                      shelf_life_days: form.shelfLifeDays ? parseInt(form.shelfLifeDays, 10) : null,
                     }}
                     catColor={categoryColorMap[form.category] ?? FALLBACK_COLOR}
                   />
@@ -2143,6 +2515,36 @@ const styles = StyleSheet.create({
   switchInfo: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, flex: 1 },
   switchLabel: { fontSize: 14, fontWeight: '600', color: Colors.textPrimary },
   switchHint: { fontSize: 11, color: Colors.textSecondary, marginTop: 2, lineHeight: 15 },
+  comboIngCard: {
+    flexDirection: 'row',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: Colors.card,
+  },
+  comboIngIndex: { fontSize: 13, fontWeight: '800', color: Colors.accent, marginTop: 10 },
+  comboSuggestBox: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  comboSuggestRow: { paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: Colors.borderLight },
+  comboSuggestText: { fontSize: 13, color: Colors.textPrimary, fontWeight: '500' },
+  addIngBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderWidth: 1.5,
+    borderColor: Colors.accent,
+    borderRadius: 10,
+    paddingVertical: 10,
+    backgroundColor: Colors.accentLight,
+  },
+  addIngBtnText: { fontSize: 13, fontWeight: '700', color: Colors.accent },
   previewWrap: { marginTop: 8, marginBottom: 4 },
   previewLabel: { fontSize: 11, fontWeight: '600', color: Colors.textSecondary, letterSpacing: 0.4, marginBottom: 8 },
   saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: Colors.accent, paddingVertical: 15, borderRadius: 12, marginTop: 8, shadowColor: Colors.accent, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.25, shadowRadius: 6, elevation: 5 },

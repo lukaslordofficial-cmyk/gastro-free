@@ -13,7 +13,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
   Building2,
@@ -47,6 +47,7 @@ import { AppScreenHeader } from '@/components/premium/AppScreenHeader';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { PremiumFinanceScreen } from '@/components/premium/PremiumFinanceScreen';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
+import { DS } from '@/constants/premiumTheme';
 
 const _now = new Date();
 const CURRENT_MONTH = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}`;
@@ -151,6 +152,9 @@ const BASE_FIXED_TYPES = [
 ];
 
 function AddFixedCostModal({ visible, onClose, onSaved }: { visible: boolean; onClose: () => void; onSaved: () => void }) {
+  const theme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const prem = theme.isPremium;
   const [selectedKey, setSelectedKey] = useState<string>('rent');
   const selectedKeyRef = useRef('rent');
   const [customCategories, setCustomCategories] = useState<string[]>([]);
@@ -223,56 +227,148 @@ function AddFixedCostModal({ visible, onClose, onSaved }: { visible: boolean; on
 
   return (
     <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <KeyboardAvoidingView style={ms.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={ms.sheet}>
+      <KeyboardAvoidingView
+        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View
+          style={[
+            ms.sheet,
+            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
+            prem && {
+              backgroundColor: DS.color.surfaceCard,
+              borderTopWidth: StyleSheet.hairlineWidth,
+              borderTopColor: DS.color.borderSubtle,
+            },
+          ]}
+        >
           <View style={ms.header}>
-            <Text style={ms.title}>Dodaj koszt stały</Text>
-            <TouchableOpacity onPress={onClose}><X size={20} color={Colors.textSecondary} strokeWidth={2} /></TouchableOpacity>
+            <Text style={[ms.title, prem && { color: DS.color.heading }]}>Dodaj koszt stały</Text>
+            <TouchableOpacity onPress={onClose}>
+              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
+            </TouchableOpacity>
           </View>
-          <Text style={ms.label}>Kategoria</Text>
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kategoria</Text>
           <View style={ms.typeRow}>
             {BASE_FIXED_TYPES.map((t) => (
               <TouchableOpacity
                 key={t.key}
-                style={[ms.pill, selectedKey === t.key && !showNewInput && ms.pillActive]}
+                style={[
+                  ms.pill,
+                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
+                  selectedKey === t.key && !showNewInput && (prem
+                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
+                    : ms.pillActive),
+                ]}
                 onPress={() => selectKey(t.key)}
               >
-                <Text style={[ms.pillText, selectedKey === t.key && !showNewInput && ms.pillTextActive]}>{t.label}</Text>
+                <Text
+                  style={[
+                    ms.pillText,
+                    prem && { color: DS.color.muted },
+                    selectedKey === t.key && !showNewInput && (prem
+                      ? { color: DS.color.greenEnd, fontWeight: '800' }
+                      : ms.pillTextActive),
+                  ]}
+                >
+                  {t.label}
+                </Text>
               </TouchableOpacity>
             ))}
             {customCategories.map((cat) => (
               <TouchableOpacity
                 key={cat}
-                style={[ms.pill, selectedKey === cat && !showNewInput && ms.pillActive]}
+                style={[
+                  ms.pill,
+                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
+                  selectedKey === cat && !showNewInput && (prem
+                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
+                    : ms.pillActive),
+                ]}
                 onPress={() => selectKey(cat)}
               >
-                <Text style={[ms.pillText, selectedKey === cat && !showNewInput && ms.pillTextActive]}>{cat}</Text>
+                <Text
+                  style={[
+                    ms.pillText,
+                    prem && { color: DS.color.muted },
+                    selectedKey === cat && !showNewInput && (prem
+                      ? { color: DS.color.greenEnd, fontWeight: '800' }
+                      : ms.pillTextActive),
+                  ]}
+                >
+                  {cat}
+                </Text>
               </TouchableOpacity>
             ))}
-            <TouchableOpacity style={[ms.pill, showNewInput && ms.pillActive]} onPress={() => setShowNewInput((v) => !v)}>
-              <Plus size={13} color={showNewInput ? Colors.accent : Colors.textSecondary} strokeWidth={2.5} />
+            <TouchableOpacity
+              style={[
+                ms.pill,
+                prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
+                showNewInput && (prem
+                  ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
+                  : ms.pillActive),
+              ]}
+              onPress={() => setShowNewInput((v) => !v)}
+            >
+              <Plus size={13} color={showNewInput ? (prem ? DS.color.greenEnd : Colors.accent) : (prem ? DS.color.muted : Colors.textSecondary)} strokeWidth={2.5} />
             </TouchableOpacity>
           </View>
           {showNewInput && (
             <View style={ms.newCatRow}>
               <TextInput
-                style={[ms.input, { flex: 1, marginBottom: 0 }]}
+                style={[
+                  ms.input,
+                  { flex: 1, marginBottom: 0 },
+                  prem && {
+                    backgroundColor: DS.color.bgTertiary,
+                    borderColor: DS.color.borderSubtle,
+                    color: DS.color.heading,
+                  },
+                ]}
                 value={newCatName}
                 onChangeText={(text) => { setNewCatName(text); newCatValueRef.current = text; }}
                 placeholder="Nazwa kategorii..."
-                placeholderTextColor={Colors.textTertiary}
+                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
                 autoFocus
                 onSubmitEditing={confirmNewCategory}
               />
-              <TouchableOpacity style={ms.newCatConfirm} onPress={confirmNewCategory}>
-                <Check size={16} color={Colors.white} strokeWidth={2.5} />
+              <TouchableOpacity
+                style={[ms.newCatConfirm, prem && { backgroundColor: DS.color.greenEnd }]}
+                onPress={confirmNewCategory}
+              >
+                <Check size={16} color={prem ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
               </TouchableOpacity>
             </View>
           )}
-          <Text style={ms.label}>Kwota (PLN) *</Text>
-          <TextInput style={ms.input} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={Colors.textTertiary} />
-          <TouchableOpacity style={[ms.saveBtn, saving && ms.saveBtnDisabled]} onPress={handleSave} disabled={saving} activeOpacity={0.85}>
-            {saving ? <ActivityIndicator size="small" color={Colors.white} /> : <Text style={ms.saveBtnText}>Zapisz koszt</Text>}
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
+          <TextInput
+            style={[
+              ms.input,
+              prem && {
+                backgroundColor: DS.color.bgTertiary,
+                borderColor: DS.color.borderSubtle,
+                color: DS.color.heading,
+              },
+            ]}
+            value={amount}
+            onChangeText={setAmount}
+            keyboardType="decimal-pad"
+            placeholder="0.00"
+            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
+          />
+          <TouchableOpacity
+            style={[
+              ms.saveBtn,
+              prem && { backgroundColor: DS.color.greenEnd },
+              saving && ms.saveBtnDisabled,
+            ]}
+            onPress={handleSave}
+            disabled={saving}
+            activeOpacity={0.85}
+          >
+            {saving
+              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
+              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz koszt</Text>}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -288,6 +384,9 @@ const BASE_VAR_TYPES = [
 ];
 
 function AddVariableCostModal({ visible, onClose, onSaved }: { visible: boolean; onClose: () => void; onSaved: () => void }) {
+  const theme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const prem = theme.isPremium;
   const [selectedKey, setSelectedKey] = useState<string>('materials');
   const selectedKeyRef = useRef('materials');
   const [customCategories, setCustomCategories] = useState<string[]>([]);
@@ -359,56 +458,148 @@ function AddVariableCostModal({ visible, onClose, onSaved }: { visible: boolean;
 
   return (
     <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <KeyboardAvoidingView style={ms.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={ms.sheet}>
+      <KeyboardAvoidingView
+        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View
+          style={[
+            ms.sheet,
+            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
+            prem && {
+              backgroundColor: DS.color.surfaceCard,
+              borderTopWidth: StyleSheet.hairlineWidth,
+              borderTopColor: DS.color.borderSubtle,
+            },
+          ]}
+        >
           <View style={ms.header}>
-            <Text style={ms.title}>Dodaj koszt zmienny</Text>
-            <TouchableOpacity onPress={onClose}><X size={20} color={Colors.textSecondary} strokeWidth={2} /></TouchableOpacity>
+            <Text style={[ms.title, prem && { color: DS.color.heading }]}>Dodaj koszt zmienny</Text>
+            <TouchableOpacity onPress={onClose}>
+              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
+            </TouchableOpacity>
           </View>
-          <Text style={ms.label}>Kategoria</Text>
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kategoria</Text>
           <View style={ms.typeRow}>
             {BASE_VAR_TYPES.map((t) => (
               <TouchableOpacity
                 key={t.key}
-                style={[ms.pill, selectedKey === t.key && !showNewInput && ms.pillActive]}
+                style={[
+                  ms.pill,
+                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
+                  selectedKey === t.key && !showNewInput && (prem
+                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
+                    : ms.pillActive),
+                ]}
                 onPress={() => selectKey(t.key)}
               >
-                <Text style={[ms.pillText, selectedKey === t.key && !showNewInput && ms.pillTextActive]}>{t.label}</Text>
+                <Text
+                  style={[
+                    ms.pillText,
+                    prem && { color: DS.color.muted },
+                    selectedKey === t.key && !showNewInput && (prem
+                      ? { color: DS.color.greenEnd, fontWeight: '800' }
+                      : ms.pillTextActive),
+                  ]}
+                >
+                  {t.label}
+                </Text>
               </TouchableOpacity>
             ))}
             {customCategories.map((cat) => (
               <TouchableOpacity
                 key={cat}
-                style={[ms.pill, selectedKey === cat && !showNewInput && ms.pillActive]}
+                style={[
+                  ms.pill,
+                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
+                  selectedKey === cat && !showNewInput && (prem
+                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
+                    : ms.pillActive),
+                ]}
                 onPress={() => selectKey(cat)}
               >
-                <Text style={[ms.pillText, selectedKey === cat && !showNewInput && ms.pillTextActive]}>{cat}</Text>
+                <Text
+                  style={[
+                    ms.pillText,
+                    prem && { color: DS.color.muted },
+                    selectedKey === cat && !showNewInput && (prem
+                      ? { color: DS.color.greenEnd, fontWeight: '800' }
+                      : ms.pillTextActive),
+                  ]}
+                >
+                  {cat}
+                </Text>
               </TouchableOpacity>
             ))}
-            <TouchableOpacity style={[ms.pill, showNewInput && ms.pillActive]} onPress={() => setShowNewInput((v) => !v)}>
-              <Plus size={13} color={showNewInput ? Colors.accent : Colors.textSecondary} strokeWidth={2.5} />
+            <TouchableOpacity
+              style={[
+                ms.pill,
+                prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
+                showNewInput && (prem
+                  ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
+                  : ms.pillActive),
+              ]}
+              onPress={() => setShowNewInput((v) => !v)}
+            >
+              <Plus size={13} color={showNewInput ? (prem ? DS.color.greenEnd : Colors.accent) : (prem ? DS.color.muted : Colors.textSecondary)} strokeWidth={2.5} />
             </TouchableOpacity>
           </View>
           {showNewInput && (
             <View style={ms.newCatRow}>
               <TextInput
-                style={[ms.input, { flex: 1, marginBottom: 0 }]}
+                style={[
+                  ms.input,
+                  { flex: 1, marginBottom: 0 },
+                  prem && {
+                    backgroundColor: DS.color.bgTertiary,
+                    borderColor: DS.color.borderSubtle,
+                    color: DS.color.heading,
+                  },
+                ]}
                 value={newCatName}
                 onChangeText={(text) => { setNewCatName(text); newCatValueRef.current = text; }}
                 placeholder="Nazwa kategorii..."
-                placeholderTextColor={Colors.textTertiary}
+                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
                 autoFocus
                 onSubmitEditing={confirmNewCategory}
               />
-              <TouchableOpacity style={ms.newCatConfirm} onPress={confirmNewCategory}>
-                <Check size={16} color={Colors.white} strokeWidth={2.5} />
+              <TouchableOpacity
+                style={[ms.newCatConfirm, prem && { backgroundColor: DS.color.greenEnd }]}
+                onPress={confirmNewCategory}
+              >
+                <Check size={16} color={prem ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
               </TouchableOpacity>
             </View>
           )}
-          <Text style={ms.label}>Kwota (PLN) *</Text>
-          <TextInput style={ms.input} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={Colors.textTertiary} />
-          <TouchableOpacity style={[ms.saveBtn, saving && ms.saveBtnDisabled]} onPress={handleSave} disabled={saving} activeOpacity={0.85}>
-            {saving ? <ActivityIndicator size="small" color={Colors.white} /> : <Text style={ms.saveBtnText}>Zapisz koszt</Text>}
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
+          <TextInput
+            style={[
+              ms.input,
+              prem && {
+                backgroundColor: DS.color.bgTertiary,
+                borderColor: DS.color.borderSubtle,
+                color: DS.color.heading,
+              },
+            ]}
+            value={amount}
+            onChangeText={setAmount}
+            keyboardType="decimal-pad"
+            placeholder="0.00"
+            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
+          />
+          <TouchableOpacity
+            style={[
+              ms.saveBtn,
+              prem && { backgroundColor: DS.color.greenEnd },
+              saving && ms.saveBtnDisabled,
+            ]}
+            onPress={handleSave}
+            disabled={saving}
+            activeOpacity={0.85}
+          >
+            {saving
+              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
+              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz koszt</Text>}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>

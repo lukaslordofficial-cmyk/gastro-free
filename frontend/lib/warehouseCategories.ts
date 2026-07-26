@@ -31,7 +31,7 @@ export const DEFAULT_WAREHOUSE_CATEGORIES: WarehouseCategorySeed[] = [
 
 export const DOC_WAREHOUSE_CATEGORIES = DEFAULT_WAREHOUSE_CATEGORIES.map((c) => c.name);
 
-function normName(s: string): string {
+export function normCategoryName(s: string): string {
   return s
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -42,6 +42,7 @@ function normName(s: string): string {
 /**
  * Upsert brakujących kategorii systemowych dla danego account_key.
  * Nie usuwa ani nie nadpisuje kategorii utworzonych przez użytkownika.
+ * Insert po jednej — unikamy race / unique violation przy już istniejących duplikatach.
  */
 export async function ensureDefaultWarehouseCategories(
   supabase: SupabaseClient,
@@ -56,27 +57,106 @@ export async function ensureDefaultWarehouseCategories(
     .from('inventory_categories')
     .select('id, name')
     .eq('account_key', ak)
-    .limit(200);
+    .limit(500);
 
   if (loadErr) {
     return { created: 0, error: loadErr.message };
   }
 
-  const have = new Set((existing || []).map((r: { name?: string }) => normName(r.name || '')));
-  const missing = DEFAULT_WAREHOUSE_CATEGORIES.filter((c) => !have.has(normName(c.name)));
+  const have = new Set((existing || []).map((r: { name?: string }) => normCategoryName(r.name || '')));
+  const missing = DEFAULT_WAREHOUSE_CATEGORIES.filter((c) => !have.has(normCategoryName(c.name)));
   if (!missing.length) return { created: 0 };
 
-  const rows = missing.map((c) => ({
-    name: c.name,
-    color: c.color,
-    icon_name: 'package',
-    sort_order: c.sort_order,
-    account_key: ak,
-  }));
-
-  const { error: insErr } = await supabase.from('inventory_categories').insert(rows);
-  if (insErr) {
-    return { created: 0, error: insErr.message };
+  let created = 0;
+  for (const c of missing) {
+    const { error: insErr } = await supabase.from('inventory_categories').insert({
+      name: c.name,
+      color: c.color,
+      icon_name: 'package',
+      sort_order: c.sort_order,
+      account_key: ak,
+    });
+    if (insErr) {
+      // Unique / race — kategoria już jest; nie przerywaj całego seedu.
+      if (/duplicate|unique|23505/i.test(insErr.message ?? '')) continue;
+      return { created, error: insErr.message };
+    }
+    created += 1;
+    have.add(normCategoryName(c.name));
   }
-  return { created: rows.length };
+  return { created };
+}
+
+type CatRow = { id: string; name: string; color?: string; sort_order?: number | null };
+
+/**
+ * Soft-dedupe: ta sama nazwa (norm) na koncie → jeden keeper.
+ * Produkty z duplikatów dostają category_id keepera; puste duplikaty usuwane.
+ * Nie rusza kategorii o unikalnych nazwach.
+ */
+export async function dedupeWarehouseCategories(
+  supabase: SupabaseClient,
+  accountKey: string,
+): Promise<{ merged: number; error?: string }> {
+  const ak = (accountKey || '').trim();
+  if (!ak || ak === 'default') return { merged: 0 };
+
+  const { data: cats, error: catErr } = await supabase
+    .from('inventory_categories')
+    .select('id, name, color, sort_order')
+    .eq('account_key', ak)
+    .limit(500);
+  if (catErr) return { merged: 0, error: catErr.message };
+  if (!cats?.length) return { merged: 0 };
+
+  const { data: items } = await supabase
+    .from('inventory_items')
+    .select('id, category_id')
+    .eq('account_key', ak)
+    .limit(5000);
+
+  const countByCat = new Map<string, number>();
+  for (const it of items || []) {
+    const cid = (it as { category_id?: string | null }).category_id;
+    if (!cid) continue;
+    countByCat.set(cid, (countByCat.get(cid) ?? 0) + 1);
+  }
+
+  const groups = new Map<string, CatRow[]>();
+  for (const c of cats as CatRow[]) {
+    const key = normCategoryName(c.name || '');
+    if (!key) continue;
+    const arr = groups.get(key) ?? [];
+    arr.push(c);
+    groups.set(key, arr);
+  }
+
+  let merged = 0;
+  for (const [, group] of groups) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => {
+      const ca = countByCat.get(a.id) ?? 0;
+      const cb = countByCat.get(b.id) ?? 0;
+      if (cb !== ca) return cb - ca;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    const keeper = group[0];
+    for (const dup of group.slice(1)) {
+      const { error: moveErr } = await supabase
+        .from('inventory_items')
+        .update({ category_id: keeper.id })
+        .eq('category_id', dup.id)
+        .eq('account_key', ak);
+      if (moveErr) return { merged, error: moveErr.message };
+
+      const { error: delErr } = await supabase
+        .from('inventory_categories')
+        .delete()
+        .eq('id', dup.id)
+        .eq('account_key', ak);
+      if (delErr) return { merged, error: delErr.message };
+      merged += 1;
+    }
+  }
+  return { merged };
 }

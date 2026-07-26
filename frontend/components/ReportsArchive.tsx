@@ -5,7 +5,7 @@
  * Renderowane jako blok wewnątrz ScrollView Panelu Finansowego.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, Modal, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, Modal, ScrollView, AppState } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
   ChevronRight, ChevronDown, FileText, Sparkles, CalendarClock, RefreshCw,
@@ -109,8 +109,8 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
   const [openWeek, setOpenWeek] = useState<string | null>(null);    // `${year}-${month}-${week}`
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const fetchReports = useCallback(async () => {
-    setLoading(true);
+  const fetchReports = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     try {
       const r = await fetch(`${BACKEND_URL}/api/reports/daily`);
       const d = await r.json();
@@ -118,14 +118,26 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
       setReports(list);
       setNeedsMigration(!!d.needs_migration);
       if (list.length && openYear === null) setOpenYear(list[0].year);
+      if (Array.isArray(d.auto_closed_dates) && d.auto_closed_dates.length) {
+        setMsg(`Auto-zamknięto raporty: ${d.auto_closed_dates.join(', ')}`);
+        onClosedDay?.();
+      }
     } catch {
-      setReports([]);
+      if (!opts?.silent) setReports([]);
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
-  }, [openYear]);
+  }, [openYear, onClosedDay]);
 
   useEffect(() => { fetchReports(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Foreground → ponów GET (backend auto-zamyka raporty dobowe po ≥25h od poprzedniego).
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') fetchReports({ silent: true });
+    });
+    return () => sub.remove();
+  }, [fetchReports]);
 
   const closeDay = useCallback(async () => {
     setClosing(true);
@@ -179,7 +191,7 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
           <Text style={styles.trendTitle}>Analiza Trendów AI</Text>
         </View>
         <Text style={styles.trendSub}>
-          Wybierz okres: tydzień / miesiąc / rok. Zysk = utarg − stałe − koszty zmienne (bez podwójnego liczenia strat).
+          Wybierz okres: tydzień / miesiąc / rok. (Zysk = utarg - koszty stałe - koszty zmienne)
         </Text>
         <View style={styles.trendBtnRow}>
           <TouchableOpacity

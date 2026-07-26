@@ -34,6 +34,7 @@ Data: 2026-07-25.
 | **Soft-delete magazynu** | UI + Jarvis usuwają przez `is_active=false` (wymaga migracji `ADD_SOFT_DELETE.sql`). Bez migracji — fallback hard-delete. |
 | **OCR / Inspiracje AI** | Wymagają backendu + OpenAI + kredytów; bez tego wpis ręczny. |
 | **Dane demo** | Finance/PnL sensowne po seedzie lub realnych wpisach. |
+| **Auto-close raportów dobowych** | Po ≥25h od ostatniego „Zamknij dzień” brakujące dni (do wczoraj) domykają się przy ładowaniu Raportów / foreground — bez GPT (oszczędność kredytów). Sync z wydrukiem POS = TODO później. |
 
 ## Co nie jest blokerem smoke’a w LAN
 

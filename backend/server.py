@@ -9246,6 +9246,152 @@ async def _generate_day_summary(httpx_c: httpx.AsyncClient,
                 f"zysk netto {profit} zł.", {"credits_deducted": 0})
 
 
+# Safety net: zapomniane „Zamknij dzień” — auto-domknięcie po ≥25h od poprzedniego raportu.
+DAILY_REPORT_AUTO_CLOSE_HOURS = 25
+
+
+def _parse_iso_dt(value) -> "datetime | None":
+    from datetime import datetime as _dt, timezone as _tz
+    if not value:
+        return None
+    try:
+        s = str(value).strip().replace("Z", "+00:00")
+        dt = _dt.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        return dt
+    except Exception:
+        return None
+
+
+async def _persist_daily_report(
+    client,
+    day: str,
+    *,
+    revenue: float | None = None,
+    waste: float | None = None,
+    invoice: float | None = None,
+    use_ai: bool = True,
+    auto_closed: bool = False,
+    allow_overwrite: bool = True,
+) -> tuple[dict | None, dict, str | None]:
+    """Agregacja + zapis daily_reports (wspólne dla ręcznego i auto zamknięcia).
+
+    Zwraca (record_or_none, billing, skip_reason). skip_reason='exists' gdy dzień
+    już zamknięty i allow_overwrite=False (auto-close — bez podwójnego liczenia).
+    """
+    from datetime import date as _date
+
+    d_obj = _date.fromisoformat(day)
+    if revenue is None:
+        revenue = await _sum_amount_for_day(client, "revenue_entries", day)
+    if invoice is None:
+        invoice = await _sum_amount_for_day(
+            client, "variable_cost_entries", day, {"type": "eq.materials"}
+        )
+    if waste is None:
+        waste = await _sum_amount_for_day(
+            client, "variable_cost_entries", day, {"type": "eq.waste"}
+        )
+
+    existing = await sb_get(
+        client, "daily_reports",
+        params={"select": "id", "date": f"eq.{day}", "limit": "1"},
+    )
+    if existing and not allow_overwrite:
+        return None, {"credits_deducted": 0}, "exists"
+
+    if use_ai:
+        summary, billing = await _generate_day_summary(client, revenue, waste, invoice, day)
+    else:
+        profit = round(float(revenue) - float(waste) - float(invoice), 2)
+        # Auto-close: bez GPT (nie spalaj kredytów w tle); treść jak fallback ręcznego zamknięcia.
+        summary = (
+            f"[Auto] Zamknięto automatycznie po {DAILY_REPORT_AUTO_CLOSE_HOURS}h od poprzedniego raportu. "
+            f"Utarg {revenue} zł, straty {waste} zł, koszty faktur {invoice} zł, zysk netto {profit} zł."
+        )
+        billing = {"credits_deducted": 0}
+        if auto_closed:
+            pass  # flaga tylko dla czytelności wywołań
+
+    record = {
+        "date": day,
+        "total_revenue": revenue,
+        "total_waste_cost": waste,
+        "total_invoice_cost": invoice,
+        "ai_summary": summary,
+        "year": d_obj.year,
+        "month": d_obj.month,
+        "week_of_month": _week_of_month(d_obj),
+    }
+    if existing:
+        await sb_patch(client, "daily_reports", {"date": f"eq.{day}"}, record)
+        record["id"] = existing[0]["id"]
+    else:
+        row = await sb_post(client, "daily_reports", record)
+        record["id"] = (row[0] if isinstance(row, list) else row).get("id")
+    return record, billing, None
+
+
+async def _auto_close_stale_daily_reports(client) -> list[str]:
+    """Domyka brakujące raporty dobowe, gdy od last close minęło ≥25h.
+
+    Trigger: GET /api/reports/daily (ładowanie Raportów / foreground refresh).
+    Zakres: dni od (ostatni_raport.date + 1) do wczoraj (UTC), bez nadpisywania istniejących.
+
+    TODO(POS): gdy POS będzie podłączony i stabilny — synchronizuj zamknięcie dnia
+    z wydrukiem raportu dobowego z kasy (przy print/close POS wciągaj P&L do rubryk).
+    Na razie tylko safety-net w aplikacji, bez integracji POS.
+    """
+    from datetime import datetime as _dt, timezone as _tz, date as _date, timedelta as _td
+
+    try:
+        rows = await sb_get(
+            client, "daily_reports",
+            params={"select": "date,created_at", "order": "date.desc", "limit": "1"},
+        ) or []
+    except httpx.HTTPStatusError:
+        return []
+
+    if not rows:
+        return []
+
+    last = rows[0]
+    last_date_s = str(last.get("date") or "")[:10]
+    closed_at = _parse_iso_dt(last.get("created_at"))
+    if not last_date_s or closed_at is None:
+        return []
+
+    now = _dt.now(_tz.utc)
+    hours_since = (now - closed_at).total_seconds() / 3600.0
+    if hours_since < DAILY_REPORT_AUTO_CLOSE_HOURS:
+        return []
+
+    try:
+        last_d = _date.fromisoformat(last_date_s)
+    except ValueError:
+        return []
+
+    yesterday = now.date() - _td(days=1)
+    closed_days: list[str] = []
+    d = last_d + _td(days=1)
+    # Ogranicz kaskadę (np. po dłuższej przerwie) — max 14 dni na jedno wywołanie.
+    while d <= yesterday and len(closed_days) < 14:
+        day_s = d.isoformat()
+        try:
+            rec, _billing, skip = await _persist_daily_report(
+                client, day_s, use_ai=False, auto_closed=True, allow_overwrite=False,
+            )
+            if rec and not skip:
+                closed_days.append(day_s)
+                logger.info(f"daily_reports auto-close: {day_s}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"daily_reports auto-close failed for {day_s}: {e}")
+            break
+        d += _td(days=1)
+    return closed_days
+
+
 @app.post("/api/pos/close-day")
 async def pos_close_day(req: CloseDayRequest):
     """Zamknięcie dnia: agreguje utarg/straty/koszty, generuje podsumowanie AI (GPT-4o-mini)
@@ -9253,54 +9399,57 @@ async def pos_close_day(req: CloseDayRequest):
     from datetime import datetime as _dt, timezone as _tz, date as _date
     day = (req.date or _dt.now(_tz.utc).strftime("%Y-%m-%d")).strip()
     try:
-        d_obj = _date.fromisoformat(day)
+        _date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="Nieprawidłowa data (YYYY-MM-DD).")
 
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        revenue = req.total_revenue if req.total_revenue is not None else \
-            await _sum_amount_for_day(client, "revenue_entries", day)
-        invoice = req.total_invoice_cost if req.total_invoice_cost is not None else \
-            await _sum_amount_for_day(client, "variable_cost_entries", day, {"type": "eq.materials"})
-        waste = req.total_waste_cost if req.total_waste_cost is not None else \
-            await _sum_amount_for_day(client, "variable_cost_entries", day, {"type": "eq.waste"})
-
-        summary, billing = await _generate_day_summary(client, revenue, waste, invoice, day)
-        record = {
-            "date": day, "total_revenue": revenue, "total_waste_cost": waste,
-            "total_invoice_cost": invoice, "ai_summary": summary,
-            "year": d_obj.year, "month": d_obj.month, "week_of_month": _week_of_month(d_obj),
-        }
         try:
-            existing = await sb_get(client, "daily_reports",
-                                    params={"select": "id", "date": f"eq.{day}", "limit": "1"})
-            if existing:
-                await sb_patch(client, "daily_reports", {"date": f"eq.{day}"}, record)
-                rec_id = existing[0]["id"]
-            else:
-                row = await sb_post(client, "daily_reports", record)
-                rec_id = (row[0] if isinstance(row, list) else row).get("id")
+            record, billing, _skip = await _persist_daily_report(
+                client,
+                day,
+                revenue=req.total_revenue,
+                waste=req.total_waste_cost,
+                invoice=req.total_invoice_cost,
+                use_ai=True,
+                allow_overwrite=True,
+            )
         except httpx.HTTPStatusError as e:
             if _is_missing_column_error(e) or "daily_reports" in (e.response.text or "").lower() \
                     or e.response.status_code == 404:
                 return {"ok": False, "needs_migration": True,
-                        "message": "Uruchom migrację ADD_DAILY_REPORTS.sql w Supabase (tabela daily_reports).",
-                        "report": record}
+                        "message": "Uruchom migrację ADD_DAILY_REPORTS.sql w Supabase (tabela daily_reports)."}
             raise HTTPException(status_code=502, detail=f"daily_reports: {e.response.text}") from e
 
-    return _with_billing({"ok": True, "id": rec_id, "report": record,
-            "message": f"Raport dobowy {day} zapisany. Zysk netto: {round(revenue - waste - invoice, 2)} zł."},
-                         billing)
+    revenue = float((record or {}).get("total_revenue") or 0)
+    waste = float((record or {}).get("total_waste_cost") or 0)
+    invoice = float((record or {}).get("total_invoice_cost") or 0)
+    return _with_billing({
+        "ok": True,
+        "id": (record or {}).get("id"),
+        "report": record,
+        "message": (
+            f"Raport dobowy {day} zapisany. "
+            f"Zysk netto: {round(revenue - waste - invoice, 2)} zł."
+        ),
+    }, billing)
 
 
 @app.get("/api/reports/daily")
 async def reports_daily():
-    """Zwraca wszystkie raporty dobowe (sort malejąco po dacie) do archiwum w UI."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+    """Zwraca wszystkie raporty dobowe (sort malejąco po dacie) do archiwum w UI.
+
+    Przy okazji uruchamia safety-net auto-close (≥25h od poprzedniego zamknięcia).
+    """
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
         try:
+            auto_closed = await _auto_close_stale_daily_reports(client)
             rows = await sb_get(client, "daily_reports",
                                 params={"select": "*", "order": "date.desc", "limit": "2000"})
-            return {"ok": True, "reports": rows or []}
+            out = {"ok": True, "reports": rows or []}
+            if auto_closed:
+                out["auto_closed_dates"] = auto_closed
+            return out
         except httpx.HTTPStatusError:
             return {"ok": True, "reports": [], "needs_migration": True}
 

@@ -294,6 +294,20 @@ export function PremiumFinanceScreen(props: Props) {
   const totalCosts = totalFixed + totalVariable;
   const netProfit = totalRevenue - totalCosts;
 
+  /** Panel KPI → te same drzewa ExpandableDateJournal co w zakładce Raporty. */
+  const openRaportyRevenueTree = () => {
+    setView('raporty');
+    setOpenRevenue(true);
+    setOpenFixed(false);
+    setOpenVariable(false);
+  };
+  const openRaportyCostsTrees = () => {
+    setView('raporty');
+    setOpenRevenue(false);
+    setOpenFixed(true);
+    setOpenVariable(true);
+  };
+
   const availableYears = useMemo(() => {
     const nowY = new Date().getFullYear();
     const ys = new Set<number>([nowY]);
@@ -714,15 +728,29 @@ export function PremiumFinanceScreen(props: Props) {
             <Text style={styles.sectionLabel}>Wyniki bieżącego miesiąca</Text>
             <View style={styles.kpiRow}>
               <Animated.View entering={FadeInDown.delay(120).duration(400)} style={styles.kpi}>
-                <Text style={styles.kpiTitle}>Przychód</Text>
-                <AnimatedCounter value={totalRevenue} formatValue={formatPLN} style={styles.kpiValue} />
+                <TouchableOpacity
+                  style={styles.kpiTap}
+                  onPress={openRaportyRevenueTree}
+                  activeOpacity={0.85}
+                  testID="kpi-przychod-open-tree"
+                >
+                  <Text style={styles.kpiTitle}>Przychód</Text>
+                  <AnimatedCounter value={totalRevenue} formatValue={formatPLN} style={styles.kpiValue} />
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.kpiAdd} onPress={props.onAddRevenue}>
                   <Plus size={14} color={PremiumColors.neon} strokeWidth={2.5} />
                 </TouchableOpacity>
               </Animated.View>
               <Animated.View entering={FadeInDown.delay(180).duration(400)} style={styles.kpi}>
-                <Text style={styles.kpiTitle}>Koszty łącznie</Text>
-                <AnimatedCounter value={totalCosts} formatValue={formatPLN} style={styles.kpiValue} />
+                <TouchableOpacity
+                  style={styles.kpiTap}
+                  onPress={openRaportyCostsTrees}
+                  activeOpacity={0.85}
+                  testID="kpi-koszty-open-trees"
+                >
+                  <Text style={styles.kpiTitle}>Koszty łącznie</Text>
+                  <AnimatedCounter value={totalCosts} formatValue={formatPLN} style={styles.kpiValue} />
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.kpiAdd} onPress={props.onAddFixed}>
                   <Plus size={14} color={PremiumColors.neon} strokeWidth={2.5} />
                 </TouchableOpacity>
@@ -1056,6 +1084,7 @@ const styles = StyleSheet.create({
   kpiTitle: { color: PremiumColors.textMuted, fontSize: 11, fontWeight: '500', marginBottom: 6 },
   kpiValue: { color: PremiumColors.text, fontSize: 18, fontWeight: '700', letterSpacing: -0.4 },
   kpiSub: { color: PremiumColors.textSecondary, fontSize: 12, marginTop: 6 },
+  kpiTap: { paddingRight: 28 },
   kpiAdd: {
     position: 'absolute',
     top: 10,

@@ -40,6 +40,7 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     if (!isAuthenticated) {
       setState(null);
       setLoading(false);
+      // Wylogowany — jasny ekran auth; zalogowany zawsze dark premium (closed beta).
       await setAppearance('free');
       return;
     }
@@ -51,11 +52,13 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     try {
       const next = await fetchSubscriptionState();
       setState(next);
-      const wantPremium = Number(next.credits_balance) > 0;
-      await setAppearance(wantPremium ? 'premium' : 'free');
+      // Closed beta: Free plan też dostaje dark premium chrome.
+      // NIE bramkuj wyglądu kredytami / tierem (wipe SQL zerował kredyty → biały UI).
+      await setAppearance('premium');
     } catch {
       setState(null);
-      await setAppearance('free');
+      // Zalogowany mimo błędu subskrypcji — nadal dark premium.
+      await setAppearance('premium');
     } finally {
       setLoading(false);
     }
@@ -79,7 +82,8 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     credits: state?.credits_balance ?? 0,
     // Closed beta / Internal Testing: bez reklam (AdMob wyłączony w UI).
     hasAds: false,
-    premiumUi: !!state?.premium_ui,
+    // Closed beta: dark premium chrome dla wszystkich zalogowanych (nie zależy od płatnego tieru).
+    premiumUi: isAuthenticated ? true : !!state?.premium_ui,
     dealHunterUnlocked: !!state?.deal_hunter_unlocked,
     refresh,
     subscribe: (t) => wrap(() => subscribeTier(t)),
@@ -91,7 +95,7 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
       await refresh();
       return r;
     },
-  }), [state, loading, refresh, wrap]);
+  }), [state, loading, refresh, wrap, isAuthenticated]);
 
   return (
     <SubscriptionContext.Provider value={value}>

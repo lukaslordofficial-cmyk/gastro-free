@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Platform,
   TextInput,
+  Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
@@ -28,8 +29,6 @@ import {
   TrendingUp,
   ChevronDown,
 } from 'lucide-react-native';
-import { Colors } from '@/constants/colors';
-import { useAppTheme } from '@/hooks/useAppTheme';
 import { DS } from '@/constants/premiumTheme';
 import { formatPln, formatPlnNumber, parsePln } from '@/lib/format';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
@@ -44,7 +43,29 @@ import {
   type CommitProduct,
 } from '@/components/InvoiceExpiryReviewForm';
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
+const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
+
+/** Client abort — Railway/proxy often dies ~100s; fail with clear message sooner. */
+const PROCESS_TIMEOUT_MS = 95_000;
+
+const C = {
+  bg: '#0A120E',
+  card: DS.color.surfaceCard,
+  elevated: DS.color.surfaceElevated,
+  border: DS.color.borderSubtle,
+  text: DS.color.heading,
+  body: DS.color.body,
+  muted: DS.color.muted,
+  green: DS.color.greenEnd,
+  greenSoft: 'rgba(0,255,120,0.12)',
+  danger: DS.color.danger,
+  dangerSoft: DS.color.dangerSoft,
+  warning: DS.color.warning,
+  warningSoft: DS.color.warningSoft,
+  warningBorder: DS.color.warningBorder,
+  blackOnGreen: '#0A0A0A',
+  inputBg: DS.color.bgTertiary,
+};
 
 export const DOC_CATEGORIES = [
   'Mięso i wędliny', 'Nabiał', 'Warzywa i owoce', 'Alkohole', 'Napoje',
@@ -89,6 +110,48 @@ interface Props {
   onMenuDetected?: () => void;
 }
 
+const PROCESSING_MESSAGES = [
+  'Agent AI analizuje wgrany dokument…',
+  'Rozpoznaję typ dokumentu i pozycje…',
+  'Segreguję produkty do właściwych zakładek…',
+  'Po zakończeniu zapiszę dane i Cię powiadomię.',
+];
+
+function friendlyApiError(status: number, detail: string): string {
+  const raw = `${detail || ''}`.toLowerCase();
+  if (
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    raw.includes('application failed to respond') ||
+    raw.includes('failed to respond') ||
+    raw.includes('timeout') ||
+    raw.includes('timed out') ||
+    raw.includes('aborted')
+  ) {
+    return (
+      'Serwer AI nie zdążył odpowiedzieć (timeout). '
+      + 'Spróbuj ponownie z krótszym plikiem (max ~4 strony) albo zdjęciem.'
+    );
+  }
+  if (!BACKEND_URL) return 'Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).';
+  if (typeof detail === 'string' && detail.trim() && !raw.startsWith('<!')) {
+    return detail.trim();
+  }
+  return `Błąd serwera (${status || '?'}). Spróbuj ponownie.`;
+}
+
+async function parseErrorDetail(res: Response): Promise<string> {
+  const txt = await res.text();
+  try {
+    const j = JSON.parse(txt);
+    const d = j?.detail ?? j?.message ?? j?.error ?? txt;
+    return typeof d === 'string' ? d : JSON.stringify(d);
+  } catch {
+    return txt || `HTTP ${res.status}`;
+  }
+}
+
 export function CatalogScanModal({
   supplierId,
   supplierName,
@@ -98,16 +161,8 @@ export function CatalogScanModal({
   scanContext = 'supplier',
   onMenuDetected,
 }: Props) {
-  const theme = useAppTheme();
   const insets = useSafeAreaInsets();
   const footerPad = Math.max(insets.bottom, 12) + 8;
-  const prem = theme.isPremium;
-  const scanBg = prem ? DS.color.bgPrimary : Colors.background;
-  const scanCard = prem ? DS.color.surfaceCard : Colors.card;
-  const scanBorder = prem ? DS.color.borderSubtle : Colors.border;
-  const scanText = prem ? DS.color.heading : Colors.textPrimary;
-  const scanMuted = prem ? DS.color.muted : Colors.textSecondary;
-  const scanAccent = theme.accent;
   const { setCameraOverlay } = useUiOverlay();
   const { showInterstitial } = useAds();
   const { tier, credits } = useSubscription();
@@ -115,7 +170,6 @@ export function CatalogScanModal({
   const [stage, setStage] = useState<Stage>('choose');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DocResult | null>(null);
-  // invoice preview
   const [invSupplierId, setInvSupplierId] = useState<string | null>(null);
   const [invSupplierName, setInvSupplierName] = useState<string>('');
   const [invTotal, setInvTotal] = useState<number>(0);
@@ -124,6 +178,11 @@ export function CatalogScanModal({
   const [destination, setDestination] = useState<'inventory' | 'variable_cost' | 'fixed_cost'>('inventory');
   const [expiryDrafts, setExpiryDrafts] = useState<ExpiryProductDraft[]>([]);
   const [userCategories, setUserCategories] = useState<string[]>(DOC_CATEGORIES);
+  const [processingMsgIdx, setProcessingMsgIdx] = useState(0);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [scanBusy, setScanBusy] = useState(false);
+  const backgroundRef = useRef(false);
+  const processingRef = useRef(false);
 
   const categoryOptions = React.useMemo(() => {
     const set = new Set<string>();
@@ -142,12 +201,17 @@ export function CatalogScanModal({
     setPickerIndex(null);
     setDestination('inventory');
     setExpiryDrafts([]);
+    setProcessingMsgIdx(0);
+    setElapsedSec(0);
+    setScanBusy(false);
+    backgroundRef.current = false;
+    processingRef.current = false;
   }, []);
 
   useEffect(() => {
-    setCameraOverlay(visible);
+    setCameraOverlay(visible || scanBusy);
     return () => setCameraOverlay(false);
-  }, [visible, setCameraOverlay]);
+  }, [visible, scanBusy, setCameraOverlay]);
 
   useEffect(() => {
     if (!visible || !isSupabaseConfigured) return;
@@ -171,15 +235,37 @@ export function CatalogScanModal({
     return () => { cancelled = true; };
   }, [visible]);
 
+  useEffect(() => {
+    if (stage !== 'processing') return;
+    setProcessingMsgIdx(0);
+    setElapsedSec(0);
+    const msgTimer = setInterval(() => {
+      setProcessingMsgIdx((i) => (i + 1) % PROCESSING_MESSAGES.length);
+    }, 3500);
+    const secTimer = setInterval(() => {
+      setElapsedSec((s) => s + 1);
+    }, 1000);
+    return () => {
+      clearInterval(msgTimer);
+      clearInterval(secTimer);
+    };
+  }, [stage]);
+
   const handleClose = useCallback(() => {
+    if (stage === 'processing') {
+      backgroundRef.current = true;
+      onClose();
+      return;
+    }
     reset();
     onClose();
-  }, [reset, onClose]);
+  }, [stage, reset, onClose]);
 
   const handleDoneClose = useCallback(async () => {
     await showInterstitial();
-    handleClose();
-  }, [showInterstitial, handleClose]);
+    reset();
+    onClose();
+  }, [showInterstitial, reset, onClose]);
 
   const ensureCredits = useCallback((): boolean => {
     if (tier === 0 && credits <= 0) {
@@ -189,11 +275,45 @@ export function CatalogScanModal({
     return true;
   }, [tier, credits]);
 
+  const finishWithResult = useCallback(
+    (data: DocResult) => {
+      processingRef.current = false;
+      setScanBusy(false);
+      setResult(data);
+      setStage('result');
+      onConfirmed();
+      if (backgroundRef.current) {
+        backgroundRef.current = false;
+        const isOffer = data.document_type === 'OFERTA_HANDLOWA';
+        Alert.alert(
+          isOffer ? 'Oferta handlowa gotowa' : 'Dokument gotowy',
+          isOffer
+            ? `AI zapisało ofertę${data.supplier_name ? ` dla „${data.supplier_name}”` : ''} w zakładce Dostawcy. Listy odświeżono.`
+            : 'AI zapisało dane w odpowiednich zakładkach. Listy odświeżono.',
+          [{ text: 'OK' }],
+        );
+      }
+    },
+    [onConfirmed],
+  );
+
   const processFile = useCallback(
     async (uri: string, name: string, mimeType: string) => {
       if (!ensureCredits()) return;
+      if (!BACKEND_URL) {
+        setError('Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).');
+        setStage('choose');
+        return;
+      }
+      processingRef.current = true;
+      setScanBusy(true);
+      backgroundRef.current = false;
       setStage('processing');
       setError(null);
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), PROCESS_TIMEOUT_MS);
+
       try {
         const form = new FormData();
         form.append('file', { uri, name, type: mimeType } as any);
@@ -203,20 +323,23 @@ export function CatalogScanModal({
           method: 'POST',
           headers: backendTenantHeaders(),
           body: form,
+          signal: ctrl.signal,
         });
         if (!res.ok) {
-          const txt = await res.text();
-          let detail = txt;
-          try { detail = JSON.parse(txt).detail ?? txt; } catch {}
-          throw new Error(detail || `Błąd serwera (${res.status})`);
+          const detail = await parseErrorDetail(res);
+          throw new Error(friendlyApiError(res.status, detail));
         }
         const data = await res.json();
         if (data.document_type === 'MENU_RESTAURACYJNE' || data.open_menu_scan) {
+          processingRef.current = false;
+          setScanBusy(false);
           onMenuDetected?.();
           onClose();
           return;
         }
         if (data.document_type === 'FAKTURA_ZAKUPOWA') {
+          processingRef.current = false;
+          setScanBusy(false);
           setInvSupplierId(data.supplier_id ?? null);
           setInvSupplierName(data.supplier_name ?? '');
           setInvTotal(Number(data.total_amount ?? 0));
@@ -233,46 +356,105 @@ export function CatalogScanModal({
             }))
           );
           setStage('invoice_preview');
+          if (backgroundRef.current) {
+            backgroundRef.current = false;
+            Alert.alert(
+              'Faktura rozpoznana',
+              'Otwórz ponownie skaner, aby sprawdzić pozycje i zatwierdzić.',
+              [{ text: 'OK' }],
+            );
+          }
         } else {
-          setResult(data);
-          setStage('result');
-          onConfirmed();
+          finishWithResult(data);
         }
       } catch (e: any) {
-        setError(e.message ?? 'Nie udało się przetworzyć dokumentu.');
+        processingRef.current = false;
+        setScanBusy(false);
+        const aborted = e?.name === 'AbortError' || /aborted/i.test(String(e?.message || ''));
+        const msg = aborted
+          ? friendlyApiError(504, 'timeout')
+          : (e?.message ?? 'Nie udało się przetworzyć dokumentu.');
+        setError(msg);
         setStage('choose');
+        if (backgroundRef.current) {
+          backgroundRef.current = false;
+          Alert.alert('Skan nieudany', msg, [{ text: 'OK' }]);
+        }
+      } finally {
+        clearTimeout(timer);
       }
     },
-    [supplierId, onConfirmed, ensureCredits, onMenuDetected, onClose]
+    [supplierId, ensureCredits, onMenuDetected, onClose, finishWithResult]
   );
 
   const handlePickFile = useCallback(async () => {
-    const r = await DocumentPicker.getDocumentAsync({
-      type: ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'],
-      copyToCacheDirectory: true,
-    });
-    if (r.canceled || !r.assets?.[0]) return;
-    const a = r.assets[0];
-    await processFile(a.uri, a.name ?? 'dokument', a.mimeType ?? 'application/pdf');
-  }, [processFile]);
+    if (!ensureCredits()) return;
+    // Pokaż status od razu — DocumentPicker potrafi „zniknąć” z modalem na Androidzie.
+    processingRef.current = true;
+    setScanBusy(true);
+    setStage('processing');
+    setError(null);
+    setProcessingMsgIdx(0);
+    try {
+      const r = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'],
+        copyToCacheDirectory: true,
+      });
+      if (r.canceled || !r.assets?.[0]) {
+        processingRef.current = false;
+        setScanBusy(false);
+        setStage('choose');
+        return;
+      }
+      const a = r.assets[0];
+      await processFile(a.uri, a.name ?? 'dokument', a.mimeType ?? 'application/pdf');
+    } catch (e: any) {
+      processingRef.current = false;
+      setScanBusy(false);
+      setError(e?.message ?? 'Nie udało się wybrać pliku.');
+      setStage('choose');
+    }
+  }, [processFile, ensureCredits]);
 
   const handleCamera = useCallback(async () => {
-    let perm = await ImagePicker.getCameraPermissionsAsync();
-    if (!perm.granted && perm.canAskAgain) perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      setError('Brak dostępu do aparatu. Włącz uprawnienia aparatu w Ustawieniach.');
-      return;
+    if (!ensureCredits()) return;
+    processingRef.current = true;
+    setScanBusy(true);
+    setStage('processing');
+    setError(null);
+    try {
+      let perm = await ImagePicker.getCameraPermissionsAsync();
+      if (!perm.granted && perm.canAskAgain) perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        processingRef.current = false;
+        setScanBusy(false);
+        setError('Brak dostępu do aparatu. Włącz uprawnienia aparatu w Ustawieniach.');
+        setStage('choose');
+        return;
+      }
+      const r = await ImagePicker.launchCameraAsync({ quality: 0.85, mediaTypes: ['images'] });
+      if (r.canceled || !r.assets?.[0]) {
+        processingRef.current = false;
+        setScanBusy(false);
+        setStage('choose');
+        return;
+      }
+      const a = r.assets[0];
+      await processFile(a.uri, a.fileName ?? 'zdjecie.jpg', a.mimeType ?? 'image/jpeg');
+    } catch (e: any) {
+      processingRef.current = false;
+      setScanBusy(false);
+      setError(e?.message ?? 'Nie udało się zrobić zdjęcia.');
+      setStage('choose');
     }
-    const r = await ImagePicker.launchCameraAsync({ quality: 0.85, mediaTypes: ['images'] });
-    if (r.canceled || !r.assets?.[0]) return;
-    const a = r.assets[0];
-    await processFile(a.uri, a.fileName ?? 'zdjecie.jpg', a.mimeType ?? 'image/jpeg');
-  }, [processFile]);
+  }, [processFile, ensureCredits]);
 
   const confirmInvoice = useCallback(async (productsOverride?: Array<InvoiceProduct | CommitProduct>) => {
     if (!ensureCredits()) return;
     setStage('processing');
     setError(null);
+    processingRef.current = true;
+    setScanBusy(true);
     try {
       const products = productsOverride ?? invProducts;
       const { apiJsonHeaders } = await import('@/lib/apiHeaders');
@@ -288,20 +470,18 @@ export function CatalogScanModal({
         }),
       });
       if (!res.ok) {
-        const txt = await res.text();
-        let detail = txt;
-        try { detail = JSON.parse(txt).detail ?? txt; } catch {}
-        throw new Error(detail || `Błąd serwera (${res.status})`);
+        const detail = await parseErrorDetail(res);
+        throw new Error(friendlyApiError(res.status, detail));
       }
       const data = await res.json();
-      setResult(data);
-      setStage('result');
-      onConfirmed();
+      finishWithResult(data);
     } catch (e: any) {
+      processingRef.current = false;
+      setScanBusy(false);
       setError(e.message ?? 'Nie udało się zaksięgować faktury.');
       setStage(destination === 'inventory' && expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
     }
-  }, [invSupplierId, invSupplierName, invTotal, invProducts, destination, onConfirmed, ensureCredits, expiryDrafts.length]);
+  }, [invSupplierId, invSupplierName, invTotal, invProducts, destination, ensureCredits, expiryDrafts.length, finishWithResult]);
 
   const goToExpiryReview = useCallback(() => {
     if (destination !== 'inventory') {
@@ -332,46 +512,52 @@ export function CatalogScanModal({
   const isInvoice = result?.document_type === 'FAKTURA_ZAKUPOWA';
   const headerSub = supplierId ? supplierName : (invSupplierName || 'AI rozpozna dostawcę');
 
+  // Gdy wracamy z „tła” i wynik już jest — pokaż result
+  useEffect(() => {
+    if (visible && result && stage === 'result') {
+      backgroundRef.current = false;
+    }
+  }, [visible, result, stage]);
+
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
-      <SafeAreaView style={[styles.container, { backgroundColor: scanBg }]} edges={['top', 'bottom']}>
-        <View style={[styles.header, { backgroundColor: scanCard, borderBottomColor: scanBorder }]}>
+      <SafeAreaView style={[styles.container, { backgroundColor: C.bg }]} edges={['top', 'bottom']}>
+        <View style={[styles.header, { backgroundColor: C.card, borderBottomColor: C.border }]}>
           <View style={styles.headerLeft}>
-            <View style={[styles.headerIcon, prem && { backgroundColor: 'rgba(0,255,120,0.12)' }]}>
-              <ScanLine size={18} color={scanAccent} strokeWidth={2} />
+            <View style={[styles.headerIcon, { backgroundColor: C.greenSoft }]}>
+              <ScanLine size={18} color={C.green} strokeWidth={2} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.title, { color: scanText }]}>Skan dokumentu AI</Text>
-              <Text style={[styles.subtitle, { color: scanMuted }]} numberOfLines={1}>{headerSub}</Text>
+              <Text style={[styles.title, { color: C.text }]}>Skan dokumentu AI</Text>
+              <Text style={[styles.subtitle, { color: C.muted }]} numberOfLines={1}>{headerSub}</Text>
             </View>
           </View>
           <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} testID="doc-scan-close">
-            <X size={22} color={scanMuted} strokeWidth={2} />
+            <X size={22} color={C.muted} strokeWidth={2} />
           </TouchableOpacity>
         </View>
 
         {error && (
-          <View style={styles.errorBox} testID="doc-scan-error">
-            <CircleAlert size={15} color={Colors.danger} strokeWidth={2} />
-            <Text style={styles.errorText}>{error}</Text>
+          <View style={[styles.errorBox, { backgroundColor: C.dangerSoft, borderColor: 'rgba(255,90,90,0.35)' }]} testID="doc-scan-error">
+            <CircleAlert size={15} color={C.danger} strokeWidth={2} />
+            <Text style={[styles.errorText, { color: C.danger }]}>{error}</Text>
           </View>
         )}
 
         {stage === 'choose' && (
           <ScrollView contentContainerStyle={styles.chooseWrap}>
-            <View style={[styles.hintCard, prem && { backgroundColor: DS.color.warningSoft, borderColor: DS.color.warningBorder }]}>
-              <Sparkles size={16} color={prem ? DS.color.warning : Colors.warning} strokeWidth={2} />
-              <Text style={[styles.hintText, { color: scanMuted }]}>
+            <View style={[styles.hintCard, { backgroundColor: C.warningSoft, borderColor: C.warningBorder }]}>
+              <Sparkles size={16} color={C.warning} strokeWidth={2} />
+              <Text style={[styles.hintText, { color: C.body }]}>
                 {scanContext === 'warehouse' ? (
                   <>
-                    <Text style={[styles.b, { color: scanText }]}>Wgraj fakturę zakupową.</Text>
-                    {' '}System automatycznie doda produkty do magazynu i zwiększy koszty zmienne.
-                    Możesz też uzupełnić formularz dat ważności, jeśli chcesz by aplikacja
-                    poinformowała cię o kończącym się terminie przydatności produktów.
+                    <Text style={[styles.b, { color: C.text }]}>Wgraj fakturę zakupową lub ofertę handlową.</Text>
+                    {' '}System rozpoznaje typ dokumentu: faktura trafi do magazynu/kosztów, oferta — do katalogu dostawcy.
+                    Po analizie AI zapisze dane we właściwych zakładkach i Cię powiadomi.
                   </>
                 ) : (
                   <>
-                    <Text style={[styles.b, { color: scanText }]}>Wgraj ofertę dostawcy, lub fakturę</Text>
+                    <Text style={[styles.b, { color: C.text }]}>Wgraj ofertę dostawcy, lub fakturę</Text>
                     {' '}na produkty, które od niego kupiłeś. System automatycznie stworzy profil
                     tego dostawcy, uzupełni jego dane, i doda produkty z dokumentu do jego katalogu.
                     Gdy będziesz chciał złożyć zamówienie produktowe, skorzysta z podanych danych,
@@ -381,111 +567,137 @@ export function CatalogScanModal({
               </Text>
             </View>
             <TouchableOpacity
-              style={[styles.sourceBtn, { backgroundColor: scanCard, borderColor: scanBorder }]}
+              style={[styles.sourceBtn, { backgroundColor: C.card, borderColor: C.border }]}
               onPress={handleCamera}
               testID="doc-scan-camera"
               activeOpacity={0.85}
             >
-              <View style={[styles.sourceIcon, { backgroundColor: prem ? 'rgba(0,255,120,0.12)' : Colors.accentLight }]}>
-                <Camera size={22} color={scanAccent} strokeWidth={2} />
+              <View style={[styles.sourceIcon, { backgroundColor: C.greenSoft }]}>
+                <Camera size={22} color={C.green} strokeWidth={2} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.sourceTitle, { color: scanText }]}>Zrób zdjęcie</Text>
-                <Text style={[styles.sourceSub, { color: scanMuted }]}>
+                <Text style={[styles.sourceTitle, { color: C.text }]}>Zrób zdjęcie</Text>
+                <Text style={[styles.sourceSub, { color: C.muted }]}>
                   {scanContext === 'warehouse'
-                    ? 'Sfotografuj fakturę'
+                    ? 'Sfotografuj fakturę lub ofertę'
                     : 'Sfotografuj fakturę lub ofertę'}
                 </Text>
               </View>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.sourceBtn, { backgroundColor: scanCard, borderColor: scanBorder }]}
+              style={[styles.sourceBtn, { backgroundColor: C.card, borderColor: C.border }]}
               onPress={handlePickFile}
               testID="doc-scan-file"
               activeOpacity={0.85}
             >
-              <View style={[styles.sourceIcon, { backgroundColor: prem ? 'rgba(0,255,120,0.12)' : '#F0FDF4' }]}>
-                <FileText size={22} color={prem ? DS.color.greenEnd : Colors.success} strokeWidth={2} />
+              <View style={[styles.sourceIcon, { backgroundColor: C.greenSoft }]}>
+                <FileText size={22} color={C.green} strokeWidth={2} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.sourceTitle, { color: scanText }]}>Wgraj plik</Text>
-                <Text style={[styles.sourceSub, { color: scanMuted }]}>PDF, JPG lub PNG</Text>
+                <Text style={[styles.sourceTitle, { color: C.text }]}>Wgraj plik</Text>
+                <Text style={[styles.sourceSub, { color: C.muted }]}>PDF, JPG lub PNG</Text>
               </View>
             </TouchableOpacity>
           </ScrollView>
         )}
 
         {stage === 'processing' && (
-          <View style={styles.center}>
-            <ActivityIndicator size="large" color={scanAccent} />
-            <Text style={[styles.analyzingTitle, { color: scanText }]}>Przetwarzanie…</Text>
-            <Text style={[styles.analyzingSub, { color: scanMuted }]}>GPT-4o rozpoznaje i kategoryzuje</Text>
+          <View style={styles.center} testID="doc-scan-processing">
+            <View style={[styles.processingOrb, { backgroundColor: C.greenSoft, borderColor: C.green }]}>
+              <ActivityIndicator size="large" color={C.green} />
+            </View>
+            <Text style={[styles.analyzingTitle, { color: C.text }]}>Skan dokumentu AI</Text>
+            <Text style={[styles.analyzingSub, { color: C.body }]}>
+              {PROCESSING_MESSAGES[processingMsgIdx]}
+            </Text>
+            <View style={[styles.processingCard, { backgroundColor: C.card, borderColor: C.border }]}>
+              <Text style={[styles.processingCardText, { color: C.muted }]}>
+                Po zakończeniu agent zapisze dane we właściwych zakładkach (Dostawcy / Magazyn)
+                i wyświetli podsumowanie. Możesz zostawić ten ekran otwarty albo wrócić do pulpitu —
+                praca trwa w tle.
+              </Text>
+              <Text style={[styles.elapsed, { color: C.green }]}>
+                {elapsedSec < 60
+                  ? `${elapsedSec} s`
+                  : `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')}`}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.bgBtn, { borderColor: C.border }]}
+              onPress={handleClose}
+              activeOpacity={0.85}
+              testID="doc-scan-background"
+            >
+              <Text style={[styles.bgBtnText, { color: C.body }]}>Kontynuuj w tle</Text>
+            </TouchableOpacity>
           </View>
         )}
 
         {stage === 'invoice_preview' && (
           <>
             <View style={styles.invHeader}>
-              <View style={styles.typeBadge}>
-                <ReceiptText size={13} color={Colors.success} strokeWidth={2} />
-                <Text style={[styles.typeBadgeText, { color: Colors.success }]}>Faktura zakupowa</Text>
+              <View style={[styles.typeBadge, { backgroundColor: C.greenSoft }]}>
+                <ReceiptText size={13} color={C.green} strokeWidth={2} />
+                <Text style={[styles.typeBadgeText, { color: C.green }]}>Faktura zakupowa</Text>
               </View>
-              <Text style={styles.invTotal}>Do zapłaty: {formatPln(invTotal)}</Text>
+              <Text style={[styles.invTotal, { color: C.text }]}>Do zapłaty: {formatPln(invTotal)}</Text>
             </View>
-            <Text style={styles.invHint}>Sprawdź ilość, cenę i kategorię. Możesz je poprawić przy każdej pozycji — AI mogło się pomylić przy niewyraźnych cyfrach.</Text>
+            <Text style={[styles.invHint, { color: C.muted }]}>
+              Sprawdź ilość, cenę i kategorię. Możesz je poprawić przy każdej pozycji — AI mogło się pomylić przy niewyraźnych cyfrach.
+            </Text>
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.previewContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               {invProducts.map((p, idx) => (
-                <View key={`${p.product_name}-${idx}`} style={[styles.row, { backgroundColor: scanCard, borderColor: scanBorder }]} testID={`invoice-row-${idx}`}>
+                <View key={`${p.product_name}-${idx}`} style={[styles.row, { backgroundColor: C.card, borderColor: C.border }]} testID={`invoice-row-${idx}`}>
                   <View style={{ flex: 1, gap: 8 }}>
-                    <Text style={[styles.rowName, { color: scanText }]}>{p.product_name}</Text>
+                    <Text style={[styles.rowName, { color: C.text }]}>{p.product_name}</Text>
 
                     <View style={styles.editFieldsRow}>
                       <View style={styles.editField}>
-                        <Text style={styles.editLabel}>Ilość</Text>
-                        <View style={styles.editInputWrap}>
+                        <Text style={[styles.editLabel, { color: C.muted }]}>Ilość</Text>
+                        <View style={[styles.editInputWrap, { backgroundColor: C.inputBg, borderColor: C.border }]}>
                           <TextInput
-                            style={styles.editInput}
+                            style={[styles.editInput, { color: C.text }]}
                             value={String(p.quantity ?? '')}
                             onChangeText={(v) => setRowQuantity(idx, v)}
                             keyboardType="decimal-pad"
                             selectTextOnFocus
                             testID={`invoice-quantity-${idx}`}
                           />
-                          <Text style={styles.editSuffix}>{p.unit}</Text>
+                          <Text style={[styles.editSuffix, { color: C.muted }]}>{p.unit}</Text>
                         </View>
                       </View>
                       <View style={styles.editField}>
-                        <Text style={styles.editLabel}>Cena netto</Text>
-                        <View style={styles.editInputWrap}>
+                        <Text style={[styles.editLabel, { color: C.muted }]}>Cena netto</Text>
+                        <View style={[styles.editInputWrap, { backgroundColor: C.inputBg, borderColor: C.border }]}>
                           <TextInput
-                            style={styles.editInput}
+                            style={[styles.editInput, { color: C.text }]}
                             value={formatPlnNumber(p.price_netto)}
                             onChangeText={(v) => setRowPrice(idx, v)}
                             keyboardType="decimal-pad"
                             selectTextOnFocus
                             testID={`invoice-price-${idx}`}
                           />
-                          <Text style={styles.editSuffix}>zł</Text>
+                          <Text style={[styles.editSuffix, { color: C.muted }]}>zł</Text>
                         </View>
                       </View>
                     </View>
 
                     <TouchableOpacity
-                      style={styles.catChip}
+                      style={[styles.catChip, { backgroundColor: C.greenSoft, borderColor: 'rgba(0,255,120,0.28)' }]}
                       onPress={() => setPickerIndex(idx)}
                       activeOpacity={0.7}
                       testID={`invoice-category-${idx}`}
                     >
-                      <Text style={styles.catChipText}>{p.category}</Text>
-                      <ChevronDown size={13} color={Colors.accent} strokeWidth={2.5} />
+                      <Text style={[styles.catChipText, { color: C.green }]}>{p.category}</Text>
+                      <ChevronDown size={13} color={C.green} strokeWidth={2.5} />
                     </TouchableOpacity>
                   </View>
                 </View>
               ))}
               <View style={{ height: 12 }} />
             </ScrollView>
-            <View style={[styles.footer, { backgroundColor: scanCard, borderTopColor: scanBorder, paddingBottom: footerPad }]}>
-              <Text style={styles.destLabel}>Gdzie zaksięgować?</Text>
+            <View style={[styles.footer, { backgroundColor: C.card, borderTopColor: C.border, paddingBottom: footerPad }]}>
+              <Text style={[styles.destLabel, { color: C.muted }]}>Gdzie zaksięgować?</Text>
               <View style={styles.destRow}>
                 {(
                   [
@@ -496,19 +708,32 @@ export function CatalogScanModal({
                 ).map(([id, label]) => (
                   <TouchableOpacity
                     key={id}
-                    style={[styles.destChip, destination === id && styles.destChipActive]}
+                    style={[
+                      styles.destChip,
+                      { borderColor: C.border, backgroundColor: C.inputBg },
+                      destination === id && { borderColor: C.green, backgroundColor: C.greenSoft },
+                    ]}
                     onPress={() => setDestination(id)}
                     activeOpacity={0.85}
                   >
-                    <Text style={[styles.destChipText, destination === id && styles.destChipTextActive]}>
+                    <Text style={[
+                      styles.destChipText,
+                      { color: C.muted },
+                      destination === id && { color: C.green },
+                    ]}>
                       {label}
                     </Text>
                   </TouchableOpacity>
                 ))}
               </View>
-              <TouchableOpacity style={styles.confirmBtn} onPress={goToExpiryReview} activeOpacity={0.85} testID="invoice-confirm-btn">
-                <Check size={18} color={Colors.white} strokeWidth={2.5} />
-                <Text style={styles.confirmBtnText}>
+              <TouchableOpacity
+                style={[styles.confirmBtn, { backgroundColor: C.green }]}
+                onPress={goToExpiryReview}
+                activeOpacity={0.85}
+                testID="invoice-confirm-btn"
+              >
+                <Check size={18} color={C.blackOnGreen} strokeWidth={2.5} />
+                <Text style={[styles.confirmBtnText, { color: C.blackOnGreen }]}>
                   {destination === 'inventory'
                     ? `Dalej → daty ważności (${invProducts.length})`
                     : destination === 'variable_cost'
@@ -531,16 +756,18 @@ export function CatalogScanModal({
         )}
 
         {stage === 'result' && result && (
-          <ScrollView contentContainerStyle={styles.resultWrap} testID="doc-result">
-            <View style={styles.successCircle}><Check size={38} color={Colors.success} strokeWidth={2.5} /></View>
+          <ScrollView contentContainerStyle={[styles.resultWrap, { paddingBottom: footerPad + 24 }]} testID="doc-result">
+            <View style={[styles.successCircle, { backgroundColor: C.greenSoft }]}>
+              <Check size={38} color={C.green} strokeWidth={2.5} />
+            </View>
             {isInvoice ? (
               <>
-                <View style={[styles.typeBadge, { backgroundColor: Colors.successLight }]}>
-                  <ReceiptText size={13} color={Colors.success} strokeWidth={2} />
-                  <Text style={[styles.typeBadgeText, { color: Colors.success }]}>Faktura zaksięgowana</Text>
+                <View style={[styles.typeBadge, { backgroundColor: C.greenSoft }]}>
+                  <ReceiptText size={13} color={C.green} strokeWidth={2} />
+                  <Text style={[styles.typeBadgeText, { color: C.green }]}>Faktura zaksięgowana</Text>
                 </View>
-                <Text style={styles.resultTitle}>Faktura zaksięgowana</Text>
-                <Text style={styles.resultSub}>
+                <Text style={[styles.resultTitle, { color: C.text }]}>Faktura zaksięgowana</Text>
+                <Text style={[styles.resultSub, { color: C.body }]}>
                   {result.supplier_name || 'Dostawca'} ·{' '}
                   {(result as any).destination === 'fixed_cost'
                     ? 'dopisano koszt stały.'
@@ -549,76 +776,91 @@ export function CatalogScanModal({
                       : 'zaktualizowano magazyn i koszty.'}
                 </Text>
                 <View style={styles.statsRow}>
-                  <View style={styles.statCard}>
-                    <Text style={styles.statNum}>{(result.items_updated ?? 0) + (result.items_created ?? 0)}</Text>
-                    <Text style={styles.statLabel}>pozycji do magazynu</Text>
+                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
+                    <Text style={[styles.statNum, { color: C.text }]}>
+                      {(result.items_updated ?? 0) + (result.items_created ?? 0)}
+                    </Text>
+                    <Text style={[styles.statLabel, { color: C.muted }]}>pozycji do magazynu</Text>
                   </View>
-                  <View style={styles.statCard}>
+                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <TrendingUp size={16} color={Colors.danger} strokeWidth={2.5} />
-                      <Text style={[styles.statNum, { color: Colors.danger }]}>{formatPlnNumber(result.total_amount ?? 0)}</Text>
+                      <TrendingUp size={16} color={C.danger} strokeWidth={2.5} />
+                      <Text style={[styles.statNum, { color: C.danger }]}>
+                        {formatPlnNumber(result.total_amount ?? 0)}
+                      </Text>
                     </View>
-                    <Text style={styles.statLabel}>PLN kosztu</Text>
+                    <Text style={[styles.statLabel, { color: C.muted }]}>PLN kosztu</Text>
                   </View>
                 </View>
-                <Text style={styles.resultNote}>{result.items_created ?? 0} nowych · {result.items_updated ?? 0} zwiększonych</Text>
+                <Text style={[styles.resultNote, { color: C.body }]}>
+                  {result.items_created ?? 0} nowych · {result.items_updated ?? 0} zwiększonych
+                </Text>
               </>
             ) : (
               <>
-                <View style={[styles.typeBadge, { backgroundColor: Colors.accentLight }]}>
-                  <Tags size={13} color={Colors.accent} strokeWidth={2} />
-                  <Text style={[styles.typeBadgeText, { color: Colors.accent }]}>Oferta handlowa</Text>
+                <View style={[styles.typeBadge, { backgroundColor: C.greenSoft }]}>
+                  <Tags size={13} color={C.green} strokeWidth={2} />
+                  <Text style={[styles.typeBadgeText, { color: C.green }]}>Oferta handlowa</Text>
                 </View>
-                <Text style={styles.resultTitle}>Oferta przeanalizowana</Text>
-                <Text style={styles.resultSub}>{result.supplier_name || 'Dostawca'} · produkty w katalogu.</Text>
+                <Text style={[styles.resultTitle, { color: C.text }]}>Oferta przeanalizowana</Text>
+                <Text style={[styles.resultSub, { color: C.body }]}>
+                  {result.supplier_name || 'Dostawca'} · produkty w katalogu.
+                </Text>
                 <View style={styles.statsRow}>
-                  <View style={styles.statCard}>
+                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <Eye size={15} color={Colors.success} strokeWidth={2.5} />
-                      <Text style={[styles.statNum, { color: Colors.success }]}>{result.visible_count ?? 0}</Text>
+                      <Eye size={15} color={C.green} strokeWidth={2.5} />
+                      <Text style={[styles.statNum, { color: C.green }]}>{result.visible_count ?? 0}</Text>
                     </View>
-                    <Text style={styles.statLabel}>występujące w menu</Text>
+                    <Text style={[styles.statLabel, { color: C.muted }]}>występujące w menu</Text>
                   </View>
-                  <View style={styles.statCard}>
+                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <EyeOff size={15} color={Colors.textTertiary} strokeWidth={2.5} />
-                      <Text style={[styles.statNum, { color: Colors.textTertiary }]}>{result.hidden_count ?? 0}</Text>
+                      <EyeOff size={15} color={C.muted} strokeWidth={2.5} />
+                      <Text style={[styles.statNum, { color: C.muted }]}>{result.hidden_count ?? 0}</Text>
                     </View>
-                    <Text style={styles.statLabel}>dodatkowe (też w katalogu)</Text>
+                    <Text style={[styles.statLabel, { color: C.muted }]}>dodatkowe (też w katalogu)</Text>
                   </View>
                 </View>
-                <Text style={styles.resultNote}>
+                <Text style={[styles.resultNote, { color: C.body }]}>
                   Znaleziono {result.products_total ?? 0} produktów — wszystkie w katalogu, posegregowane.
                 </Text>
               </>
             )}
             {!!result.warnings?.length && (
-              <View style={styles.warnBox}>
-                {result.warnings.map((w, i) => (<Text key={i} style={styles.warnText}>• {w}</Text>))}
+              <View style={[styles.warnBox, { backgroundColor: C.warningSoft, borderColor: C.warningBorder }]}>
+                {result.warnings.map((w, i) => (
+                  <Text key={i} style={[styles.warnText, { color: C.warning }]}>• {w}</Text>
+                ))}
               </View>
             )}
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => void handleDoneClose()} testID="doc-result-done">
-              <Text style={styles.primaryBtnText}>Zamknij i powróć do pulpitu</Text>
+            <TouchableOpacity
+              style={[styles.primaryBtn, { backgroundColor: C.green }]}
+              onPress={() => void handleDoneClose()}
+              testID="doc-result-done"
+            >
+              <Text style={[styles.primaryBtnText, { color: C.blackOnGreen }]}>Zamknij i powróć do pulpitu</Text>
             </TouchableOpacity>
           </ScrollView>
         )}
 
-        {/* Category picker overlay */}
         <Modal visible={pickerIndex !== null} transparent animationType="fade" onRequestClose={() => setPickerIndex(null)}>
           <TouchableOpacity style={styles.pickerOverlay} activeOpacity={1} onPress={() => setPickerIndex(null)}>
-            <View style={styles.pickerSheet}>
-              <Text style={styles.pickerTitle}>Wybierz kategorię</Text>
+            <View style={[styles.pickerSheet, { backgroundColor: C.elevated }]}>
+              <Text style={[styles.pickerTitle, { color: C.text }]}>Wybierz kategorię</Text>
               {categoryOptions.map((cat) => {
                 const active = pickerIndex !== null && invProducts[pickerIndex]?.category === cat;
                 return (
                   <TouchableOpacity
                     key={cat}
-                    style={[styles.pickerRow, active && styles.pickerRowActive]}
+                    style={[styles.pickerRow, active && { backgroundColor: C.greenSoft }]}
                     onPress={() => pickerIndex !== null && setRowCategory(pickerIndex, cat)}
                     testID={`category-option-${cat}`}
                   >
-                    <Text style={[styles.pickerRowText, active && styles.pickerRowTextActive]}>{cat}</Text>
-                    {active && <Check size={16} color={Colors.accent} strokeWidth={2.5} />}
+                    <Text style={[styles.pickerRowText, { color: C.text }, active && { color: C.green, fontWeight: '700' }]}>
+                      {cat}
+                    </Text>
+                    {active && <Check size={16} color={C.green} strokeWidth={2.5} />}
                   </TouchableOpacity>
                 );
               })}
@@ -636,77 +878,219 @@ export function CatalogScanModal({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  b: { fontWeight: '700', color: Colors.textPrimary },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.card },
+  container: { flex: 1, backgroundColor: C.bg },
+  b: { fontWeight: '700' },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+  },
   headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  headerIcon: { width: 38, height: 38, borderRadius: 10, backgroundColor: Colors.accentLight, alignItems: 'center', justifyContent: 'center' },
-  title: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
-  subtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 1 },
-  errorBox: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, backgroundColor: Colors.dangerLight, borderColor: '#FECACA', borderWidth: 1, marginHorizontal: 16, marginTop: 12, borderRadius: 10, padding: 12 },
-  errorText: { flex: 1, fontSize: 12, color: Colors.danger, lineHeight: 17 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 32 },
+  headerIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  title: { fontSize: 16, fontWeight: '700' },
+  subtitle: { fontSize: 12, marginTop: 1 },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    borderWidth: 1,
+    marginHorizontal: 16,
+    marginTop: 12,
+    borderRadius: 10,
+    padding: 12,
+  },
+  errorText: { flex: 1, fontSize: 12, lineHeight: 17 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 28 },
+  processingOrb: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    marginBottom: 4,
+  },
+  processingCard: {
+    alignSelf: 'stretch',
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 16,
+    gap: 10,
+    marginTop: 8,
+  },
+  processingCardText: { fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  elapsed: { fontSize: 13, fontWeight: '700', textAlign: 'center' },
+  bgBtn: {
+    marginTop: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  bgBtnText: { fontSize: 14, fontWeight: '600' },
   chooseWrap: { padding: 16, gap: 12 },
-  hintCard: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', backgroundColor: Colors.warningLight, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#FDE68A' },
-  hintText: { flex: 1, fontSize: 13, color: Colors.textSecondary, lineHeight: 19 },
-  pathRow: { flexDirection: 'row', gap: 10 },
-  pathCard: { flex: 1, backgroundColor: Colors.card, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, padding: 12, gap: 3, alignItems: 'flex-start' },
-  pathTitle: { fontSize: 13, fontWeight: '700', color: Colors.textPrimary },
-  pathSub: { fontSize: 11, color: Colors.textTertiary },
-  sourceBtn: { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: Colors.card, borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: Colors.border },
+  hintCard: {
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'flex-start',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+  },
+  hintText: { flex: 1, fontSize: 13, lineHeight: 19 },
+  sourceBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: 1.5,
+  },
   sourceIcon: { width: 48, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  sourceTitle: { fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
-  sourceSub: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
-  analyzingTitle: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary, marginTop: 6 },
-  analyzingSub: { fontSize: 13, color: Colors.textTertiary },
-  invHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 6 },
-  invTotal: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
-  invHint: { fontSize: 12, color: Colors.textTertiary, paddingHorizontal: 16, paddingBottom: 8, lineHeight: 16 },
+  sourceTitle: { fontSize: 15, fontWeight: '700' },
+  sourceSub: { fontSize: 12, marginTop: 2 },
+  analyzingTitle: { fontSize: 17, fontWeight: '700', marginTop: 6, textAlign: 'center' },
+  analyzingSub: { fontSize: 14, textAlign: 'center', lineHeight: 20 },
+  invHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 6,
+  },
+  invTotal: { fontSize: 15, fontWeight: '800' },
+  invHint: { fontSize: 12, paddingHorizontal: 16, paddingBottom: 8, lineHeight: 16 },
   previewContent: { paddingHorizontal: 12, paddingTop: 4 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.card, borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
-  rowName: { fontSize: 14, fontWeight: '600', color: Colors.textPrimary },
-  rowMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-  rowMetaText: { fontSize: 12, color: Colors.textSecondary },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+  },
+  rowName: { fontSize: 14, fontWeight: '600' },
   editFieldsRow: { flexDirection: 'row', gap: 8 },
   editField: { flex: 1, gap: 3 },
-  editLabel: { fontSize: 10, fontWeight: '700', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.4 },
-  editInputWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.background, borderRadius: 8, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 8, paddingVertical: 6 },
-  editInput: { flex: 1, fontSize: 13, fontWeight: '600', color: Colors.textPrimary, paddingVertical: 0 },
-  editSuffix: { fontSize: 11, fontWeight: '600', color: Colors.textTertiary, marginLeft: 4 },
-  catChip: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.accentLight, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#BFDBFE' },
-  catChipText: { fontSize: 12, fontWeight: '700', color: Colors.accent },
-  footer: { padding: 16, paddingBottom: Platform.OS === 'ios' ? 12 : 20, borderTopWidth: 1, borderTopColor: Colors.border, backgroundColor: Colors.card },
-  destLabel: { fontSize: 12, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8 },
+  editLabel: { fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
+  editInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  editInput: { flex: 1, fontSize: 13, fontWeight: '600', paddingVertical: 0 },
+  editSuffix: { fontSize: 11, fontWeight: '600', marginLeft: 4 },
+  catChip: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+  },
+  catChipText: { fontSize: 12, fontWeight: '700' },
+  footer: { padding: 16, borderTopWidth: 1 },
+  destLabel: { fontSize: 12, fontWeight: '700', marginBottom: 8 },
   destRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   destChip: {
-    flex: 1, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: Colors.border,
-    backgroundColor: Colors.borderLight, alignItems: 'center',
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
   },
-  destChipActive: { borderColor: Colors.accent, backgroundColor: Colors.accentLight },
-  destChipText: { fontSize: 11, fontWeight: '700', color: Colors.textSecondary },
-  destChipTextActive: { color: Colors.accent },
-  confirmBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: Colors.accent, borderRadius: 12, paddingVertical: 15 },
-  confirmBtnText: { fontSize: 15, fontWeight: '700', color: Colors.white },
+  destChipText: { fontSize: 11, fontWeight: '700' },
+  confirmBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 12,
+    paddingVertical: 15,
+  },
+  confirmBtnText: { fontSize: 15, fontWeight: '700' },
   resultWrap: { padding: 20, alignItems: 'center', gap: 8 },
-  successCircle: { width: 76, height: 76, borderRadius: 38, backgroundColor: Colors.successLight, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
-  typeBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20, backgroundColor: Colors.successLight },
+  successCircle: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  typeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+  },
   typeBadgeText: { fontSize: 12, fontWeight: '700' },
-  resultTitle: { fontSize: 19, fontWeight: '800', color: Colors.textPrimary, marginTop: 4 },
-  resultSub: { fontSize: 13, color: Colors.textSecondary, textAlign: 'center' },
+  resultTitle: { fontSize: 19, fontWeight: '800', marginTop: 4 },
+  resultSub: { fontSize: 13, textAlign: 'center' },
   statsRow: { flexDirection: 'row', gap: 12, marginTop: 14, alignSelf: 'stretch' },
-  statCard: { flex: 1, backgroundColor: Colors.card, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, padding: 14, alignItems: 'center', gap: 4 },
-  statNum: { fontSize: 26, fontWeight: '800', color: Colors.textPrimary, letterSpacing: -0.5 },
-  statLabel: { fontSize: 11, color: Colors.textTertiary, textAlign: 'center', lineHeight: 15 },
-  resultNote: { fontSize: 12, color: Colors.textSecondary, marginTop: 10 },
-  warnBox: { alignSelf: 'stretch', backgroundColor: Colors.warningLight, borderRadius: 10, padding: 12, marginTop: 12, borderWidth: 1, borderColor: '#FDE68A', gap: 4 },
-  warnText: { fontSize: 11, color: Colors.warning, lineHeight: 16 },
-  primaryBtn: { alignSelf: 'stretch', backgroundColor: Colors.accent, borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginTop: 20, marginBottom: Platform.OS === 'ios' ? 20 : 8 },
-  primaryBtnText: { fontSize: 15, fontWeight: '700', color: Colors.white },
-  pickerOverlay: { flex: 1, backgroundColor: Colors.overlay ?? 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  pickerSheet: { backgroundColor: Colors.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, paddingBottom: Platform.OS === 'ios' ? 32 : 20 },
-  pickerTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary, marginBottom: 10 },
-  pickerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 13, paddingHorizontal: 12, borderRadius: 10 },
-  pickerRowActive: { backgroundColor: Colors.accentLight },
-  pickerRowText: { fontSize: 14, color: Colors.textPrimary, fontWeight: '500' },
-  pickerRowTextActive: { color: Colors.accent, fontWeight: '700' },
+  statCard: {
+    flex: 1,
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 14,
+    alignItems: 'center',
+    gap: 4,
+  },
+  statNum: { fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
+  statLabel: { fontSize: 11, textAlign: 'center', lineHeight: 15 },
+  resultNote: { fontSize: 12, marginTop: 10 },
+  warnBox: {
+    alignSelf: 'stretch',
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    gap: 4,
+  },
+  warnText: { fontSize: 11, lineHeight: 16 },
+  primaryBtn: {
+    alignSelf: 'stretch',
+    borderRadius: 12,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginTop: 20,
+    marginBottom: Platform.OS === 'ios' ? 20 : 8,
+  },
+  primaryBtnText: { fontSize: 15, fontWeight: '700' },
+  pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
+  pickerSheet: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 16,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 20,
+  },
+  pickerTitle: { fontSize: 15, fontWeight: '800', marginBottom: 10 },
+  pickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 13,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+  },
+  pickerRowText: { fontSize: 14, fontWeight: '500' },
 });

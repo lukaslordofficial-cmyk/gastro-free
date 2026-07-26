@@ -322,6 +322,7 @@ function SupplierCard({
   onRefresh: () => Promise<void>;
 }) {
   const theme = useAppTheme();
+  const { notifyDocumentScanComplete } = useUiOverlay();
   const [expanded, setExpanded] = useState(false);
   const [offer, setOffer] = useState<SupplierOffer | null>(null);
   const [offerItems, setOfferItems] = useState<SupplierOfferItem[]>([]);
@@ -772,7 +773,7 @@ function SupplierCard({
                   theme.isPremium && { color: DS.color.muted },
                 ]}
               >
-                Score z ocen dostaw pojawi się po zbieraniu feedbacku (Faza 4). Na razie Łowca nie karze TCO bez danych.
+                Score z ocen dostaw pojawi się po wgraniu co najmniej 5 ofert od tego dostawcy.
               </Text>
             </View>
 
@@ -1322,7 +1323,10 @@ function SupplierCard({
         supplierName={supplier.name}
         visible={showScanModal}
         onClose={() => setShowScanModal(false)}
-        onConfirmed={async () => { await onRefresh(); }}
+        onConfirmed={async () => {
+          await onRefresh();
+          notifyDocumentScanComplete();
+        }}
         scanContext="supplier"
       />
     </View>
@@ -2344,7 +2348,7 @@ const gbStyles = StyleSheet.create({
 
 export default function DostawcyScreen() {
   const theme = useAppTheme();
-  const { openVoiceReport } = useUiOverlay();
+  const { openVoiceReport, documentScanRevision, notifyDocumentScanComplete } = useUiOverlay();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2455,6 +2459,10 @@ export default function DostawcyScreen() {
     setLoading(true);
     void fetchSuppliers();
   }, [fetchSuppliers, authReady, isAuthenticated, accountKey]);
+
+  useEffect(() => {
+    if (documentScanRevision > 0) void fetchSuppliers();
+  }, [documentScanRevision, fetchSuppliers]);
 
   const handleUpload = useCallback(async (
     supplierId: string,
@@ -3035,14 +3043,16 @@ export default function DostawcyScreen() {
                 style={[mainStyles.input, premInput]}
                 value={formLeadTime}
                 onChangeText={setFormLeadTime}
-                placeholder="np. 2 — Uzupełnij czas dostawy"
+                placeholder="np. 2"
                 placeholderTextColor={premPh}
                 keyboardType="decimal-pad"
                 testID="supplier-lead-time-input"
               />
               <Text style={[mainStyles.toggleHint, prem && { color: DS.color.muted, marginBottom: 8 }]}>
-                Uzupełnij czas dostawy — Łowca Okazji używa tej wartości przy produktach krytycznych
-                (gdy puste: bezpieczny domyślny ~2 dni w optymalizerze, bez zapisu do bazy).
+                Łowca Okazji używa tej informacji do nadawania większego priorytetu tym dostawcom,
+                którzy mają najkrótszy okres oczekiwania, w momencie gdy brakuje produktów krytycznych,
+                a potrawy które wymagają ich użycia znajdują się w top 5 najlepiej sprzedających się
+                potraw z ostatniego miesiąca.
               </Text>
 
               <Text style={[mainStyles.fieldLabel, premLabel]}>Notatki</Text>
@@ -3081,7 +3091,10 @@ export default function DostawcyScreen() {
         supplierId={null}
         visible={showTopScan}
         onClose={() => setShowTopScan(false)}
-        onConfirmed={fetchSuppliers}
+        onConfirmed={() => {
+          void fetchSuppliers();
+          notifyDocumentScanComplete();
+        }}
         scanContext="supplier"
       />
     </SafeAreaView>

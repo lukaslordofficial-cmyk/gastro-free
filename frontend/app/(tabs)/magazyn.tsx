@@ -712,7 +712,7 @@ export default function MagazynScreen() {
   const [savingCat, setSavingCat] = useState(false);
   const savingCatRef = useRef(false);
   const [showVoiceModal, setShowVoiceModal] = useState(false);
-  const { setVoiceOverlay, openDocumentScan } = useUiOverlay();
+  const { setVoiceOverlay, openDocumentScan, documentScanRevision } = useUiOverlay();
 
   useEffect(() => {
     setVoiceOverlay(showVoiceModal);
@@ -800,6 +800,11 @@ export default function MagazynScreen() {
     setLoading(true);
     void fetchData();
   }, [fetchData, authReady, isAuthenticated, accountKey]);
+
+  useEffect(() => {
+    if (documentScanRevision > 0) void fetchData();
+  }, [documentScanRevision, fetchData]);
+
   const onRefresh = () => { setRefreshing(true); fetchData(); };
 
   // ── Category derived data ───────────────────────────────────────────────────────────────

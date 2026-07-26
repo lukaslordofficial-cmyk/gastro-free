@@ -2644,9 +2644,10 @@ _CATALOG_SYSTEM_PROMPT = (
 
 
 def _images_from_upload(contents: bytes, mime: str, filename: str) -> list[str]:
-    """Return a list of base64 data-URIs (PNG/JPEG) to feed GPT-4o Vision.
+    """Return a list of base64 data-URIs (JPEG/PNG) to feed GPT-4o Vision.
 
-    PDFs are rendered page-by-page with PyMuPDF (max 8 pages)."""
+    PDFs are rendered page-by-page with PyMuPDF (max 4 pages, JPEG ~110 dpi)
+    — keeps Railway/proxy under timeout and Vision latency ~<20–40s."""
     name = (filename or "").lower()
     is_pdf = "pdf" in (mime or "").lower() or name.endswith(".pdf")
     if is_pdf:
@@ -2659,11 +2660,17 @@ def _images_from_upload(contents: bytes, mime: str, filename: str) -> list[str]:
             doc = fitz.open(stream=contents, filetype="pdf")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Nie udało się otworzyć PDF: {e}") from e
-        zoom = fitz.Matrix(2.0, 2.0)  # ~144 dpi — czytelne dla OCR modelu
-        for page in doc[:8]:
+        # ~108 dpi — wystarczy do OCR, dużo szybsze niż 2.0 / PNG
+        zoom = fitz.Matrix(1.5, 1.5)
+        max_pages = 4
+        for page in doc[:max_pages]:
             pix = page.get_pixmap(matrix=zoom)
-            png = pix.tobytes("png")
-            uris.append("data:image/png;base64," + base64.b64encode(png).decode())
+            try:
+                img_bytes = pix.tobytes("jpeg")
+                uris.append("data:image/jpeg;base64," + base64.b64encode(img_bytes).decode())
+            except Exception:
+                png = pix.tobytes("png")
+                uris.append("data:image/png;base64," + base64.b64encode(png).decode())
         doc.close()
         if not uris:
             raise HTTPException(status_code=400, detail="PDF nie zawiera stron.")
@@ -3549,8 +3556,25 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
             "Brak składników w recepturach menu — wszystkie pozycje oferty trafią do „Dodatkowe”. "
             "Dodaj receptury w zakładce Menu (lub zaproponuj AI)."
         )
-    ai_map = await _classify_offer_vs_menu_ai(menu_lista, products)
-    if not ai_map and products:
+    # Bez receptur AI i tak wrzuci wszystko do „dodatkowe” — pomijamy kosztowny call.
+    # Z recepturami: twardy timeout, żeby cały /documents/process mieścił się w ~20–40 s.
+    ai_map: dict = {}
+    if recipe_keys and products:
+        try:
+            ai_map = await asyncio.wait_for(
+                _classify_offer_vs_menu_ai(menu_lista, products),
+                timeout=18.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("_classify_offer_vs_menu_ai timed out — fuzzy fallback")
+            ai_map = {}
+            warnings.append(
+                "Klasyfikacja AI przekroczyła limit czasu — użyto dopasowania do składników receptur."
+            )
+        except Exception as e:
+            logger.warning(f"_classify_offer_vs_menu_ai error: {e}")
+            ai_map = {}
+    if not ai_map and products and recipe_keys:
         warnings.append(
             "Klasyfikacja AI niedostępna — użyto ścisłego dopasowania do składników receptur "
             "(bez magazynu)."

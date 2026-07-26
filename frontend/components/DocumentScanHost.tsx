@@ -13,6 +13,7 @@ export function DocumentScanHost() {
     documentScanVisible,
     documentScanKind,
     closeDocumentScan,
+    notifyDocumentScanComplete,
     menuScanVisible,
     openMenuScan,
     closeMenuScan,
@@ -28,13 +29,18 @@ export function DocumentScanHost() {
     );
   }, [closeDocumentScan, openMenuScan]);
 
+  const onScanConfirmed = useCallback(() => {
+    // Odśwież Magazyn / Dostawców — NIE zamykaj modala (użytkownik widzi wynik).
+    notifyDocumentScanComplete();
+  }, [notifyDocumentScanComplete]);
+
   return (
     <>
       <CatalogScanModal
         supplierId={null}
         visible={documentScanVisible}
         onClose={closeDocumentScan}
-        onConfirmed={closeDocumentScan}
+        onConfirmed={onScanConfirmed}
         scanContext={scanContext}
         onMenuDetected={onMenuDetected}
       />
@@ -43,6 +49,7 @@ export function DocumentScanHost() {
         onClose={closeMenuScan}
         onConfirmed={() => {
           closeMenuScan();
+          notifyDocumentScanComplete();
           try {
             router.push('/(tabs)/menu');
           } catch {

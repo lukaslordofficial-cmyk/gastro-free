@@ -9265,9 +9265,14 @@ class ComparePeriodsRequest(BaseModel):
     period_2: str
 
 
-# Rok symulacji finansowej / POS (seed_sim_restaurant_2025). Gdy użytkownik
-# nie poda roku („zyski z lipca”, „top sprzedaż”), bierzemy ten rok — nie bieżący kalendarzowy.
-SIM_FINANCE_YEAR = 2025
+# Domyślny rok finansowy gdy użytkownik nie poda roku („zyski z lipca”).
+# Wcześniej na sztywno 2025 (seed SIM) — teraz bieżący rok kalendarzowy.
+def _default_finance_year() -> int:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).year
+
+
+SIM_FINANCE_YEAR = 2025  # legacy alias; nie używaj do nowych fallbacków
 
 
 def _period_days(period_type: str, limit_days) -> int:
@@ -9367,8 +9372,8 @@ def _resolve_period_window(
         mo = _MONTHS_PL[key]
 
     if mo is not None:
-        # Bez roku w komendzie → rok symulacji (nie „lipiec 2026” gdy dane są w 2025).
-        y = y_hint if y_hint is not None else SIM_FINANCE_YEAR
+        # Bez roku w komendzie → bieżący rok kalendarzowy.
+        y = y_hint if y_hint is not None else _default_finance_year()
         last = monthrange(y, mo)[1]
         since = datetime(y, mo, 1, tzinfo=timezone.utc)
         until = datetime(y, mo, last, 23, 59, 59, tzinfo=timezone.utc)
@@ -9380,35 +9385,31 @@ def _resolve_period_window(
         until = datetime(y_hint, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
         return since.isoformat(), until.isoformat(), f"rok {y_hint}"
 
-    # period_type z UI (tydzień / miesiąc / rok) — mapuj na rok symulacji,
-    # żeby w 2026 nie wychodziło puste okno przy danych seed [SIM2025].
+    # period_type z UI (tydzień / miesiąc / rok) — rzeczywiste okno względem „teraz”.
     pt = (period_type or "").strip().lower()
-    try:
-        sim_anchor = now.replace(year=SIM_FINANCE_YEAR)
-    except ValueError:
-        sim_anchor = now.replace(year=SIM_FINANCE_YEAR, day=28)
 
     if pt == "week":
-        until = sim_anchor.replace(hour=23, minute=59, second=59, microsecond=0)
-        since = (sim_anchor - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        until = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        since = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
         return (
             since.isoformat(),
             until.isoformat(),
-            f"ostatnie 7 dni · {_MONTH_NAMES_PL[sim_anchor.month]} {SIM_FINANCE_YEAR}",
+            f"ostatnie 7 dni · {_MONTH_NAMES_PL[now.month]} {now.year}",
         )
     if pt == "month":
-        y, mo = SIM_FINANCE_YEAR, sim_anchor.month
+        y, mo = now.year, now.month
         last = monthrange(y, mo)[1]
         since = datetime(y, mo, 1, tzinfo=timezone.utc)
         until = datetime(y, mo, last, 23, 59, 59, tzinfo=timezone.utc)
         return since.isoformat(), until.isoformat(), f"{_MONTH_NAMES_PL[mo]} {y}"
     if pt == "year":
-        since = datetime(SIM_FINANCE_YEAR, 1, 1, tzinfo=timezone.utc)
-        until = datetime(SIM_FINANCE_YEAR, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
-        return since.isoformat(), until.isoformat(), f"rok {SIM_FINANCE_YEAR}"
+        y = now.year
+        since = datetime(y, 1, 1, tzinfo=timezone.utc)
+        until = datetime(y, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        return since.isoformat(), until.isoformat(), f"rok {y}"
 
-    # Hint bez miesiąca/roku (np. „ranking sprzedaży”) — cały rok symulacji.
-    y = SIM_FINANCE_YEAR
+    # Hint bez miesiąca/roku (np. „ranking sprzedaży”) — bieżący rok.
+    y = _default_finance_year()
     since = datetime(y, 1, 1, tzinfo=timezone.utc)
     until = datetime(y, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
     return since.isoformat(), until.isoformat(), f"rok {y}"
@@ -10928,7 +10929,7 @@ def _window_from_period_sel(sel: dict) -> tuple[str, str, str]:
     """{kind, year, month?, week?, day?} → (since_iso, until_iso, label) z czasem UTC (Z)."""
     from calendar import monthrange
     kind = (sel.get("kind") or "month").lower()
-    y = int(sel.get("year") or SIM_FINANCE_YEAR)
+    y = int(sel.get("year") or _default_finance_year())
     if kind == "year":
         return (
             f"{y}-01-01T00:00:00Z",

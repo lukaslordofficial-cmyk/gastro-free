@@ -125,13 +125,17 @@ type Props = {
 
 export function PeriodPickerTree({ value, onChange, years: yearsProp, preferYear, preferMonth }: Props) {
   const years = useMemo(() => {
-    if (yearsProp?.length) return [...yearsProp].sort((a, b) => b - a);
+    if (yearsProp?.length) return [...yearsProp].filter((yr) => yr !== 2025).sort((a, b) => b - a);
     const y = new Date().getFullYear();
-    // zawsze pokaż 2025 (symulacja) + bieżący ±1
-    return Array.from(new Set([y + 1, y, y - 1, 2025])).sort((a, b) => b - a);
+    // Bieżący ±1; 2025 był tylko rokiem demo/SIM — nie pokazujemy go w drzewie.
+    return Array.from(new Set([y + 1, y, y - 1])).filter((yr) => yr !== 2025).sort((a, b) => b - a);
   }, [yearsProp]);
 
-  const [openYear, setOpenYear] = useState<number | null>(preferYear ?? years.find((y) => y === 2025) ?? years[0] ?? null);
+  const [openYear, setOpenYear] = useState<number | null>(
+    preferYear && preferYear !== 2025
+      ? preferYear
+      : years.find((y) => y === new Date().getFullYear()) ?? years[0] ?? null,
+  );
   const [openMonth, setOpenMonth] = useState<string | null>(
     preferYear && preferMonth ? `${preferYear}-${preferMonth}` : null,
   );

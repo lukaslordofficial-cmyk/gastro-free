@@ -440,7 +440,6 @@ export default function FinanseScreen() {
       const [
         revRes, fixedRes, varRes, revHistRes, varHistRes, inventoryRes,
         revAllRes, fixedAllRes, varAllRes,
-        rev2025Res, fixed2025Res, var2025Res,
       ] = await Promise.all([
         supabase.from('revenue_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
         supabase.from('fixed_costs').select('*').eq('year_month', CURRENT_MONTH).order('type'),
@@ -451,33 +450,14 @@ export default function FinanseScreen() {
         supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
         supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
         supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-        // Pełny rok SIM 2025 do testów wykresu
-        supabase.from('revenue_entries').select('*').gte('year_month', '2025-01').lte('year_month', '2025-12').order('created_at').limit(4000),
-        supabase.from('fixed_costs').select('*').gte('year_month', '2025-01').lte('year_month', '2025-12').order('created_at').limit(500),
-        supabase.from('variable_cost_entries').select('*').gte('year_month', '2025-01').lte('year_month', '2025-12').order('created_at').limit(4000),
       ]);
       if (revRes.error) throw revRes.error;
       if (fixedRes.error) throw fixedRes.error;
       if (varRes.error) throw varRes.error;
 
-      const mergeById = <T extends { id: string }>(a: T[], b: T[]) => {
-        const map = new Map<string, T>();
-        for (const row of [...a, ...b]) map.set(row.id, row);
-        return Array.from(map.values());
-      };
-
-      const revMerged = mergeById(
-        (revAllRes.data ?? []) as RevenueEntry[],
-        (rev2025Res.data ?? []) as RevenueEntry[],
-      );
-      const fixedMerged = mergeById(
-        (fixedAllRes.data ?? []) as FixedCost[],
-        (fixed2025Res.data ?? []) as FixedCost[],
-      );
-      const varMerged = mergeById(
-        (varAllRes.data ?? []) as VariableCostEntry[],
-        (var2025Res.data ?? []) as VariableCostEntry[],
-      );
+      const revMerged = (revAllRes.data ?? []) as RevenueEntry[];
+      const fixedMerged = (fixedAllRes.data ?? []) as FixedCost[];
+      const varMerged = (varAllRes.data ?? []) as VariableCostEntry[];
 
       setRevenueEntries((revRes.data ?? []) as RevenueEntry[]);
       setRevenueJournal(revMerged.length ? revMerged : ((revRes.data ?? []) as RevenueEntry[]));
@@ -489,15 +469,14 @@ export default function FinanseScreen() {
       const revH = revHistRes.data ?? [];
       const varH = varHistRes.data ?? [];
 
-      // Agregacja z pełnych dzienników (w tym SIM 2025)
       const allMonths = new Set<string>([
         ...revMerged.map((r) => r.year_month).filter(Boolean),
         ...varMerged.map((r) => r.year_month).filter(Boolean),
         ...fixedMerged.map((r) => r.year_month).filter(Boolean),
         ...revH.map((r) => r.year_month).filter(Boolean),
         ...varH.map((r) => r.year_month).filter(Boolean),
+        CURRENT_MONTH,
       ]);
-      for (let m = 1; m <= 12; m++) allMonths.add(`2025-${String(m).padStart(2, '0')}`);
       const sortedMonths = Array.from(allMonths).sort();
       setChartRecords(
         sortedMonths.map((month) => ({

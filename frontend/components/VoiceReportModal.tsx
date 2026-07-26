@@ -2197,7 +2197,7 @@ function PeriodConfirmEditor({
               <Text style={styles.compareTileValue}>{edited.period_2 || '—'}</Text>
             </View>
             <Text style={styles.editHint2}>
-              Zaznacz w drzewie 2 okresy (np. Lipiec 2025 i Sierpień 2025) — nadpiszą kafelki.
+              Zaznacz w drzewie 2 okresy (np. Lipiec i Sierpień) — nadpiszą kafelki.
             </Text>
           </View>
         ) : null}
@@ -2206,7 +2206,7 @@ function PeriodConfirmEditor({
           <PeriodPickerTree
             value={selected}
             onChange={onTreeChange}
-            preferYear={prefer?.year ?? 2025}
+            preferYear={prefer?.year ?? new Date().getFullYear()}
             preferMonth={prefer?.month}
           />
         ) : null}
@@ -3395,7 +3395,7 @@ function seedPayload(
       }
       if (!Array.isArray(p.selected_periods) || p.selected_periods.length === 0) {
         const sels: PeriodSelection[] = [];
-        const preferYear = 2025;
+        const preferYear = new Date().getFullYear();
         const a = parsePeriodHintToSelection(String(p.period_1 || transcriptHint || ''), { preferYear });
         if (a) sels.push(a);
         if (intent === 'compare_two_periods') {
@@ -3422,12 +3422,6 @@ function seedPayload(
           );
           const parsed = parsePeriodHintToSelection(hintSrc, { preferYear: yWanted });
           p.selected_periods = parsed ? [parsed] : fixed;
-          p.period_1 = labelForSelections(p.selected_periods);
-        } else {
-          const cy = new Date().getFullYear();
-          p.selected_periods = (p.selected_periods as PeriodSelection[]).map((s) =>
-            s.year === cy && cy !== 2025 ? { ...s, year: 2025 } : s,
-          );
           p.period_1 = labelForSelections(p.selected_periods);
         }
       }

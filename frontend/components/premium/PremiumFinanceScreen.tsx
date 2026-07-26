@@ -51,8 +51,6 @@ import { ChartYAxis, GreenAreaLineChart } from '@/components/GreenAreaLineChart'
 const LOGO = require('@/assets/premium/gastro-manager-logo.webp');
 const { width: SCREEN_W } = Dimensions.get('window');
 const WEEKDAYS_PL = ['niedz.', 'pon.', 'wt.', 'śr.', 'czw.', 'pt.', 'sob.'];
-/** Opcjonalny podgląd danych SIM (testy) — rok 2025 nadal wybieralny, ale nie domyślny */
-const SIM_YEAR = 2025;
 
 function formatPLN(n: number): string {
   return Math.round(n).toLocaleString('pl-PL', { maximumFractionDigits: 0 }) + ' PLN';
@@ -297,7 +295,8 @@ export function PremiumFinanceScreen(props: Props) {
   const netProfit = totalRevenue - totalCosts;
 
   const availableYears = useMemo(() => {
-    const ys = new Set<number>([SIM_YEAR]);
+    const nowY = new Date().getFullYear();
+    const ys = new Set<number>([nowY]);
     const cy = Number(String(props.currentMonth || '').slice(0, 4));
     if (Number.isFinite(cy) && cy > 2000) ys.add(cy);
     for (const r of props.chartRecords) {
@@ -308,7 +307,7 @@ export function PremiumFinanceScreen(props: Props) {
       const y = Number(String(e.year_month || '').slice(0, 4));
       if (Number.isFinite(y) && y > 2000) ys.add(y);
     }
-    return Array.from(ys).sort((a, b) => a - b);
+    return Array.from(ys).filter((y) => y !== 2025).sort((a, b) => a - b);
   }, [props.chartRecords, props.revenueJournal, props.currentMonth]);
 
   const monthsInChartYear = useMemo(() => {
@@ -840,7 +839,6 @@ export function PremiumFinanceScreen(props: Props) {
               <Text style={styles.kpiSub}>
                 {chartMetric === 'revenue' ? 'Przychody' : 'Zysk / strata'} ·{' '}
                 {chartGrain === 'day' ? chartMonthYm : chartGrain === 'month' ? chartYear : 'lata'}
-                {chartYear === SIM_YEAR ? ' · SIM 2025' : ''}
               </Text>
               <BarChart
                 points={salesChartPoints}

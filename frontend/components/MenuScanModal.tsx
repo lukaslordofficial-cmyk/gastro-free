@@ -56,6 +56,8 @@ interface Ingredient {
   name: string;
   quantity: string;
   unit: IngredientUnit;
+  /** Wzorcowa waga 1 sztuki w gramach */
+  pieceWeightG: string;
 }
 
 interface DraftDish {
@@ -100,8 +102,8 @@ function newIngredientKey(): string {
   return String(Date.now() + Math.random());
 }
 
-function newIngredient(name = '', quantity = '', unit: IngredientUnit = 'g'): Ingredient {
-  return { key: newIngredientKey(), name, quantity, unit };
+function newIngredient(name = '', quantity = '', unit: IngredientUnit = 'g', pieceWeightG = ''): Ingredient {
+  return { key: newIngredientKey(), name, quantity, unit, pieceWeightG };
 }
 
 function friendlyApiError(status: number, detail: string): string {
@@ -347,11 +349,23 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
       portion_weight_unit: d.portionWeightUnit,
       ingredients: d.ingredients
         .filter((i) => i.name.trim())
-        .map((i) => ({
-          name: i.name.trim(),
-          quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
-          unit: i.unit,
-        })),
+        .map((i) => {
+          const row: {
+            name: string;
+            quantity: number | null;
+            unit: string;
+            piece_weight_g?: number | null;
+          } = {
+            name: i.name.trim(),
+            quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
+            unit: i.unit,
+          };
+          if ((i.unit === 'szt') && i.pieceWeightG.trim()) {
+            const pw = parsePln(i.pieceWeightG);
+            if (pw > 0) row.piece_weight_g = pw;
+          }
+          return row;
+        }),
     }));
   };
 
@@ -480,11 +494,23 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             category: d.category,
             ingredients: d.ingredients
               .filter((i) => i.name.trim())
-              .map((i) => ({
-                name: i.name.trim(),
-                quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
-                unit: i.unit,
-              })),
+              .map((i) => {
+                const row: {
+                  name: string;
+                  quantity: number | null;
+                  unit: string;
+                  piece_weight_g?: number | null;
+                } = {
+                  name: i.name.trim(),
+                  quantity: i.quantity.trim() ? parsePln(i.quantity) : null,
+                  unit: i.unit,
+                };
+                if (i.unit === 'szt' && i.pieceWeightG.trim()) {
+                  const pw = parsePln(i.pieceWeightG);
+                  if (pw > 0) row.piece_weight_g = pw;
+                }
+                return row;
+              }),
             portion_weight_value: d.portionWeightInput.trim() ? parsePln(d.portionWeightInput) : null,
             portion_weight_unit: d.portionWeightUnit,
           }));
@@ -501,6 +527,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
                 name: si.name,
                 quantity: Number(si.quantity ?? 0),
                 unit: si.unit || 'g',
+                piece_weight_g: null as number | null,
               }));
             }
 
@@ -766,53 +793,71 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
                       </Text>
                     ) : (
                       d.ingredients.map((ing, ingIdx) => (
-                        <View key={ing.key} style={styles.ingRow}>
-                          <TextInput
-                            style={[styles.ingInput, styles.ingName]}
-                            value={ing.name}
-                            placeholder="Nazwa"
-                            placeholderTextColor={C.muted}
-                            onChangeText={(v) => patchIngredient(d.key, ing.key, { name: v })}
-                            testID={`menu-scan-ing-name-${idx}-${ingIdx}`}
-                          />
-                          <TextInput
-                            style={[styles.ingInput, styles.ingQty]}
-                            value={ing.quantity}
-                            placeholder="ilość"
-                            placeholderTextColor={C.muted}
-                            keyboardType="decimal-pad"
-                            onChangeText={(v) => patchIngredient(d.key, ing.key, { quantity: v })}
-                            testID={`menu-scan-ing-qty-${idx}-${ingIdx}`}
-                          />
-                          <View style={styles.ingUnitToggle}>
-                            {INGREDIENT_UNITS.map((u) => {
-                              const active = ing.unit === u;
-                              return (
-                                <TouchableOpacity
-                                  key={u}
-                                  style={[styles.ingUnitBtn, active && styles.ingUnitBtnActive]}
-                                  onPress={() => patchIngredient(d.key, ing.key, { unit: u })}
-                                  activeOpacity={0.7}
-                                >
-                                  <Text
-                                    style={[
-                                      styles.ingUnitText,
-                                      active && styles.ingUnitTextActive,
-                                    ]}
+                        <View key={ing.key} style={styles.ingBlock}>
+                          <View style={styles.ingRow}>
+                            <TextInput
+                              style={[styles.ingInput, styles.ingName]}
+                              value={ing.name}
+                              placeholder="Nazwa"
+                              placeholderTextColor={C.muted}
+                              onChangeText={(v) => patchIngredient(d.key, ing.key, { name: v })}
+                              testID={`menu-scan-ing-name-${idx}-${ingIdx}`}
+                            />
+                            <TextInput
+                              style={[styles.ingInput, styles.ingQty]}
+                              value={ing.quantity}
+                              placeholder="ilość"
+                              placeholderTextColor={C.muted}
+                              keyboardType="decimal-pad"
+                              onChangeText={(v) => patchIngredient(d.key, ing.key, { quantity: v })}
+                              testID={`menu-scan-ing-qty-${idx}-${ingIdx}`}
+                            />
+                            <View style={styles.ingUnitToggle}>
+                              {INGREDIENT_UNITS.map((u) => {
+                                const active = ing.unit === u;
+                                return (
+                                  <TouchableOpacity
+                                    key={u}
+                                    style={[styles.ingUnitBtn, active && styles.ingUnitBtnActive]}
+                                    onPress={() => patchIngredient(d.key, ing.key, { unit: u })}
+                                    activeOpacity={0.7}
                                   >
-                                    {u}
-                                  </Text>
-                                </TouchableOpacity>
-                              );
-                            })}
+                                    <Text
+                                      style={[
+                                        styles.ingUnitText,
+                                        active && styles.ingUnitTextActive,
+                                      ]}
+                                    >
+                                      {u}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                            <TouchableOpacity
+                              style={styles.ingRemove}
+                              onPress={() => removeIngredient(d.key, ing.key)}
+                              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                            >
+                              <Trash2 size={13} color={C.danger} strokeWidth={2} />
+                            </TouchableOpacity>
                           </View>
-                          <TouchableOpacity
-                            style={styles.ingRemove}
-                            onPress={() => removeIngredient(d.key, ing.key)}
-                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                          >
-                            <Trash2 size={13} color={C.danger} strokeWidth={2} />
-                          </TouchableOpacity>
+                          {ing.unit === 'szt' && (
+                            <View style={styles.pieceWeightRow}>
+                              <Text style={styles.pieceWeightLabel}>Waga 1 szt. (g)</Text>
+                              <TextInput
+                                style={[styles.ingInput, styles.pieceWeightInput]}
+                                value={ing.pieceWeightG}
+                                placeholder="np. 180"
+                                placeholderTextColor={C.muted}
+                                keyboardType="decimal-pad"
+                                onChangeText={(v) =>
+                                  patchIngredient(d.key, ing.key, { pieceWeightG: v })
+                                }
+                                testID={`menu-scan-ing-piece-wt-${idx}-${ingIdx}`}
+                              />
+                            </View>
+                          )}
                         </View>
                       ))
                     )}
@@ -1189,6 +1234,17 @@ const styles = StyleSheet.create({
   },
   emptyIngredients: { fontSize: 12, color: C.muted, fontStyle: 'italic', paddingVertical: 6 },
   ingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  ingBlock: { marginBottom: 8 },
+  pieceWeightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: -2,
+    marginBottom: 4,
+    paddingLeft: 4,
+  },
+  pieceWeightLabel: { fontSize: 11, fontWeight: '700', color: C.muted, minWidth: 88 },
+  pieceWeightInput: { width: 88 },
   ingInput: {
     backgroundColor: C.inputBg,
     borderWidth: 1,

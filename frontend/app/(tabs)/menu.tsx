@@ -65,6 +65,7 @@ interface RecipeIngredient {
   name: string;
   quantity: number;
   unit: string;
+  piece_weight_g?: number | null;
 }
 
 interface Dish {
@@ -93,6 +94,8 @@ interface IngredientDraft {
   name: string;
   quantity: string;
   unit: string;
+  /** Wzorcowa waga 1 sztuki (g) — gdy unit=szt */
+  pieceWeightG: string;
 }
 
 // Inventory item shape mirrored from magazyn.tsx
@@ -146,7 +149,7 @@ function makePosId(category: string, total: number): string {
 }
 
 function newDraftIngredient(): IngredientDraft {
-  return { key: String(Date.now() + Math.random()), name: '', quantity: '', unit: 'g' };
+  return { key: String(Date.now() + Math.random()), name: '', quantity: '', unit: 'g', pieceWeightG: '' };
 }
 
 function mapDbToDish(row: any): Dish {
@@ -161,6 +164,7 @@ function mapDbToDish(row: any): Dish {
       name: i.ingredient_name,
       quantity: Number(i.quantity),
       unit: i.unit,
+      piece_weight_g: i.piece_weight_g != null ? Number(i.piece_weight_g) : null,
     })),
   };
 }
@@ -647,6 +651,32 @@ function IngredientRow({
               <Trash2 size={14} color={Colors.danger} strokeWidth={2} />
             </TouchableOpacity>
           </View>
+          {(draft.unit === 'szt' || draft.unit === 'sztuka') && (
+            <View
+              style={[
+                ingStyles.pieceWeightBox,
+                prem && {
+                  backgroundColor: 'rgba(0,255,120,0.06)',
+                  borderColor: DS.color.borderSubtle,
+                },
+              ]}
+            >
+              <Text style={[ingStyles.pieceWeightLabel, prem && { color: DS.color.muted }]}>
+                Wzorcowa waga 1 sztuki (g)
+              </Text>
+              <TextInput
+                style={[ingStyles.input, ingStyles.pieceWeightInput, inputPrem]}
+                placeholder="np. 180"
+                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
+                value={draft.pieceWeightG}
+                onChangeText={(v) => onChange(draft.key, 'pieceWeightG', v)}
+                keyboardType="decimal-pad"
+              />
+              <Text style={[ingStyles.pieceWeightHint, prem && { color: DS.color.muted }]}>
+                Potrzebne do kosztu i magazynu (np. 1 jajko ≈ 60 g)
+              </Text>
+            </View>
+          )}
         </View>
       </View>
     </View>
@@ -684,6 +714,18 @@ const ingStyles = StyleSheet.create({
   tooltipText: { fontSize: 12, color: Colors.white, fontWeight: '600' },
   qtyRow: { flexDirection: 'row', gap: 6, alignItems: 'center' },
   qtyInput: { width: 72 },
+  pieceWeightBox: {
+    marginTop: 4,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.background,
+    gap: 6,
+  },
+  pieceWeightLabel: { fontSize: 11, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.2 },
+  pieceWeightInput: { width: 100 },
+  pieceWeightHint: { fontSize: 10, color: Colors.textTertiary, lineHeight: 14 },
   input: {
     backgroundColor: Colors.background,
     borderWidth: 1.5,
@@ -800,7 +842,7 @@ export default function MenuScreen() {
       const [dishesRes, utensilsRes, invRes, catsRes] = await Promise.all([
         supabase
           .from('menu_items')
-          .select('id, name, category, price_pln, pos_id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
+          .select('id, name, category, price_pln, pos_id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order, piece_weight_g)')
           .eq('account_key', ak)
           .eq('is_active', true)
           .order('category')
@@ -833,12 +875,28 @@ export default function MenuScreen() {
           .order('sort_order'),
       ]);
 
-      if (dishesRes.error) throw dishesRes.error;
+      let dishesData = dishesRes.data;
+      if (dishesRes.error) {
+        if (/piece_weight_g/i.test(dishesRes.error.message ?? '')) {
+          const retry = await supabase
+            .from('menu_items')
+            .select('id, name, category, price_pln, pos_id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
+            .eq('account_key', ak)
+            .eq('is_active', true)
+            .order('category')
+            .order('name')
+            .limit(1000);
+          if (retry.error) throw retry.error;
+          dishesData = retry.data;
+        } else {
+          throw dishesRes.error;
+        }
+      }
       if (utensilsRes.error) throw utensilsRes.error;
       if (invRes.error) throw invRes.error;
       if (catsRes.error) throw catsRes.error;
 
-      setDishes((dishesRes.data ?? []).map(mapDbToDish));
+      setDishes((dishesData ?? []).map(mapDbToDish));
       setUtensils(utensilsRes.data ?? []);
       setInventory((invRes.data ?? []).map(mapInvDbRow));
 
@@ -879,7 +937,7 @@ export default function MenuScreen() {
           if (!payload?.menuItemId || !open || open.id !== payload.menuItemId) return;
           const { data } = await supabase
             .from('recipe_ingredients')
-            .select('ingredient_name, quantity, unit, sort_order')
+            .select('ingredient_name, quantity, unit, sort_order, piece_weight_g')
             .eq('menu_item_id', payload.menuItemId)
             .order('sort_order');
           const rows = (data ?? []).sort(
@@ -892,6 +950,7 @@ export default function MenuScreen() {
                   name: r.ingredient_name ?? '',
                   quantity: String(r.quantity ?? 0),
                   unit: r.unit || 'g',
+                  pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
                 }))
               : [newDraftIngredient()]
           );
@@ -1016,6 +1075,7 @@ export default function MenuScreen() {
             name: r.name,
             quantity: String(r.quantity),
             unit: r.unit,
+            pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
           }))
         : [newDraftIngredient()]
     );
@@ -1140,15 +1200,37 @@ export default function MenuScreen() {
         await supabase.from('recipe_ingredients').delete().eq('menu_item_id', editingDish.id);
         if (validIngredients.length > 0) {
           const { error: ingError } = await supabase.from('recipe_ingredients').insert(
-            validIngredients.map((ing, idx) => ({
-              menu_item_id: editingDish.id,
-              ingredient_name: ing.name.trim(),
-              quantity: parseFloat(ing.quantity) || 0,
-              unit: ing.unit,
-              sort_order: idx + 1,
-            }))
+            validIngredients.map((ing, idx) => {
+              const row: Record<string, unknown> = {
+                menu_item_id: editingDish.id,
+                ingredient_name: ing.name.trim(),
+                quantity: parseFloat(ing.quantity) || 0,
+                unit: ing.unit,
+                sort_order: idx + 1,
+              };
+              if ((ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()) {
+                const pw = parseFloat(ing.pieceWeightG.replace(',', '.'));
+                if (!isNaN(pw) && pw > 0) row.piece_weight_g = pw;
+              }
+              return row;
+            })
           );
-          if (ingError) throw ingError;
+          if (ingError) {
+            if (/piece_weight_g/i.test(ingError.message ?? '')) {
+              const { error: e2 } = await supabase.from('recipe_ingredients').insert(
+                validIngredients.map((ing, idx) => ({
+                  menu_item_id: editingDish.id,
+                  ingredient_name: ing.name.trim(),
+                  quantity: parseFloat(ing.quantity) || 0,
+                  unit: ing.unit,
+                  sort_order: idx + 1,
+                }))
+              );
+              if (e2) throw e2;
+            } else {
+              throw ingError;
+            }
+          }
         }
 
         const updatedDish: Dish = {
@@ -1160,6 +1242,10 @@ export default function MenuScreen() {
             name: ing.name.trim(),
             quantity: parseFloat(ing.quantity) || 0,
             unit: ing.unit,
+            piece_weight_g:
+              (ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()
+                ? parseFloat(ing.pieceWeightG.replace(',', '.')) || null
+                : null,
           })),
         };
         setDishes((prev) => prev.map((d) => (d.id === editingDish.id ? updatedDish : d)));
@@ -1197,15 +1283,37 @@ export default function MenuScreen() {
 
         if (validIngredients.length > 0) {
           const { error: ingError } = await supabase.from('recipe_ingredients').insert(
-            validIngredients.map((ing, idx) => ({
-              menu_item_id: newItem.id,
-              ingredient_name: ing.name.trim(),
-              quantity: parseFloat(ing.quantity) || 0,
-              unit: ing.unit,
-              sort_order: idx + 1,
-            }))
+            validIngredients.map((ing, idx) => {
+              const row: Record<string, unknown> = {
+                menu_item_id: newItem.id,
+                ingredient_name: ing.name.trim(),
+                quantity: parseFloat(ing.quantity) || 0,
+                unit: ing.unit,
+                sort_order: idx + 1,
+              };
+              if ((ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()) {
+                const pw = parseFloat(ing.pieceWeightG.replace(',', '.'));
+                if (!isNaN(pw) && pw > 0) row.piece_weight_g = pw;
+              }
+              return row;
+            })
           );
-          if (ingError) throw ingError;
+          if (ingError) {
+            if (/piece_weight_g/i.test(ingError.message ?? '')) {
+              const { error: e2 } = await supabase.from('recipe_ingredients').insert(
+                validIngredients.map((ing, idx) => ({
+                  menu_item_id: newItem.id,
+                  ingredient_name: ing.name.trim(),
+                  quantity: parseFloat(ing.quantity) || 0,
+                  unit: ing.unit,
+                  sort_order: idx + 1,
+                }))
+              );
+              if (e2) throw e2;
+            } else {
+              throw ingError;
+            }
+          }
         }
 
         const newDish: Dish = {
@@ -1218,6 +1326,10 @@ export default function MenuScreen() {
             name: ing.name.trim(),
             quantity: parseFloat(ing.quantity) || 0,
             unit: ing.unit,
+            piece_weight_g:
+              (ing.unit === 'szt' || ing.unit === 'sztuka') && ing.pieceWeightG.trim()
+                ? parseFloat(ing.pieceWeightG.replace(',', '.')) || null
+                : null,
           })),
         };
         setDishes((prev) => [...prev, newDish]);

@@ -33,6 +33,7 @@ export type DishFamily =
   | 'salad'
   | 'dessert'
   | 'drink'
+  | 'meat'
   | 'other';
 
 export function normalizeDishName(raw: string): string {
@@ -53,6 +54,7 @@ export function significantTokens(normalized: string): string[] {
 
 export function detectDishFamily(name: string): DishFamily {
   const n = normalizeDishName(name);
+  // Sosy / zupy przed mięsem — „sos czosnkowy”, „krem z kurczaka”
   if (/\b(sos|sauce|aioli|gravy|bbq|demi glace|bearnaise|holendersk|bernensk|fondue|satay|bolognese|carbonara)\b/.test(n) || n.startsWith('sos ')) {
     return 'sauces';
   }
@@ -65,6 +67,12 @@ export function detectDishFamily(name: string): DishFamily {
   if (/\b(salatk|salad)\b/.test(n)) return 'salad';
   if (/\b(ciasto|tort|deser|lody|pancake|nalesnik|tiramisu|panna cotta)\b/.test(n)) return 'dessert';
   if (/\b(kawa|herbata|lemoniad|sok |smoothie|drink|koktajl|piwo|wino|energetyk|cola)\b/.test(n)) return 'drink';
+  // Mięsa / dania obiadowe (filet, pierś, schab…) — NIE zupy
+  if (
+    /\b(filet|piers|kurczak|schab|kotlet|stek|zeberk|wolow|wieprz|indyk|kaczka|de volaille|poledwic|antrykot|karkowk|udziec|skrzyde|nugget)\b/.test(n)
+  ) {
+    return 'meat';
+  }
   return 'other';
 }
 
@@ -78,8 +86,14 @@ function familyFromEntry(entry: DishImageEntry): DishFamily {
   if (/salad|salatk/.test(path)) return 'salad';
   if (/dessert|cake|ice_cream|pancake|pastr|french_dessert/.test(path)) return 'dessert';
   if (/coffee|tea|lemonade|juice|cocktail|beer|wine|spirit|energy/.test(path)) return 'drink';
+  if (/steak|meat|mieso|grill|bbq|kotlet|schab|kurczak|beef|pork|ribs/.test(path) && !/soup|zupa/.test(path)) return 'meat';
   return detectDishFamily(entry.labelPl);
 }
+
+/** Tokeny generyczne — sam „kurczak” nie wystarczy do silnego matcha. */
+const WEAK_ALONE = new Set([
+  'kurczak', 'wolow', 'wieprz', 'indyk', 'mieso', 'ryba', 'ser', 'sos', 'zupa', 'krem',
+]);
 
 /** Dice / token overlap 0–100. */
 function tokenOverlapScore(qTokens: string[], cTokens: string[]): number {
@@ -99,7 +113,11 @@ function tokenOverlapScore(qTokens: string[], cTokens: string[]): number {
   const coverQ = hit / qTokens.length;
   const coverC = hit / cTokens.length;
   // Wymagaj mocnego pokrycia zapytań; lekkie pokrycie kandydata nie wystarczy
-  const score = Math.round(100 * (0.7 * coverQ + 0.3 * Math.min(coverC, 1)));
+  let score = Math.round(100 * (0.7 * coverQ + 0.3 * Math.min(coverC, 1)));
+  // Pojedynczy wspólny token (np. tylko „kurczak”) — cap, żeby zupa ≠ filet
+  if (hit < 1.5 && qTokens.length >= 2) {
+    score = Math.min(score, 52);
+  }
   return score;
 }
 
@@ -116,7 +134,8 @@ function bestCandidateScore(q: string, qTokens: string[], entry: DishImageEntry)
       continue;
     }
     if (qTokens.length === 1 && cTokens.includes(qTokens[0]) && cTokens.length <= 3) {
-      best = Math.max(best, 90);
+      const alone = qTokens[0];
+      best = Math.max(best, WEAK_ALONE.has(alone) ? 70 : 90);
       continue;
     }
     const overlap = tokenOverlapScore(qTokens, cTokens);
@@ -161,7 +180,14 @@ export function findDishImageMatch(
     if (score <= 0) continue;
     const fam = familyFromEntry(entry);
     if (wantFamily !== 'other' && fam === wantFamily) score = Math.min(100, score + 8);
-    else if (wantFamily !== 'other' && fam !== 'other' && fam !== wantFamily) score = Math.max(0, score - 25);
+    else if (wantFamily !== 'other' && fam !== 'other' && fam !== wantFamily) {
+      // Mięso ↔ zupa: twarda kara (filet kurczaka ≠ rosół)
+      if ((wantFamily === 'meat' && fam === 'soups') || (wantFamily === 'soups' && fam === 'meat')) {
+        score = Math.max(0, score - 45);
+      } else {
+        score = Math.max(0, score - 25);
+      }
+    }
     if (score >= STRONG_THRESHOLD) {
       ranked.push({ slug: entry.slug, score, entry });
     }
@@ -201,6 +227,8 @@ export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[])
       return pick('pizza_margherita');
     case 'salad':
       return pick('garden_salad');
+    case 'meat':
+      return pick('kotlet_schabowy', 'stek_ribeye', 'de_volaille') ?? catalog.find((e) => /steak|kotlet|grill|mieso/.test(e.storagePath))?.slug;
     default:
       return undefined;
   }

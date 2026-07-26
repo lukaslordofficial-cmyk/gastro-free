@@ -316,6 +316,8 @@ export interface RecipeIngredient {
   quantity: number;
   unit: string;
   sort_order: number;
+  /** Wzorcowa waga 1 sztuki w gramach (gdy unit=szt). */
+  piece_weight_g?: number | null;
 }
 
 export interface KitchenUtensil {

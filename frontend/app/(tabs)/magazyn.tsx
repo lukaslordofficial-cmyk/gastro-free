@@ -55,6 +55,7 @@ import {
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
+import { namesMatch } from '@/lib/fuzzyProductMatch';
 import { useAuth } from '@/contexts/AuthContext';
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
@@ -1200,14 +1201,13 @@ export default function MagazynScreen() {
 
   async function autoUnlockOfferItems(newItemId: string, newItemName: string) {
     try {
-      const { data: sleeping } = await supabase.from('supplier_offer_items').select('id, raw_product_name').is('warehouse_product_id', null);
+      const { data: sleeping } = await supabase
+        .from('supplier_offer_items')
+        .select('id, raw_product_name')
+        .is('warehouse_product_id', null);
       if (!sleeping || sleeping.length === 0) return;
-      const newWords = newItemName.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
       const toUnlock = sleeping
-        .filter((item: any) => {
-          const offerWords = item.raw_product_name.toLowerCase().split(/\s+/);
-          return newWords.some((w) => offerWords.some((ow: string) => ow.includes(w) || w.includes(ow)));
-        })
+        .filter((item: any) => namesMatch(newItemName, item.raw_product_name || '', 72))
         .map((item: any) => item.id);
       if (toUnlock.length > 0) {
         await supabase.from('supplier_offer_items').update({ warehouse_product_id: newItemId }).in('id', toUnlock);

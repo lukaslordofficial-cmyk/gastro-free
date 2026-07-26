@@ -34,6 +34,7 @@ import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { formatPlnNumber } from '@/lib/format';
+import { namesMatch } from '@/lib/fuzzyProductMatch';
 
 interface OfferRow {
   id: string;
@@ -143,13 +144,14 @@ export default function ProductSuppliersScreen() {
     if (!productId) return;
     setLoading(true);
     try {
-      const { data } = await supabase
+      // 1) Oferty już zlinkowane do produktu magazynowego
+      const { data: linked } = await supabase
         .from('supplier_offer_items')
-        .select('id, supplier_id, raw_product_name, price_net, unit, suppliers(name, icon_color)')
+        .select('id, supplier_id, raw_product_name, price_net, unit, warehouse_product_id, suppliers(name, icon_color)')
         .eq('warehouse_product_id', productId)
         .order('price_net', { ascending: true, nullsFirst: false });
 
-      const rows: OfferRow[] = (data ?? []).map((r: any) => ({
+      const rows: OfferRow[] = (linked ?? []).map((r: any) => ({
         id: r.id,
         supplier_id: r.supplier_id,
         supplier_name: r.suppliers?.name ?? 'Nieznany dostawca',
@@ -159,13 +161,76 @@ export default function ProductSuppliersScreen() {
         unit: r.unit,
       }));
 
+      // 2) Fuzzy: oferty bez warehouse_product_id + katalog dostawcy (nazwa ≈ produkt)
+      const productLabel = (productName || '').trim();
+      if (productLabel) {
+        const seen = new Set(rows.map((r) => r.id));
+
+        const { data: unlinked } = await supabase
+          .from('supplier_offer_items')
+          .select('id, supplier_id, raw_product_name, price_net, unit, warehouse_product_id, suppliers(name, icon_color)')
+          .is('warehouse_product_id', null)
+          .limit(2000);
+
+        const toLink: string[] = [];
+        for (const r of unlinked ?? []) {
+          if (!r?.raw_product_name || seen.has(r.id)) continue;
+          if (!namesMatch(productLabel, r.raw_product_name, 72)) continue;
+          seen.add(r.id);
+          toLink.push(r.id);
+          rows.push({
+            id: r.id,
+            supplier_id: r.supplier_id,
+            supplier_name: (r as any).suppliers?.name ?? 'Nieznany dostawca',
+            supplier_color: (r as any).suppliers?.icon_color ?? Colors.textSecondary,
+            raw_product_name: r.raw_product_name,
+            price_net: r.price_net != null ? Number(r.price_net) : null,
+            unit: r.unit,
+          });
+        }
+        // Backfill FK — żeby kolejne otwarcia były szybkie
+        if (toLink.length > 0) {
+          void supabase
+            .from('supplier_offer_items')
+            .update({ warehouse_product_id: productId })
+            .in('id', toLink);
+        }
+
+        // Katalog dostawców (cennik) — gdy nie ma wierszy w offer_items
+        const { data: catalog } = await supabase
+          .from('supplier_catalog')
+          .select('id, supplier_id, name, price_pln, unit, suppliers(name, icon_color)')
+          .limit(3000);
+        for (const c of catalog ?? []) {
+          if (!c?.name || !namesMatch(productLabel, c.name, 72)) continue;
+          const synId = `cat-${c.id}`;
+          if (seen.has(synId)) continue;
+          // Unikaj duplikatu tego samego dostawcy + zbliżonej nazwy
+          const already = rows.some(
+            (r) => r.supplier_id === c.supplier_id && namesMatch(r.raw_product_name, c.name, 85),
+          );
+          if (already) continue;
+          seen.add(synId);
+          rows.push({
+            id: synId,
+            supplier_id: c.supplier_id,
+            supplier_name: (c as any).suppliers?.name ?? 'Nieznany dostawca',
+            supplier_color: (c as any).suppliers?.icon_color ?? Colors.textSecondary,
+            raw_product_name: c.name,
+            price_net: c.price_pln != null ? Number(c.price_pln) : null,
+            unit: (c as any).unit || 'szt',
+          });
+        }
+      }
+
       const priced = rows.filter((r) => r.price_net != null);
       const unpriced = rows.filter((r) => r.price_net == null);
+      priced.sort((a, b) => (a.price_net ?? 0) - (b.price_net ?? 0));
       setOffers([...priced, ...unpriced]);
     } finally {
       setLoading(false);
     }
-  }, [productId]);
+  }, [productId, productName]);
 
   const loadProduct = useCallback(async () => {
     if (!productId) return;

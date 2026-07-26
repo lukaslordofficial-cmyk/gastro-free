@@ -2796,11 +2796,51 @@ def _strip_accents(text: str) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
+_TOKEN_SYNONYMS = {
+    "filet": "piers", "filety": "piers", "filetem": "piers", "filetu": "piers",
+    "piersi": "piers", "piersiami": "piers", "piers": "piers",
+    "kurczaka": "kurczak", "kurczakiem": "kurczak", "kurczaki": "kurczak",
+    "kurczakowi": "kurczak", "drobiowy": "kurczak", "drobiowa": "kurczak", "drobiowe": "kurczak",
+    "indyka": "indyk", "indykiem": "indyk",
+    "wolowego": "wolow", "wolowa": "wolow", "wolowy": "wolow", "wolowe": "wolow",
+    "wolowina": "wolow", "wolowiny": "wolow",
+    "wieprzowego": "wieprz", "wieprzowa": "wieprz", "wieprzowy": "wieprz", "wieprzowina": "wieprz",
+    "oliwek": "oliw", "oliwa": "oliw", "oliwy": "oliw", "oliwie": "oliw", "olive": "oliw",
+    "cukru": "cukier", "cukrem": "cukier",
+    "soli": "sol", "sola": "sol",
+    "pieprzu": "pieprz",
+    "czosnku": "czosnek", "czosnkiem": "czosnek",
+    "cebuli": "cebula",
+    "pomidorow": "pomidor", "pomidory": "pomidor", "pomidora": "pomidor",
+    "ziemniakow": "ziemniak", "ziemniaki": "ziemniak",
+    "majonezu": "majonez", "musztardy": "musztarda",
+    "smietany": "smietana", "mleka": "mleko",
+    "masla": "maslo", "maslem": "maslo",
+    "sera": "ser", "serem": "ser",
+    "jajka": "jajko", "jajek": "jajko", "jaja": "jajko",
+}
+
+
+def _canon_token(t: str) -> str:
+    """Lekki stem + synonimy kulinarne (filet↔pierś, kurczaka→kurczak)."""
+    if t in _TOKEN_SYNONYMS:
+        return _TOKEN_SYNONYMS[t]
+    for suf in ("ami", "ach", "owi", "iem", "ow", "om", "em", "ie"):
+        if len(t) > len(suf) + 3 and t.endswith(suf):
+            stem = t[: -len(suf)]
+            return _TOKEN_SYNONYMS.get(stem, stem)
+    if len(t) >= 6 and t[-1] in "ayiue":
+        stem = t[:-1]
+        return _TOKEN_SYNONYMS.get(stem, stem)
+    return t
+
+
 def _norm_pl(text: str) -> str:
     """Pełna normalizacja PL dla fuzzy matchingu:
     - lower + usunięcie diakrytyków
     - usunięcie jednostek/miar (1kg, 500g, 200ml, 2 szt...)
     - usunięcie znaków niealfanum.
+    - synonimy/stem (filet↔pierś, kurczaka→kurczak)
     - tokenizacja + posortowany join (kolejność słów nie ma znaczenia).
     - usunięcie marek/dostawców (Sokołów, …) by nie blokować matchingu.
     """
@@ -2812,15 +2852,19 @@ def _norm_pl(text: str) -> str:
     tokens = [t for t in s.split() if len(t) >= 2]
     # Usuwamy typowe słowa-śmieci (przyimki), które nie niosą znaczenia
     stop = {"do", "od", "na", "za", "ze", "we", "po", "pod", "nad", "przy",
-            "bez", "dla", "oraz", "lub", "albo"}
+            "bez", "dla", "oraz", "lub", "albo", "a", "i", "z", "w"}
     # Marki / szum e-commerce — „Sokołów Schab” ↔ magazyn „Schab”
     brands = {
         "sokolow", "sokolów", "animex", "morliny", "berlinki", "henkel",
         "premium", "bio", "eko", "organic", "light", "classic", "extra",
         "select", "selection", "gourmet", "fresh", "swieze", "swiezy",
-        "opak", "opakowanie", "promocja",
+        "opak", "opakowanie", "promocja", "virgin", "extra",
     }
-    tokens = [t for t in tokens if t not in stop and t not in brands]
+    tokens = [
+        _canon_token(t) for t in tokens
+        if t not in stop and t not in brands
+    ]
+    tokens = [t for t in tokens if len(t) >= 2 and t not in stop]
     return " ".join(sorted(set(tokens)))
 
 
@@ -3581,8 +3625,8 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
         )
 
     # Fallback + weryfikacja AI: TYLKO składniki receptur (bez magazynu)
-    RECIPE_VERIFY_THRESHOLD = 80
-    RECIPE_FALLBACK_THRESHOLD = 88
+    RECIPE_VERIFY_THRESHOLD = 74
+    RECIPE_FALLBACK_THRESHOLD = 78
 
     existing = await sb_get(client, "supplier_catalog",
                             params={"select": "id,name,sort_order", "supplier_id": f"eq.{supplier_id}"})
@@ -4202,16 +4246,33 @@ async def portions_yield(item_id: str):
         uwv = item.get("unit_weight_volume")
         wvu = item.get("weight_volume_unit")
 
-        # recipe_ingredients łączy się z magazynem po NAZWIE (nie FK)
-        recipes = await sb_get(client, "recipe_ingredients",
-                               params={"select": "menu_item_id,ingredient_name,quantity,unit"})
+        # recipe_ingredients łączy się z magazynem po NAZWIE (fuzzy)
+        try:
+            recipes = await sb_get(client, "recipe_ingredients",
+                                   params={"select": "menu_item_id,ingredient_name,quantity,unit,piece_weight_g"})
+        except httpx.HTTPStatusError as e:
+            if "piece_weight_g" in (e.response.text or ""):
+                recipes = await sb_get(client, "recipe_ingredients",
+                                       params={"select": "menu_item_id,ingredient_name,quantity,unit"})
+            else:
+                raise
         key = _norm(item_name)
-        matched = [
-            r for r in (recipes or [])
-            if _norm(r["ingredient_name"]) == key
-            or key in _norm(r["ingredient_name"])
-            or _norm(r["ingredient_name"]) in key
-        ]
+        key_pl = _norm_pl(item_name)
+        matched = []
+        for r in (recipes or []):
+            ing = r.get("ingredient_name") or ""
+            if (
+                _norm(ing) == key
+                or key in _norm(ing)
+                or _norm(ing) in key
+                or _norm_pl(ing) == key_pl
+            ):
+                matched.append(r)
+                continue
+            # Lekki fuzzy token-set (bez partial) — filet↔pierś
+            hit, _score = _fuzzy_match_token_only(key_pl, [_norm_pl(ing)], threshold=74)
+            if hit is not None:
+                matched.append(r)
 
         # nazwy potraw
         menu_ids = list({r["menu_item_id"] for r in matched})
@@ -4228,7 +4289,17 @@ async def portions_yield(item_id: str):
         recipe_unit = r["unit"] or stock_unit
         if per_portion <= 0:
             continue
-        available, convertible = _yield_available(stock_qty, stock_unit, uwv, wvu, recipe_unit)
+        # Gdy receptura w szt a mamy wzorcową wagę — użyj jej jako unit_size
+        piece_wt = r.get("piece_weight_g")
+        use_uwv = uwv
+        use_wvu = wvu
+        try:
+            if piece_wt is not None and float(piece_wt) > 0 and _is_piece_unit(recipe_unit):
+                use_uwv = float(piece_wt)
+                use_wvu = "g"
+        except (TypeError, ValueError):
+            pass
+        available, convertible = _yield_available(stock_qty, stock_unit, use_uwv, use_wvu, recipe_unit)
         portions = int(available // per_portion) if available is not None else 0
         menu = menu_map.get(r["menu_item_id"])
         dishes.append({
@@ -5361,6 +5432,7 @@ class ConfirmMenuIngredient(BaseModel):
     name: str
     quantity: Optional[float] = None
     unit: str = "g"
+    piece_weight_g: Optional[float] = None
 
 
 class ConfirmMenuDish(BaseModel):
@@ -5638,20 +5710,38 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
                 # Pomiń wielkość porcji — to parametr nadrzędny, nie składnik.
                 if _is_porcja_row(iname):
                     continue
-                recipe_rows.append({
+                row_ing: dict = {
                     "menu_item_id": menu_id,
                     "ingredient_name": iname,
                     "quantity": float(ing.quantity or 0),
                     "unit": ing.unit or "g",
                     "sort_order": i + 1,
-                })
+                }
+                pw = getattr(ing, "piece_weight_g", None)
+                if pw is not None:
+                    try:
+                        pw_f = float(pw)
+                        if pw_f > 0:
+                            row_ing["piece_weight_g"] = pw_f
+                    except (TypeError, ValueError):
+                        pass
+                recipe_rows.append(row_ing)
                 all_ingredient_names.append(iname)
 
             if recipe_rows:
                 try:
                     await sb_post(client, "recipe_ingredients", recipe_rows)
                 except httpx.HTTPStatusError as e:
-                    warnings.append(f"{name}: składniki niezapisane ({e.response.text[:120]}).")
+                    body = e.response.text or ""
+                    if "piece_weight_g" in body:
+                        for r in recipe_rows:
+                            r.pop("piece_weight_g", None)
+                        try:
+                            await sb_post(client, "recipe_ingredients", recipe_rows)
+                        except httpx.HTTPStatusError as e2:
+                            warnings.append(f"{name}: składniki niezapisane ({e2.response.text[:120]}).")
+                    else:
+                        warnings.append(f"{name}: składniki niezapisane ({body[:120]}).")
 
             inserted += 1
             saved.append({"id": menu_id, "name": name, "category": category, "price_pln": price, "action": "inserted"})

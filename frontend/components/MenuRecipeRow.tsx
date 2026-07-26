@@ -29,6 +29,7 @@ import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { emitRecipeIngredientsChanged } from '@/lib/recipeSync';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { bestProductMatch } from '@/lib/fuzzyProductMatch';
 
 const RECIPE_WH_MAP_KEY = '@gm/recipe_wh_map';
 const UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
@@ -74,6 +75,7 @@ export interface RecipeIngredientRow {
   ingredient_name: string;
   quantity: number;
   unit: string;
+  piece_weight_g?: number | null;
   warehouse_product_id: string | null;
   warehouse_product_name?: string | null;
   in_stock?: boolean;
@@ -95,6 +97,7 @@ type EditableIngredient = {
   name: string;
   quantity: string;
   unit: string;
+  pieceWeightG: string;
   warehouse_product_id: string | null;
   warehouse_product_name?: string | null;
   in_stock?: boolean;
@@ -114,6 +117,7 @@ function toEditable(rows: RecipeIngredientRow[]): EditableIngredient[] {
     name: r.ingredient_name,
     quantity: String(r.quantity ?? 0),
     unit: r.unit || 'g',
+    pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
     warehouse_product_id: r.warehouse_product_id,
     warehouse_product_name: r.warehouse_product_name,
     in_stock: r.in_stock,
@@ -128,6 +132,7 @@ function newEditable(): EditableIngredient {
     name: '',
     quantity: '',
     unit: 'g',
+    pieceWeightG: '',
     warehouse_product_id: null,
   };
 }
@@ -175,7 +180,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
 
     const nestedFull = await supabase
       .from('menu_items')
-      .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
+      .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order, piece_weight_g, warehouse_product_id)')
       .eq('id', menuItem.id)
       .maybeSingle();
 
@@ -183,9 +188,16 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     if (nestedFull.error) {
       nested = await supabase
         .from('menu_items')
-        .select('id, recipe_ingredients(id, ingredient_name, quantity, unit)')
+        .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, piece_weight_g)')
         .eq('id', menuItem.id)
         .maybeSingle();
+      if (nested.error) {
+        nested = await supabase
+          .from('menu_items')
+          .select('id, recipe_ingredients(id, ingredient_name, quantity, unit)')
+          .eq('id', menuItem.id)
+          .maybeSingle();
+      }
     }
 
     if (!nested.error && nested.data) {
@@ -196,11 +208,21 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       errMsg = nested.error?.message ?? nestedFull.error?.message ?? null;
       const fallback = await supabase
         .from('recipe_ingredients')
-        .select('id, ingredient_name, quantity, unit')
+        .select('id, ingredient_name, quantity, unit, piece_weight_g')
         .eq('menu_item_id', menuItem.id);
-      data = (fallback.data as any[]) ?? [];
-      if (!fallback.error) errMsg = null;
-      else errMsg = fallback.error.message;
+      if (fallback.error && /piece_weight_g/i.test(fallback.error.message ?? '')) {
+        const fb2 = await supabase
+          .from('recipe_ingredients')
+          .select('id, ingredient_name, quantity, unit')
+          .eq('menu_item_id', menuItem.id);
+        data = (fb2.data as any[]) ?? [];
+        if (!fb2.error) errMsg = null;
+        else errMsg = fb2.error.message;
+      } else {
+        data = (fallback.data as any[]) ?? [];
+        if (!fallback.error) errMsg = null;
+        else errMsg = fallback.error.message;
+      }
     }
 
     if (errMsg && (!data || data.length === 0)) {
@@ -216,6 +238,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       ingredient_name: r.ingredient_name,
       quantity: Number(r.quantity) || 0,
       unit: r.unit || 'g',
+      piece_weight_g: r.piece_weight_g != null ? Number(r.piece_weight_g) : null,
       warehouse_product_id: r.warehouse_product_id ?? null,
       warehouse_product_name: null,
     }));
@@ -257,7 +280,9 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         row.in_stock = false;
         continue;
       }
+      const fuzzy = bestProductMatch(row.ingredient_name, inventoryItems, (i) => i.name, 72);
       const hit =
+        fuzzy?.item ||
         inventoryItems.find((i) => normName(i.name) === key) ||
         inventoryItems.find((i) => {
           const n = normName(i.name);
@@ -348,13 +373,19 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
 
       for (let idx = 0; idx < valid.length; idx++) {
         const d = valid[idx];
-        const payload = {
+        const payload: Record<string, unknown> = {
           ingredient_name: d.name.trim(),
           quantity: parseFloat(d.quantity.replace(',', '.')) || 0,
           unit: d.unit || 'g',
           sort_order: idx + 1,
           warehouse_product_id: d.warehouse_product_id,
         };
+        if ((d.unit === 'szt' || d.unit === 'sztuka') && d.pieceWeightG.trim()) {
+          const pw = parseFloat(d.pieceWeightG.replace(',', '.'));
+          if (!isNaN(pw) && pw > 0) payload.piece_weight_g = pw;
+        } else {
+          payload.piece_weight_g = null;
+        }
 
         if (d.id) {
           const { error } = await supabase
@@ -363,7 +394,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
             .eq('id', d.id);
           if (error) {
             const msg = (error.message || '').toLowerCase();
-            if (msg.includes('warehouse_product_id') || msg.includes('schema cache')) {
+            if (msg.includes('warehouse_product_id') || msg.includes('schema cache') || msg.includes('piece_weight_g')) {
               const { error: e2 } = await supabase
                 .from('recipe_ingredients')
                 .update({
@@ -389,6 +420,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
             sort_order: payload.sort_order,
           };
           if (d.warehouse_product_id) insertRow.warehouse_product_id = d.warehouse_product_id;
+          if (payload.piece_weight_g != null) insertRow.piece_weight_g = payload.piece_weight_g;
           const { data: inserted, error } = await supabase
             .from('recipe_ingredients')
             .insert(insertRow)
@@ -396,7 +428,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
             .single();
           if (error) {
             const msg = (error.message || '').toLowerCase();
-            if (msg.includes('warehouse_product_id') || msg.includes('schema cache')) {
+            if (msg.includes('warehouse_product_id') || msg.includes('schema cache') || msg.includes('piece_weight_g')) {
               const { data: inserted2, error: e2 } = await supabase
                 .from('recipe_ingredients')
                 .insert({
@@ -883,6 +915,36 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
                   </View>
                 </View>
 
+                {(ing.unit === 'szt' || ing.unit === 'sztuka') && (
+                  <View
+                    style={[
+                      styles.pieceWeightBox,
+                      {
+                        backgroundColor: prem ? 'rgba(0,255,120,0.06)' : '#F8FAFC',
+                        borderColor: prem ? DS.color.borderSubtle : '#E2E8F0',
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.pieceWeightLabel, { color: textMuted }]}>
+                      Wzorcowa waga 1 sztuki (g)
+                    </Text>
+                    <TextInput
+                      style={[
+                        styles.pieceWeightInput,
+                        { backgroundColor: inputBg, borderColor: inputBorder, color: textPrimary },
+                      ]}
+                      value={ing.pieceWeightG}
+                      onChangeText={(v) => updateDraft(ing.key, { pieceWeightG: v })}
+                      placeholder="np. 180"
+                      placeholderTextColor={textMuted}
+                      keyboardType="decimal-pad"
+                    />
+                    <Text style={[styles.pieceWeightHint, { color: textMuted }]}>
+                      Do kosztu i magazynu (1 szt. = X g)
+                    </Text>
+                  </View>
+                )}
+
                 <View style={styles.mapRow}>
                   <Text
                     style={[
@@ -1280,6 +1342,31 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     textAlignVertical: 'center',
     includeFontPadding: false,
+  },
+  pieceWeightBox: {
+    marginTop: 2,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: 6,
+  },
+  pieceWeightLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  pieceWeightInput: {
+    width: 100,
+    height: 40,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  pieceWeightHint: {
+    fontSize: 10,
+    lineHeight: 14,
   },
   unitWrap: {
     flex: 1,

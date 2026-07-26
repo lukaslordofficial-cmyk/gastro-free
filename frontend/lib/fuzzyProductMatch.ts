@@ -1,0 +1,249 @@
+/**
+ * Lekki fuzzy-matcher nazw produktów (menu ↔ magazyn ↔ oferty dostawców).
+ * Bez ML — normalizacja PL, synonimy kulinarne, stem-ish, Jaccard + Levenshtein.
+ */
+
+const STOP = new Set([
+  'a', 'i', 'z', 'ze', 'w', 'we', 'na', 'do', 'od', 'po', 'pod', 'nad', 'przy',
+  'bez', 'dla', 'oraz', 'lub', 'albo', 'the', 'of', 'and', 'with', 'de', 'la',
+  'swiezy', 'swieze', 'swieza', 'fresh', 'bio', 'eko', 'premium', 'classic',
+  'extra', 'light', 'opak', 'opakowanie', 'virgin', 'organic', 'selection',
+]);
+
+/** Synonimy kulinarne → kanoniczny token (po normalizacji). */
+const SYNONYM: Record<string, string> = {
+  filet: 'piers',
+  filety: 'piers',
+  filetem: 'piers',
+  filetu: 'piers',
+  piersi: 'piers',
+  piersiami: 'piers',
+  piers: 'piers',
+  kurczaka: 'kurczak',
+  kurczakiem: 'kurczak',
+  kurczaki: 'kurczak',
+  kurczakowi: 'kurczak',
+  drobiowy: 'kurczak',
+  drobiowa: 'kurczak',
+  drobiowe: 'kurczak',
+  indyka: 'indyk',
+  indykiem: 'indyk',
+  wolowego: 'wolow',
+  wolowa: 'wolow',
+  wolowy: 'wolow',
+  wolowe: 'wolow',
+  wolowina: 'wolow',
+  wolowiny: 'wolow',
+  wieprzowego: 'wieprz',
+  wieprzowa: 'wieprz',
+  wieprzowy: 'wieprz',
+  wieprzowina: 'wieprz',
+  oliwek: 'oliw',
+  oliwa: 'oliw',
+  oliwy: 'oliw',
+  oliwie: 'oliw',
+  olive: 'oliw',
+  olives: 'oliw',
+  cukru: 'cukier',
+  cukrem: 'cukier',
+  soli: 'sol',
+  sola: 'sol',
+  pieprzu: 'pieprz',
+  czosnku: 'czosnek',
+  czosnkiem: 'czosnek',
+  cebuli: 'cebula',
+  cebula: 'cebula',
+  pomidorow: 'pomidor',
+  pomidory: 'pomidor',
+  pomidora: 'pomidor',
+  ziemniakow: 'ziemniak',
+  ziemniaki: 'ziemniak',
+  majonezu: 'majonez',
+  musztardy: 'musztarda',
+  smietany: 'smietana',
+  smietana: 'smietana',
+  mleka: 'mleko',
+  masla: 'maslo',
+  maslem: 'maslo',
+  sera: 'ser',
+  serem: 'ser',
+  jajka: 'jajko',
+  jajek: 'jajko',
+  jaja: 'jajko',
+};
+
+const NORM_CACHE = new Map<string, string>();
+const TOKENS_CACHE = new Map<string, string[]>();
+const CACHE_MAX = 4000;
+
+function cacheSet<T>(map: Map<string, T>, key: string, value: T): T {
+  if (map.size >= CACHE_MAX) {
+    let i = 0;
+    const drop = Math.floor(CACHE_MAX / 3);
+    for (const k of map.keys()) {
+      map.delete(k);
+      if (++i >= drop) break;
+    }
+  }
+  map.set(key, value);
+  return value;
+}
+
+export function normalizePolish(raw: string): string {
+  const hit = NORM_CACHE.get(raw);
+  if (hit !== undefined) return hit;
+  const s = (raw || '')
+    .toLowerCase()
+    .replace(/ł/g, 'l')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:kg|g|mg|l|ml|cl|szt|op|opak)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cacheSet(NORM_CACHE, raw, s);
+}
+
+function lightStem(token: string): string {
+  if (SYNONYM[token]) return SYNONYM[token];
+  const suffixes = ['ami', 'ach', 'owi', 'iem', 'ami', 'ow', 'om', 'em', 'ie'];
+  for (const suf of suffixes) {
+    if (token.length > suf.length + 3 && token.endsWith(suf)) {
+      const stem = token.slice(0, -suf.length);
+      return SYNONYM[stem] ?? stem;
+    }
+  }
+  // końcówki 1-literowe tylko dla dłuższych słów
+  if (token.length >= 6 && /[ayiue]$/.test(token)) {
+    const stem = token.slice(0, -1);
+    return SYNONYM[stem] ?? stem;
+  }
+  return token;
+}
+
+/** Znaczące tokeny kanoniczne (posortowane, unikalne). */
+export function productTokens(raw: string): string[] {
+  const key = raw || '';
+  const cached = TOKENS_CACHE.get(key);
+  if (cached) return cached;
+  const norm = normalizePolish(key);
+  const tokens = norm
+    .split(' ')
+    .filter((t) => t.length >= 2 && !STOP.has(t))
+    .map(lightStem)
+    .filter((t) => t.length >= 2 && !STOP.has(t));
+  const uniq = [...new Set(tokens)].sort();
+  return cacheSet(TOKENS_CACHE, key, uniq);
+}
+
+/** Znormalizowany klucz do porównań (tokeny posortowane). */
+export function productMatchKey(raw: string): string {
+  return productTokens(raw).join(' ');
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const row = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) row[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    let prev = i - 1;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j];
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + cost);
+      prev = tmp;
+    }
+  }
+  return row[b.length];
+}
+
+function tokenJaccard(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const bSet = new Set(b);
+  let inter = 0;
+  for (const t of a) if (bSet.has(t)) inter += 1;
+  const union = a.length + b.length - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function softTokenOverlap(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  let hit = 0;
+  for (const t of a) {
+    if (b.includes(t)) {
+      hit += 1;
+      continue;
+    }
+    if (t.length >= 4 && b.some((bt) => bt.length >= 4 && (bt.includes(t) || t.includes(bt) || levenshtein(t, bt) <= 1))) {
+      hit += 0.85;
+    }
+  }
+  return hit / a.length;
+}
+
+/**
+ * Wynik 0–100. ≥72 ≈ pewne dopasowanie kulinarne (filet z piersi kurczaka ↔ pierś z kurczaka).
+ */
+export function scoreProductNames(a: string, b: string): number {
+  const ka = productMatchKey(a);
+  const kb = productMatchKey(b);
+  if (!ka || !kb) return 0;
+  if (ka === kb) return 100;
+
+  const ta = productTokens(a);
+  const tb = productTokens(b);
+  const jaccard = tokenJaccard(ta, tb);
+  const coverA = softTokenOverlap(ta, tb);
+  const coverB = softTokenOverlap(tb, ta);
+  const cover = 0.55 * coverA + 0.45 * coverB;
+
+  const maxLen = Math.max(ka.length, kb.length);
+  const levSim = maxLen > 0 ? 1 - levenshtein(ka, kb) / maxLen : 0;
+
+  // Wymagaj sensownego pokrycia tokenów — sam Levenshtein na długich stringach nie wystarczy
+  let score = 100 * (0.5 * cover + 0.35 * jaccard + 0.15 * levSim);
+
+  // Bonus: wszystkie tokeny krótszej nazwy pokryte
+  const shorter = ta.length <= tb.length ? ta : tb;
+  const longer = ta.length <= tb.length ? tb : ta;
+  if (shorter.length >= 2 && shorter.every((t) => longer.includes(t) || longer.some((l) => l.includes(t) || t.includes(l)))) {
+    score = Math.max(score, 88);
+  }
+  if (shorter.length === 1 && longer.includes(shorter[0]) && longer.length <= 3) {
+    score = Math.max(score, 82);
+  }
+
+  return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+export function namesMatch(a: string, b: string, threshold = 72): boolean {
+  return scoreProductNames(a, b) >= threshold;
+}
+
+export function bestProductMatch<T>(
+  query: string,
+  candidates: readonly T[],
+  getName: (c: T) => string,
+  threshold = 72,
+): { item: T; score: number } | null {
+  let best: { item: T; score: number } | null = null;
+  for (const c of candidates) {
+    const score = scoreProductNames(query, getName(c));
+    if (score < threshold) continue;
+    if (!best || score > best.score) best = { item: c, score };
+  }
+  return best;
+}
+
+/** Czy nazwa produktu występuje na liście składników menu (fuzzy). */
+export function matchesAnyMenuIngredient(
+  productName: string,
+  ingredientNames: readonly string[],
+  threshold = 72,
+): boolean {
+  if (!productName || !ingredientNames.length) return false;
+  return ingredientNames.some((ing) => namesMatch(productName, ing, threshold));
+}

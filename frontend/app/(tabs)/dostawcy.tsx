@@ -71,6 +71,7 @@ import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { formatPln, formatPlnNumber } from '@/lib/format';
 import type { SupplierOffer, SupplierOfferItem } from '@/lib/types';
+import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ const ACCEPTED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/jpg', 'imag
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function mapDbRow(row: any): Supplier {
+function mapDbRow(row: any, menuIngredientNames: string[] = []): Supplier {
   return {
     id: row.id,
     name: row.name,
@@ -148,16 +149,23 @@ function mapDbRow(row: any): Supplier {
         : null,
     catalog: (row.supplier_catalog ?? [])
       .sort((a: any, b: any) => a.sort_order - b.sort_order)
-      .map((c: any): CatalogProduct => ({
-        id: c.id,
-        name: c.name,
-        variant: c.variant,
-        volume_label: c.volume_label ?? '',
-        unit_count: Number(c.unit_count),
-        price_pln: Number(c.price_pln),
-        liters_total: Number(c.liters_total),
-        in_menu: c.is_visible !== false,
-      })),
+      .map((c: any): CatalogProduct => {
+        const fromDb = c.is_visible !== false;
+        const fromFuzzy =
+          !fromDb &&
+          menuIngredientNames.length > 0 &&
+          matchesAnyMenuIngredient(c.name, menuIngredientNames, 72);
+        return {
+          id: c.id,
+          name: c.name,
+          variant: c.variant,
+          volume_label: c.volume_label ?? '',
+          unit_count: Number(c.unit_count),
+          price_pln: Number(c.price_pln),
+          liters_total: Number(c.liters_total),
+          in_menu: fromDb || fromFuzzy,
+        };
+      }),
   };
 }
 
@@ -2391,13 +2399,17 @@ export default function DostawcyScreen() {
       'id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order)';
     try {
       const ak = accountKey;
-      const [suppliersRes, countRes] = await Promise.all([
+      const [suppliersRes, countRes, recipeRes] = await Promise.all([
         supabase.from('suppliers').select(SEL_VISIBLE).eq('account_key', ak).order('name'),
         supabase
           .from('supplier_offers')
           .select('*', { count: 'exact', head: true })
           .eq('account_key', ak)
           .eq('status', 'done'),
+        supabase
+          .from('recipe_ingredients')
+          .select('ingredient_name')
+          .limit(5000),
       ]);
       let data = suppliersRes.data;
       if (suppliersRes.error) {
@@ -2427,7 +2439,26 @@ export default function DostawcyScreen() {
           throw suppliersRes.error;
         }
       }
-      setSuppliers((data ?? []).map(mapDbRow));
+      const menuIngredients = [
+        ...new Set(
+          (recipeRes.data ?? [])
+            .map((r: any) => (r.ingredient_name || '').trim())
+            .filter(Boolean),
+        ),
+      ];
+      // Opcjonalnie: podnieś is_visible w DB dla fuzzy-match (bez blokowania UI)
+      const toReveal: string[] = [];
+      for (const s of data ?? []) {
+        for (const c of (s as any).supplier_catalog ?? []) {
+          if (c.is_visible === false && matchesAnyMenuIngredient(c.name, menuIngredients, 72)) {
+            toReveal.push(c.id);
+          }
+        }
+      }
+      if (toReveal.length > 0) {
+        void supabase.from('supplier_catalog').update({ is_visible: true }).in('id', toReveal);
+      }
+      setSuppliers((data ?? []).map((row) => mapDbRow(row, menuIngredients)));
       setTotalAnalyses(countRes.count ?? 0);
       setError(null);
 

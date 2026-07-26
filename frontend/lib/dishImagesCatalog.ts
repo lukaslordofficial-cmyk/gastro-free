@@ -14,7 +14,7 @@ export type DishImageEntry = {
 
 /** Plansza 52 — zupy (poprawione, większe marginesy) */
 export const SOUPS_PL_CATALOG: DishImageEntry[] = [
-  { slug: 'rosol', category: 'kuchnia_polska', labelPl: 'Tradycyjny rosół z makaronem i marchewką', aliases: ['rosół', 'rosol', 'rosół z makaronem', 'chicken soup', 'bulion z kurczaka', 'tradycyjny rosół'], storagePath: 'dania/soups_pl/soup_pl_01.webp', localAsset: require('@/assets/premium/dishes/soups_pl/soup_pl_01.webp') },
+  { slug: 'rosol', category: 'kuchnia_polska', labelPl: 'Tradycyjny rosół z makaronem i marchewką', aliases: ['rosół', 'rosol', 'rosół z makaronem', 'tradycyjny rosół', 'rosół domowy'], storagePath: 'dania/soups_pl/soup_pl_01.webp', localAsset: require('@/assets/premium/dishes/soups_pl/soup_pl_01.webp') },
   { slug: 'zupa_pomidorowa', category: 'kuchnia_polska', labelPl: 'Zupa pomidorowa z ryżem i świeżą pietruszką', aliases: ['pomidorowa', 'tomato soup', 'krem pomidorowy', 'zupa pomidorowa z ryżem'], storagePath: 'dania/soups_pl/soup_pl_02.webp', localAsset: require('@/assets/premium/dishes/soups_pl/soup_pl_02.webp') },
   { slug: 'zurek', category: 'kuchnia_polska', labelPl: 'Żurek staropolski z białą kiełbasą i jajkiem', aliases: ['żurek', 'zurek', 'zur', 'barszcz biały', 'żurek staropolski'], storagePath: 'dania/soups_pl/soup_pl_03.webp', localAsset: require('@/assets/premium/dishes/soups_pl/soup_pl_03.webp') },
   { slug: 'krem_warzywny', category: 'kuchnia_polska', labelPl: 'Krem warzywny', aliases: ['krem warzywny', 'zupa krem warzywna', 'vegetable cream'], storagePath: 'dania/soups_pl/soup_pl_04.webp', localAsset: require('@/assets/premium/dishes/soups_pl/soup_pl_04.webp') },

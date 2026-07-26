@@ -29,6 +29,9 @@ function detectDishFamily(name) {
   if (/\b(zupa|krem|rosol|barszcz|zurek|flaki|chowder|bisque|gazpacho|bulion|chlodnik|krupnik|kapusniak|grochowk|pho|ramen|miso|tom yum|tom kha)\b/.test(n)) {
     return 'soups';
   }
+  if (/\b(filet|piers|kurczak|schab|kotlet|stek|zeberk|wolow|wieprz|indyk|kaczka|de volaille|poledwic|antrykot)\b/.test(n)) {
+    return 'meat';
+  }
   return 'other';
 }
 
@@ -117,6 +120,7 @@ const cases = [
   { name: 'Sos czosnkowy aioli', expectSlug: 'sos_aioli_pieczony_czosnek', rejectSlug: 'hummus_klasyczny' },
   { name: 'hummus', expectSlug: 'hummus_klasyczny' },
   { name: 'Zupa ogórkowa', expectSlug: 'zupa_ogorkowa_pl', expectFamily: 'soups' },
+  { name: 'Filet z piersi kurczaka', expectFamily: 'meat', rejectSlug: 'rosol' },
   { name: 'losowy krem czosnkowy xyz', rejectSlug: 'hummus_klasyczny' },
 ];
 

@@ -73,7 +73,7 @@ export const MEAT_CATALOG: ProductImageEntry[] = [
     slug: 'piers_z_kurczaka',
     category: 'mieso',
     labelPl: 'Pierś z kurczaka',
-    aliases: ['pierś z kurczaka', 'piers z kurczaka', 'filet z kurczaka', 'kurczak pierś', 'indyk filet'],
+    aliases: ['pierś z kurczaka', 'piers z kurczaka', 'filet z kurczaka', 'filet z piersi kurczaka', 'kurczak pierś', 'kurczak filet', 'indyk filet'],
     storagePath: 'mieso/piers_z_kurczaka.png',
     localAsset: require('@/assets/premium/meats/meat_03.webp'),
   },
@@ -1172,7 +1172,11 @@ function resolveDishCategoryPlaceholder(
   const rules: { keys: string[]; slug: string }[] = [
     { keys: ['ramen', 'pho', 'miso', 'tom yum', 'tom kha', 'udon', 'soba', 'laksa', 'wonton', 'kimchi', 'congee', 'asia'], slug: 'shoyu_ramen' },
     { keys: ['sos', 'sauce', 'aioli', 'gravy', 'demi glace', 'bearnaise', 'hollandaise', 'satay', 'bbq glaze'], slug: 'sos_smietankowo_ziolowy' },
-    { keys: ['zupa', 'krem', 'rosol', 'barszcz', 'zurek', 'flaki', 'chowder', 'bisque', 'gazpacho', 'bulion', 'zupy', 'krupnik', 'kapusniak', 'chlodnik'], slug: 'rosol' },
+    // Zupy — tylko gdy nazwa/kategoria ma kontekst zupy (nie „kurczak” sam)
+    { keys: ['zupa', 'rosol', 'barszcz', 'zurek', 'flaki', 'chowder', 'bisque', 'gazpacho', 'bulion', 'zupy', 'krupnik', 'kapusniak', 'chlodnik'], slug: 'rosol' },
+    { keys: ['krem z ', 'kremem'], slug: 'rosol' },
+    // Mięsa / filety / piersi — PRZED ogólnymi regułami
+    { keys: ['filet', 'piers', 'kurczak', 'schab', 'kotlet', 'de volaille', 'udziec', 'skrzyde', 'indyk', 'kaczka', 'poledwic', 'antrykot', 'karkow'], slug: 'kotlet_schabowy' },
     { keys: ['burger', 'smash', 'cheeseburger', 'hamburger', 'sandwich', 'kanapka', 'burgery'], slug: 'classic_cheeseburger' },
     { keys: ['frytk', 'nachos', 'hot dog', 'nugget', 'taco', 'zapiekank', 'street', 'wings', 'onion ring', 'quesadilla'], slug: 'french_fries' },
     { keys: ['tatar', 'carpaccio', 'ceviche', 'ostrygi', 'foie', 'gravlax', 'przystawk', 'tataki', 'krewet', 'starter'], slug: 'beef_tartare' },
@@ -1380,6 +1384,20 @@ export function resolveProductImage(
 
   const ranked: { entry: ProductImageEntry; score: number }[] = [];
 
+  // Prefer dishes: użyj family z dishImageMatch gdy dostępne
+  let wantFamily: string | null = null;
+  if (preferDishes) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { detectDishFamily } = require('@/lib/dishImageMatch') as {
+        detectDishFamily: (name: string) => string;
+      };
+      wantFamily = detectDishFamily(productName);
+    } catch {
+      wantFamily = null;
+    }
+  }
+
   for (const pool of pools) {
     for (const entry of pool) {
       const candidates = [entry.slug.replace(/_/g, ' '), entry.labelPl, ...entry.aliases].map(normalizeName);
@@ -1389,7 +1407,13 @@ export function resolveProductImage(
         if (q === c) score = Math.max(score, 100);
         else if (c.length >= 5 && q.length >= 5 && (q.includes(c) || c.includes(q))) {
           // Unikaj „stek” ⊆ „cheesesteak” / krótkich podciągów
-          score = Math.max(score, 85 + Math.min(c.length, 10));
+          // Pełne zawieranie nazwy — tylko gdy kandydat ma ≥2 tokeny lub jest długi
+          const cTok = c.split(' ').filter((t) => t.length > 2);
+          if (cTok.length >= 2 || c.length >= 10) {
+            score = Math.max(score, 85 + Math.min(c.length, 10));
+          } else {
+            score = Math.max(score, 62);
+          }
         } else {
           const qTokens = q.split(' ').filter((t) => t.length > 2);
           const cTokens = c.split(' ').filter((t) => t.length > 2);
@@ -1401,13 +1425,27 @@ export function resolveProductImage(
               return false;
             }),
           ).length;
-          if (hit > 0) score = Math.max(score, 50 + hit * 18);
+          if (hit > 0) {
+            let s = 50 + hit * 18;
+            // Sam jeden wspólny token przy 2+ w zapytaniu — słabe (kurczak ≠ rosół/burger)
+            if (hit === 1 && qTokens.length >= 2) s = Math.min(s, 54);
+            score = Math.max(score, s);
+          }
         }
+      }
+      // Kara za odległą kategorię (np. zupa vs mięso)
+      if (preferDishes && wantFamily && wantFamily !== 'other' && score > 0) {
+        const path = `${entry.storagePath} ${entry.slug} ${entry.category}`.toLowerCase();
+        const isSoup = /soup|zupa/.test(path);
+        const isMeat = /mieso|steak|grill|kotlet|schab|kurczak|beef|pork/.test(path) && !isSoup;
+        if (wantFamily === 'meat' && isSoup) score = Math.max(0, score - 45);
+        else if (wantFamily === 'soups' && isMeat) score = Math.max(0, score - 45);
+        else if (wantFamily === 'meat' && isMeat) score = Math.min(100, score + 8);
       }
       if (score > 0) ranked.push({ entry, score });
     }
-    // Jeśli w katalogu dań jest sensowne trafienie — nie mieszaj ze składnikami
-    if (preferDishes && ranked.some((r) => r.score >= 55)) break;
+    // Jeśli w katalogu dań jest MOCNE trafienie — nie mieszaj ze składnikami
+    if (preferDishes && ranked.some((r) => r.score >= 75)) break;
   }
 
   ranked.sort((a, b) => b.score - a.score);
@@ -1415,11 +1453,11 @@ export function resolveProductImage(
   const exact = ranked.find((r) => r.score >= 95);
   const pick =
     exact ||
-    ranked.find((r) => r.score >= 55 && (!excluded || !excluded.has(r.entry.slug))) ||
-    ranked.find((r) => r.score >= 55) ||
+    ranked.find((r) => r.score >= 70 && (!excluded || !excluded.has(r.entry.slug))) ||
+    ranked.find((r) => r.score >= 70) ||
     null;
 
-  if (pick && pick.score >= 55) {
+  if (pick && pick.score >= 70) {
     const resolved = {
       slug: pick.entry.slug,
       labelPl: pick.entry.labelPl,

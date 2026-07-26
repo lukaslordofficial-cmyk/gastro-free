@@ -11,6 +11,7 @@ ani logowany.  Użytkownik uzupełnia go we własnym .env — patrz backend/.env
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -4985,6 +4986,39 @@ class SuggestRecipeResponse(BaseModel):
     credits_remaining: Optional[int] = None
 
 
+_MENU_SUGGEST_BATCH_SIZE = 4
+_MENU_SUGGEST_BATCH_TIMEOUT_S = 55.0
+
+_MENU_SUGGEST_SYSTEM_PROMPT = (
+    "Jesteś doświadczonym szefem kuchni. Dla listy potraw restauracyjnych proponujesz "
+    "receptury na 1 porcję zgodnie z powszechnie stosowanymi standardami gastronomicznymi.\n\n"
+    "Dla KAŻDEJ potrawy zwróć obiekt z polami:\n"
+    "- name: dokładnie taka sama nazwa jak wejściowa.\n"
+    "- suggested_portion_weight_value: łączna wzorcowa waga/objętość porcji "
+    "(np. burger ≈ 350, spaghetti ≈ 400, latte ≈ 250). Jeśli wejście `has_portion_weight=true`, "
+    "zwróć null (użytkownik już podał gramaturę).\n"
+    "- suggested_portion_weight_unit: 'g' (dania stałe), 'ml' (napoje), 'szt' (jeżeli liczone w sztukach). "
+    "Null jeśli suggested_portion_weight_value=null.\n"
+    "- suggested_ingredients: lista składników z realistycznymi gramaturami wzorcowymi "
+    "(np. bułka 80g, kotlet wołowy 150g, ser 20g, sałata 20g, sos 30g). Zasady:\n"
+    "   * Jeśli `has_ingredients=true` (użytkownik już podał składniki), UŻYJ dokładnie tych nazw "
+    "     (pole name musi być identyczne) — możesz jedynie doszacować ilości.\n"
+    "   * Jeśli `has_ingredients=false`, wygeneruj kompletny wzorcowy skład (5–10 pozycji).\n"
+    "   * Jednostki: 'g' (waga), 'ml' (płyny), 'szt' (jajko, plaster itp.).\n"
+    "   * SPÓJNOŚĆ JEDNOSTEK (KRYTYCZNE): ten sam składnik musi mieć IDENTYCZNĄ "
+    "jednostkę we WSZYSTKICH potrawach naraz. Jeśli 'śmietana' jest w ml w jednym "
+    "daniu, MUSI być w ml we wszystkich. Płyny/nabiał/oleje/sosy (śmietana, mleko, "
+    "olej, sos, bulion, woda, sok, krem) ZAWSZE w 'ml'; produkty stałe ZAWSZE w 'g'; "
+    "liczone na sztuki (jajko, plaster, bułka) w 'szt'. Nigdy nie mieszaj g i ml dla "
+    "tego samego produktu.\n"
+    "   * Ilości > 0.\n"
+    "   * KATEGORYCZNIE ZAKAZANE: 'Porcja', 'Porcje', 'Wielkość porcji', 'Gramatura', "
+    "'Gramatura porcji' NIE MOGĄ pojawić się w `suggested_ingredients`. Wielkość porcji "
+    "zapisuj TYLKO w `suggested_portion_weight_value` + `suggested_portion_weight_unit`.\n\n"
+    "Zwróć wyłącznie poprawny JSON zgodny ze schematem."
+)
+
+
 @app.post("/api/menu/suggest-recipe", response_model=SuggestRecipeResponse)
 async def menu_suggest_recipe(req: SuggestRecipeRequest):
     """Dla listy potraw AI proponuje brakujące składniki i/lub gramaturę.
@@ -4992,7 +5026,10 @@ async def menu_suggest_recipe(req: SuggestRecipeRequest):
     - jeśli `ingredients` puste → proponuje pełny wzorcowy skład + gramatury,
     - jeśli `ingredients` niepuste, ale bez ilości LUB brak `portion_weight_value` →
       proponuje gramatury wzorcowe (nie zmienia nazw składników użytkownika).
-    Zwraca WYŁĄCZNIE sugestie — decyduje frontend, czy je zastosować."""
+    Zwraca WYŁĄCZNIE sugestie — decyduje frontend, czy je zastosować.
+
+    Przetwarzanie partiami (max 4 dania / call OpenAI), żeby uniknąć timeoutów proxy Railway.
+    """
     if not req.dishes:
         raise HTTPException(status_code=400, detail="Brak potraw do przetworzenia.")
 
@@ -5014,75 +5051,81 @@ async def menu_suggest_recipe(req: SuggestRecipeRequest):
         for d in req.dishes
     ]
 
-    system_prompt = (
-        "Jesteś doświadczonym szefem kuchni. Dla listy potraw restauracyjnych proponujesz "
-        "receptury na 1 porcję zgodnie z powszechnie stosowanymi standardami gastronomicznymi.\n\n"
-        "Dla KAŻDEJ potrawy zwróć obiekt z polami:\n"
-        "- name: dokładnie taka sama nazwa jak wejściowa.\n"
-        "- suggested_portion_weight_value: łączna wzorcowa waga/objętość porcji "
-        "(np. burger ≈ 350, spaghetti ≈ 400, latte ≈ 250). Jeśli wejście `has_portion_weight=true`, "
-        "zwróć null (użytkownik już podał gramaturę).\n"
-        "- suggested_portion_weight_unit: 'g' (dania stałe), 'ml' (napoje), 'szt' (jeżeli liczone w sztukach). "
-        "Null jeśli suggested_portion_weight_value=null.\n"
-        "- suggested_ingredients: lista składników z realistycznymi gramaturami wzorcowymi "
-        "(np. bułka 80g, kotlet wołowy 150g, ser 20g, sałata 20g, sos 30g). Zasady:\n"
-        "   * Jeśli `has_ingredients=true` (użytkownik już podał składniki), UŻYJ dokładnie tych nazw "
-        "     (pole name musi być identyczne) — możesz jedynie doszacować ilości.\n"
-        "   * Jeśli `has_ingredients=false`, wygeneruj kompletny wzorcowy skład (5–10 pozycji).\n"
-        "   * Jednostki: 'g' (waga), 'ml' (płyny), 'szt' (jajko, plaster itp.).\n"
-        "   * SPÓJNOŚĆ JEDNOSTEK (KRYTYCZNE): ten sam składnik musi mieć IDENTYCZNĄ "
-        "jednostkę we WSZYSTKICH potrawach naraz. Jeśli 'śmietana' jest w ml w jednym "
-        "daniu, MUSI być w ml we wszystkich. Płyny/nabiał/oleje/sosy (śmietana, mleko, "
-        "olej, sos, bulion, woda, sok, krem) ZAWSZE w 'ml'; produkty stałe ZAWSZE w 'g'; "
-        "liczone na sztuki (jajko, plaster, bułka) w 'szt'. Nigdy nie mieszaj g i ml dla "
-        "tego samego produktu.\n"
-        "   * Ilości > 0.\n"
-        "   * KATEGORYCZNIE ZAKAZANE: 'Porcja', 'Porcje', 'Wielkość porcji', 'Gramatura', "
-        "'Gramatura porcji' NIE MOGĄ pojawić się w `suggested_ingredients`. Wielkość porcji "
-        "zapisuj TYLKO w `suggested_portion_weight_value` + `suggested_portion_weight_unit`.\n\n"
-        "Zwróć wyłącznie poprawny JSON zgodny ze schematem."
-    )
-
-    try:
-        resp = await client.chat.completions.create(
-            model=CHAT_MODEL,
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps({"dishes": payload_dishes}, ensure_ascii=False)},
-            ],
-            response_format={"type": "json_schema", "json_schema": _MENU_SUGGEST_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/menu/suggest-recipe", model=CHAT_MODEL,
-            extras={"dishes_count": len(req.dishes)},
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
-
     out: list[SuggestedDishOut] = []
-    for d in data.get("dishes") or []:
+    credits_deducted = 0
+    credits_remaining = None
+
+    async def _suggest_batch(batch: list[dict]) -> tuple[list[SuggestedDishOut], dict]:
         try:
-            out.append(SuggestedDishOut(**d))
-        except Exception:
-            continue
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": _MENU_SUGGEST_SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps({"dishes": batch}, ensure_ascii=False)},
+                    ],
+                    response_format={"type": "json_schema", "json_schema": _MENU_SUGGEST_JSON_SCHEMA},
+                ),
+                timeout=_MENU_SUGGEST_BATCH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as e:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Sugestie AI przekroczyły limit czasu. "
+                    "Spróbuj ponownie lub uruchom sugestie dla mniejszej liczby potraw."
+                ),
+            ) from e
+        except APIError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Serwis AI chwilowo niedostępny: {e.message}",
+            ) from e
+        except OpenAIError as e:  # pragma: no cover
+            raise HTTPException(
+                status_code=502,
+                detail=f"Serwis AI chwilowo niedostępny: {e}",
+            ) from e
+
+        billing = {"credits_deducted": 0, "credits_remaining": None}
+        async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+            billing = await _bill_openai_response(
+                httpx_c, resp, endpoint="/api/menu/suggest-recipe", model=CHAT_MODEL,
+                extras={"dishes_count": len(batch)},
+            )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=502,
+                detail="Model AI zwrócił niepoprawną odpowiedź. Spróbuj ponownie.",
+            ) from e
+
+        batch_out: list[SuggestedDishOut] = []
+        for d in data.get("dishes") or []:
+            try:
+                batch_out.append(SuggestedDishOut(**d))
+            except Exception:
+                continue
+        return batch_out, billing
+
+    for i in range(0, len(payload_dishes), _MENU_SUGGEST_BATCH_SIZE):
+        batch = payload_dishes[i : i + _MENU_SUGGEST_BATCH_SIZE]
+        batch_out, billing = await _suggest_batch(batch)
+        out.extend(batch_out)
+        credits_deducted += int(billing.get("credits_deducted") or 0)
+        if billing.get("credits_remaining") is not None:
+            credits_remaining = billing.get("credits_remaining")
+
     # Ujednolić jednostki: ten sam składnik = ta sama jednostka we wszystkich potrawach.
     _canonicalize_ingredient_units(out)
     return SuggestRecipeResponse(
         dishes=out,
-        credits_deducted=int(billing.get("credits_deducted") or 0),
-        credits_remaining=billing.get("credits_remaining"),
+        credits_deducted=credits_deducted,
+        credits_remaining=credits_remaining,
     )
 
 

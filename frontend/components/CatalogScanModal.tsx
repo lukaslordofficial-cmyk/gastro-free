@@ -10,7 +10,7 @@ import {
   Platform,
   TextInput,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import {
@@ -99,6 +99,8 @@ export function CatalogScanModal({
   onMenuDetected,
 }: Props) {
   const theme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const footerPad = Math.max(insets.bottom, 12) + 8;
   const prem = theme.isPremium;
   const scanBg = prem ? DS.color.bgPrimary : Colors.background;
   const scanCard = prem ? DS.color.surfaceCard : Colors.card;
@@ -482,7 +484,7 @@ export function CatalogScanModal({
               ))}
               <View style={{ height: 12 }} />
             </ScrollView>
-            <View style={[styles.footer, { backgroundColor: scanCard, borderTopColor: scanBorder }]}>
+            <View style={[styles.footer, { backgroundColor: scanCard, borderTopColor: scanBorder, paddingBottom: footerPad }]}>
               <Text style={styles.destLabel}>Gdzie zaksięgować?</Text>
               <View style={styles.destRow}>
                 {(

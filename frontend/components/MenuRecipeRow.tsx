@@ -456,7 +456,20 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(json?.detail || json?.error || `HTTP ${res.status}`);
+        const detail = String(json?.detail || json?.error || `HTTP ${res.status}`);
+        const low = detail.toLowerCase();
+        if (
+          res.status === 502 ||
+          res.status === 503 ||
+          res.status === 504 ||
+          low.includes('application failed to respond') ||
+          low.includes('failed to respond')
+        ) {
+          throw new Error(
+            'Serwer AI nie zdążył odpowiedzieć (timeout / 502). Spróbuj ponownie za chwilę.',
+          );
+        }
+        throw new Error(detail);
       }
       const suggested =
         (json?.dishes?.[0]?.suggested_ingredients as { name: string; quantity: number; unit: string }[]) ??

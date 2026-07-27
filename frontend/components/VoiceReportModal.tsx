@@ -62,6 +62,12 @@ import { usePremiumAlert } from '@/components/PremiumAlert';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
 import { WeightRealityCheckModal } from '@/components/WeightRealityCheckModal';
 import { offerWeightRealityCheck } from '@/lib/offerWeightRealityCheck';
+import { VolumeRealityCheckModal } from '@/components/VolumeRealityCheckModal';
+import { offerVolumeRealityCheck } from '@/lib/offerVolumeRealityCheck';
+import {
+  shouldPreferVolumeRealityCheck,
+  suggestedMlFromQty,
+} from '@/lib/volumeRealityCheck';
 import {
   findProduceConverter,
   piecesToKg,
@@ -300,6 +306,9 @@ export function VoiceReportModal({
   const [showWeightCheck, setShowWeightCheck] = useState(false);
   const [weightCheckItem, setWeightCheckItem] = useState<string | null>(null);
   const [weightCheckSuggestedG, setWeightCheckSuggestedG] = useState<number | null>(null);
+  const [showVolumeCheck, setShowVolumeCheck] = useState(false);
+  const [volumeCheckItem, setVolumeCheckItem] = useState<string | null>(null);
+  const [volumeCheckSuggestedMl, setVolumeCheckSuggestedMl] = useState<number | null>(null);
   const { alert: premiumAlert } = usePremiumAlert();
   const wakeListeningRef = useRef(false);
   const autoStartedRef = useRef(false);
@@ -1110,12 +1119,30 @@ export function VoiceReportModal({
         }
       }
       if (applyIntent === 'waste') {
-        setWeightCheckItem(String(payload.item_name || curEdited.item_name || ''));
+        const itemLabel = String(payload.item_name || curEdited.item_name || '');
+        const unitStr = String(payload.unit || '');
+        const qtyNum = Number(payload.quantity);
+        const preferVolume = shouldPreferVolumeRealityCheck({
+          unit: unitStr,
+          itemName: itemLabel,
+          reason: String(payload.reason_text || curEdited.reason_text || ''),
+        });
+        setWeightCheckItem(itemLabel);
         setWeightCheckSuggestedG(weightHintG);
+        setVolumeCheckItem(itemLabel);
+        setVolumeCheckSuggestedMl(
+          Number.isFinite(qtyNum) ? suggestedMlFromQty(qtyNum, unitStr) : null,
+        );
         setTimeout(() => {
-          offerWeightRealityCheck(premiumAlert, {
-            onAccept: () => setShowWeightCheck(true),
-          });
+          if (preferVolume) {
+            offerVolumeRealityCheck(premiumAlert, {
+              onAccept: () => setShowVolumeCheck(true),
+            });
+          } else {
+            offerWeightRealityCheck(premiumAlert, {
+              onAccept: () => setShowWeightCheck(true),
+            });
+          }
         }, 400);
       }
     } catch (e: any) {
@@ -1638,6 +1665,12 @@ export function VoiceReportModal({
         onClose={() => setShowWeightCheck(false)}
         itemName={weightCheckItem}
         suggestedGrams={weightCheckSuggestedG}
+      />
+      <VolumeRealityCheckModal
+        visible={showVolumeCheck}
+        onClose={() => setShowVolumeCheck(false)}
+        itemName={volumeCheckItem}
+        suggestedMl={volumeCheckSuggestedMl}
       />
     </Modal>
   );

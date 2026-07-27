@@ -18,6 +18,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
 import { WeightRealityCheckModal } from '@/components/WeightRealityCheckModal';
+import { VolumeRealityCheckModal } from '@/components/VolumeRealityCheckModal';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { Trash2, X, Plus, Check, Search } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
@@ -26,6 +27,11 @@ import { useAppTheme } from '@/hooks/useAppTheme';
 import { supabase } from '@/lib/supabase';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { offerWeightRealityCheck } from '@/lib/offerWeightRealityCheck';
+import { offerVolumeRealityCheck } from '@/lib/offerVolumeRealityCheck';
+import {
+  shouldPreferVolumeRealityCheck,
+  suggestedMlFromQty,
+} from '@/lib/volumeRealityCheck';
 import {
   findProduceConverter,
   piecesToKg,
@@ -135,6 +141,9 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const [showWeightCheck, setShowWeightCheck] = useState(false);
   const [weightCheckItem, setWeightCheckItem] = useState<string | null>(null);
   const [weightCheckSuggestedG, setWeightCheckSuggestedG] = useState<number | null>(null);
+  const [showVolumeCheck, setShowVolumeCheck] = useState(false);
+  const [volumeCheckItem, setVolumeCheckItem] = useState<string | null>(null);
+  const [volumeCheckSuggestedMl, setVolumeCheckSuggestedMl] = useState<number | null>(null);
 
   const produceConverter = useMemo(() => {
     if (itemType !== 'ingredient') return null;
@@ -351,14 +360,28 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       setOkMsg(detail);
       setWeightCheckItem(name);
       setWeightCheckSuggestedG(suggestedG);
+      const reasonText = reason.trim() || 'Strata ręczna';
+      const preferVolume = shouldPreferVolumeRealityCheck({
+        unit: saveUnit,
+        itemName: name,
+        reason: reasonText,
+      });
+      setVolumeCheckItem(name);
+      setVolumeCheckSuggestedMl(suggestedMlFromQty(saveQty, saveUnit));
       resetForm();
       await fetchLogs();
       onSaved?.();
       setTimeout(() => {
         setMode('list');
-        offerWeightRealityCheck(alert, {
-          onAccept: () => setShowWeightCheck(true),
-        });
+        if (preferVolume) {
+          offerVolumeRealityCheck(alert, {
+            onAccept: () => setShowVolumeCheck(true),
+          });
+        } else {
+          offerWeightRealityCheck(alert, {
+            onAccept: () => setShowWeightCheck(true),
+          });
+        }
       }, 500);
     } catch (e: any) {
       setError(e?.message ?? 'Nie udało się zapisać straty.');
@@ -681,6 +704,12 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
         onClose={() => setShowWeightCheck(false)}
         itemName={weightCheckItem}
         suggestedGrams={weightCheckSuggestedG}
+      />
+      <VolumeRealityCheckModal
+        visible={showVolumeCheck}
+        onClose={() => setShowVolumeCheck(false)}
+        itemName={volumeCheckItem}
+        suggestedMl={volumeCheckSuggestedMl}
       />
     </Modal>
   );

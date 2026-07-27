@@ -327,6 +327,7 @@ export interface KitchenUtensil {
   capacity_value: number | null;
   capacity_unit: string | null;
   notes: string | null;
+  account_key?: string | null;
   created_at: string;
 }
 

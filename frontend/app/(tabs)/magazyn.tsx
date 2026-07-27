@@ -770,6 +770,7 @@ export default function MagazynScreen() {
       await ensureDefaultWarehouseCategories(supabase, ak);
       // Soft-dedupe: ta sama nazwa → jeden category_id (produkty przenoszone, puste dupy usuwane).
       await dedupeWarehouseCategories(supabase, ak);
+      await ensureDefaultKitchenUtensils(supabase, ak);
 
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase

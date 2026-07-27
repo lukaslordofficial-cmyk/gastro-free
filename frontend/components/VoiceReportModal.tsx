@@ -58,7 +58,10 @@ import {
 import { fetchJson } from '@/lib/safeFetch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
+import { WeightRealityCheckModal } from '@/components/WeightRealityCheckModal';
+import { offerWeightRealityCheck } from '@/lib/offerWeightRealityCheck';
 import {
   findProduceConverter,
   piecesToKg,
@@ -294,6 +297,10 @@ export function VoiceReportModal({
   const [wakeStatus, setWakeStatus] = useState<string | null>(null);
   const [showCommands, setShowCommands] = useState(false);
   const [commandHint, setCommandHint] = useState<string | null>(null);
+  const [showWeightCheck, setShowWeightCheck] = useState(false);
+  const [weightCheckItem, setWeightCheckItem] = useState<string | null>(null);
+  const [weightCheckSuggestedG, setWeightCheckSuggestedG] = useState<number | null>(null);
+  const { alert: premiumAlert } = usePremiumAlert();
   const wakeListeningRef = useRef(false);
   const autoStartedRef = useRef(false);
   const followUpModeRef = useRef(false);
@@ -990,17 +997,26 @@ export function VoiceReportModal({
       };
 
       // Waste: visual size → kg for produce counted as pieces
+      let weightHintG: number | null = null;
       if (applyIntent === 'waste' && payload.produce_size) {
         const conv = findProduceConverter(String(payload.item_name || ''));
         const pcs = Number(payload.quantity);
         const sizeKey = String(payload.produce_size) as ProduceSizeKey;
         const tier = conv?.sizes.find((s) => s.key === sizeKey);
         if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
-          const { kg } = piecesToKg(pcs, tier);
+          const { kg, grams } = piecesToKg(pcs, tier);
           payload.produce_pieces = pcs;
           payload.produce_converter_id = conv.id;
           payload.quantity = kg;
           payload.unit = 'kg';
+          weightHintG = grams;
+        }
+      } else if (applyIntent === 'waste') {
+        const q = Number(payload.quantity);
+        const u = String(payload.unit || '').toLowerCase();
+        if (Number.isFinite(q) && q > 0) {
+          if (u === 'g') weightHintG = q;
+          else if (u === 'kg') weightHintG = q * 1000;
         }
       }
 
@@ -1092,6 +1108,15 @@ export function VoiceReportModal({
           setBulkContextLabel(label);
           setBulkCompare(normalizeOptimizeResult(compare));
         }
+      }
+      if (applyIntent === 'waste') {
+        setWeightCheckItem(String(payload.item_name || curEdited.item_name || ''));
+        setWeightCheckSuggestedG(weightHintG);
+        setTimeout(() => {
+          offerWeightRealityCheck(premiumAlert, {
+            onAccept: () => setShowWeightCheck(true),
+          });
+        }, 400);
       }
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'Błąd zapisu.');
@@ -1608,6 +1633,12 @@ export function VoiceReportModal({
           onClose={() => { setBulkCompare(null); setBulkContextLabel(''); onClose(); }}
         />
       ) : null}
+      <WeightRealityCheckModal
+        visible={showWeightCheck}
+        onClose={() => setShowWeightCheck(false)}
+        itemName={weightCheckItem}
+        suggestedGrams={weightCheckSuggestedG}
+      />
     </Modal>
   );
 }

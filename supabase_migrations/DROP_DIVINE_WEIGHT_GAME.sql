@@ -1,20 +1,8 @@
 -- =============================================================================
--- DROP: resztki minigry „Boska Waga w Ręku” / divine weight (xianxia)
--- Idempotentne — bezpieczne nawet gdy tabele nigdy nie powstały.
--- Project: tucmmrcwwcltkqwyvzxa
+-- DROP resztek divine weight — IDEMPOTENTNE (OK gdy tabele nigdy nie powstały)
+-- PostgreSQL: DROP POLICY IF EXISTS wymaga istnienia TABELI → nie używamy go.
+-- DROP TABLE IF EXISTS … CASCADE usuwa też polityki.
 -- =============================================================================
-
-DROP POLICY IF EXISTS divine_weight_attempts_tenant_select ON public.divine_weight_attempts;
-DROP POLICY IF EXISTS divine_weight_attempts_tenant_insert ON public.divine_weight_attempts;
-DROP POLICY IF EXISTS divine_weight_attempts_tenant_update ON public.divine_weight_attempts;
-DROP POLICY IF EXISTS divine_weight_attempts_tenant_delete ON public.divine_weight_attempts;
-DROP POLICY IF EXISTS divine_weight_attempts_tenant_all ON public.divine_weight_attempts;
-
-DROP POLICY IF EXISTS divine_weight_stats_tenant_select ON public.divine_weight_stats;
-DROP POLICY IF EXISTS divine_weight_stats_tenant_insert ON public.divine_weight_stats;
-DROP POLICY IF EXISTS divine_weight_stats_tenant_update ON public.divine_weight_stats;
-DROP POLICY IF EXISTS divine_weight_stats_tenant_delete ON public.divine_weight_stats;
-DROP POLICY IF EXISTS divine_weight_stats_tenant_all ON public.divine_weight_stats;
 
 DROP TABLE IF EXISTS public.divine_weight_attempts CASCADE;
 DROP TABLE IF EXISTS public.divine_weight_stats CASCADE;

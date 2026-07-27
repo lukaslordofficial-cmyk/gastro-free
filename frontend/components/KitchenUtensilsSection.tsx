@@ -15,7 +15,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Plus, Pencil, Trash2, X, Ruler } from 'lucide-react-native';
+import { Plus, Pencil, Trash2, X, Ruler, ChevronDown, ChevronUp, Lightbulb } from 'lucide-react-native';
 import { DS } from '@/constants/premiumTheme';
 import { supabase } from '@/lib/supabase';
 import { usePremiumAlert } from '@/components/PremiumAlert';
@@ -24,6 +24,13 @@ import {
   fetchKitchenUtensils,
   type KitchenUtensilRow,
 } from '@/lib/kitchenUtensils';
+import {
+  KNIFE_GUIDE,
+  MEASUREMENT_TIPS,
+  POT_STICKER_CONCEPT,
+  SHOP_AFFILIATE_NOTE,
+  SHOP_PLACEHOLDER,
+} from '@/lib/kitchenMeasurementTips';
 
 type Props = {
   accountKey: string;
@@ -46,6 +53,7 @@ export function KitchenUtensilsSection({ accountKey, onChanged }: Props) {
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [tipsOpen, setTipsOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!accountKey || accountKey === 'default') {
@@ -212,6 +220,47 @@ export function KitchenUtensilsSection({ accountKey, onChanged }: Props) {
         ))
       )}
 
+      <TouchableOpacity
+        style={styles.tipsToggle}
+        onPress={() => setTipsOpen((v) => !v)}
+        activeOpacity={0.85}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: tipsOpen }}
+      >
+        <Lightbulb size={15} color={DS.color.greenEnd} strokeWidth={2} />
+        <Text style={styles.tipsToggleText}>Wskazówki pomiaru</Text>
+        {tipsOpen ? (
+          <ChevronUp size={16} color={DS.color.muted} strokeWidth={2} />
+        ) : (
+          <ChevronDown size={16} color={DS.color.muted} strokeWidth={2} />
+        )}
+      </TouchableOpacity>
+
+      {tipsOpen ? (
+        <View style={styles.tipsBody}>
+          <Text style={styles.tipsSectionTitle}>Noże — który do czego</Text>
+          {KNIFE_GUIDE.map((row) => (
+            <View key={row.knife} style={styles.knifeRow}>
+              <Text style={styles.knifeName}>{row.knife}</Text>
+              <Text style={styles.knifeUse}>{row.use}</Text>
+            </View>
+          ))}
+
+          <Text style={[styles.tipsSectionTitle, { marginTop: 14 }]}>{POT_STICKER_CONCEPT.title}</Text>
+          <Text style={styles.tipsPara}>{POT_STICKER_CONCEPT.body}</Text>
+
+          <Text style={[styles.tipsSectionTitle, { marginTop: 14 }]}>Pomiary w kuchni</Text>
+          {MEASUREMENT_TIPS.map((tip) => (
+            <Text key={tip} style={styles.tipBullet}>
+              · {tip}
+            </Text>
+          ))}
+
+          <Text style={styles.shopLine}>{SHOP_PLACEHOLDER}</Text>
+          <Text style={styles.shopNote}>{SHOP_AFFILIATE_NOTE}</Text>
+        </View>
+      ) : null}
+
       <Modal visible={modalOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setModalOpen(false)}>
         <SafeAreaView style={styles.modalSafe} edges={['top', 'bottom']}>
           <View style={styles.modalHeader}>
@@ -329,6 +378,53 @@ const styles = StyleSheet.create({
   iconBtn: { padding: 8 },
   empty: { fontSize: 13, color: DS.color.muted, paddingVertical: 8 },
   warn: { fontSize: 13, color: DS.color.alert, marginTop: 8, lineHeight: 18 },
+  tipsToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: DS.color.borderSubtle,
+  },
+  tipsToggleText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: DS.color.heading,
+  },
+  tipsBody: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: DS.color.bgPrimary,
+    borderWidth: 1,
+    borderColor: DS.color.borderSubtle,
+  },
+  tipsSectionTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: DS.color.greenEnd,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  knifeRow: {
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: DS.color.borderSubtle,
+  },
+  knifeName: { fontSize: 13, fontWeight: '700', color: DS.color.heading },
+  knifeUse: { fontSize: 12, color: DS.color.muted, marginTop: 2, lineHeight: 17 },
+  tipsPara: { fontSize: 13, color: DS.color.body, lineHeight: 19 },
+  tipBullet: { fontSize: 13, color: DS.color.body, lineHeight: 19, marginBottom: 4 },
+  shopLine: {
+    marginTop: 14,
+    fontSize: 13,
+    fontWeight: '700',
+    color: DS.color.heading,
+  },
+  shopNote: { marginTop: 4, fontSize: 11, color: DS.color.muted, lineHeight: 16 },
   modalSafe: { flex: 1, backgroundColor: DS.color.bgPrimary },
   modalHeader: {
     flexDirection: 'row',

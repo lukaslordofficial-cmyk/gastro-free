@@ -58,10 +58,7 @@ import {
 import { fetchJson } from '@/lib/safeFetch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
-import { usePremiumAlert } from '@/components/PremiumAlert';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
-import { DivineWeightGameModal } from '@/components/DivineWeightGameModal';
-import { offerDivinePerceptionTraining } from '@/lib/offerDivinePerception';
 import {
   findProduceConverter,
   piecesToKg,
@@ -297,10 +294,6 @@ export function VoiceReportModal({
   const [wakeStatus, setWakeStatus] = useState<string | null>(null);
   const [showCommands, setShowCommands] = useState(false);
   const [commandHint, setCommandHint] = useState<string | null>(null);
-  const [showDivineGame, setShowDivineGame] = useState(false);
-  const [divineItemName, setDivineItemName] = useState<string | null>(null);
-  const [divineSuggestedG, setDivineSuggestedG] = useState<number | null>(null);
-  const { alert: premiumAlert } = usePremiumAlert();
   const wakeListeningRef = useRef(false);
   const autoStartedRef = useRef(false);
   const followUpModeRef = useRef(false);
@@ -997,19 +990,17 @@ export function VoiceReportModal({
       };
 
       // Waste: visual size → kg for produce counted as pieces
-      let divineSuggested: number | null = null;
       if (applyIntent === 'waste' && payload.produce_size) {
         const conv = findProduceConverter(String(payload.item_name || ''));
         const pcs = Number(payload.quantity);
         const sizeKey = String(payload.produce_size) as ProduceSizeKey;
         const tier = conv?.sizes.find((s) => s.key === sizeKey);
         if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
-          const { kg, grams } = piecesToKg(pcs, tier);
+          const { kg } = piecesToKg(pcs, tier);
           payload.produce_pieces = pcs;
           payload.produce_converter_id = conv.id;
           payload.quantity = kg;
           payload.unit = 'kg';
-          divineSuggested = grams;
         }
       }
 
@@ -1101,15 +1092,6 @@ export function VoiceReportModal({
           setBulkContextLabel(label);
           setBulkCompare(normalizeOptimizeResult(compare));
         }
-      }
-      if (applyIntent === 'waste') {
-        setDivineItemName(String(payload.item_name || curEdited.item_name || ''));
-        setDivineSuggestedG(divineSuggested);
-        setTimeout(() => {
-          offerDivinePerceptionTraining(premiumAlert, {
-            onAccept: () => setShowDivineGame(true),
-          });
-        }, 400);
       }
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'Błąd zapisu.');
@@ -1626,12 +1608,6 @@ export function VoiceReportModal({
           onClose={() => { setBulkCompare(null); setBulkContextLabel(''); onClose(); }}
         />
       ) : null}
-      <DivineWeightGameModal
-        visible={showDivineGame}
-        onClose={() => setShowDivineGame(false)}
-        itemName={divineItemName}
-        suggestedGrams={divineSuggestedG}
-      />
     </Modal>
   );
 }

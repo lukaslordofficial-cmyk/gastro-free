@@ -17,15 +17,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
-import { DivineWeightGameModal } from '@/components/DivineWeightGameModal';
-import { usePremiumAlert } from '@/components/PremiumAlert';
 import { Trash2, X, Plus, Check, Search } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { PremiumTokens } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { supabase } from '@/lib/supabase';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
-import { offerDivinePerceptionTraining } from '@/lib/offerDivinePerception';
 import {
   findProduceConverter,
   piecesToKg,
@@ -112,7 +109,6 @@ function formatLogTime(iso: string): string {
 
 export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const theme = useAppTheme();
-  const { alert } = usePremiumAlert();
   const accent = theme.isPremium ? theme.accent : Colors.accent;
   const [mode, setMode] = useState<'list' | 'add'>('list');
   const [period, setPeriod] = useState<PeriodTab>('day');
@@ -132,9 +128,6 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const [okMsg, setOkMsg] = useState<string | null>(null);
   const [produceSize, setProduceSize] = useState<ProduceSizeKey | null>(null);
   const [convertedKg, setConvertedKg] = useState<number | null>(null);
-  const [showDivineGame, setShowDivineGame] = useState(false);
-  const [divineItemName, setDivineItemName] = useState<string | null>(null);
-  const [divineSuggestedG, setDivineSuggestedG] = useState<number | null>(null);
 
   const produceConverter = useMemo(() => {
     if (itemType !== 'ingredient') return null;
@@ -295,19 +288,16 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     // Size→kg: when user picked visual size for produce in pieces, deduct kg
     let saveQty = qty;
     let saveUnit = unit;
-    let suggestedG: number | null = null;
     if (produceConverter && produceSize && (unit === 'szt' || unit === 'op')) {
       const tier = produceConverter.sizes.find((s) => s.key === produceSize);
       if (tier) {
         const conv = piecesToKg(qty, tier);
         saveQty = conv.kg;
         saveUnit = 'kg';
-        suggestedG = conv.grams;
       }
     } else if (produceSize && convertedKg != null && convertedKg > 0) {
       saveQty = convertedKg;
       saveUnit = 'kg';
-      suggestedG = convertedKg * 1000;
     }
 
     setSaving(true);
@@ -345,16 +335,11 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           ? `Strata zapisana — odjęto ${saveQty} kg (${qty} szt. rozmiar ${produceSize}).`
           : 'Strata zapisana — składniki odjęte z magazynu.');
       setOkMsg(detail);
-      setDivineItemName(name);
-      setDivineSuggestedG(suggestedG);
       resetForm();
       await fetchLogs();
       onSaved?.();
       setTimeout(() => {
         setMode('list');
-        offerDivinePerceptionTraining(alert, {
-          onAccept: () => setShowDivineGame(true),
-        });
       }, 500);
     } catch (e: any) {
       setError(e?.message ?? 'Nie udało się zapisać straty.');
@@ -672,12 +657,6 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           </KeyboardAvoidingView>
         )}
       </SafeAreaView>
-      <DivineWeightGameModal
-        visible={showDivineGame}
-        onClose={() => setShowDivineGame(false)}
-        itemName={divineItemName}
-        suggestedGrams={divineSuggestedG}
-      />
     </Modal>
   );
 }

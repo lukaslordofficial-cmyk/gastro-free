@@ -16,11 +16,21 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
+import { ProduceSizePicker } from '@/components/ProduceSizePicker';
+import { DivineWeightGameModal } from '@/components/DivineWeightGameModal';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { Trash2, X, Plus, Check, Search } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { PremiumTokens } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { supabase } from '@/lib/supabase';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
+import { offerDivinePerceptionTraining } from '@/lib/offerDivinePerception';
+import {
+  findProduceConverter,
+  piecesToKg,
+  type ProduceSizeKey,
+} from '@/lib/produceSizeConverter';
 
 const BACKEND_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ??
@@ -102,6 +112,7 @@ function formatLogTime(iso: string): string {
 
 export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const theme = useAppTheme();
+  const { alert } = usePremiumAlert();
   const accent = theme.isPremium ? theme.accent : Colors.accent;
   const [mode, setMode] = useState<'list' | 'add'>('list');
   const [period, setPeriod] = useState<PeriodTab>('day');
@@ -119,6 +130,16 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [okMsg, setOkMsg] = useState<string | null>(null);
+  const [produceSize, setProduceSize] = useState<ProduceSizeKey | null>(null);
+  const [convertedKg, setConvertedKg] = useState<number | null>(null);
+  const [showDivineGame, setShowDivineGame] = useState(false);
+  const [divineItemName, setDivineItemName] = useState<string | null>(null);
+  const [divineSuggestedG, setDivineSuggestedG] = useState<number | null>(null);
+
+  const produceConverter = useMemo(() => {
+    if (itemType !== 'ingredient') return null;
+    return findProduceConverter(selected?.name || query);
+  }, [itemType, selected?.name, query]);
 
   const fetchLogs = useCallback(async () => {
     setLoadingLogs(true);
@@ -235,13 +256,22 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     setReason('');
     setError(null);
     setOkMsg(null);
+    setProduceSize(null);
+    setConvertedKg(null);
   }
 
   function pickSuggestion(s: SuggestItem) {
     setSelected(s);
     setQuery(s.name);
     setSuggestions([]);
-    if (s.unit) setUnit(s.unit);
+    setProduceSize(null);
+    setConvertedKg(null);
+    // Produce often stored in kg but counted as pieces — prefer szt for converter
+    if (findProduceConverter(s.name)) {
+      setUnit('szt');
+    } else if (s.unit) {
+      setUnit(s.unit);
+    }
   }
 
   async function handleSave() {
@@ -261,11 +291,30 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       setError('Podaj poprawną ilość.');
       return;
     }
+
+    // Size→kg: when user picked visual size for produce in pieces, deduct kg
+    let saveQty = qty;
+    let saveUnit = unit;
+    let suggestedG: number | null = null;
+    if (produceConverter && produceSize && (unit === 'szt' || unit === 'op')) {
+      const tier = produceConverter.sizes.find((s) => s.key === produceSize);
+      if (tier) {
+        const conv = piecesToKg(qty, tier);
+        saveQty = conv.kg;
+        saveUnit = 'kg';
+        suggestedG = conv.grams;
+      }
+    } else if (produceSize && convertedKg != null && convertedKg > 0) {
+      saveQty = convertedKg;
+      saveUnit = 'kg';
+      suggestedG = convertedKg * 1000;
+    }
+
     setSaving(true);
     try {
       const res = await fetch(`${BACKEND_URL}/api/actions/apply`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({
           intent: 'waste',
           source: 'manual',
@@ -273,9 +322,16 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
             item_type: itemType,
             item_name: name,
             related_id: selected.id,
-            quantity: qty,
-            unit,
+            quantity: saveQty,
+            unit: saveUnit,
             reason_text: reason.trim() || 'Strata ręczna',
+            ...(produceSize
+              ? {
+                  produce_size: produceSize,
+                  produce_pieces: qty,
+                  produce_converter_id: produceConverter?.id,
+                }
+              : {}),
           },
         }),
       });
@@ -283,11 +339,23 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       if (!res.ok || data.ok === false) {
         throw new Error(data.detail || data.message || `Błąd (${res.status})`);
       }
-      setOkMsg(data.detail || 'Strata zapisana — składniki odjęte z magazynu.');
+      const detail =
+        data.detail ||
+        (produceSize && saveUnit === 'kg'
+          ? `Strata zapisana — odjęto ${saveQty} kg (${qty} szt. rozmiar ${produceSize}).`
+          : 'Strata zapisana — składniki odjęte z magazynu.');
+      setOkMsg(detail);
+      setDivineItemName(name);
+      setDivineSuggestedG(suggestedG);
       resetForm();
       await fetchLogs();
       onSaved?.();
-      setTimeout(() => setMode('list'), 600);
+      setTimeout(() => {
+        setMode('list');
+        offerDivinePerceptionTraining(alert, {
+          onAccept: () => setShowDivineGame(true),
+        });
+      }, 500);
     } catch (e: any) {
       setError(e?.message ?? 'Nie udało się zapisać straty.');
     } finally {
@@ -468,7 +536,16 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   <TextInput
                     style={[styles.inputSolo, { backgroundColor: card, borderColor: border, color: text }]}
                     value={quantity}
-                    onChangeText={setQuantity}
+                    onChangeText={(v) => {
+                      setQuantity(v);
+                      if (produceConverter && produceSize) {
+                        const tier = produceConverter.sizes.find((s) => s.key === produceSize);
+                        const pcs = parseFloat(v.replace(',', '.'));
+                        if (tier && Number.isFinite(pcs) && pcs > 0) {
+                          setConvertedKg(piecesToKg(pcs, tier).kg);
+                        }
+                      }
+                    }}
                     keyboardType="decimal-pad"
                     placeholder="0"
                     placeholderTextColor={muted}
@@ -505,6 +582,24 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   </ScrollView>
                 </View>
               </View>
+
+              {produceConverter && (unit === 'szt' || unit === 'op' || unit === 'kg') ? (
+                <ProduceSizePicker
+                  converter={produceConverter}
+                  pieceCount={parseFloat(quantity.replace(',', '.')) || 0}
+                  selectedSize={produceSize}
+                  onSelectSize={(size, tier, kg) => {
+                    setProduceSize(size);
+                    setConvertedKg(kg);
+                    setUnit('szt');
+                  }}
+                />
+              ) : null}
+              {produceConverter && (unit === 'szt' || unit === 'op') && !produceSize ? (
+                <Text style={[styles.hint, { color: theme.isPremium ? PremiumTokens.color.warning : Colors.warning, marginTop: 8 }]}>
+                  Wybierz rozmiar S/M/L, żeby odjąć kilogramy z magazynu (np. 4×L marchewki = 1 kg).
+                </Text>
+              ) : null}
 
               <Text style={[styles.fieldLabel, { color: muted }]}>Powód (opcjonalnie)</Text>
               <TextInput
@@ -577,6 +672,12 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           </KeyboardAvoidingView>
         )}
       </SafeAreaView>
+      <DivineWeightGameModal
+        visible={showDivineGame}
+        onClose={() => setShowDivineGame(false)}
+        itemName={divineItemName}
+        suggestedGrams={divineSuggestedG}
+      />
     </Modal>
   );
 }

@@ -58,6 +58,15 @@ import {
 import { fetchJson } from '@/lib/safeFetch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
+import { usePremiumAlert } from '@/components/PremiumAlert';
+import { ProduceSizePicker } from '@/components/ProduceSizePicker';
+import { DivineWeightGameModal } from '@/components/DivineWeightGameModal';
+import { offerDivinePerceptionTraining } from '@/lib/offerDivinePerception';
+import {
+  findProduceConverter,
+  piecesToKg,
+  type ProduceSizeKey,
+} from '@/lib/produceSizeConverter';
 
 type Stage =
   | 'idle' | 'recording' | 'transcribing' | 'interpreting'
@@ -288,6 +297,10 @@ export function VoiceReportModal({
   const [wakeStatus, setWakeStatus] = useState<string | null>(null);
   const [showCommands, setShowCommands] = useState(false);
   const [commandHint, setCommandHint] = useState<string | null>(null);
+  const [showDivineGame, setShowDivineGame] = useState(false);
+  const [divineItemName, setDivineItemName] = useState<string | null>(null);
+  const [divineSuggestedG, setDivineSuggestedG] = useState<number | null>(null);
+  const { alert: premiumAlert } = usePremiumAlert();
   const wakeListeningRef = useRef(false);
   const autoStartedRef = useRef(false);
   const followUpModeRef = useRef(false);
@@ -982,6 +995,24 @@ export function VoiceReportModal({
           ? labelForSelections(selected_periods as PeriodSelection[])
           : curEdited.period_1,
       };
+
+      // Waste: visual size → kg for produce counted as pieces
+      let divineSuggested: number | null = null;
+      if (applyIntent === 'waste' && payload.produce_size) {
+        const conv = findProduceConverter(String(payload.item_name || ''));
+        const pcs = Number(payload.quantity);
+        const sizeKey = String(payload.produce_size) as ProduceSizeKey;
+        const tier = conv?.sizes.find((s) => s.key === sizeKey);
+        if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
+          const { kg, grams } = piecesToKg(pcs, tier);
+          payload.produce_pieces = pcs;
+          payload.produce_converter_id = conv.id;
+          payload.quantity = kg;
+          payload.unit = 'kg';
+          divineSuggested = grams;
+        }
+      }
+
       const result = await fetchJson<{
         ok?: boolean;
         detail?: string;
@@ -1070,6 +1101,15 @@ export function VoiceReportModal({
           setBulkContextLabel(label);
           setBulkCompare(normalizeOptimizeResult(compare));
         }
+      }
+      if (applyIntent === 'waste') {
+        setDivineItemName(String(payload.item_name || curEdited.item_name || ''));
+        setDivineSuggestedG(divineSuggested);
+        setTimeout(() => {
+          offerDivinePerceptionTraining(premiumAlert, {
+            onAccept: () => setShowDivineGame(true),
+          });
+        }, 400);
       }
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'Błąd zapisu.');
@@ -1586,6 +1626,12 @@ export function VoiceReportModal({
           onClose={() => { setBulkCompare(null); setBulkContextLabel(''); onClose(); }}
         />
       ) : null}
+      <DivineWeightGameModal
+        visible={showDivineGame}
+        onClose={() => setShowDivineGame(false)}
+        itemName={divineItemName}
+        suggestedGrams={divineSuggestedG}
+      />
     </Modal>
   );
 }
@@ -1616,13 +1662,16 @@ function IntentEditor({ intent, edited, patch, categories, menuCategories }: Edi
     // Składnik z magazynu → jednostki magazynowe.
     const wasteUnits = isDish ? ['porcja', 'l', 'kg', 'g', 'ml'] : ['szt', 'op', 'l', 'ml', 'g', 'kg'];
     const changeType = (v: string) => {
-      const next: Record<string, any> = { item_type: v };
+      const next: Record<string, any> = { item_type: v, produce_size: null };
       const validNow = (v === 'dish' ? ['porcja', 'l', 'kg', 'g', 'ml'] : ['szt', 'op', 'l', 'ml', 'g', 'kg']);
       if (!validNow.includes(edited.unit)) {
         next.unit = v === 'dish' ? 'porcja' : 'szt';
       }
       patch(next);
     };
+    const produce = !isDish ? findProduceConverter(String(edited.item_name || '')) : null;
+    const selectedSize = (edited.produce_size as ProduceSizeKey | null) || null;
+    const pcs = Number(edited.quantity) || 0;
     return (
       <Card>
         <SegmentedField
@@ -1634,7 +1683,7 @@ function IntentEditor({ intent, edited, patch, categories, menuCategories }: Edi
             { key: 'dish', label: 'Danie z menu' },
           ]}
         />
-        <EditRow label="Pozycja" value={edited.item_name ?? ''} onChangeText={(v) => patch({ item_name: v })} placeholder={isDish ? 'np. Krem z dyni' : 'np. Mleko'} />
+        <EditRow label="Pozycja" value={edited.item_name ?? ''} onChangeText={(v) => patch({ item_name: v, produce_size: null })} placeholder={isDish ? 'np. Krem z dyni' : 'np. Mleko'} />
         <View style={styles.twoCol}>
           <View style={{ flex: 1 }}>
             <EditRow label="Ilość" value={edited.quantity == null ? '' : String(edited.quantity)} onChangeText={(v) => patch({ quantity: numOrNull(v) })} keyboardType="decimal-pad" placeholder="0" />
@@ -1643,6 +1692,14 @@ function IntentEditor({ intent, edited, patch, categories, menuCategories }: Edi
             <UnitField value={edited.unit ?? ''} onChange={(v) => patch({ unit: v })} options={wasteUnits} />
           </View>
         </View>
+        {produce && (edited.unit === 'szt' || edited.unit === 'op' || edited.unit === 'kg' || !edited.unit) ? (
+          <ProduceSizePicker
+            converter={produce}
+            pieceCount={pcs}
+            selectedSize={selectedSize}
+            onSelectSize={(size) => patch({ produce_size: size, unit: 'szt' })}
+          />
+        ) : null}
         {isDish && (
           <Text style={styles.editHint2}>
             Jednostka „porcja” odejmie składniki z receptury × liczba porcji. Litr/kg/g/ml odejmie wg wielkości porcji dania.

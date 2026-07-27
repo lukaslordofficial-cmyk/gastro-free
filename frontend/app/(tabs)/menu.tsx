@@ -32,6 +32,7 @@ import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { MenuScanModal } from '@/components/MenuScanModal';
+import { BatchPrepModal, type BatchPrepDish } from '@/components/BatchPrepModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 
 /** Ciężkie katalogi dań — osobny chunk Metro, nie przy cold start Menu. */
@@ -201,12 +202,14 @@ function DishCard({
   dish,
   onEdit,
   onDelete,
+  onBatchPrep,
   premium,
   thumbSrc,
 }: {
   dish: Dish;
   onEdit: (dish: Dish) => void;
   onDelete: (dish: Dish) => void;
+  onBatchPrep?: (dish: Dish) => void;
   premium?: boolean;
   thumbSrc: number | { uri: string };
 }) {
@@ -279,6 +282,17 @@ function DishCard({
                 </View>
               ))
             )}
+            {onBatchPrep && dish.recipe.length > 0 ? (
+              <TouchableOpacity
+                style={dishStyles.premBatch}
+                onPress={() => onBatchPrep(dish)}
+                activeOpacity={0.85}
+                testID={`batch-prep-open-${dish.id}`}
+              >
+                <ChefHat size={14} color="#0A0A0A" strokeWidth={2.5} />
+                <Text style={dishStyles.premBatchText}>Przygotowanie partii</Text>
+              </TouchableOpacity>
+            ) : null}
             <View style={dishStyles.actionRow}>
               <TouchableOpacity style={dishStyles.premEdit} onPress={() => onEdit(dish)}>
                 <Edit size={14} color={DS.color.greenEnd} strokeWidth={2} />
@@ -431,6 +445,18 @@ const dishStyles = StyleSheet.create({
     borderRadius: DS.radius.button,
     backgroundColor: DS.color.dangerSoft,
   },
+  premBatch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: DS.radius.button,
+    backgroundColor: DS.color.greenEnd,
+    marginTop: 4,
+    ...DS.shadow.greenGlow,
+  },
+  premBatchText: { color: '#0A0A0A', fontWeight: '800', fontSize: 13 },
   header: { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
   catDot: { width: 10, height: 10, borderRadius: 5 },
   headerText: { flex: 1, gap: 3 },
@@ -847,6 +873,9 @@ export default function MenuScreen() {
   const [invForm, setInvForm] = useState(BLANK_INV_FORM);
   const [invSaving, setInvSaving] = useState(false);
 
+  // Batch prep (premium) — skalowanie + dobór naczynia
+  const [batchPrepDish, setBatchPrepDish] = useState<BatchPrepDish | null>(null);
+
   // ── Data fetching ─────────────────────────────────────────────────────────
 
   const fetchData = useCallback(async () => {
@@ -865,6 +894,7 @@ export default function MenuScreen() {
         supabase
           .from('kitchen_utensils')
           .select('id, name, utensil_type, capacity_value, capacity_unit')
+          .eq('account_key', ak)
           .order('name'),
         supabase
           .from('inventory_items')
@@ -906,12 +936,19 @@ export default function MenuScreen() {
           throw dishesRes.error;
         }
       }
-      if (utensilsRes.error) throw utensilsRes.error;
+      if (utensilsRes.error) {
+        // account_key może jeszcze nie istnieć — nie blokuj całego Menu
+        if (!/account_key|schema cache|column/i.test(utensilsRes.error.message ?? '')) {
+          throw utensilsRes.error;
+        }
+        setUtensils([]);
+      } else {
+        setUtensils(utensilsRes.data ?? []);
+      }
       if (invRes.error) throw invRes.error;
       if (catsRes.error) throw catsRes.error;
 
       setDishes((dishesData ?? []).map(mapDbToDish));
-      setUtensils(utensilsRes.data ?? []);
       setInventory((invRes.data ?? []).map(mapInvDbRow));
 
       const map: Record<string, string> = {};
@@ -1190,6 +1227,15 @@ export default function MenuScreen() {
           dish={item.dish}
           onEdit={handleOpenEdit}
           onDelete={handleDeleteDish}
+          onBatchPrep={(d) =>
+            setBatchPrepDish({
+              id: d.id,
+              name: d.name,
+              category: d.category,
+              recipe: d.recipe,
+              basePortions: 1,
+            })
+          }
           premium
           thumbSrc={dishThumbByName.get(item.dish.name) ?? require('@/assets/premium/placeholders/ph_kartony_brazowe.webp')}
         />
@@ -2184,6 +2230,12 @@ export default function MenuScreen() {
         visible={showScanModal}
         onClose={() => setShowScanModal(false)}
         onConfirmed={() => { setShowScanModal(false); fetchData(); }}
+      />
+      <BatchPrepModal
+        visible={!!batchPrepDish}
+        dish={batchPrepDish}
+        accountKey={accountKey || ''}
+        onClose={() => setBatchPrepDish(null)}
       />
       <Suspense fallback={<ActivityIndicator style={{ position: 'absolute', opacity: 0 }} />}>
         {showInspirations ? (

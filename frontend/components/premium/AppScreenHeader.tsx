@@ -27,7 +27,7 @@ export function AppScreenHeader({ title, subtitle, right, showDevToggle, centere
         {subtitle ? (
           <Text style={[styles.subCentered, { color: t.textSecondary }]}>{subtitle}</Text>
         ) : null}
-        {showDevToggle ? (
+        {showDevToggle && __DEV__ ? (
           <TouchableOpacity
             style={[styles.toggle, styles.toggleCentered, { backgroundColor: t.card, borderColor: t.border }]}
             onPress={() => void toggleAppearance()}
@@ -60,7 +60,7 @@ export function AppScreenHeader({ title, subtitle, right, showDevToggle, centere
           ) : null}
         </View>
         {right}
-        {showDevToggle ? (
+        {showDevToggle && __DEV__ ? (
           <TouchableOpacity
             style={[styles.toggle, { backgroundColor: t.card, borderColor: t.border }]}
             onPress={() => void toggleAppearance()}

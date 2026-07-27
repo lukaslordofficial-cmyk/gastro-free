@@ -40,8 +40,8 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     if (!isAuthenticated) {
       setState(null);
       setLoading(false);
-      // Wylogowany — jasny ekran auth; zalogowany zawsze dark premium (closed beta).
-      await setAppearance('free');
+      // Wylogowany: nie wracamy do białego skina — chrome zostaje premium.
+      await setAppearance('premium');
       return;
     }
     // Czekaj na prawdziwy account_key — inaczej wczytamy portfel „default” (wyciek testowego konta).

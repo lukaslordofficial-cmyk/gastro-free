@@ -327,10 +327,12 @@ export function PremiumDashboard({
               <Text style={styles.brandSub}>PRO DARK · JARVIS</Text>
             </View>
           </View>
-          <TouchableOpacity style={styles.devToggle} onPress={() => void toggleAppearance()} activeOpacity={0.85}>
-            <ToggleRight size={16} color={PremiumColors.neon} strokeWidth={2} />
-            <Text style={styles.devToggleText}>Free UI</Text>
-          </TouchableOpacity>
+          {__DEV__ ? (
+            <TouchableOpacity style={styles.devToggle} onPress={() => void toggleAppearance()} activeOpacity={0.85}>
+              <ToggleRight size={16} color={PremiumColors.neon} strokeWidth={2} />
+              <Text style={styles.devToggleText}>Free UI</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
 
         <View style={styles.metaRow}>
@@ -496,17 +498,20 @@ export function PremiumDashboard({
           })}
         </View>
 
-        <Text style={styles.footerHint}>
-          Tryb testowy Premium — przełącznik Free UI powyżej. Wygląd darmowy bez zmian.
-        </Text>
+        {__DEV__ ? (
+          <Text style={styles.footerHint}>
+            Tryb testowy Premium — przełącznik Free UI powyżej. Wygląd darmowy bez zmian.
+          </Text>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-/** Mały przełącznik na ekranie free (dev). */
+/** Mały przełącznik na ekranie free (tylko __DEV__). */
 export function PremiumPreviewToggle() {
   const { isPremiumUi, toggleAppearance } = useThemeMode();
+  if (!__DEV__) return null;
   return (
     <TouchableOpacity
       style={toggleStyles.btn}

@@ -11,13 +11,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const STORAGE_KEY = '@gm/ui_appearance';
 
 /**
- * Closed beta: dark premium UI jest domyślny dla wszystkich zalogowanych.
- * Plan Free nadal dostaje ciemny chrome — nie bramkujemy wyglądu płatnym Premium.
- * Flaga 'free' zostaje tylko do ewentualnego debug toggle / wylogowany stan.
+ * Closed beta: dark premium UI jest jedynym chrome'em aplikacji.
+ * Plan Free (kredyty / ads) NIE wraca do białego skina.
+ * Flaga 'free' tylko w __DEV__ do podglądu starego UI.
  */
 export type UiAppearance = 'free' | 'premium';
 
-/** Closed beta — zawsze startuj od dark premium (nie od białego free). */
 const DEFAULT_APPEARANCE: UiAppearance = 'premium';
 
 type ThemeModeContextValue = {
@@ -39,18 +38,17 @@ export function ThemeModeProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        // Migrate legacy 'free' → premium (closed beta: nie wracamy do białego po wipe SQL).
-        if (!cancelled) {
-          if (raw === 'premium') {
-            setAppearanceState('premium');
-          } else {
-            setAppearanceState(DEFAULT_APPEARANCE);
-            if (raw !== 'premium') {
-              try {
-                await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_APPEARANCE);
-              } catch {
-                /* ignore */
-              }
+        if (cancelled) return;
+        // Produkcja: zawsze premium. Dev: pozwól odczytać 'free' tylko gdy świadomie zapisane.
+        if (__DEV__ && raw === 'free') {
+          setAppearanceState('free');
+        } else {
+          setAppearanceState('premium');
+          if (raw !== 'premium') {
+            try {
+              await AsyncStorage.setItem(STORAGE_KEY, 'premium');
+            } catch {
+              /* ignore */
             }
           }
         }
@@ -66,15 +64,18 @@ export function ThemeModeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const setAppearance = useCallback(async (next: UiAppearance) => {
-    setAppearanceState(next);
+    // Poza __DEV__ nigdy nie stosuj białego skina — nawet jeśli ktoś wywoła 'free'.
+    const applied: UiAppearance = !__DEV__ && next === 'free' ? 'premium' : next;
+    setAppearanceState(applied);
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, next);
+      await AsyncStorage.setItem(STORAGE_KEY, applied);
     } catch {
       /* ignore */
     }
   }, []);
 
   const toggleAppearance = useCallback(async () => {
+    if (!__DEV__) return;
     const next: UiAppearance = appearance === 'premium' ? 'free' : 'premium';
     await setAppearance(next);
   }, [appearance, setAppearance]);
@@ -82,7 +83,8 @@ export function ThemeModeProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<ThemeModeContextValue>(
     () => ({
       appearance,
-      isPremiumUi: appearance === 'premium',
+      // Produkcja: zawsze dark premium chrome. Dev: zależy od appearance.
+      isPremiumUi: __DEV__ ? appearance === 'premium' : true,
       ready,
       setAppearance,
       toggleAppearance,

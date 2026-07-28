@@ -56,6 +56,7 @@ import { assignUniqueDishImageSources } from '@/lib/productImages';
 import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
+import { ingredientDedupeKey, normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 
@@ -154,13 +155,9 @@ function newDraftIngredient(): IngredientDraft {
   return { key: String(Date.now() + Math.random()), name: '', quantity: '', unit: 'g', pieceWeightG: '' };
 }
 
+/** Dedupe / link key — stem-ish (pomidor ≡ pomidory). */
 function normIngredientName(name: string): string {
-  return (name || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return ingredientDedupeKey(name);
 }
 
 const PIECE_WEIGHT_HINT =
@@ -1254,13 +1251,18 @@ export default function MenuScreen() {
     if (!accountKey || accountKey === 'default') return linkMap;
 
     const working = [...inventory];
-    const findLocal = (key: string) => working.find((i) => normIngredientName(i.product_name) === key);
+    const findLocal = (displayName: string, key: string) =>
+      working.find(
+        (i) =>
+          normIngredientName(i.product_name) === key ||
+          namesMatch(i.product_name, displayName, 86),
+      );
 
     for (const ing of validIngredients) {
-      const name = ing.name.trim();
+      const name = normalizeIngredientName(ing.name.trim());
       const key = normIngredientName(name);
       if (!key || linkMap.has(key)) continue;
-      const existing = findLocal(key);
+      const existing = findLocal(name, key);
       if (existing) {
         linkMap.set(key, existing.id);
         continue;
@@ -1296,9 +1298,10 @@ export default function MenuScreen() {
     linkMap: Map<string, string>,
   ) {
     return validIngredients.map((ing, idx) => {
+      const iname = normalizeIngredientName(ing.name.trim());
       const row: Record<string, unknown> = {
         menu_item_id: menuItemId,
-        ingredient_name: ing.name.trim(),
+        ingredient_name: iname,
         quantity: normalizeRecipeQuantity(parseFloat((ing.quantity || '').replace(',', '.')) || 0),
         unit: normalizeMenuUnit(ing.unit),
         sort_order: idx + 1,
@@ -1307,7 +1310,7 @@ export default function MenuScreen() {
       if ((ing.unit === 'szt' || ing.unit === 'sztuka') && pw != null) {
         row.piece_weight_g = pw;
       }
-      const wid = linkMap.get(normIngredientName(ing.name));
+      const wid = linkMap.get(normIngredientName(iname));
       if (wid) row.warehouse_product_id = wid;
       return row;
     });

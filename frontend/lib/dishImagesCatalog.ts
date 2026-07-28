@@ -1,16 +1,84 @@
 /**
  * Katalog grafik dań (zupy / burgery) — plansze 5×5, lokalne WebP.
  */
+/** Rodzina menu do category-aware matching (1000+ assets). */
+export type DishMenuFamily =
+  | 'zupy'
+  | 'burgery'
+  | 'makarony'
+  | 'pizze'
+  | 'salatki'
+  | 'przystawki'
+  | 'miesa'
+  | 'napoje'
+  | 'desery'
+  | 'sides'
+  | 'kebab'
+  | 'sushi'
+  | 'bbq'
+  | 'azjatycka'
+  | 'indyjska'
+  | 'meksykanska'
+  | 'srodziemnomorska'
+  | 'rybne'
+  | 'wege'
+  | 'sniadania'
+  | 'sosy'
+  | 'inne';
+
 export type DishImageEntry = {
   slug: string;
-  category: 'kuchnia_polska';
+  /** Legacy / broad tag — prefer menuFamily for matching */
+  category: string;
   labelPl: string;
   aliases: string[];
   storagePath: string;
   localAsset: number;
   /** false = ukryj w module Inspiracje (dodatek / gotowiec) */
   recipeEligible?: boolean;
+  /** Category-aware matching (inferred from storagePath if missing) */
+  menuFamily?: DishMenuFamily;
+  /** Dish plates are cooked by default */
+  cooked?: boolean;
 };
+
+/** Infer menuFamily from storage path for category-aware dish matching. */
+export function inferDishMenuFamily(storagePath: string, slug = ''): DishMenuFamily {
+  const p = `${storagePath} ${slug}`.toLowerCase();
+  if (/soup|zupa/.test(p)) return 'zupy';
+  if (/burger|sandwich/.test(p)) return 'burgery';
+  if (/pasta|makaron/.test(p)) return 'makarony';
+  if (/pizza/.test(p)) return 'pizze';
+  if (/salad|salatk/.test(p)) return 'salatki';
+  if (/starter|app|przystawk|bruschett/.test(p)) return 'przystawki';
+  if (/side|dodatk|surowk|coleslaw|warzywa_grill/.test(p)) return 'sides';
+  if (/kebab|shawarma/.test(p)) return 'kebab';
+  if (/sushi|nigiri|maki/.test(p)) return 'sushi';
+  if (/bbq|ribs|grill|steak|roast|mieso|kotlet|schab/.test(p)) return 'bbq';
+  if (/asian|pad_thai|ramen|wok|stir/.test(p)) return 'azjatycka';
+  if (/indian|curry|tikka|butter_chicken/.test(p)) return 'indyjska';
+  if (/mexican|taco|burrito/.test(p)) return 'meksykanska';
+  if (/mediterr|paella|caucas|chaczapuri/.test(p)) return 'srodziemnomorska';
+  if (/fish|ryb|losos|seafood/.test(p)) return 'rybne';
+  if (/vegan|wege|tofu/.test(p)) return 'wege';
+  if (/breakfast|sniadan|jajeczn/.test(p)) return 'sniadania';
+  if (/sauce|sos|dip/.test(p)) return 'sosy';
+  if (/dessert|cake|ice_cream|pancake|pastr|coffee|tea|lemonad|juice|cocktail|beer|wine|spirit|energy|napoj/.test(p)) {
+    if (/coffee|tea|lemonad|juice|cocktail|beer|wine|spirit|energy/.test(p)) return 'napoje';
+    return 'desery';
+  }
+  if (/dinner|obiad|polish|roast/.test(p)) return 'miesa';
+  return 'inne';
+}
+
+export function stampDishCatalog(entries: DishImageEntry[]): DishImageEntry[] {
+  return entries.map((e) => ({
+    ...e,
+    cooked: e.cooked ?? true,
+    menuFamily: e.menuFamily ?? inferDishMenuFamily(e.storagePath, e.slug),
+    category: e.menuFamily ?? inferDishMenuFamily(e.storagePath, e.slug),
+  }));
+}
 
 /** Plansza 52 — zupy (poprawione, większe marginesy) */
 export const SOUPS_PL_CATALOG: DishImageEntry[] = [
@@ -97,7 +165,7 @@ export const BURGERS_CATALOG: DishImageEntry[] = [
   { slug: 'breakfast_brioche', category: 'kuchnia_polska', labelPl: 'Śniadaniowa bułka maślana', aliases: ['śniadaniowa bułka', 'breakfast brioche', 'bułka z jajkiem', 'breakfast sandwich'], storagePath: 'dania/burgers/burger_25.webp', localAsset: require('@/assets/premium/dishes/burgers/burger_25.webp') },
 ];
 
-export const DISH_IMAGE_CATALOG: DishImageEntry[] = [
+export const DISH_IMAGE_CATALOG: DishImageEntry[] = stampDishCatalog([
   ...SOUPS_PL_CATALOG,
   ...SOUPS_ASIA_CATALOG,
   ...BURGERS_CATALOG,
@@ -260,4 +328,4 @@ export const DISH_IMAGE_CATALOG: DishImageEntry[] = [
       return [];
     }
   })(),
-];
+]);

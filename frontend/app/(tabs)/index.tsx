@@ -23,6 +23,7 @@ import {
   X,
   Package,
   Trash2,
+  Pencil,
   MoreHorizontal,
   Check,
   MessageSquare,
@@ -47,6 +48,7 @@ import { AppScreenHeader } from '@/components/premium/AppScreenHeader';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { PremiumFinanceScreen } from '@/components/premium/PremiumFinanceScreen';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { DS } from '@/constants/premiumTheme';
 
 const _now = new Date();
@@ -607,6 +609,174 @@ function AddVariableCostModal({ visible, onClose, onSaved }: { visible: boolean;
   );
 }
 
+// --- Edit Fixed / Variable Cost Modal (Raporty journals) ---
+
+type EditableCostKind = 'fixed' | 'variable';
+
+type EditableCostRow = {
+  id: string;
+  name: string;
+  amount_pln: number;
+  year_month: string;
+  kind: EditableCostKind;
+};
+
+function EditCostModal({
+  visible,
+  cost,
+  onClose,
+  onSaved,
+}: {
+  visible: boolean;
+  cost: EditableCostRow | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const theme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const prem = theme.isPremium;
+  const { alert: premiumAlert } = usePremiumAlert();
+  const [name, setName] = useState('');
+  const [amount, setAmount] = useState('');
+  const [yearMonth, setYearMonth] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!cost || !visible) return;
+    setName(cost.name);
+    setAmount(String(cost.amount_pln ?? ''));
+    setYearMonth(cost.year_month || CURRENT_MONTH);
+  }, [cost, visible]);
+
+  async function handleSave() {
+    if (!cost) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      premiumAlert('Błąd', 'Podaj nazwę kosztu.');
+      return;
+    }
+    const val = parseFloat(amount.replace(',', '.'));
+    if (isNaN(val) || val <= 0) {
+      premiumAlert('Błąd', 'Podaj poprawną kwotę.');
+      return;
+    }
+    const ym = (yearMonth || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(ym)) {
+      premiumAlert('Błąd', 'Miesiąc w formacie RRRR-MM (np. 2026-07).');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const ak = (await import('@/lib/accountKey')).getAccountKey();
+      const tableName = cost.kind === 'fixed' ? 'fixed_costs' : 'variable_cost_entries';
+      const payload = { name: trimmed, amount_pln: val, year_month: ym };
+      let q = supabase.from(tableName).update(payload).eq('id', cost.id);
+      if (ak && ak !== 'default') q = q.eq('account_key', ak);
+      const { error } = await q;
+      if (error) throw error;
+      onSaved();
+      onClose();
+    } catch (e: any) {
+      premiumAlert('Błąd', e.message ?? 'Nie udało się zapisać zmian.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View
+          style={[
+            ms.sheet,
+            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
+            prem && {
+              backgroundColor: DS.color.surfaceCard,
+              borderTopWidth: StyleSheet.hairlineWidth,
+              borderTopColor: DS.color.borderSubtle,
+            },
+          ]}
+        >
+          <View style={ms.header}>
+            <Text style={[ms.title, prem && { color: DS.color.heading }]}>
+              Edytuj koszt {cost?.kind === 'variable' ? 'zmienny' : 'stały'}
+            </Text>
+            <TouchableOpacity onPress={onClose}>
+              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
+            </TouchableOpacity>
+          </View>
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Nazwa *</Text>
+          <TextInput
+            style={[
+              ms.input,
+              prem && {
+                backgroundColor: DS.color.bgTertiary,
+                borderColor: DS.color.borderSubtle,
+                color: DS.color.heading,
+              },
+            ]}
+            value={name}
+            onChangeText={setName}
+            placeholder="Nazwa kosztu"
+            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
+            autoFocus
+          />
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
+          <TextInput
+            style={[
+              ms.input,
+              prem && {
+                backgroundColor: DS.color.bgTertiary,
+                borderColor: DS.color.borderSubtle,
+                color: DS.color.heading,
+              },
+            ]}
+            value={amount}
+            onChangeText={setAmount}
+            keyboardType="decimal-pad"
+            placeholder="0.00"
+            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
+          />
+          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Miesiąc (RRRR-MM)</Text>
+          <TextInput
+            style={[
+              ms.input,
+              prem && {
+                backgroundColor: DS.color.bgTertiary,
+                borderColor: DS.color.borderSubtle,
+                color: DS.color.heading,
+              },
+            ]}
+            value={yearMonth}
+            onChangeText={setYearMonth}
+            placeholder={CURRENT_MONTH}
+            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
+            autoCapitalize="none"
+          />
+          <TouchableOpacity
+            style={[
+              ms.saveBtn,
+              prem && { backgroundColor: DS.color.greenEnd },
+              saving && ms.saveBtnDisabled,
+            ]}
+            onPress={handleSave}
+            disabled={saving}
+            activeOpacity={0.85}
+          >
+            {saving
+              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
+              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz zmiany</Text>}
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 // --- FinanseScreen ---
 
 export default function FinanseScreen() {
@@ -643,9 +813,11 @@ export default function FinanseScreen() {
   const [showAddRevenue, setShowAddRevenue] = useState(false);
   const [showAddFixed, setShowAddFixed] = useState(false);
   const [showAddVariable, setShowAddVariable] = useState(false);
+  const [editCost, setEditCost] = useState<EditableCostRow | null>(null);
   const [expandedNoteId, setExpandedNoteId] = useState<string | null>(null);
   const [noteText, setNoteText] = useState('');
   const [noteSaving, setNoteSaving] = useState(false);
+  const { alert: premiumAlert } = usePremiumAlert();
 
   const fetchData = useCallback(async () => {
     try {
@@ -757,11 +929,30 @@ export default function FinanseScreen() {
     }
   }
 
+  function openEditCost(id: string, kind: EditableCostKind) {
+    const pool =
+      kind === 'fixed'
+        ? (fixedCostsJournal.length ? fixedCostsJournal : fixedCosts)
+        : (variableCostsJournal.length ? variableCostsJournal : variableEntries);
+    const row = pool.find((c) => c.id === id);
+    if (!row) return;
+    setEditCost({
+      id: row.id,
+      name: row.name,
+      amount_pln: Number(row.amount_pln),
+      year_month: row.year_month || CURRENT_MONTH,
+      kind,
+    });
+  }
+
   async function saveNote(id: string, table: 'fixed' | 'variable' | 'revenue') {
     setNoteSaving(true);
     try {
+      const ak = (await import('@/lib/accountKey')).getAccountKey();
       const tableName = table === 'fixed' ? 'fixed_costs' : table === 'variable' ? 'variable_cost_entries' : 'revenue_entries';
-      const { error: updateErr } = await supabase.from(tableName).update({ note: noteText.trim() || null }).eq('id', id);
+      let q = supabase.from(tableName).update({ note: noteText.trim() || null }).eq('id', id);
+      if (ak && ak !== 'default') q = q.eq('account_key', ak);
+      const { error: updateErr } = await q;
       if (updateErr) throw updateErr;
       const saved = noteText.trim() || null;
       if (table === 'fixed') setFixedCosts((prev) => prev.map((c) => c.id === id ? { ...c, note: saved } : c));
@@ -777,18 +968,25 @@ export default function FinanseScreen() {
   }
 
   function handleDelete(id: string, table: 'fixed' | 'variable' | 'revenue') {
-    Alert.alert('Usuń pozycję', 'Czy na pewno chcesz usunąć tę pozycję?', [
+    premiumAlert('Usuń pozycję', 'Czy na pewno chcesz usunąć tę pozycję?', [
       { text: 'Anuluj', style: 'cancel' },
       {
         text: 'Usuń',
         style: 'destructive',
         onPress: async () => {
+          const ak = (await import('@/lib/accountKey')).getAccountKey();
           const tableName = table === 'fixed' ? 'fixed_costs' : table === 'variable' ? 'variable_cost_entries' : 'revenue_entries';
-          const { error: delErr } = await supabase.from(tableName).delete().eq('id', id);
-          if (delErr) { Alert.alert('Błąd', delErr.message); return; }
-          if (table === 'fixed') setFixedCosts((prev) => prev.filter((c) => c.id !== id));
-          else if (table === 'variable') setVariableEntries((prev) => prev.filter((e) => e.id !== id));
-          else {
+          let q = supabase.from(tableName).delete().eq('id', id);
+          if (ak && ak !== 'default') q = q.eq('account_key', ak);
+          const { error: delErr } = await q;
+          if (delErr) { premiumAlert('Błąd', delErr.message); return; }
+          if (table === 'fixed') {
+            setFixedCosts((prev) => prev.filter((c) => c.id !== id));
+            setFixedCostsJournal((prev) => prev.filter((c) => c.id !== id));
+          } else if (table === 'variable') {
+            setVariableEntries((prev) => prev.filter((e) => e.id !== id));
+            setVariableCostsJournal((prev) => prev.filter((e) => e.id !== id));
+          } else {
             setRevenueEntries((prev) => prev.filter((e) => e.id !== id));
             setRevenueJournal((prev) => prev.filter((e) => e.id !== id));
           }
@@ -844,6 +1042,7 @@ export default function FinanseScreen() {
           onAddRevenue={() => setShowAddRevenue(true)}
           onAddFixed={() => setShowAddFixed(true)}
           onAddVariable={() => setShowAddVariable(true)}
+          onEditCost={openEditCost}
           onDelete={handleDelete}
           expandedNoteId={expandedNoteId}
           noteText={noteText}
@@ -859,6 +1058,12 @@ export default function FinanseScreen() {
         <AddVariableCostModal
           visible={showAddVariable}
           onClose={() => setShowAddVariable(false)}
+          onSaved={fetchData}
+        />
+        <EditCostModal
+          visible={!!editCost}
+          cost={editCost}
+          onClose={() => setEditCost(null)}
           onSaved={fetchData}
         />
         <CreditsUsageHistoryModal visible={showUsageHistory} onClose={() => setShowUsageHistory(false)} />
@@ -1177,6 +1382,12 @@ export default function FinanseScreen() {
                           {formatPLN(Number(cost.amount_pln))}
                         </Text>
                         <TouchableOpacity
+                          onPress={() => openEditCost(cost.id, 'fixed')}
+                          style={styles.rowIconBtn}
+                        >
+                          <Pencil size={13} color={theme.textMuted} strokeWidth={2} />
+                        </TouchableOpacity>
+                        <TouchableOpacity
                           onPress={() => handleDelete(cost.id, 'fixed')}
                           style={styles.rowIconBtn}
                         >
@@ -1284,6 +1495,12 @@ export default function FinanseScreen() {
                           {formatPLN(Number(entry.amount_pln))}
                         </Text>
                         <TouchableOpacity
+                          onPress={() => openEditCost(entry.id, 'variable')}
+                          style={styles.rowIconBtn}
+                        >
+                          <Pencil size={13} color={theme.textMuted} strokeWidth={2} />
+                        </TouchableOpacity>
+                        <TouchableOpacity
                           onPress={() => handleDelete(entry.id, 'variable')}
                           style={styles.rowIconBtn}
                         >
@@ -1357,6 +1574,12 @@ export default function FinanseScreen() {
       <AddVariableCostModal
         visible={showAddVariable}
         onClose={() => setShowAddVariable(false)}
+        onSaved={fetchData}
+      />
+      <EditCostModal
+        visible={!!editCost}
+        cost={editCost}
+        onClose={() => setEditCost(null)}
         onSaved={fetchData}
       />
       <CreditsUsageHistoryModal visible={showUsageHistory} onClose={() => setShowUsageHistory(false)} />

@@ -28,7 +28,7 @@ import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { emitRecipeIngredientsChanged } from '@/lib/recipeSync';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { bestProductMatch } from '@/lib/fuzzyProductMatch';
+import { bestProductMatch, ingredientDedupeKey } from '@/lib/fuzzyProductMatch';
 import { normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 
@@ -51,7 +51,7 @@ async function saveSoftMap(map: Record<string, string>) {
 }
 
 function normName(s: string) {
-  return (s || '')
+  return ingredientDedupeKey(s) || (s || '')
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')

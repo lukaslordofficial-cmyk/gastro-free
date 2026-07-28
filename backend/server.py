@@ -2029,8 +2029,73 @@ def _whole_product_name(name: str) -> str:
     return raw
 
 
-def _apply_whole_product_names_to_dishes(dishes: list) -> None:
-    """In-place: suggested_ingredients / ingredients → nazwy całych produktów."""
+# Plural / stem-ish → singular display (pomidory→pomidor). Used at recipe + inventory write.
+_PLURAL_TO_SINGULAR: dict[str, str] = {
+    "pomidory": "pomidor", "pomidorow": "pomidor", "pomidora": "pomidor",
+    "jajka": "jajko", "jajek": "jajko", "jaja": "jajko",
+    "ziemniaki": "ziemniak", "ziemniakow": "ziemniak",
+    "marchewki": "marchew", "marchewek": "marchew",
+    "ogorki": "ogórek", "ogorkow": "ogórek",
+    "papryki": "papryka", "cukinie": "cukinia", "baklazany": "bakłażan",
+    "pieczarki": "pieczarka", "pieczarek": "pieczarka",
+    "grzyby": "grzyb", "grzybow": "grzyb",
+    "borowiki": "borowik", "borowikow": "borowik",
+    "boczniaki": "boczniak", "boczniakow": "boczniak",
+    "cebule": "cebula", "cytryny": "cytryna", "limonki": "limonka",
+    "jablka": "jabłko", "jablek": "jabłko", "banany": "banan", "bananow": "banan",
+    "truskawki": "truskawka", "truskawek": "truskawka",
+    "maliny": "malina", "orzechy": "orzech", "orzechow": "orzech",
+    "migdaly": "migdał", "oliwki": "oliwka", "oliwek": "oliwka",
+    "bulki": "bułka", "bulek": "bułka", "chleby": "chleb",
+    "kielbasy": "kiełbasa", "kielbas": "kiełbasa",
+    "boczki": "boczek", "filety": "filet", "piersi": "pierś",
+    "steki": "stek", "kotlety": "kotlet", "kotletow": "kotlet",
+    "krewetki": "krewetka", "krewetek": "krewetka",
+}
+
+
+# Dish-like names that must NOT become warehouse SKUs — rewrite to buyable ingredient.
+_DISH_LIKE_TO_INGREDIENT: dict[str, str] = {
+    "risotto": "ryż arborio",
+    "risotto grzybowe": "ryż arborio",
+    "risotto z grzybami": "ryż arborio",
+    "paella": "ryż bomba",
+    "couscous": "kuskus",
+    "kuskus": "kuskus",
+    "polenta": "kasza kukurydziana",
+    "gnocchi": "gnocchi (półprodukt)",
+    "nalesniki": "mąka pszenna",
+    "naleśniki": "mąka pszenna",
+}
+
+
+def _normalize_ingredient_name(name: str) -> str:
+    """Kanoniczna nazwa składnika: całe produkty + singular PL (pomidory→pomidor)."""
+    raw = _whole_product_name((name or "").strip())
+    if not raw:
+        return raw
+    key = _strip_diacritics_pl(_norm_name(raw))
+    if key in _PLURAL_TO_SINGULAR:
+        return _PLURAL_TO_SINGULAR[key]
+    # Ostatni token liczby mnogiej (np. „pomidory cherry” → „pomidor cherry”)
+    parts = key.split()
+    if len(parts) >= 2 and parts[-1] in _PLURAL_TO_SINGULAR:
+        last = _PLURAL_TO_SINGULAR[parts[-1]]
+        orig_parts = raw.split()
+        if orig_parts:
+            orig_parts[-1] = last
+            return " ".join(orig_parts)
+    # Dish-like → buyable ingredient
+    if key in _DISH_LIKE_TO_INGREDIENT:
+        return _DISH_LIKE_TO_INGREDIENT[key]
+    for dish_key, ing in _DISH_LIKE_TO_INGREDIENT.items():
+        if key == dish_key or key.startswith(dish_key + " "):
+            return ing
+    return raw
+
+
+def _apply_normalize_ingredient_names_to_dishes(dishes: list) -> None:
+    """In-place: normalize ingredient names (singular + dish→SKU rewrite)."""
     for d in dishes or []:
         ings = getattr(d, "suggested_ingredients", None)
         if ings is None and isinstance(d, dict):
@@ -2041,9 +2106,83 @@ def _apply_whole_product_names_to_dishes(dishes: list) -> None:
             continue
         for ing in ings:
             if hasattr(ing, "name"):
-                ing.name = _whole_product_name(getattr(ing, "name", "") or "")
+                ing.name = _normalize_ingredient_name(getattr(ing, "name", "") or "")
             elif isinstance(ing, dict) and "name" in ing:
-                ing["name"] = _whole_product_name(ing.get("name") or "")
+                ing["name"] = _normalize_ingredient_name(ing.get("name") or "")
+
+
+def _is_combo_polprodukt_name(name: str) -> bool:
+    """Wykrywa półprodukt combo (nie kupowany jako jeden SKU).
+
+    Reguły (menu scan → magazyn):
+    1. Mix / mieszanka / zestaw warzyw lub sałat bez jednego buyable SKU.
+    2. Przetworzone/grillowane/pieczone/smażone mieszanki (np. „warzywa grillowane”).
+    3. Domowe frytki / pieczone dodatki złożone z wielu składników.
+    4. Nazwy z „mix”, „mixem”, „assorted”, „selection” + warzywa/mięsa.
+    NIE oznacza: pojedynczego surowca (pomidor, boczek, ryż).
+    """
+    n = _strip_diacritics_pl(_norm_name(name or ""))
+    if not n or len(n) < 4:
+        return False
+    # Jawne combo / półprodukt
+    if any(k in n for k in (
+        "polprodukt", "pol-produkt", "combo", "mise en place", "prep ",
+    )):
+        return True
+    # Mix / mieszanka
+    if any(k in n for k in ("mieszanka", "mix warzyw", "mix salat", "mix salat", "vegetable mix", "assorted")):
+        return True
+    if n.startswith("mix ") or " mix" in n:
+        if any(k in n for k in ("warzyw", "salat", "mies", "grzyb", "owoc")):
+            return True
+    # Przetworzone mieszanki (grill / piecz / smaż) — typowo nie jeden SKU
+    processed = any(k in n for k in (
+        "grillowan", "pieczon", "smazo", "smazon", "duszone", "gotowane",
+        "blanszowan", "marynowan", "glazurowan",
+    ))
+    multi = any(k in n for k in (
+        "warzyw", "salat", "grzyb", "owoc", "mies", "dodatk", "zestaw",
+    ))
+    if processed and multi:
+        return True
+    # Klasyczne przykłady
+    if n in (
+        "warzywa grillowane", "warzywa pieczone", "warzywa duszone",
+        "warzywa smażone", "warzywa smazone", "grilled vegetables",
+        "pieczone warzywa", "grillowane warzywa", "smażone warzywa",
+        "smazone warzywa", "mix sałat", "mix salat", "sałatka mieszana",
+        "salatka mieszana",
+    ):
+        return True
+    return False
+
+
+# Propozycje składników combo (gdy wykryto półprodukt bez receptury).
+_COMBO_DEFAULT_INGREDIENTS: dict[str, list[str]] = {
+    "warzywa grillowane": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
+    "warzywa pieczone": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
+    "pieczone warzywa": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
+    "grillowane warzywa": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
+    "mix sałat": ["sałata rzymska", "rukola", "roszponka"],
+    "mix salat": ["sałata rzymska", "rukola", "roszponka"],
+}
+
+
+def _combo_default_ingredients(name: str) -> list[str]:
+    key = _strip_diacritics_pl(_norm_name(name or ""))
+    if key in _COMBO_DEFAULT_INGREDIENTS:
+        return list(_COMBO_DEFAULT_INGREDIENTS[key])
+    for k, ings in _COMBO_DEFAULT_INGREDIENTS.items():
+        if k in key or key in k:
+            return list(ings)
+    if "warzyw" in key and any(p in key for p in ("grill", "piecz", "smaz", "smaż")):
+        return ["cukinia", "papryka", "bakłażan", "olej rzepakowy"]
+    return []
+
+
+def _apply_whole_product_names_to_dishes(dishes: list) -> None:
+    """In-place: części → całe produkty + singular PL (pomidory→pomidor)."""
+    _apply_normalize_ingredient_names_to_dishes(dishes)
 
 
 def _is_porcja_row(name: str) -> bool:
@@ -5426,6 +5565,13 @@ _MENU_SUGGEST_SYSTEM_PROMPT = (
     "   * CAŁY PRODUKT (KRYTYCZNE): jeśli przepis używa części (żółtko, białko, skórka cytryny, "
     "sok z cytryny, ząbek czosnku, miąższ awokado), podaj nazwę CAŁEGO produktu magazynowego "
     "(jajko, cytryna, czosnek, awokado) — nie części.\n"
+    "   * LICZBA POJEDYNCZA (KRYTYCZNE): zapisuj składniki w formie kanonicznej liczby pojedynczej "
+    "(pomidor nie pomidory, jajko nie jajka, ziemniak nie ziemniaki).\n"
+    "   * SKŁADNIKI KUPOWANE, NIE DANIA: nie twórz pozycji magazynowej o nazwie gotowego dania "
+    "(risotto, paella). Zamiast tego podaj surowiec (ryż arborio / ryż do risotto).\n"
+    "   * PÓŁPRODUKT COMBO: jeśli pozycja to przetworzona mieszanka bez jednego SKU "
+    "(warzywa grillowane, mix sałat, pieczone warzywa), nadal wymień osobne surowce w recepturze "
+    "dania; nie wstawiaj samej nazwy mieszanki jako jedynego składnika.\n"
     "   * KATEGORYCZNIE ZAKAZANE: 'Porcja', 'Porcje', 'Wielkość porcji', 'Gramatura', "
     "'Gramatura porcji' NIE MOGĄ pojawić się w `suggested_ingredients`. Wielkość porcji "
     "zapisuj TYLKO w `suggested_portion_weight_value` + `suggested_portion_weight_unit`.\n\n"
@@ -5874,25 +6020,32 @@ async def _gpt_categorize_ingredients(names: list[str],
 
 async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: list[str]):
     """Dla każdego składnika receptury, którego NIE MA w magazynie, tworzy nowy produkt
-    (stan 0, min 5, bufor 20%) z kategorią przypisaną przez GPT. Zwraca (count, items, warnings)."""
+    (stan 0, min 5, bufor 20%) z kategorią przypisaną przez GPT. Zwraca (count, items, warnings).
+
+    - Dedupe: `_food_match_key` / `_find_inventory_duplicate` (pomidor ≡ pomidory).
+    - Nazwy kanoniczne: `_normalize_ingredient_name` (singular + dish→SKU).
+    - Combo półprodukt: `_is_combo_polprodukt_name` → is_combo_polprodukt=True + domyślne składniki.
+    """
     warnings: list[str] = []
     # unikalne, pomijając 'Porcja'/'Wielkość porcji'/'Gramatura' (parametr potrawy, nie produkt).
     seen: dict[str, str] = {}
     for n in ingredient_names:
-        nm = _whole_product_name((n or "").strip())
+        nm = _normalize_ingredient_name((n or "").strip())
         if not nm or _is_porcja_row(nm):
             continue
-        key = _norm_name(nm)
+        key = _food_match_key(nm) or _norm_name(nm)
         if key and key not in seen:
             seen[key] = nm
     if not seen:
         return 0, [], warnings
 
-    inv = await sb_get(client, "inventory_items", params={"select": "id,name", "limit": "5000"}) or []
+    inv = await sb_get(client, "inventory_items", params={
+        "select": "id,name,is_combo_polprodukt", "limit": "5000",
+    }) or []
     to_create: list[str] = []
-    for norm_key, orig in seen.items():
-        hit, _score = _resolve_by_fuzzy(orig, inv, threshold=86)
-        if not hit:
+    for _norm_key, orig in seen.items():
+        dup = _find_inventory_duplicate(orig, inv, threshold=86)
+        if not dup:
             to_create.append(orig)
     if not to_create:
         return 0, [], warnings
@@ -5904,24 +6057,52 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     for name in to_create:
         cat_name = cat_map.get(name, "Inne")
         cat_id = await _resolve_category_id_cached(client, cat_name, cat_cache)
+        is_combo = _is_combo_polprodukt_name(name)
         payload = {
             "name": name, "category_id": cat_id, "quantity": 0,
             "unit": "szt", "min_quantity": 5, "safety_buffer_percent": 20,
-            "is_combo_polprodukt": False, "unit_cost": 0,
+            "is_combo_polprodukt": is_combo, "unit_cost": 0,
         }
         try:
-            await sb_post(client, "inventory_items", payload)
-            created.append({"name": name, "category": cat_name})
+            row = await sb_post(client, "inventory_items", payload)
         except httpx.HTTPStatusError as e:
             if "safety_buffer_percent" in (e.response.text or ""):
                 payload.pop("safety_buffer_percent", None)
                 try:
-                    await sb_post(client, "inventory_items", payload)
-                    created.append({"name": name, "category": cat_name})
+                    row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e2:
                     warnings.append(f"{name}: nie utworzono w magazynie ({e2.response.text[:80]}).")
+                    continue
             else:
                 warnings.append(f"{name}: nie utworzono w magazynie ({e.response.text[:80]}).")
+                continue
+        inv_id = None
+        try:
+            inv_id = (row[0] if isinstance(row, list) else row).get("id")
+        except Exception:
+            inv_id = None
+        item_info: dict = {"name": name, "category": cat_name, "is_combo_polprodukt": is_combo}
+        if is_combo and inv_id:
+            combo_ings = _combo_default_ingredients(name)
+            item_info["combo_ingredients_proposed"] = combo_ings
+            for i, cname in enumerate(combo_ings):
+                cname_n = _normalize_ingredient_name(cname)
+                try:
+                    await sb_post(client, "inventory_combo_ingredients", {
+                        "inventory_item_id": inv_id,
+                        "ingredient_name": cname_n,
+                        "quantity": 1,
+                        "unit": "szt",
+                        "sort_order": i + 1,
+                    })
+                except Exception as ce:  # noqa: BLE001
+                    warnings.append(f"{name}: składnik combo „{cname_n}” nie zapisany ({ce}).")
+            warnings.append(
+                f"„{name}” oznaczono jako półprodukt combo — zaproponowano składniki "
+                f"({', '.join(combo_ings) if combo_ings else 'edytuj w Magazynie'})."
+            )
+        created.append(item_info)
+        inv.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo})
     return len(created), created, warnings
 
 
@@ -6036,7 +6217,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
                     continue
                 row_ing: dict = {
                     "menu_item_id": menu_id,
-                    "ingredient_name": iname,
+                    "ingredient_name": _normalize_ingredient_name(iname),
                     "quantity": float(ing.quantity or 0),
                     "unit": ing.unit or "g",
                     "sort_order": i + 1,
@@ -6050,7 +6231,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
                     except (TypeError, ValueError):
                         pass
                 recipe_rows.append(row_ing)
-                all_ingredient_names.append(iname)
+                all_ingredient_names.append(str(row_ing["ingredient_name"]))
 
             if recipe_rows:
                 try:

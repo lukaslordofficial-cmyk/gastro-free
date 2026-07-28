@@ -20,6 +20,7 @@ import { Image } from 'expo-image';
 import {
   Plus,
   Trash2,
+  Pencil,
   MessageSquare,
   TrendingUp,
   Mic,
@@ -88,6 +89,7 @@ type Props = {
   onAddRevenue: () => void;
   onAddFixed: () => void;
   onAddVariable: () => void;
+  onEditCost?: (id: string, table: 'fixed' | 'variable') => void;
   onDelete: (id: string, table: 'fixed' | 'variable' | 'revenue') => void;
   expandedNoteId: string | null;
   noteText: string;
@@ -662,9 +664,16 @@ export function PremiumFinanceScreen(props: Props) {
                 emptyText="Brak kosztów stałych — kliknij +"
                 formatAmount={formatPLN}
                 renderActions={(item) => (
-                  <TouchableOpacity onPress={() => props.onDelete(item.id, 'fixed')} style={styles.iconBtn}>
-                    <Trash2 size={13} color={PremiumColors.alert} />
-                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', gap: 4 }}>
+                    {props.onEditCost ? (
+                      <TouchableOpacity onPress={() => props.onEditCost!(item.id, 'fixed')} style={styles.iconBtn}>
+                        <Pencil size={13} color={PremiumColors.textMuted} />
+                      </TouchableOpacity>
+                    ) : null}
+                    <TouchableOpacity onPress={() => props.onDelete(item.id, 'fixed')} style={styles.iconBtn}>
+                      <Trash2 size={13} color={PremiumColors.alert} />
+                    </TouchableOpacity>
+                  </View>
                 )}
               />
             </CollapsibleTile>
@@ -696,9 +705,16 @@ export function PremiumFinanceScreen(props: Props) {
                 emptyText="Brak kosztów zmiennych — kliknij +"
                 formatAmount={formatPLN}
                 renderActions={(item) => (
-                  <TouchableOpacity onPress={() => props.onDelete(item.id, 'variable')} style={styles.iconBtn}>
-                    <Trash2 size={13} color={PremiumColors.alert} />
-                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', gap: 4 }}>
+                    {props.onEditCost ? (
+                      <TouchableOpacity onPress={() => props.onEditCost!(item.id, 'variable')} style={styles.iconBtn}>
+                        <Pencil size={13} color={PremiumColors.textMuted} />
+                      </TouchableOpacity>
+                    ) : null}
+                    <TouchableOpacity onPress={() => props.onDelete(item.id, 'variable')} style={styles.iconBtn}>
+                      <Trash2 size={13} color={PremiumColors.alert} />
+                    </TouchableOpacity>
+                  </View>
                 )}
               />
             </CollapsibleTile>

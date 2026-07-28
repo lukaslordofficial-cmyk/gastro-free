@@ -41,6 +41,14 @@ export type ProductImageEntry = {
   storagePath: string;
   /** Opcjonalny lokalny require (dev / offline) */
   localAsset?: number;
+  /**
+   * Pool hint:
+   * - raw = surowy składnik magazynowy
+   * - cooked = danie / obróbka termiczna
+   * - packaging = opakowanie (NIGDY jako fallback dania)
+   * - placeholder = uniwersalny ph_*
+   */
+  kind?: 'raw' | 'cooked' | 'packaging' | 'placeholder' | 'ingredient';
 };
 
 const SUPABASE_URL = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').replace(/\/$/, '');
@@ -81,7 +89,7 @@ export const MEAT_CATALOG: ProductImageEntry[] = [
     slug: 'boczek_surowy_plastry',
     category: 'mieso',
     labelPl: 'Boczek surowy (plastry)',
-    aliases: ['boczek surowy', 'boczek plastry', 'bacon surowy', 'boczek'],
+    aliases: ['boczek surowy', 'boczek plastry', 'bacon surowy', 'boczek', 'bacon', 'smoked bacon', 'bekon'],
     storagePath: 'mieso/boczek_surowy_plastry.png',
     localAsset: require('@/assets/premium/meats/meat_04.webp'),
   },
@@ -665,10 +673,10 @@ export const HERBS_CATALOG: ProductImageEntry[] = [
   { slug: 'szalwia_swieza', category: 'ziola_grzyby', labelPl: 'Szałwia', aliases: ['szałwia', 'szalwia', 'sage'], storagePath: 'ziola/szalwia_swieza.png', localAsset: require('@/assets/premium/herbs/szalwia_swieza.webp') },
   { slug: 'liscie_laurowe_swieze', category: 'ziola_grzyby', labelPl: 'Liść laurowy', aliases: ['liść laurowy', 'liście laurowe', 'bay'], storagePath: 'ziola/liscie_laurowe_swieze.png', localAsset: require('@/assets/premium/herbs/liscie_laurowe_swieze.webp') },
   { slug: 'estragon_lub_czaber', category: 'ziola_grzyby', labelPl: 'Estragon', aliases: ['estragon', 'cząber', 'tarragon'], storagePath: 'ziola/estragon_lub_czaber.png', localAsset: require('@/assets/premium/herbs/estragon_lub_czaber.webp') },
-  { slug: 'borowik_grzyby_lesne', category: 'ziola_grzyby', labelPl: 'Borowik', aliases: ['borowik', 'prawdziwek', 'porcini'], storagePath: 'ziola/borowik_grzyby_lesne.png', localAsset: require('@/assets/premium/herbs/borowik_grzyby_lesne.webp') },
+  { slug: 'borowik_grzyby_lesne', category: 'ziola_grzyby', labelPl: 'Borowik', aliases: ['borowik', 'borowiki', 'prawdziwek', 'porcini', 'grzyb borowik'], storagePath: 'ziola/borowik_grzyby_lesne.png', localAsset: require('@/assets/premium/herbs/borowik_grzyby_lesne.webp') },
   { slug: 'kurki_grzyby_lesne', category: 'ziola_grzyby', labelPl: 'Kurki', aliases: ['kurki', 'chanterelle'], storagePath: 'ziola/kurki_grzyby_lesne.png', localAsset: require('@/assets/premium/herbs/kurki_grzyby_lesne.webp') },
   { slug: 'grzyby_shiitake', category: 'ziola_grzyby', labelPl: 'Shiitake', aliases: ['shiitake'], storagePath: 'ziola/grzyby_shiitake.png', localAsset: require('@/assets/premium/herbs/grzyby_shiitake.webp') },
-  { slug: 'boczniak_ostrygowaty', category: 'ziola_grzyby', labelPl: 'Boczniak', aliases: ['boczniak'], storagePath: 'ziola/boczniak_ostrygowaty.png', localAsset: require('@/assets/premium/herbs/boczniak_ostrygowaty.webp') },
+  { slug: 'boczniak_ostrygowaty', category: 'ziola_grzyby', labelPl: 'Boczniak', aliases: ['boczniak', 'boczniaki', 'oyster mushroom'], storagePath: 'ziola/boczniak_ostrygowaty.png', localAsset: require('@/assets/premium/herbs/boczniak_ostrygowaty.webp') },
   { slug: 'smergiel_smardz_premium', category: 'ziola_grzyby', labelPl: 'Smardz', aliases: ['smardz', 'smardze', 'morel'], storagePath: 'ziola/smergiel_smardz_premium.png', localAsset: require('@/assets/premium/herbs/smergiel_smardz_premium.webp') },
 ];
 
@@ -871,7 +879,7 @@ export const DRINKS_CATALOG: ProductImageEntry[] = [
   { slug: 'tropicana_sok_butelka', category: 'napoje', labelPl: 'Tropicana', aliases: ['tropicana'], storagePath: 'napoje/tropicana_sok_butelka.png', localAsset: require('@/assets/premium/drinks/tropicana_sok_butelka.webp') },
   { slug: 'minute_maid_sok_jablkowy', category: 'napoje', labelPl: 'Minute Maid', aliases: ['minute maid'], storagePath: 'napoje/minute_maid_sok_jablkowy.png', localAsset: require('@/assets/premium/drinks/minute_maid_sok_jablkowy.webp') },
   { slug: 'ocean_spray_sok_zurawinowy', category: 'napoje', labelPl: 'Ocean Spray', aliases: ['ocean spray', 'żurawina', 'zurawina'], storagePath: 'napoje/ocean_spray_sok_zurawinowy.png', localAsset: require('@/assets/premium/drinks/ocean_spray_sok_zurawinowy.webp') },
-  { slug: 'fiji_woda_butelka', category: 'napoje', labelPl: 'Fiji Water', aliases: ['fiji', 'woda fiji'], storagePath: 'napoje/fiji_woda_butelka.png', localAsset: require('@/assets/premium/drinks/fiji_woda_butelka.webp') },
+  { slug: 'fiji_woda_butelka', category: 'napoje', labelPl: 'Fiji Water', aliases: ['fiji', 'woda fiji', 'woda', 'woda mineralna', 'woda niegazowana', 'woda gazowana', 'water', 'sparkling water', 'still water'], storagePath: 'napoje/fiji_woda_butelka.png', localAsset: require('@/assets/premium/drinks/fiji_woda_butelka.webp') },
 ];
 
 export const WINE_BEER_CATALOG: ProductImageEntry[] = [
@@ -939,7 +947,7 @@ export const PACKAGING_CATALOG: ProductImageEntry[] = [
   { slug: 'pudelko_na_burgera_kraft', category: 'opakowania', labelPl: 'Pudełko na burgera', aliases: ['burger box', 'pudełko burger'], storagePath: 'opakowania/pudelko_na_burgera_kraft.png', localAsset: require('@/assets/premium/packaging/pudelko_na_burgera_kraft.webp') },
   { slug: 'pojemnik_cukierniczy_plastik', category: 'opakowania', labelPl: 'Pojemnik cukierniczy', aliases: ['pojemnik cukierniczy', 'na ciasto'], storagePath: 'opakowania/pojemnik_cukierniczy_plastik.png', localAsset: require('@/assets/premium/packaging/pojemnik_cukierniczy_plastik.webp') },
   { slug: 'kubek_na_wynos_papierowy', category: 'opakowania', labelPl: 'Kubek na wynos', aliases: ['kubek na wynos', 'kubek papierowy', 'coffee cup'], storagePath: 'opakowania/kubek_na_wynos_papierowy.png', localAsset: require('@/assets/premium/packaging/kubek_na_wynos_papierowy.webp') },
-  { slug: 'opakowanie_na_frytki_kraft', category: 'opakowania', labelPl: 'Opakowanie na frytki', aliases: ['frytki', 'pudełko frytki', 'fry box'], storagePath: 'opakowania/opakowanie_na_frytki_kraft.png', localAsset: require('@/assets/premium/packaging/opakowanie_na_frytki_kraft.webp') },
+  { slug: 'opakowanie_na_frytki_kraft', category: 'opakowania', labelPl: 'Opakowanie na frytki', aliases: ['opakowanie na frytki', 'pudełko frytki', 'fry box', 'opakowanie frytki'], storagePath: 'opakowania/opakowanie_na_frytki_kraft.png', localAsset: require('@/assets/premium/packaging/opakowanie_na_frytki_kraft.webp'), kind: 'packaging' },
   { slug: 'wytlaczanka_na_kubki_wytlok', category: 'opakowania', labelPl: 'Wytłaczanka na kubki', aliases: ['wytłaczanka', 'nosidełko kubki', 'cup holder'], storagePath: 'opakowania/wytlaczanka_na_kubki_wytlok.png', localAsset: require('@/assets/premium/packaging/wytlaczanka_na_kubki_wytlok.webp') },
   { slug: 'torba_papierowa_z_uchwytem', category: 'opakowania', labelPl: 'Torba papierowa', aliases: ['torba papierowa', 'torba kraft'], storagePath: 'opakowania/torba_papierowa_z_uchwytem.png', localAsset: require('@/assets/premium/packaging/torba_papierowa_z_uchwytem.webp') },
   { slug: 'torebka_papierowa_faldowa', category: 'opakowania', labelPl: 'Torebka papierowa', aliases: ['torebka', 'torebka papierowa'], storagePath: 'opakowania/torebka_papierowa_faldowa.png', localAsset: require('@/assets/premium/packaging/torebka_papierowa_faldowa.webp') },
@@ -1186,6 +1194,8 @@ function resolveDishCategoryPlaceholder(
     { keys: ['surowk', 'coleslaw', 'mizeria', 'buraczk', 'dodatki', 'sides'], slug: 'coleslaw' },
     { keys: ['kebab', 'szawarma', 'shawarma', 'falafel', 'lahmacun', 'kofta', 'toum'], slug: 'kebab_rollo' },
     { keys: ['obiad', 'schabow', 'gołąb', 'golab', 'bigos', 'golonk', 'de volaille', 'dinners'], slug: 'kotlet_schabowy' },
+    { keys: ['warzyw grill', 'grillowane warzyw', 'pieczone warzyw', 'sides'], slug: 'warzywa_grillowane' },
+    { keys: ['napoj', 'woda', 'sok ', 'lemoniad', 'smoothie', 'drink', 'cola'], slug: 'lemoniada_cytrynowa' },
     { keys: ['pierog', 'kopytk', 'kluski', 'nalesnik', 'naleśnik', 'knedle', 'pampuchy', 'racuchy', 'kartacz', 'cepelin'], slug: 'pierogi_ruskie' },
     { keys: ['pizza', 'calzone', 'focaccia', 'pizzetta', 'margherit'], slug: 'pizza_margherita' },
     { keys: ['stek', 'steak', 'ribeye', 'tomahawk', 't-bone', 'tbone', 'rostbef', 'roast beef', 'brisket', 'zeberk', 'żeberk', 'bbq', 'pulled pork', 'antrikot', 'antrykot'], slug: 'stek_ribeye' },
@@ -1306,10 +1316,15 @@ function rememberResolve(key: string, value: ResolvedProductImage | null): Resol
 function toImageSource(r: ResolvedProductImage | null): number | { uri: string } {
   if (r?.localAsset != null) return r.localAsset;
   if (r?.uri) return { uri: r.uri };
+  // Unikaj białych opakowań jako fallback dania — lepiej skrzynka / mięso niż karton
   try {
-    return require('@/assets/premium/placeholders/ph_pojemniki_plastik_bialy.webp');
+    return require('@/assets/premium/placeholders/ph_skrzynka_warzywa.webp');
   } catch {
-    return require('@/assets/premium/placeholders/ph_kartony_brazowe.webp');
+    try {
+      return require('@/assets/premium/placeholders/ph_mieso_surowe_stek.webp');
+    } catch {
+      return require('@/assets/premium/placeholders/ph_kartony_brazowe.webp');
+    }
   }
 }
 
@@ -1322,15 +1337,61 @@ export function warmProductImageIndexes(): void {
   void catalogAll();
 }
 
+function isPackagingEntry(entry: ProductImageEntry): boolean {
+  if (entry.kind === 'packaging') return true;
+  if (entry.category === 'opakowania') return true;
+  const slug = entry.slug || '';
+  return (
+    slug.startsWith('ph_pojemniki') ||
+    slug.startsWith('ph_kartony') ||
+    slug.startsWith('ph_torby') ||
+    slug.startsWith('pudelko_') ||
+    slug.startsWith('opakowanie_') ||
+    slug.startsWith('pojemnik_')
+  );
+}
+
+function isRawMeatEntry(entry: ProductImageEntry): boolean {
+  if (entry.kind === 'raw') return true;
+  const slug = `${entry.slug} ${entry.storagePath}`.toLowerCase();
+  if (entry.category !== 'mieso' && !/mieso|meat/.test(slug)) return false;
+  return /surow|raw|ph_mieso_surowe/.test(slug) || entry.category === 'mieso';
+}
+
+function isCookedDishPath(entry: ProductImageEntry): boolean {
+  if (entry.kind === 'cooked') return true;
+  return /dania\//.test(entry.storagePath || '') || entry.kind === 'cooked';
+}
+
+/** Tokeny mylące: boczek ≠ boczniak, borowik ≠ boczek (bez słabego substring). */
+function tokensConflictSafe(qTok: string, cTok: string): boolean {
+  if (qTok === cTok) return true;
+  // boczek / boczniak / borowik — wymagaj exact (prefix zbyt krótki)
+  const MEAT_MUSHROOM = new Set(['boczek', 'bacon', 'bekon', 'boczniak', 'borowik', 'borowiki']);
+  if (MEAT_MUSHROOM.has(qTok) || MEAT_MUSHROOM.has(cTok)) {
+    return qTok === cTok;
+  }
+  if (qTok.length >= 5 && cTok.length >= 5 && (cTok.includes(qTok) || qTok.includes(cTok))) {
+    // Unikaj: boczek ⊆ boczniak (false includes), ale też krótkich kolizji
+    const shorter = qTok.length <= cTok.length ? qTok : cTok;
+    const longer = qTok.length <= cTok.length ? cTok : qTok;
+    if (longer.startsWith(shorter) && longer.length - shorter.length <= 2) return true;
+    if (longer.includes(shorter) && shorter.length >= 6) return true;
+    return false;
+  }
+  return false;
+}
+
 /**
  * Dopasuj nazwę z menu/magazynu do ikony katalogu.
- * Zwraca najlepsze trafienie albo null — NIGDY nie podstawiaj „domyślnego mięsa”.
- * @param excludeSlugs — slugi już użyte u użytkownika (luźne dopasowanie unika duplikatów)
  * @param preferDishes — szukaj najpierw w katalogu dań (Menu), potem składniki
- * @param menuCategory — kategoria z karty dań (fallback poziom 2)
  *
- * Schodkowe zdjęcia (Menu):
- * 1) dedykowane WebP dania → 2) placeholder kategorii → 3) uniwersalny ph_*
+ * Menu rules:
+ * 1) strict dish match ≥85
+ * 2) fuzzy w pool dań (cooked) — NIGDY opakowania / white-box placeholders
+ * 3) category placeholder (cooked)
+ * 4) soft keyword — bez ph_pojemniki / ph_kartony / opakowań
+ * Dla mięs po obróbce: preferuj cooked dish, nie raw warehouse meat.
  */
 export function resolveProductImage(
   productName: string,
@@ -1352,11 +1413,13 @@ export function resolveProductImage(
     if (hit !== undefined) return hit;
   }
 
+  // Menu: tylko dania (+ ewentualnie non-packaging ingredients jako ostatnia deska)
+  // Magazyn: składniki bez pool dań
   const pools = preferDishes
-    ? [dishCatalog(), catalogAll()]
+    ? [dishCatalog(), catalogAll().filter((e) => !isPackagingEntry(e) && e.category !== 'placeholdery')]
     : [catalogAll()];
 
-  // Menu / receptury: najpierw ścisły matcher dań (unikaj hummus dla sosów itd.)
+  // Menu / receptury: najpierw ścisły matcher dań
   if (preferDishes) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1384,7 +1447,6 @@ export function resolveProductImage(
 
   const ranked: { entry: ProductImageEntry; score: number }[] = [];
 
-  // Prefer dishes: użyj family z dishImageMatch gdy dostępne
   let wantFamily: string | null = null;
   if (preferDishes) {
     try {
@@ -1398,16 +1460,21 @@ export function resolveProductImage(
     }
   }
 
+  const cookedHints = /\b(confitur|glazur|pieczon|grillowan|smazo|smazon|duszon|gotowan|sous.?vide|bbq|w sosie|z sosem)\b/.test(q);
+
   for (const pool of pools) {
     for (const entry of pool) {
+      if (preferDishes && isPackagingEntry(entry)) continue;
+      // Menu + cooked meat dish: skip raw warehouse meat (kaczka w confiturze ≠ pierś surowa)
+      if (preferDishes && (wantFamily === 'meat' || cookedHints) && isRawMeatEntry(entry) && !isCookedDishPath(entry)) {
+        continue;
+      }
       const candidates = [entry.slug.replace(/_/g, ' '), entry.labelPl, ...entry.aliases].map(normalizeName);
       let score = 0;
       for (const c of candidates) {
         if (!c) continue;
         if (q === c) score = Math.max(score, 100);
         else if (c.length >= 5 && q.length >= 5 && (q.includes(c) || c.includes(q))) {
-          // Unikaj „stek” ⊆ „cheesesteak” / krótkich podciągów
-          // Pełne zawieranie nazwy — tylko gdy kandydat ma ≥2 tokeny lub jest długi
           const cTok = c.split(' ').filter((t) => t.length > 2);
           if (cTok.length >= 2 || c.length >= 10) {
             score = Math.max(score, 85 + Math.min(c.length, 10));
@@ -1418,33 +1485,32 @@ export function resolveProductImage(
           const qTokens = q.split(' ').filter((t) => t.length > 2);
           const cTokens = c.split(' ').filter((t) => t.length > 2);
           const hit = qTokens.filter((t) =>
-            cTokens.some((ct) => {
-              if (ct === t) return true;
-              // Podciąg tylko dla dłuższych tokenów (≥5), żeby stek ≠ cheesesteak
-              if (t.length >= 5 && ct.length >= 5 && (ct.includes(t) || t.includes(ct))) return true;
-              return false;
-            }),
+            cTokens.some((ct) => tokensConflictSafe(t, ct)),
           ).length;
           if (hit > 0) {
             let s = 50 + hit * 18;
-            // Sam jeden wspólny token przy 2+ w zapytaniu — słabe (kurczak ≠ rosół/burger)
             if (hit === 1 && qTokens.length >= 2) s = Math.min(s, 54);
             score = Math.max(score, s);
           }
         }
       }
-      // Kara za odległą kategorię (np. zupa vs mięso)
+      if (preferDishes && isCookedDishPath(entry) && score > 0) {
+        score = Math.min(100, score + 6);
+      }
       if (preferDishes && wantFamily && wantFamily !== 'other' && score > 0) {
         const path = `${entry.storagePath} ${entry.slug} ${entry.category}`.toLowerCase();
         const isSoup = /soup|zupa/.test(path);
-        const isMeat = /mieso|steak|grill|kotlet|schab|kurczak|beef|pork/.test(path) && !isSoup;
+        const isMeat = /mieso|steak|grill|kotlet|schab|kurczak|beef|pork|roast|dania\//.test(path) && !isSoup;
         if (wantFamily === 'meat' && isSoup) score = Math.max(0, score - 45);
         else if (wantFamily === 'soups' && isMeat) score = Math.max(0, score - 45);
         else if (wantFamily === 'meat' && isMeat) score = Math.min(100, score + 8);
+        else if (wantFamily === 'drink' && /napoj|drink|woda|sok|kawa|tea/.test(path)) {
+          score = Math.min(100, score + 10);
+        }
       }
       if (score > 0) ranked.push({ entry, score });
     }
-    // Jeśli w katalogu dań jest MOCNE trafienie — nie mieszaj ze składnikami
+    // Mocne trafienie w katalogu dań — nie mieszaj ze składnikami
     if (preferDishes && ranked.some((r) => r.score >= 75)) break;
   }
 
@@ -1458,14 +1524,19 @@ export function resolveProductImage(
     null;
 
   if (pick && pick.score >= 70) {
-    const resolved = {
-      slug: pick.entry.slug,
-      labelPl: pick.entry.labelPl,
-      uri: publicIconUrl(pick.entry.storagePath),
-      localAsset: pick.entry.localAsset,
-      score: pick.score,
-    };
-    return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
+    // Menu: nigdy packaging nawet przy wysokim score
+    if (preferDishes && isPackagingEntry(pick.entry)) {
+      /* fall through */
+    } else {
+      const resolved = {
+        slug: pick.entry.slug,
+        labelPl: pick.entry.labelPl,
+        uri: publicIconUrl(pick.entry.storagePath),
+        localAsset: pick.entry.localAsset,
+        score: pick.score,
+      };
+      return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
+    }
   }
 
   const best = ranked[0] ?? null;
@@ -1473,7 +1544,7 @@ export function resolveProductImage(
   // Poziom 2 — kategoria premium (tylko Menu)
   if (preferDishes) {
     const catPh = resolveDishCategoryPlaceholder(q, menuCategory);
-    if (catPh) {
+    if (catPh && !isPackagingEntry(catPh)) {
       const resolved = {
         slug: catPh.slug,
         labelPl: catPh.labelPl,
@@ -1483,9 +1554,14 @@ export function resolveProductImage(
       };
       return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
     }
-    // Menu: NIGDY nie wrzucaj opakowań / losowych ph_* — lepszy placeholder kategorii
     const soft = resolvePlaceholderByKeywords(q);
-    if (soft && !String(soft.slug).startsWith('ph_pojemniki') && !String(soft.slug).startsWith('ph_kartony')) {
+    if (
+      soft &&
+      !isPackagingEntry(soft) &&
+      !String(soft.slug).startsWith('ph_pojemniki') &&
+      !String(soft.slug).startsWith('ph_kartony') &&
+      !String(soft.slug).startsWith('ph_skrzynka') // warzywa crate ≠ danie
+    ) {
       const resolved = {
         slug: soft.slug,
         labelPl: soft.labelPl,
@@ -1511,8 +1587,17 @@ export function resolveProductImage(
     return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
   }
 
+  // Magazyn: mądrzejszy fallback (nie zawsze skrzynka warzyw)
+  const fallbackSlug =
+    /\b(mies|mięso|boczek|bacon|bekon|kurczak|wolow|wieprz|stek|wedlin)\b/.test(q)
+      ? 'ph_mieso_surowe_stek'
+      : /\b(wod|napoj|sok|cola|piwo|wino|kawa|herbat)\b/.test(q)
+        ? 'fiji_woda_butelka'
+        : /\b(grzyb|borowik|boczniak|pieczark)\b/.test(q)
+          ? 'ph_ziola_doniczki'
+          : 'ph_skrzynka_warzywa';
   const fallback =
-    catalogAll().find((e) => e.slug === 'ph_skrzynka_warzywa') ||
+    catalogAll().find((e) => e.slug === fallbackSlug) ||
     catalogAll().find((e) => e.slug === 'ph_mieso_surowe_stek') ||
     catalogAll()[0];
   if (!fallback) return hasExclude ? null : rememberResolve(cacheKey, null);
@@ -1530,6 +1615,10 @@ export function resolveProductImage(
 function resolvePlaceholderByKeywords(q: string): ProductImageEntry | null {
   const rules: { keys: string[]; slug: string }[] = [
     // Specyficzne produkty — PRZED ogólnymi regułami (mięso / warzywa)
+    { keys: ['bacon', 'boczek', 'bekon', 'smoked bacon'], slug: 'boczek_surowy_plastry' },
+    { keys: ['borowik', 'borowiki', 'prawdziwek', 'porcini'], slug: 'borowik_grzyby_lesne' },
+    { keys: ['boczniak', 'boczniaki'], slug: 'boczniak_ostrygowaty' },
+    { keys: ['woda', 'water', 'mineralna', 'gazowana', 'niegazowana'], slug: 'fiji_woda_butelka' },
     { keys: ['lod ', 'lody', 'lodów', 'lodow', 'ice cream', 'gelato', 'sorbet'], slug: 'ph_mleko_karton_nabial' },
     { keys: ['biszkopt', 'babeczk', 'ciastk', 'tiramisu', 'deser', 'ciast', 'tort ', 'pudding', 'ciasto'], slug: 'ph_mleko_karton_nabial' },
     { keys: ['grzank', 'crouton', 'tost '], slug: 'ph_kartony_brazowe' },
@@ -1544,13 +1633,14 @@ function resolvePlaceholderByKeywords(q: string): ProductImageEntry | null {
     { keys: ['deser', 'ciast', 'tort ', 'pudding'], slug: 'ph_mleko_karton_nabial' },
     { keys: ['pieczyw', 'chleb', 'bulka', 'bułka', 'bagiet'], slug: 'ph_kartony_brazowe' },
     { keys: ['owoc', 'cytrus', 'sezonow', 'jablk', 'gruszk', 'malin', 'truskawk'], slug: 'ph_kosz_owoce' },
+    { keys: ['napoj', 'sok ', 'cola', 'lemoniad', 'smoothie', 'drink'], slug: 'fiji_woda_butelka' },
     { keys: ['warzyw', 'nowalijk', 'ziemniak', 'korzen'], slug: 'ph_skrzynka_warzywa' },
     { keys: ['ser ', 'sery', 'twarog', 'twaróg'], slug: 'ph_sery_kregi' },
     { keys: ['mleko', 'smietan', 'śmietan', 'jogurt', 'nabial', 'nabiał'], slug: 'ph_mleko_karton_nabial' },
     { keys: ['jajk', 'jaj ', 'melanz'], slug: 'ph_jajka_wytlaczanka' },
-    { keys: ['mies', 'mięso', 'stek', 'wedlin', 'kurczak', 'wolow', 'wieprz'], slug: 'ph_mieso_surowe_stek' },
+    { keys: ['mies', 'mięso', 'stek', 'wedlin', 'kurczak', 'wolow', 'wieprz', 'kaczka', 'indyk'], slug: 'ph_mieso_surowe_stek' },
     { keys: ['ryb', 'krewet', 'owoc morza'], slug: 'ph_ryby_swieze' },
-    { keys: ['ziol', 'bazyl', 'miet', 'rozmaryn', 'kielk'], slug: 'ph_ziola_doniczki' },
+    { keys: ['grzyb', 'ziol', 'bazyl', 'miet', 'rozmaryn', 'kielk'], slug: 'ph_ziola_doniczki' },
     { keys: ['chemia', 'dezynfek', 'haccp', 'czystosc'], slug: 'ph_chemia_spray' },
     { keys: ['kawa', 'herbata'], slug: 'ph_kubki_kawa_papier' },
     { keys: ['torba', 'opakowan'], slug: 'ph_torby_papier_kraft' },

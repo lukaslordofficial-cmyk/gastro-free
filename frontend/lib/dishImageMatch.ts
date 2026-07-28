@@ -34,6 +34,7 @@ export type DishFamily =
   | 'dessert'
   | 'drink'
   | 'meat'
+  | 'sides'
   | 'other';
 
 export function normalizeDishName(raw: string): string {
@@ -65,11 +66,14 @@ export function detectDishFamily(name: string): DishFamily {
   if (/\b(makaron|pasta|spaghetti|tagliatelle|penne|lasagne|ravioli|gnocchi)\b/.test(n)) return 'pasta';
   if (/\b(pizza|calzone)\b/.test(n)) return 'pizza';
   if (/\b(salatk|salad)\b/.test(n)) return 'salad';
+  if (/\b(warzyw.*grill|grillowan.*warzyw|pieczon.*warzyw|sides|surowk|coleslaw|frytk|dodatk)\b/.test(n)) {
+    return 'sides';
+  }
   if (/\b(ciasto|tort|deser|lody|pancake|nalesnik|tiramisu|panna cotta)\b/.test(n)) return 'dessert';
-  if (/\b(kawa|herbata|lemoniad|sok |smoothie|drink|koktajl|piwo|wino|energetyk|cola)\b/.test(n)) return 'drink';
-  // Mięsa / dania obiadowe (filet, pierś, schab…) — NIE zupy
+  if (/\b(kawa|herbata|lemoniad|sok |smoothie|drink|koktajl|piwo|wino|energetyk|cola|woda)\b/.test(n)) return 'drink';
+  // Mięsa / dania obiadowe (filet, pierś, schab…) — NIE zupy; confiture/glaze = cooked meat
   if (
-    /\b(filet|piers|kurczak|schab|kotlet|stek|zeberk|wolow|wieprz|indyk|kaczka|de volaille|poledwic|antrykot|karkowk|udziec|skrzyde|nugget)\b/.test(n)
+    /\b(filet|piers|kurczak|schab|kotlet|stek|zeberk|wolow|wieprz|indyk|kaczka|de volaille|poledwic|antrykot|karkowk|udziec|skrzyde|nugget|confitur|glazur|boczek)\b/.test(n)
   ) {
     return 'meat';
   }
@@ -77,6 +81,17 @@ export function detectDishFamily(name: string): DishFamily {
 }
 
 function familyFromEntry(entry: DishImageEntry): DishFamily {
+  const mf = (entry as DishImageEntry & { menuFamily?: string }).menuFamily;
+  if (mf === 'zupy') return 'soups';
+  if (mf === 'burgery') return 'burgers';
+  if (mf === 'makarony') return 'pasta';
+  if (mf === 'pizze') return 'pizza';
+  if (mf === 'salatki') return 'salad';
+  if (mf === 'sides') return 'sides';
+  if (mf === 'napoje') return 'drink';
+  if (mf === 'desery') return 'dessert';
+  if (mf === 'sosy') return 'sauces';
+  if (mf === 'miesa' || mf === 'bbq') return 'meat';
   const path = `${entry.storagePath} ${entry.slug}`.toLowerCase();
   if (/sauce|sosy|dipy/.test(path)) return 'sauces';
   if (/soup|zupa/.test(path)) return 'soups';
@@ -84,9 +99,10 @@ function familyFromEntry(entry: DishImageEntry): DishFamily {
   if (/pasta|makaron/.test(path)) return 'pasta';
   if (/pizza/.test(path)) return 'pizza';
   if (/salad|salatk/.test(path)) return 'salad';
+  if (/side|warzywa_grill|surowk/.test(path)) return 'sides';
   if (/dessert|cake|ice_cream|pancake|pastr|french_dessert/.test(path)) return 'dessert';
   if (/coffee|tea|lemonade|juice|cocktail|beer|wine|spirit|energy/.test(path)) return 'drink';
-  if (/steak|meat|mieso|grill|bbq|kotlet|schab|kurczak|beef|pork|ribs/.test(path) && !/soup|zupa/.test(path)) return 'meat';
+  if (/steak|meat|mieso|grill|bbq|kotlet|schab|kurczak|beef|pork|ribs|roast/.test(path) && !/soup|zupa/.test(path)) return 'meat';
   return detectDishFamily(entry.labelPl);
 }
 
@@ -228,7 +244,11 @@ export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[])
     case 'salad':
       return pick('garden_salad');
     case 'meat':
-      return pick('kotlet_schabowy', 'stek_ribeye', 'de_volaille') ?? catalog.find((e) => /steak|kotlet|grill|mieso/.test(e.storagePath))?.slug;
+      return pick('kotlet_schabowy', 'stek_ribeye', 'de_volaille') ?? catalog.find((e) => /steak|kotlet|grill|mieso|roast/.test(e.storagePath))?.slug;
+    case 'sides':
+      return pick('warzywa_grillowane', 'french_fries', 'coleslaw');
+    case 'drink':
+      return pick('espresso', 'lemoniada_cytrynowa') ?? catalog.find((e) => /coffee|tea|lemonade|juice/.test(e.storagePath))?.slug;
     default:
       return undefined;
   }

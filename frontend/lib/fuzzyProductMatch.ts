@@ -75,6 +75,70 @@ const SYNONYM: Record<string, string> = {
   bialko: 'jajko',
   bialka: 'jajko',
   yolk: 'jajko',
+  marchewki: 'marchew',
+  marchewek: 'marchew',
+  marchew: 'marchew',
+  ogorki: 'ogorek',
+  ogorkow: 'ogorek',
+  papryki: 'papryka',
+  papryk: 'papryka',
+  cukinie: 'cukinia',
+  cukinii: 'cukinia',
+  baklazany: 'baklazan',
+  pieczarki: 'pieczarka',
+  pieczarek: 'pieczarka',
+  grzyby: 'grzyb',
+  grzybow: 'grzyb',
+  borowiki: 'borowik',
+  borowikow: 'borowik',
+  boczniaki: 'boczniak',
+  boczniakow: 'boczniak',
+  cebule: 'cebula',
+  czosnki: 'czosnek',
+  cytryny: 'cytryna',
+  limonki: 'limonka',
+  jabłka: 'jablko',
+  jablka: 'jablko',
+  jablek: 'jablko',
+  banany: 'banan',
+  bananow: 'banan',
+  truskawki: 'truskawka',
+  truskawek: 'truskawka',
+  maliny: 'malina',
+  malin: 'malina',
+  orzechy: 'orzech',
+  orzechow: 'orzech',
+  migdaly: 'migdal',
+  migdalow: 'migdal',
+  rodzynki: 'rodzynka',
+  rodzynkow: 'rodzynka',
+  oliwki: 'oliwka',
+  oliwek: 'oliwka',
+  kapary: 'kapar',
+  kaparow: 'kapar',
+  bazylie: 'bazylia',
+  pietruszki: 'pietruszka',
+  koperki: 'koperek',
+  szczypiorki: 'szczypiorek',
+  ryze: 'ryz',
+  makarony: 'makaron',
+  bulki: 'bulka',
+  bulek: 'bulka',
+  chleby: 'chleb',
+  chlebow: 'chleb',
+  kielbasy: 'kielbasa',
+  kielbas: 'kielbasa',
+  szynki: 'szynka',
+  szynek: 'szynka',
+  boczki: 'boczek',
+  filety: 'filet',
+  piersi: 'piers',
+  steki: 'stek',
+  kotlety: 'kotlet',
+  kotletow: 'kotlet',
+  krewetki: 'krewetka',
+  krewetek: 'krewetka',
+  muszle: 'muszla',
 };
 
 const NORM_CACHE = new Map<string, string>();
@@ -144,6 +208,89 @@ export function productTokens(raw: string): string[] {
 /** Znormalizowany klucz do porównań (tokeny posortowane). */
 export function productMatchKey(raw: string): string {
   return productTokens(raw).join(' ');
+}
+
+/**
+ * Kanoniczna nazwa składnika do zapisu / dedupe (pomidory → pomidor, jajka → jajko).
+ * Stem-ish + synonimy PL; wielowyrazowe zachowuje czytelny zapis z kanonicznymi tokenami.
+ */
+const SINGULAR_DISPLAY: Record<string, string> = {
+  pomidor: 'pomidor',
+  jajko: 'jajko',
+  ziemniak: 'ziemniak',
+  marchew: 'marchew',
+  ogorek: 'ogórek',
+  papryka: 'papryka',
+  cukinia: 'cukinia',
+  baklazan: 'bakłażan',
+  pieczarka: 'pieczarka',
+  grzyb: 'grzyb',
+  borowik: 'borowik',
+  boczniak: 'boczniak',
+  cebula: 'cebula',
+  czosnek: 'czosnek',
+  cytryna: 'cytryna',
+  limonka: 'limonka',
+  jablko: 'jabłko',
+  banan: 'banan',
+  truskawka: 'truskawka',
+  malina: 'malina',
+  orzech: 'orzech',
+  migdal: 'migdał',
+  oliwka: 'oliwka',
+  kapar: 'kapar',
+  bazylia: 'bazylia',
+  pietruszka: 'pietruszka',
+  koperek: 'koperek',
+  szczypiorek: 'szczypiorek',
+  ryz: 'ryż',
+  makaron: 'makaron',
+  bulka: 'bułka',
+  chleb: 'chleb',
+  kielbasa: 'kiełbasa',
+  szynka: 'szynka',
+  boczek: 'boczek',
+  filet: 'filet',
+  piers: 'pierś',
+  stek: 'stek',
+  kotlet: 'kotlet',
+  krewetka: 'krewetka',
+  kurczak: 'kurczak',
+  indyk: 'indyk',
+  maslo: 'masło',
+  mleko: 'mleko',
+  smietana: 'śmietana',
+  ser: 'ser',
+  cukier: 'cukier',
+  sol: 'sól',
+  pieprz: 'pieprz',
+  majonez: 'majonez',
+  musztarda: 'musztarda',
+  oliw: 'oliwa',
+};
+
+export function normalizeIngredientName(raw: string): string {
+  const trimmed = (raw || '').trim().replace(/\s+/g, ' ');
+  if (!trimmed) return trimmed;
+  const tokens = productTokens(trimmed);
+  if (!tokens.length) return trimmed;
+  if (tokens.length === 1) {
+    return SINGULAR_DISPLAY[tokens[0]] ?? trimmed;
+  }
+  // Wielowyrazowe: zachowaj oryginał, ale zredukuj oczywiste formy liczby mnogiej na końcu
+  const last = tokens[tokens.length - 1];
+  const lastDisp = SINGULAR_DISPLAY[last];
+  if (lastDisp && /y$|i$|e$|ów$|ow$/i.test(trimmed.split(/\s+/).pop() || '')) {
+    const parts = trimmed.split(/\s+/);
+    parts[parts.length - 1] = lastDisp;
+    return parts.join(' ');
+  }
+  return trimmed;
+}
+
+/** Klucz dedupe magazyn ↔ receptura (pomidor === pomidory). */
+export function ingredientDedupeKey(raw: string): string {
+  return productMatchKey(normalizeIngredientName(raw)) || productMatchKey(raw);
 }
 
 function levenshtein(a: string, b: string): number {

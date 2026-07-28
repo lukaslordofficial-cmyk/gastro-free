@@ -36,6 +36,7 @@ import {
   type InspirationRecipe,
 } from '@/lib/inspirationUnlocks';
 import { normalizeRecipeQuantity } from '@/lib/recipeUnits';
+import { normalizeIngredientName } from '@/lib/fuzzyProductMatch';
 
 export type { InspirationRecipe };
 
@@ -406,7 +407,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
                   const scale = portions / Math.max(1, recipe.default_portions || 1);
                   const ingredients = recipe.ingredients_sections.flatMap((sec) =>
                     sec.ingredients.map((ing) => ({
-                      name: ing.name,
+                      name: normalizeIngredientName(ing.name),
                       quantity: normalizeRecipeQuantity(ing.base_quantity * scale),
                       unit: ing.unit,
                     })),

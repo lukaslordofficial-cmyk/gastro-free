@@ -1,7 +1,9 @@
 -- =============================================================================
--- GASTRO MANAGER — Auth profiles (Supabase Auth → account_key + kredyty 1000)
+-- GASTRO MANAGER — Auth profiles (Supabase Auth → account_key + 100 kredytów
+-- + 30-dniowy trial Premium / Profesjonalny)
 -- Uruchom w Supabase SQL Editor PO ADD_SUBSCRIPTIONS.sql / FIX_SUBSCRIPTIONS_RLS.sql.
 -- Wymaga włączonego Email Auth w Authentication → Providers.
+-- Preferuj też PREMIUM_TRIAL_100_CREDITS.sql (kolumna trial_ends_at + backfill).
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS public.profiles (
@@ -73,6 +75,13 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- trial_ends_at: 30-dniowy trial Premium (features jak tier 2); po dacie → Free, kredyty zostają
+ALTER TABLE public.subscriptions
+  ADD COLUMN IF NOT EXISTS trial_ends_at timestamptz;
+
+ALTER TABLE public.subscriptions
+  ALTER COLUMN credits_balance SET DEFAULT 100;
+
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -98,9 +107,9 @@ BEGIN
         updated_at = now();
 
   INSERT INTO public.subscriptions (
-    account_key, tier_level, credits_balance, status, free_starter_claimed
+    account_key, tier_level, credits_balance, status, free_starter_claimed, trial_ends_at
   )
-  VALUES (v_key, 0, 1000, 'active', true)
+  VALUES (v_key, 0, 100, 'active', true, now() + interval '30 days')
   ON CONFLICT (account_key) DO NOTHING;
 
   RETURN NEW;
@@ -123,8 +132,10 @@ FROM auth.users u
 WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = u.id)
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO public.subscriptions (account_key, tier_level, credits_balance, status, free_starter_claimed)
-SELECT p.account_key, 0, 1000, 'active', true
+INSERT INTO public.subscriptions (
+  account_key, tier_level, credits_balance, status, free_starter_claimed, trial_ends_at
+)
+SELECT p.account_key, 0, 100, 'active', true, now() + interval '30 days'
 FROM public.profiles p
 WHERE NOT EXISTS (
   SELECT 1 FROM public.subscriptions s WHERE s.account_key = p.account_key

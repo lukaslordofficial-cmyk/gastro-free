@@ -20,7 +20,7 @@ Data: 2026-07-25.
 | Ograniczenie | Szczegół |
 |--------------|----------|
 | **Stripe = Test mode** | Tylko `sk_test_` / `pk_test_`. Karta: `4242…`. Live keys dopiero przy płatnych pilotach. |
-| **Kredyty beta = 1000** | Free / startowy pakiet: **1000** kredytów AI na nowe konto (trigger + fallback w appce). |
+| **Kredyty start = 100 + trial 30d** | Nowe konto: **100** kredytów AI + `trial_ends_at` (+30 dni Premium / Łowca). Po trialu Free; kredyty zostają. Migracja: `PREMIUM_TRIAL_100_CREDITS.sql`. |
 | **Legacy `default`** | Stary portfel `account_key='default'` zostaje dla seedów / fallbacku backendu bez nagłówka. |
 
 ## Produkt (świadomie niedokończone)

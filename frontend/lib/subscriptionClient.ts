@@ -9,10 +9,23 @@ import {
 } from '@/lib/subscriptionCatalog';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
-const STARTER_CREDITS = 1000;
+/** Startowe kredyty AI przy rejestracji (trial Premium 30 dni osobno). */
+const STARTER_CREDITS = 100;
+const TRIAL_DAYS = 30;
 
 function accountKey(): string {
   return getAccountKey();
+}
+
+function trialEndsIso(from = new Date()): string {
+  return new Date(from.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/** Trial Premium aktywny, gdy trial_ends_at > now (Free plan + features jak Profesjonalny). */
+export function isPremiumTrialActive(trialEndsAt: string | null | undefined): boolean {
+  if (!trialEndsAt) return false;
+  const t = Date.parse(trialEndsAt);
+  return Number.isFinite(t) && t > Date.now();
 }
 
 export type SubscriptionRow = {
@@ -22,6 +35,8 @@ export type SubscriptionRow = {
   credits_balance: number;
   status: string;
   current_period_end: string | null;
+  /** Koniec 30-dniowego trialu Premium; po dacie → Free, kredyty zostają. */
+  trial_ends_at?: string | null;
   free_starter_claimed?: boolean | null;
   created_at?: string;
   updated_at?: string;
@@ -36,8 +51,10 @@ export type SubscriptionState = {
   credits_balance: number;
   status: string;
   current_period_end: string | null;
+  trial_ends_at: string | null;
+  trial_active: boolean;
   deal_hunter_unlocked: boolean;
-  /** Dark premium UI — kredyty > 0 lub aktywna płatna subskrypcja */
+  /** Dark premium UI — trial, płatny tier lub kredyty > 0 */
   premium_ui: boolean;
   features: Array<{
     key: string; icon: string; name: string; cost: string;
@@ -56,28 +73,31 @@ export type WalletSnapshot = Pick<
 function buildView(row: SubscriptionRow, message?: string | null): SubscriptionState {
   const tier = Number(row.tier_level ?? 0);
   const bal = Number(row.credits_balance ?? 0);
-  /** Startowy pakiet 1000 kr. na tier 0: pełny dostęp (w tym Łowca) dopóki są kredyty. */
-  const starterFullAccess = tier === 0 && bal > 0;
+  const trialEnds = row.trial_ends_at ?? null;
+  const trialActive = isPremiumTrialActive(trialEnds);
+  // Paid Profesjonalny LUB aktywny 30-dniowy trial → Łowca + feature gate jak tier 2
+  const premiumEntitled = tier >= 2 || trialActive;
   const features = FEATURE_CATALOG.map((f) => {
     let reason: string | null = null;
     if (bal <= 0) {
       reason = 'Brak kredytów — dostępne tylko funkcje manualne';
-    } else if (starterFullAccess) {
-      reason = null;
-    } else if (f.requires_deal_hunter && tier < 2) {
-      reason = 'Wymaga planu Profesjonalny';
+    } else if (f.requires_deal_hunter && !premiumEntitled) {
+      reason = 'Wymaga planu Profesjonalny lub aktywnego trialu Premium (30 dni)';
     }
     return { ...f, locked: reason !== null, locked_reason: reason };
   });
   return {
     ok: true,
     tier_level: tier,
-    tier_name: tierName(tier),
+    tier_name: trialActive && tier < 2 ? `${tierName(tier)} · trial Premium` : tierName(tier),
     credits_balance: bal,
     status: row.status ?? 'active',
     current_period_end: row.current_period_end ?? null,
-      deal_hunter_unlocked: starterFullAccess || tier >= 2,
-      premium_ui: bal > 0,
+    trial_ends_at: trialEnds,
+    trial_active: trialActive,
+    deal_hunter_unlocked: premiumEntitled,
+    // Dark premium chrome podczas trialu / płatnego planu / gdy są kredyty
+    premium_ui: premiumEntitled || bal > 0,
     features,
     topup_packages: TOPUP_PACKAGES,
     plans: TIER_PLANS,
@@ -117,6 +137,8 @@ async function ensureRow(): Promise<SubscriptionRow> {
     status: 'active',
     current_period_end: null,
     free_starter_claimed: true,
+    // 30-dniowy trial Premium (Łowca itd.); po dacie Free, kredyty zostają
+    trial_ends_at: trialEndsIso(),
   };
   const { data, error } = await supabase
     .from('subscriptions')
@@ -152,6 +174,8 @@ export async function fetchSubscriptionState(): Promise<SubscriptionState> {
       credits_balance: 0,
       status: 'unknown',
       current_period_end: null,
+      trial_ends_at: null,
+      trial_active: false,
       deal_hunter_unlocked: false,
       premium_ui: false,
       features: FEATURE_CATALOG.map((f) => ({ ...f, locked: true, locked_reason: 'Brak migracji' })),
@@ -207,7 +231,7 @@ export async function cancelSubscription(): Promise<SubscriptionState> {
   );
 }
 
-/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu 1000 kredytów. */
+/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu startowego. */
 export async function resignToFreeTier(): Promise<SubscriptionState> {
   const row = await ensureRow();
   const updated = await patchRow({

@@ -20,6 +20,8 @@ type SubscriptionContextValue = {
   hasAds: boolean;
   premiumUi: boolean;
   dealHunterUnlocked: boolean;
+  trialActive: boolean;
+  trialEndsAt: string | null;
   refresh: () => Promise<void>;
   subscribe: (tierLevel: 1 | 2) => Promise<SubscriptionState>;
   cancel: () => Promise<SubscriptionState>;
@@ -82,9 +84,11 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     credits: state?.credits_balance ?? 0,
     // Closed beta / Internal Testing: bez reklam (AdMob wyłączony w UI).
     hasAds: false,
-    // Closed beta: dark premium chrome dla wszystkich zalogowanych (nie zależy od płatnego tieru).
+    // Dark premium chrome: trial Premium, płatny plan, albo zalogowany (closed beta).
     premiumUi: isAuthenticated ? true : !!state?.premium_ui,
     dealHunterUnlocked: !!state?.deal_hunter_unlocked,
+    trialActive: !!state?.trial_active,
+    trialEndsAt: state?.trial_ends_at ?? null,
     refresh,
     subscribe: (t) => wrap(() => subscribeTier(t)),
     cancel: () => wrap(cancelSubscription),

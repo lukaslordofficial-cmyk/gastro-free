@@ -19,10 +19,10 @@ export const TIER_PLANS: PlanDef[] = [
     deal_hunter: false,
     price_note: null,
     perks: [
-      'Reklamy w aplikacji',
+      'Reklamy w aplikacji (po zakończeniu trialu)',
       'Manualny magazyn, finanse i baza receptur',
-      'Jednorazowy pakiet 1000 kredytów AI na start (przy pierwszym koncie / beta)',
-      'Na starcie: pełny dostęp do AI + dark premium dopóki masz kredyty',
+      '100 kredytów AI na start + 30 dni trialu Premium (Łowca Okazji, dark UI)',
+      'Po trialu: plan Free — pozostałe kredyty zostają',
       'Oglądaj wideo reklamowe, aby zdobyć dodatkowe kredyty AI',
     ],
   },

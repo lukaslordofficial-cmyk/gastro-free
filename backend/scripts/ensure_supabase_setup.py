@@ -65,12 +65,12 @@ def ensure_subscription_row(client: httpx.Client) -> None:
     ins = client.post(
         f"{URL}/rest/v1/subscriptions",
         headers={**headers(), "Prefer": "return=representation"},
-        json={"account_key": "default", "tier_level": 0, "credits_balance": 1000, "status": "active"},
+        json={"account_key": "default", "tier_level": 0, "credits_balance": 0, "status": "active", "free_starter_claimed": True},
     )
     if ins.status_code >= 300:
         print(f"  subscriptions: nie udało się utworzyć wiersza — {ins.status_code} {ins.text[:200]}")
     else:
-        print("  subscriptions: utworzono wiersz 'default' (Free, 1000 kredytów)")
+        print("  subscriptions: utworzono wiersz 'default' (Free, 0 kredytów — nie dziel portfela)")
 
 
 def main() -> int:

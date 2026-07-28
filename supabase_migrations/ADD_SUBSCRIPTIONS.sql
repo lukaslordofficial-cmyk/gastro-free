@@ -7,17 +7,18 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_key         text UNIQUE NOT NULL DEFAULT 'default',
   tier_level          int  NOT NULL DEFAULT 0,          -- 0=Free, 1=Podstawowy, 2=Profesjonalny
-  credits_balance     int  NOT NULL DEFAULT 1000,       -- 1 kredyt = 1 jednostka salda; beta starter = 1000
-  free_starter_claimed boolean NOT NULL DEFAULT false,  -- jednorazowy pakiet 1000 kr.
+  credits_balance     int  NOT NULL DEFAULT 100,        -- 1 kredyt = 1 jednostka; starter = 100
+  free_starter_claimed boolean NOT NULL DEFAULT false,  -- jednorazowy pakiet startowy (100 kr.)
   status              text NOT NULL DEFAULT 'active',   -- active | canceled | expired
   current_period_end  timestamptz,
+  trial_ends_at       timestamptz,                     -- 30-dniowy trial Premium (features tier 2)
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
--- Pojedynczy wiersz konta restauracji (brak logowania) — Free, 1000 kredytów na start (beta).
+-- Pojedynczy wiersz konta demo — Free, 0 kredytów (nie dziel portfela testowego).
 INSERT INTO public.subscriptions (account_key, tier_level, credits_balance, status, free_starter_claimed)
-VALUES ('default', 0, 1000, 'active', true)
+VALUES ('default', 0, 0, 'active', true)
 ON CONFLICT (account_key) DO NOTHING;
 
 -- auto-aktualizacja updated_at

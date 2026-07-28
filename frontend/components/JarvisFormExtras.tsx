@@ -552,6 +552,7 @@ export function CriticalOrderEditor({
   categories: { id: string; name: string }[];
 }) {
   const selected: string[] = Array.isArray(edited.categories) ? edited.categories : [];
+  const items: any[] = Array.isArray(edited.items) ? edited.items : [];
   const allOn = selected.includes('all');
   const toggle = (name: string) => {
     if (name === 'all') {
@@ -565,14 +566,17 @@ export function CriticalOrderEditor({
       patch({ categories: [...withoutAll, name] });
     }
   };
+  const updateItem = (idx: number, changes: Record<string, any>) => {
+    patch({ items: items.map((it, i) => (i === idx ? { ...it, ...changes } : it)) });
+  };
   const target = edited.stock_target === 'optimal' ? 'optimal' : 'critical';
   return (
     <View style={styles.card}>
       <Text style={styles.hint}>
-        Zaznacz kategorie magazynu (wiele naraz) albo „Wszystkie”. Potem wybierz tryb zamówienia i zatwierdź —
-        otworzy się Łowca Okazji.
+        Zaznacz kategorie braków (np. Warzywa) i/lub dodaj konkretne produkty z nazwy
+        (np. ser kozi). Po zatwierdzeniu otworzy się Łowca Okazji z połączonym koszykiem.
       </Text>
-      <Text style={styles.label}>Kategorie</Text>
+      <Text style={styles.label}>Kategorie braków</Text>
       <View style={styles.pillRow}>
         <TouchableOpacity style={[styles.pill, allOn && styles.pillOn]} onPress={() => toggle('all')}>
           <Text style={[styles.pillText, allOn && styles.pillTextOn]}>Wszystkie</Text>
@@ -590,7 +594,7 @@ export function CriticalOrderEditor({
           );
         })}
       </View>
-      <Text style={[styles.label, { marginTop: 12 }]}>Zakres zamówienia</Text>
+      <Text style={[styles.label, { marginTop: 12 }]}>Zakres zamówienia (kategorie)</Text>
       <View style={styles.pillRow}>
         <TouchableOpacity
           style={[styles.pill, target === 'critical' && styles.pillOn]}
@@ -609,6 +613,25 @@ export function CriticalOrderEditor({
           </Text>
         </TouchableOpacity>
       </View>
+      <Text style={[styles.label, { marginTop: 14 }]}>Dodatkowe produkty (z nazwy)</Text>
+      <Text style={[styles.hint, { marginBottom: 8 }]}>
+        Np. „ser kozi”, „filet z kurczaka” — zawsze trafią do koszyka, nawet gdy nie są krytyczne.
+      </Text>
+      {items.map((it, idx) => (
+        <OrderLine
+          key={idx}
+          item={it}
+          onChange={(c) => updateItem(idx, c)}
+          onRemove={() => patch({ items: items.filter((_, i) => i !== idx) })}
+        />
+      ))}
+      <TouchableOpacity
+        style={styles.addBtn}
+        onPress={() => patch({ items: [...items, { product_name: '', quantity: 1, unit: 'szt' }] })}
+      >
+        <Plus size={14} color={CTA_TEXT} strokeWidth={2.5} />
+        <Text style={styles.addBtnText}>Dodaj produkt</Text>
+      </TouchableOpacity>
     </View>
   );
 }

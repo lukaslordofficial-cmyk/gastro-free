@@ -84,12 +84,15 @@ async function ensureLocalProfile(user: User): Promise<UserProfile> {
 
   if (!error && data) {
     // Portfel — trigger SQL zwykle tworzy wiersz; tu fallback (ignoruj konflikt)
+    // Free + 100 kredytów + 30-dniowy trial Premium (Łowca / dark UI). Po trialu → Free, kredyty zostają.
+    const trialEnds = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const { error: subErr } = await supabase.from('subscriptions').insert({
       account_key,
       tier_level: 0,
-      credits_balance: 1000,
+      credits_balance: 100,
       status: 'active',
       free_starter_claimed: true,
+      trial_ends_at: trialEnds,
     });
     if (subErr && !String(subErr.message || '').toLowerCase().includes('duplicate')) {
       if (__DEV__) console.warn('[Auth] subscriptions seed:', subErr.message);

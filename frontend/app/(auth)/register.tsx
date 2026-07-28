@@ -75,7 +75,7 @@ export default function RegisterScreen() {
             <Text style={styles.title}>Nowe konto</Text>
             <Text style={styles.sub}>
               Rejestracja e-mail + hasło — bez potwierdzenia maila (beta). Po założeniu konta
-              otrzymujesz 1000 kredytów AI i własny magazyn / menu.
+              otrzymujesz 100 kredytów AI, 30 dni trialu Premium i własny magazyn / menu.
             </Text>
 
             {!isSupabaseConfigured && (

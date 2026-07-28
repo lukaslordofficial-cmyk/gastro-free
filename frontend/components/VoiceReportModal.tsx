@@ -235,7 +235,7 @@ const COMMAND_EXAMPLES: { intent: Intent; example: string }[] = [
   { intent: 'add_supplier', example: 'Dodaj nowego dostawcę' },
   { intent: 'edit_menu_item_price', example: 'Zmień cenę dowolnego dania' },
   { intent: 'order_product', example: 'Zamów dowolny produkt/y z oferty twoich dostawców' },
-  { intent: 'order_critical_items_by_category', example: 'Zamów braki z wybranej kategorii' },
+  { intent: 'order_critical_items_by_category', example: 'Zamów ser kozi i brakujące warzywa' },
   { intent: 'summarize_custom_period', example: 'Pokaż zyski z wybranych okresów' },
   { intent: 'rank_menu_sales', example: 'Pokaż ranking sprzedaży z wybranego okresu' },
   { intent: 'rank_waste_cost', example: 'Ile pieniędzy utracono przez straty produktowe' },
@@ -1219,7 +1219,10 @@ export function VoiceReportModal({
         ? Number(edited.amount) > 0
         : Number(edited.percentage) > 0)))
     && (interp.intent !== 'order_product'
-      || (Array.isArray(edited.items) && edited.items.some((it: any) => String(it?.product_name || '').trim())));
+      || (Array.isArray(edited.items) && edited.items.some((it: any) => String(it?.product_name || '').trim())))
+    && (interp.intent !== 'order_critical_items_by_category'
+      || ((Array.isArray(edited.categories) && edited.categories.length > 0)
+        || (Array.isArray(edited.items) && edited.items.some((it: any) => String(it?.product_name || '').trim()))));
   const meta = interp ? INTENT_META[interp.intent] : INTENT_META.unknown;
   const workingMessage =
     stage === 'transcribing' ? 'Zamieniam mowę na tekst (Whisper)…'
@@ -3422,7 +3425,7 @@ function seedPayload(
   if (intent === 'add_menu_item' && (!Array.isArray(p.ingredients) || p.ingredients.length === 0)) {
     p.ingredients = [{ ingredient_name: '', quantity: null, unit: 'g' }];
   }
-  // Zbiorcze zamówienie braków
+  // Zbiorcze zamówienie braków (+ opcjonalnie nazwiane produkty MIX)
   if (intent === 'order_critical_items_by_category') {
     const raw = p.categories;
     let cats: string[] = [];
@@ -3431,6 +3434,17 @@ function seedPayload(
     if (opts?.fromLegend || cats.length === 0) cats = [];
     p.categories = cats;
     if (!p.stock_target) p.stock_target = 'critical';
+    // MIX: „ser kozi + brakujące warzywa” — zachowaj items[] z interpretacji
+    if (!Array.isArray(p.items)) p.items = [];
+    else {
+      p.items = p.items
+        .filter((it: any) => it && String(it.product_name || it.name || '').trim())
+        .map((it: any) => ({
+          product_name: String(it.product_name || it.name || '').trim(),
+          quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1,
+          unit: String(it.unit || 'szt').trim() || 'szt',
+        }));
+    }
   }
   if (intent === 'order_product') {
     if (!Array.isArray(p.items) || p.items.length === 0) {

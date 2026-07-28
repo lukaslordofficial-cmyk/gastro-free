@@ -1199,11 +1199,13 @@ DOSTĘPNE INTENCJE:
     Słowa: zamów, chcę zamówić, potrzebuję dostawy, dorzuć do zamówienia.
     * pola: items[] (lista {{product_name, quantity, unit}}), supplier_name (opcjonalny)
 
-13b. "order_critical_items_by_category" – ZBIORCZE zamówienie WSZYSTKICH BRAKÓW magazynowych
-    (produktów, których stan spadł poniżej progu krytycznego), z filtrem po kategoriach.
+13b. "order_critical_items_by_category" – ZBIORCZE zamówienie BRAKÓW magazynowych
+    (produktów poniżej progu krytycznego), z filtrem po kategoriach — ORAZ opcjonalnie
+    KONKRETNYCH produktów wymienionych z nazwy w tej samej komendzie.
     Słowa: „zamów wszystkie braki", „zamów brakujące produkty", „domów co się kończy",
     „zamów mięso i nabiał", „zamów braki z warzyw", „uzupełnij magazyn",
-    „ile brakuje", „braki magazynowe", „zamów wszystko czego brakuje".
+    „ile brakuje", „braki magazynowe", „zamów wszystko czego brakuje",
+    MIX: „zamów ser kozi, filet z kurczaka i wszystkie brakujące warzywa".
     * pole `categories: string[]` — twarda lista nazw kategorii magazynowych.
       Sztywne nazwy do dopasowania (użyj dokładnie tych stringów):
         'Mięso i wędliny', 'Ryby i owoce morza', 'Nabiał', 'Warzywa i owoce', 'Pieczywo',
@@ -1227,7 +1229,19 @@ DOSTĘPNE INTENCJE:
     * Jeśli użytkownik mówi „zamów WSZYSTKIE braki"/„zamów wszystko czego brakuje"
       bez wskazania kategorii → categories = ["all"].
     * Jeśli mówi „zamów mięso i nabiał" → categories = ["Mięso i wędliny", "Nabiał"].
-    * Nie wypełniaj items[] — backend sam wyliczy braki i deficyty.
+    * MIX nazwy + kategoria (WAŻNE): gdy wymienia KONKRETNE produkty ORAZ braki z kategorii
+      (np. „zamów ser kozi, filet z kurczaka i wszystkie brakujące warzywa"):
+        intent = order_critical_items_by_category
+        categories = ["Warzywa i owoce"]
+        items = [
+          {{"product_name": "ser kozi", "quantity": 1, "unit": "szt"}},
+          {{"product_name": "filet z kurczaka", "quantity": 1, "unit": "kg"}}
+        ]
+      (użyj sensownych domyślnych quantity/unit gdy użytkownik nie podał ilości;
+       dopasuj nazwy do listy składników magazynu jeśli pasują).
+      Backend scali nazwiane pozycje z brakami kategorii w jeden koszyk Łowcy.
+    * Samo „zamów ser kozi i filet" BEZ kategorii braków → użyj "order_product" (items[]).
+    * Same braki kategorii BEZ nazwanych produktów → categories wypełnione, items = null.
 
 14. "supplier_flip_order" – PRZERZUCENIE koszyka z jednego dostawcy do drugiego (zmiana ceny/oferty).
     Słowa: przerzuć na, zmień dostawcę, weź od (dostawcy) zamiast, przełącz na.
@@ -1592,10 +1606,11 @@ TIER_CONFIG = {
         "name": "Free", "max_credits": 1000, "monthly_grant": 0, "price_pln": 0,
         "deal_hunter": False, "price_note": None,
         "perks": [
-            "Reklamy w aplikacji",
+            "Reklamy w aplikacji (po zakończeniu trialu)",
             "Manualny magazyn, finanse i baza receptur, bez wsparcia automatyzacji",
-            "Jednorazowy pakiet 1000 kredytów AI na darmowy start i testy systemu "
-            "(beta: wystarczy na wiele skanów, Jarvis i Łowcę)",
+            "100 kredytów AI na start + 30 dni trialu Premium "
+            "(Łowca Okazji, dark UI — jak plan Profesjonalny)",
+            "Po trialu: Free; pozostałe kredyty zostają na koncie",
         ],
     },
     1: {
@@ -1629,6 +1644,29 @@ TIER_CONFIG = {
         ],
     },
 }
+
+STARTER_CREDITS = 100
+TRIAL_DAYS = 30
+
+
+def _trial_active(sub: dict) -> bool:
+    """True gdy trial_ends_at > now — Free dostaje features Premium (tier 2) przez 30 dni."""
+    from datetime import datetime, timezone
+    end = _parse_dt(sub.get("trial_ends_at"))
+    if not end:
+        return False
+    return datetime.now(timezone.utc) < end
+
+
+def _premium_entitled(sub: dict) -> bool:
+    """Płatny Profesjonalny (tier>=2) LUB aktywny 30-dniowy trial Premium."""
+    return int(sub.get("tier_level") or 0) >= 2 or _trial_active(sub)
+
+
+def _trial_ends_iso_from_now() -> str:
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) + timedelta(days=TRIAL_DAYS)).isoformat()
+
 
 TOPUP_PACKAGES = {
     "small":  {"credits": 100,  "price_pln": 10, "label": "+100 kredytów"},
@@ -1671,14 +1709,23 @@ async def _ensure_subscription(client: httpx.AsyncClient) -> dict:
             "credits_balance": 0,
             "status": "active",
             "current_period_end": None,
+            "trial_ends_at": None,
             "free_starter_claimed": True,
         }
     rows = await sb_get(client, "subscriptions",
                         params={"select": "*", "account_key": f"eq.{key}", "limit": "1"})
     if rows:
         return rows[0]
-    payload = {"account_key": key, "tier_level": 0, "credits_balance": 1000,
-               "status": "active", "current_period_end": None, "free_starter_claimed": True}
+    payload = {
+        "account_key": key,
+        "tier_level": 0,
+        "credits_balance": STARTER_CREDITS,
+        "status": "active",
+        "current_period_end": None,
+        "free_starter_claimed": True,
+        # Free + 100 kr. + 30-dniowy trial Premium; po trial_ends_at → Free, kredyty zostają
+        "trial_ends_at": _trial_ends_iso_from_now(),
+    }
     created = await sb_post(client, "subscriptions", payload)
     if isinstance(created, list) and created:
         return created[0]
@@ -1733,11 +1780,12 @@ async def _check_ai_access(client: httpx.AsyncClient, *, needs_credits: bool = T
     except httpx.HTTPStatusError as e:
         logger.warning(f"subscriptions niedostępne → autoryzacja pominięta: {e}")
         return {"tier_level": 2, "credits_balance": 10 ** 9, "status": "active"}
-    tier = int(sub.get("tier_level") or 0)
-    if needs_deal_hunter and tier < 2:
+    # Łowca: płatny tier 2 LUB aktywny 30-dniowy trial Premium
+    if needs_deal_hunter and not _premium_entitled(sub):
         raise HTTPException(
             status_code=403,
-            detail="Moduł „Łowca Okazji” dostępny w planie Profesjonalnym (Tier 2). "
+            detail="Moduł „Łowca Okazji” dostępny w planie Profesjonalnym (Tier 2) "
+                   "lub podczas 30-dniowego trialu Premium. "
                    "Ulepsz subskrypcję w zakładce Subskrypcja.")
     if needs_credits and int(sub.get("credits_balance") or 0) <= 0:
         raise HTTPException(
@@ -7858,12 +7906,21 @@ def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]
     return matched, unmatched
 
 
+class ExtraOrderItem(BaseModel):
+    """Nazwany produkt do dorzucenia do koszyka braków (voice MIX)."""
+    product_name: str = ""
+    quantity: float = 1.0
+    unit: str = "szt"
+
+
 class CriticalByCategoryRequest(BaseModel):
     categories: list[str] = Field(default_factory=list)
     restaurant_name: Optional[str] = None
     skip_compare: bool = False  # True = tylko detekcja braków (bez Łowcy)
     # critical = tylko qty <= min; optimal = wszystkie poniżej progu optymalnego
     stock_target: str = "critical"
+    # MIX: konkretne produkty z nazwy (np. ser kozi) + braki z categories
+    items: list[ExtraOrderItem] = Field(default_factory=list)
 
 
 @app.post("/api/orders/critical-by-category")
@@ -7879,17 +7936,58 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
       6. Zwróć wynik + `matched_categories`, `critical_products`, `unmatched_categories`.
     """
     matched, unmatched = _resolve_warehouse_categories(req.categories or [])
-    if not matched:
+    # Nazwane produkty z komendy (MIX: „ser kozi … i brakujące warzywa”)
+    named_raw: list[dict] = []
+    for it in (req.items or []):
+        if isinstance(it, ExtraOrderItem):
+            n = (it.product_name or "").strip()
+            if not n:
+                continue
+            try:
+                q = float(it.quantity) if it.quantity is not None else 1.0
+            except (TypeError, ValueError):
+                q = 1.0
+            if q <= 0:
+                q = 1.0
+            named_raw.append({
+                "name": n,
+                "quantity": q,
+                "unit": (it.unit or "szt").strip() or "szt",
+            })
+        elif isinstance(it, dict):
+            n = str(it.get("product_name") or it.get("name") or "").strip()
+            if not n:
+                continue
+            try:
+                q = float(it.get("quantity") or 1)
+            except (TypeError, ValueError):
+                q = 1.0
+            if q <= 0:
+                q = 1.0
+            named_raw.append({
+                "name": n,
+                "quantity": q,
+                "unit": str(it.get("unit") or "szt").strip() or "szt",
+            })
+
+    if not matched and not named_raw:
         return {
             "ok": False,
             "action": "order_critical_items_by_category",
             "matched_categories": [],
             "unmatched_categories": unmatched,
             "critical_products": [],
+            "named_products": [],
             "compare": None,
-            "message": ("Nie rozpoznano żadnej kategorii magazynowej. Powiedz np. "
-                        "'zamów wszystkie braki', 'zamów mięso i nabiał'."),
+            "message": ("Nie rozpoznano kategorii ani produktów. Powiedz np. "
+                        "'zamów wszystkie braki', 'zamów mięso i nabiał', "
+                        "lub 'zamów ser kozi i brakujące warzywa'."),
         }
+
+    named_added: list[dict] = []
+    critical: list[dict] = []
+    category_total = 0
+    want_all = matched == ["all"]
 
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
         # Pobierz magazyn wraz z powiązaną kategorią.
@@ -7931,90 +8029,147 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                     r["inventory_categories"] = {"name": cat_by_id.get(r.get("category_id"))}
 
         want_all = matched == ["all"]
-        wanted_set = {_norm_pl(x) for x in matched} if not want_all else set()
+        wanted_set = {_norm_pl(x) for x in matched} if matched and not want_all else set()
         target_mode = (req.stock_target or "critical").strip().lower()
         if target_mode not in ("critical", "optimal"):
             target_mode = "critical"
 
         # Ile produktów jest w wybranych kategoriach (mianownik do X/Y)
         category_total = 0
-        critical: list[dict] = []
-        for r in inv_all:
-            name = (r.get("name") or "").strip()
-            if not name or "(dup)" in name.lower():
-                continue
-            if r.get("is_active") is False:
-                continue
-            try:
-                qty = float(r.get("quantity") or 0)
-                minq = float(r.get("min_quantity") or 0)
-            except (TypeError, ValueError):
-                continue
-            cat_obj = r.get("inventory_categories") or {}
-            cat_name = (cat_obj.get("name") if isinstance(cat_obj, dict) else None) or ""
-            # FE: brak category_id → wyświetla „Inne” (mapDbRow). Backend musi robić to samo.
-            effective_cat = (cat_name or "").strip() or "Inne"
-            if not want_all:
-                if _norm_pl(effective_cat) not in wanted_set:
-                    if not any(
-                        fuzz.token_set_ratio(_norm_pl(effective_cat), w) >= 88
-                        for w in wanted_set
-                    ):
-                        continue
-            category_total += 1
-            buf_pct = float(r.get("safety_buffer_percent") or 20.0)
-            try:
-                opt_user = float(r.get("optimal_quantity") or 0)
-            except (TypeError, ValueError):
-                opt_user = 0.0
-            if opt_user > 0:
-                optimal = opt_user
-            elif minq > 0:
-                optimal = minq * (1.0 + buf_pct / 100.0)
-            else:
-                optimal = 0.0
-
-            if target_mode == "critical":
-                # Brak: poniżej min (gdy ustawione) ALBO stan < 1 gdy brak progu
-                # (wcześniej min_quantity<=0 pomijało puste produkty → za mało pozycji w koszyku)
-                if minq > 0:
-                    is_short = qty <= minq
+        critical = []
+        # Braki z kategorii — pomiń skan gdy brak categories (tylko named items)
+        if matched:
+            for r in inv_all:
+                name = (r.get("name") or "").strip()
+                if not name or "(dup)" in name.lower():
+                    continue
+                if r.get("is_active") is False:
+                    continue
+                try:
+                    qty = float(r.get("quantity") or 0)
+                    minq = float(r.get("min_quantity") or 0)
+                except (TypeError, ValueError):
+                    continue
+                cat_obj = r.get("inventory_categories") or {}
+                cat_name = (cat_obj.get("name") if isinstance(cat_obj, dict) else None) or ""
+                # FE: brak category_id → wyświetla „Inne” (mapDbRow). Backend musi robić to samo.
+                effective_cat = (cat_name or "").strip() or "Inne"
+                if not want_all:
+                    if _norm_pl(effective_cat) not in wanted_set:
+                        if not any(
+                            fuzz.token_set_ratio(_norm_pl(effective_cat), w) >= 88
+                            for w in wanted_set
+                        ):
+                            continue
+                category_total += 1
+                buf_pct = float(r.get("safety_buffer_percent") or 20.0)
+                try:
+                    opt_user = float(r.get("optimal_quantity") or 0)
+                except (TypeError, ValueError):
+                    opt_user = 0.0
+                if opt_user > 0:
+                    optimal = opt_user
+                elif minq > 0:
+                    optimal = minq * (1.0 + buf_pct / 100.0)
                 else:
-                    is_short = qty < 1.0
-                if not is_short:
-                    continue
-                if optimal <= 0:
-                    optimal = max(minq, 1.0)
-            else:
-                # optimal: wszystko poniżej progu; pusty stan bez progu → zamów 1
-                if optimal <= 0:
-                    if qty > 0:
-                        continue
-                    optimal = 1.0
-                if qty >= optimal:
-                    continue
+                    optimal = 0.0
 
-            deficit = max(0.0, round(optimal - qty, 4))
-            if deficit <= 0:
-                if qty <= 0:
-                    deficit = max(1.0, optimal or 1.0)
+                if target_mode == "critical":
+                    # Brak: poniżej min (gdy ustawione) ALBO stan < 1 gdy brak progu
+                    if minq > 0:
+                        is_short = qty <= minq
+                    else:
+                        is_short = qty < 1.0
+                    if not is_short:
+                        continue
+                    if optimal <= 0:
+                        optimal = max(minq, 1.0)
                 else:
-                    continue
-            qty_lo = round(deficit * 0.9, 4)
-            qty_hi = round(deficit * 1.1, 4)
-            critical.append({
-                "id": r["id"],
-                "name": name,
-                "unit": r.get("unit") or "szt",
-                "current_quantity": qty,
-                "min_quantity": minq,
-                "safety_buffer_percent": buf_pct,
-                "optimal_quantity": round(optimal, 4),
-                "deficit": deficit,
-                "order_qty_min": qty_lo,
-                "order_qty_max": qty_hi,
-                "category": effective_cat,
-            })
+                    # optimal: wszystko poniżej progu; pusty stan bez progu → zamów 1
+                    if optimal <= 0:
+                        if qty > 0:
+                            continue
+                        optimal = 1.0
+                    if qty >= optimal:
+                        continue
+
+                deficit = max(0.0, round(optimal - qty, 4))
+                if deficit <= 0:
+                    if qty <= 0:
+                        deficit = max(1.0, optimal or 1.0)
+                    else:
+                        continue
+                qty_lo = round(deficit * 0.9, 4)
+                qty_hi = round(deficit * 1.1, 4)
+                critical.append({
+                    "id": r["id"],
+                    "name": name,
+                    "unit": r.get("unit") or "szt",
+                    "current_quantity": qty,
+                    "min_quantity": minq,
+                    "safety_buffer_percent": buf_pct,
+                    "optimal_quantity": round(optimal, 4),
+                    "deficit": deficit,
+                    "order_qty_min": qty_lo,
+                    "order_qty_max": qty_hi,
+                    "category": effective_cat,
+                    "source": "category_shortage",
+                })
+
+        # MIX: dorzuć nazwiane produkty (ser kozi, filet…) — dedupe po nazwie
+        named_added = []
+        seen = {_norm_pl(c["name"]) for c in critical}
+        inv_by_norm = {
+            _norm_pl((r.get("name") or "").strip()): r
+            for r in inv_all
+            if (r.get("name") or "").strip()
+        }
+        for nr in named_raw:
+            key = _norm_pl(nr["name"])
+            # Fuzzy match do magazynu (lepsza nazwa / jednostka)
+            hit = inv_by_norm.get(key)
+            if not hit:
+                best_score, best_row = 0.0, None
+                for nk, row in inv_by_norm.items():
+                    sc = float(fuzz.token_set_ratio(key, nk))
+                    if sc > best_score:
+                        best_score, best_row = sc, row
+                if best_row and best_score >= 78:
+                    hit = best_row
+            display_name = (hit.get("name") if hit else nr["name"]).strip()
+            unit = (hit.get("unit") if hit else None) or nr["unit"]
+            qty_order = float(nr["quantity"])
+            nkey = _norm_pl(display_name)
+            if nkey in seen:
+                # Już w brakach kategorii — podnieś qty do max(deficit, żądane)
+                for c in critical:
+                    if _norm_pl(c["name"]) == nkey:
+                        if qty_order > float(c.get("deficit") or 0):
+                            c["deficit"] = qty_order
+                            c["order_qty_min"] = round(qty_order * 0.9, 4)
+                            c["order_qty_max"] = round(qty_order * 1.1, 4)
+                        c["source"] = "named+category"
+                        named_added.append(c)
+                        break
+                continue
+            seen.add(nkey)
+            entry = {
+                "id": (hit or {}).get("id"),
+                "name": display_name,
+                "unit": unit or "szt",
+                "current_quantity": float((hit or {}).get("quantity") or 0) if hit else None,
+                "min_quantity": float((hit or {}).get("min_quantity") or 0) if hit else None,
+                "deficit": qty_order,
+                "order_qty_min": round(qty_order * 0.9, 4),
+                "order_qty_max": round(qty_order * 1.1, 4),
+                "category": (
+                    ((hit.get("inventory_categories") or {}) if hit else {}).get("name")
+                    if hit else None
+                ) or "—",
+                "source": "named",
+            }
+            critical.append(entry)
+            named_added.append(entry)
 
         if not critical:
             return {
@@ -8024,12 +8179,15 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 "unmatched_categories": unmatched,
                 "category_total": category_total,
                 "critical_products": [],
+                "named_products": [],
                 "compare": None,
                 "message": (
                     f"Brak produktów do zamówienia w kategoriach: {', '.join(matched)} "
                     f"(w kategorii: {category_total} pozycji)."
-                    if not want_all else
+                    if matched and not want_all else
                     "Nie znaleziono braków w magazynie."
+                    if matched else
+                    "Nie udało się dodać nazwanych produktów do koszyka."
                 ),
             }
 
@@ -8041,10 +8199,11 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             "unmatched_categories": unmatched,
             "category_total": category_total,
             "critical_products": critical,
+            "named_products": named_added,
             "critical_count": len(critical),
             "compare": None,
             "message": (
-                f"Znaleziono {len(critical)} braków do zamówienia "
+                f"Znaleziono {len(critical)} pozycji do zamówienia "
                 f"(w kategorii łącznie {category_total} pozycji)."
             ),
         }
@@ -8079,10 +8238,14 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
 
     # Mianownik = wszystkie produkty w kategorii (np. 80), licznik = znalezione w ofertach
     denom = category_total if category_total > 0 else len(critical)
+    named_n = sum(1 for c in critical if c.get("source") in ("named", "named+category"))
     msg_parts = [
-        f"Do zamówienia: {len(critical)} braków"
-        + (f" z kategorii {', '.join(matched)}" if not want_all else " (globalnie)")
-        + f" · w kategorii łącznie {category_total} pozycji."
+        f"Do zamówienia: {len(critical)} pozycji"
+        + (f" z kategorii {', '.join(matched)}" if matched and not want_all else
+           " (globalnie)" if matched else "")
+        + (f" · w tym {named_n} nazwanych" if named_n else "")
+        + (f" · w kategorii łącznie {category_total} pozycji" if category_total else "")
+        + "."
     ]
     msg_parts.append(
         f"W ofertach dostawców dopasowano {found_in_offers} z {denom} pozycji."
@@ -8099,6 +8262,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         "unmatched_categories": unmatched,
         "category_total": category_total,
         "critical_products": critical,
+        "named_products": [c for c in critical if c.get("source") in ("named", "named+category")],
         "critical_count": len(critical),
         "found_in_offers_count": found_in_offers,
         "compare": compare_result,
@@ -9746,10 +9910,31 @@ async def voice_dispatch(req: VoiceDispatchRequest):
         cats = p.get("categories") or []
         if isinstance(cats, str):
             cats = [cats]
+        raw_items = p.get("items") or []
+        extra: list[ExtraOrderItem] = []
+        if isinstance(raw_items, list):
+            for itx in raw_items:
+                if not isinstance(itx, dict):
+                    continue
+                pname = str(itx.get("product_name") or itx.get("name") or "").strip()
+                if not pname:
+                    continue
+                try:
+                    qty = float(itx.get("quantity") or 1)
+                except (TypeError, ValueError):
+                    qty = 1.0
+                if qty <= 0:
+                    qty = 1.0
+                extra.append(ExtraOrderItem(
+                    product_name=pname,
+                    quantity=qty,
+                    unit=str(itx.get("unit") or "szt").strip() or "szt",
+                ))
         return await orders_critical_by_category(CriticalByCategoryRequest(
             categories=list(cats),
             restaurant_name=p.get("restaurant_name"),
             stock_target=str(p.get("stock_target") or "critical"),
+            items=extra,
         ))
     raise HTTPException(status_code=400, detail=f"Intencja {it!r} nie obsługiwana przez /voice/dispatch.")
 
@@ -12025,24 +12210,32 @@ def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
     tier = int(sub.get("tier_level") or 0)
     cfg = TIER_CONFIG.get(tier, TIER_CONFIG[0])
     bal = int(sub.get("credits_balance") or 0)
+    trial_active = _trial_active(sub)
+    premium = _premium_entitled(sub)
     features = []
     for f in FEATURE_CATALOG:
         needs_dh = f["requires_deal_hunter"]
         reason = None
-        if needs_dh and tier < 2:
-            reason = "Wymaga planu Profesjonalny"
+        if needs_dh and not premium:
+            reason = "Wymaga planu Profesjonalny lub aktywnego trialu Premium (30 dni)"
         elif bal <= 0:
             reason = "Brak kredytów"
         features.append({**f, "locked": reason is not None, "locked_reason": reason})
+    tier_label = cfg["name"]
+    if trial_active and tier < 2:
+        tier_label = f"{cfg['name']} · trial Premium"
     return {
         "tier_level": tier,
-        "tier_name": cfg["name"],
+        "tier_name": tier_label,
         "credits_balance": bal,
         "max_credits": cfg["max_credits"],
         "credits_pln": round(bal / 100.0, 2),
         "status": sub.get("status") or "active",
         "current_period_end": sub.get("current_period_end"),
-        "deal_hunter_unlocked": tier >= 2,
+        "trial_ends_at": sub.get("trial_ends_at"),
+        "trial_active": trial_active,
+        "deal_hunter_unlocked": premium,
+        "premium_ui": premium or bal > 0,
         "features": features,
         "topup_packages": [{"key": k, **v} for k, v in TOPUP_PACKAGES.items()],
         "plans": [

@@ -113,20 +113,20 @@ Ręczny przebieg przed oddaniem zamkniętej bety restauratorom (~15–25 min).
 6. **Łowca** — critical / optimize; brak crasha przy pustym lead_time (default 2 dni)
 7. **Receptura OCR** — opcjonalnie; wymaga OpenAI + kredytów **lub** wpis ręczny
 8. **Stripe Test** — checkout kartą `4242…`; **bez live keys**
-9. **Kredyty beta** — saldo startowe / Free max = **1000** (migracja `BETA_CREDITS_1000.sql`)
+9. **Kredyty + trial** — saldo startowe = **100** + 30 dni trialu Premium (`PREMIUM_TRIAL_100_CREDITS.sql`)
 
 **Stripe:** dla beta testów = **Test mode**. Live dopiero przy płatnych pilotach + gotowej firmie + produkcyjnych webhookach.
 
-### Limity kredytów (closed beta = 1000)
+### Limity kredytów (starter = 100 + trial Premium 30 dni)
 
 | Miejsce | Zmiana |
 |---------|--------|
-| `backend/server.py` → `TIER_CONFIG[0]` | `max_credits` 500→**1000**, starter create **1000** |
-| `frontend/lib/subscriptionClient.ts` | `STARTER_CREDITS` **1000** |
-| `frontend/lib/subscriptionCatalog.ts` | copy Free: pakiet **1000** |
-| `supabase_migrations/ADD_SUBSCRIPTIONS.sql` | DEFAULT / seed **1000** |
-| `supabase_migrations/BETA_CREDITS_1000.sql` | dopełnienie istniejących kont do **1000** |
-| `backend/scripts/ensure_supabase_setup.py` | seed **1000** |
+| `backend/server.py` → `TIER_CONFIG[0]` | starter create **100**, `trial_ends_at` |
+| `frontend/lib/subscriptionClient.ts` | `STARTER_CREDITS` **100**, trial gate |
+| `frontend/lib/subscriptionCatalog.ts` | copy Free: **100** + trial 30d |
+| `supabase_migrations/ADD_SUBSCRIPTIONS.sql` | DEFAULT **100**, kolumna `trial_ends_at` |
+| `supabase_migrations/PREMIUM_TRIAL_100_CREDITS.sql` | trigger + backfill trial |
+| `backend/scripts/ensure_supabase_setup.py` | seed default **0** |
 
 Bez zmian (nie są limitami planu): `MAX_GAP` optymalizera (~150 zł), koszty akcji AI, top-upy Stripe.
 

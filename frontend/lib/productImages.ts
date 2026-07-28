@@ -1179,6 +1179,10 @@ function resolveDishCategoryPlaceholder(
 
   const rules: { keys: string[]; slug: string }[] = [
     { keys: ['ramen', 'pho', 'miso', 'tom yum', 'tom kha', 'udon', 'soba', 'laksa', 'wonton', 'kimchi', 'congee', 'asia'], slug: 'shoyu_ramen' },
+    // Czerwone / pomidorowe PRZED ogólnymi sosami i zupami (nie rosół, nie opakowanie)
+    { keys: ['gazpacho', 'chlodnik pomidor', 'cold tomato'], slug: 'gazpacho' },
+    { keys: ['zupa pomidor', 'pomidorowa', 'tomato soup', 'krem pomidor', 'krem z pomidor'], slug: 'zupa_pomidorowa' },
+    { keys: ['sos pomidor', 'tomato sauce', 'marinara', 'arrabbiata', 'napoletana', 'napoli', 'bolognese', 'bolonski', 'boloński'], slug: 'sos_bolognese' },
     { keys: ['sos', 'sauce', 'aioli', 'gravy', 'demi glace', 'bearnaise', 'hollandaise', 'satay', 'bbq glaze'], slug: 'sos_smietankowo_ziolowy' },
     // Zupy — tylko gdy nazwa/kategoria ma kontekst zupy (nie „kurczak” sam)
     { keys: ['zupa', 'rosol', 'barszcz', 'zurek', 'flaki', 'chowder', 'bisque', 'gazpacho', 'bulion', 'zupy', 'krupnik', 'kapusniak', 'chlodnik'], slug: 'rosol' },
@@ -1341,13 +1345,28 @@ function isPackagingEntry(entry: ProductImageEntry): boolean {
   if (entry.kind === 'packaging') return true;
   if (entry.category === 'opakowania') return true;
   const slug = entry.slug || '';
+  const path = (entry.storagePath || '').toLowerCase();
+  if (/opakowania\//.test(path)) return true;
   return (
     slug.startsWith('ph_pojemniki') ||
     slug.startsWith('ph_kartony') ||
     slug.startsWith('ph_torby') ||
     slug.startsWith('pudelko_') ||
     slug.startsWith('opakowanie_') ||
-    slug.startsWith('pojemnik_')
+    slug.startsWith('pojemnik_') ||
+    slug.startsWith('miska_zupa_papier') ||
+    slug.startsWith('miska_salatkowa_papier') ||
+    slug.startsWith('folia_') ||
+    slug.startsWith('torba_') ||
+    slug.startsWith('torebka_') ||
+    slug.startsWith('serwetki_') ||
+    slug.startsWith('sztucce_') ||
+    slug.startsWith('talerz_papier') ||
+    slug.startsWith('talerz_trzysekcyjny') ||
+    slug.startsWith('kubek_na_wynos') ||
+    slug.startsWith('wytlaczanka_') ||
+    slug.startsWith('worki_') ||
+    slug.startsWith('papier_do_pieczenia')
   );
 }
 

@@ -8,6 +8,10 @@ const STOP = new Set([
   'bez', 'dla', 'oraz', 'lub', 'albo', 'the', 'of', 'and', 'with', 'de', 'la',
   'swiezy', 'swieze', 'swieza', 'fresh', 'bio', 'eko', 'premium', 'classic',
   'extra', 'light', 'opak', 'opakowanie', 'virgin', 'organic', 'selection',
+  // Formy opakowania / porcji — „ser kozi” ↔ „ser kozi rolka”
+  'rolka', 'rolki', 'rolke', 'kostka', 'kostki', 'blok', 'bloki', 'plastry',
+  'plaster', 'krazek', 'krazki', 'kreg', 'kregi', 'tacka', 'tacki', 'luz',
+  'luzem', 'porcja', 'porcje', 'opakowanie', 'paczk', 'paczka', 'szt', 'sztuka',
 ]);
 
 /** Synonimy kulinarne → kanoniczny token (po normalizacji). */
@@ -67,6 +71,20 @@ const SYNONYM: Record<string, string> = {
   maslem: 'maslo',
   sera: 'ser',
   serem: 'ser',
+  sery: 'ser',
+  cheese: 'ser',
+  kozi: 'kozi',
+  koziego: 'kozi',
+  kozia: 'kozi',
+  kozie: 'kozi',
+  feta: 'feta',
+  mozzarella: 'mozzarella',
+  mozarella: 'mozzarella',
+  cheddar: 'cheddar',
+  gouda: 'gouda',
+  parmezan: 'parmezan',
+  parmigiano: 'parmezan',
+  ricotta: 'ricotta',
   jajka: 'jajko',
   jajek: 'jajko',
   jaja: 'jajko',
@@ -113,7 +131,6 @@ const SYNONYM: Record<string, string> = {
   rodzynki: 'rodzynka',
   rodzynkow: 'rodzynka',
   oliwki: 'oliwka',
-  oliwek: 'oliwka',
   kapary: 'kapar',
   kaparow: 'kapar',
   bazylie: 'bazylia',
@@ -131,8 +148,6 @@ const SYNONYM: Record<string, string> = {
   szynki: 'szynka',
   szynek: 'szynka',
   boczki: 'boczek',
-  filety: 'filet',
-  piersi: 'piers',
   steki: 'stek',
   kotlety: 'kotlet',
   kotletow: 'kotlet',
@@ -367,8 +382,31 @@ export function scoreProductNames(a: string, b: string): number {
   if (shorter.length === 1 && longer.includes(shorter[0]) && longer.length <= 3) {
     score = Math.max(score, 82);
   }
+  // „ser kozi” ⊂ „ser kozi rolka” (po odfiltrowaniu form opakowania w STOP)
+  if (shorter.length >= 2 && shorter.every((t) => longer.includes(t)) && longer.length - shorter.length <= 2) {
+    score = Math.max(score, 92);
+  }
 
   return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+/** Lista kandydatów z wynikami — do UI (near-hits) i lokalnego wyszukiwania katalogu. */
+export function rankProductMatches<T>(
+  query: string,
+  candidates: readonly T[],
+  getName: (c: T) => string,
+  opts?: { threshold?: number; limit?: number },
+): Array<{ item: T; score: number }> {
+  const threshold = opts?.threshold ?? 55;
+  const limit = opts?.limit ?? 40;
+  const ranked: Array<{ item: T; score: number }> = [];
+  for (const c of candidates) {
+    const score = scoreProductNames(query, getName(c));
+    if (score < threshold) continue;
+    ranked.push({ item: c, score });
+  }
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, limit);
 }
 
 export function namesMatch(a: string, b: string, threshold = 72): boolean {

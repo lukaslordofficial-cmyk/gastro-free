@@ -65,6 +65,8 @@ import { ensureDefaultKitchenUtensils } from '@/lib/kitchenUtensils';
 import { KitchenUtensilsSection } from '@/components/KitchenUtensilsSection';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import { useSubscription } from '@/contexts/SubscriptionContext';
+import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
 
@@ -720,6 +722,7 @@ export default function MagazynScreen() {
   const router = useRouter();
   const theme = useAppTheme();
   const { alert: premiumAlert } = usePremiumAlert();
+  const { dealHunterUnlocked } = useSubscription();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const focusParams = useLocalSearchParams<{
     focusProductId?: string | string[];
@@ -1069,6 +1072,11 @@ export default function MagazynScreen() {
   }, [focusParams.focusProductId, focusParams.focusProductName, loading, inventory]);
 
   const handleOrderItem = (item: MockInventoryItem) => {
+    // Free / tier 1 bez trialu → tylko PremiumAlert, bez flow Łowcy
+    if (!dealHunterUnlocked) {
+      premiumAlert(DEAL_HUNTER_GATE_TITLE, DEAL_HUNTER_GATE_MESSAGE);
+      return;
+    }
     setOrderProduct(item);
   };
 

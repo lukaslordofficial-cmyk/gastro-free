@@ -41,6 +41,9 @@ import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import { useSubscription } from '@/contexts/SubscriptionContext';
+import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
+import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
 import {
@@ -711,12 +714,13 @@ function SupplierCatalogPicker({
   }, [visible]);
 
   const filtered = useMemo(() => {
-    const s = q.trim().toLowerCase();
+    const s = q.trim();
     const list = !s
       ? rows
-      : rows.filter(
-          (r) => r.name.toLowerCase().includes(s) || (r.variant ?? '').toLowerCase().includes(s),
-        );
+      : rankProductMatches(s, rows, (r) => `${r.name} ${r.variant ?? ''}`, {
+          threshold: 52,
+          limit: 120,
+        }).map((x) => x.item);
     return sortCatalogMenuFirst(list).slice(0, 120);
   }, [rows, q]);
 
@@ -937,24 +941,24 @@ function NewOrderBrowser({
   }, [visible]);
 
   const filteredSuppliers = useMemo(() => {
-    const s = q.trim().toLowerCase();
+    const s = q.trim();
     if (!s) return suppliers;
+    const sLower = s.toLowerCase();
     return suppliers
       .map((sup) => {
-        const nameHit = sup.name.toLowerCase().includes(s);
+        const nameHit = sup.name.toLowerCase().includes(sLower);
         const matchedProducts = sortCatalogMenuFirst(
-          sup.products.filter(
-            (p) =>
-              p.name.toLowerCase().includes(s)
-              || (p.variant ?? '').toLowerCase().includes(s),
-          ),
+          rankProductMatches(s, sup.products, (p) => `${p.name} ${p.variant ?? ''}`, {
+            threshold: 52,
+            limit: 80,
+          }).map((x) => x.item),
         );
         return {
           ...sup,
           products: nameHit && matchedProducts.length === 0 ? sup.products : matchedProducts,
         };
       })
-      .filter((sup) => sup.products.length > 0);
+      .filter((sup) => sup.products.length > 0 || sup.name.toLowerCase().includes(sLower));
   }, [suppliers, q]);
 
   const stockForSelected = selectedProduct
@@ -1125,6 +1129,7 @@ export function DealHunterModal({
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
   const { alert: premiumAlert } = usePremiumAlert();
+  const { dealHunterUnlocked } = useSubscription();
   const lastDraftFpRef = useRef<string | null>(null);
   const [draftSavedInfo, setDraftSavedInfo] = useState<string | null>(null);
   const [step, setStep] = useState<Step>('qty');
@@ -1169,6 +1174,12 @@ export function DealHunterModal({
 
   useEffect(() => {
     if (visible) {
+      // Free / tier 1 bez trialu — zamknij modal i pokaż bramkę (nie uruchamiaj compare)
+      if (!dealHunterUnlocked) {
+        premiumAlert(DEAL_HUNTER_GATE_TITLE, DEAL_HUNTER_GATE_MESSAGE);
+        onClose();
+        return;
+      }
       if (initialCompare) {
         setStep('compare');
         applyCompareResult(initialCompare);
@@ -1194,7 +1205,7 @@ export function DealHunterModal({
       setFromEmails({});
       setToEmails({});
     }
-  }, [visible, product, initialCompare, applyCompareResult]);
+  }, [visible, product, initialCompare, applyCompareResult, dealHunterUnlocked, premiumAlert, onClose]);
 
   const liveResult = useMemo(() => {
     if (!compare) return null;
@@ -1410,6 +1421,11 @@ export function DealHunterModal({
 
   const runCompare = useCallback(async () => {
     if (!product) return;
+    if (!dealHunterUnlocked) {
+      premiumAlert(DEAL_HUNTER_GATE_TITLE, DEAL_HUNTER_GATE_MESSAGE);
+      onClose();
+      return;
+    }
     const q = parseFloat(qty.replace(',', '.'));
     if (isNaN(q) || q <= 0) {
       setError('Podaj poprawną ilość (liczba > 0).');
@@ -1439,7 +1455,7 @@ export function DealHunterModal({
     } finally {
       setLoading(false);
     }
-  }, [product, qty, restaurantName, applyCompareResult]);
+  }, [product, qty, restaurantName, applyCompareResult, dealHunterUnlocked, premiumAlert, onClose]);
 
   const generateMessages = useCallback(async (groups?: SupplierGroup[]) => {
     const suppliers = groups ?? pendingGroups ?? selectedSuppliers();

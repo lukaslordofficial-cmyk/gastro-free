@@ -3301,6 +3301,11 @@ def _norm_pl(text: str) -> str:
         "premium", "bio", "eko", "organic", "light", "classic", "extra",
         "select", "selection", "gourmet", "fresh", "swieze", "swiezy",
         "opak", "opakowanie", "promocja", "virgin", "extra",
+        # Formy opakowania / porcji — „ser kozi” ↔ „ser kozi rolka”
+        "rolka", "rolki", "rolke", "kostka", "kostki", "blok", "bloki",
+        "plastry", "plaster", "krazek", "krazki", "kreg", "kregi",
+        "tacka", "tacki", "luz", "luzem", "porcja", "porcje", "paczka",
+        "paczk", "szt", "sztuka", "sztuki",
     }
     tokens = [
         _canon_token(t) for t in tokens
@@ -6749,19 +6754,82 @@ def _slug(s: str) -> str:
 
 
 def _tokens(s: str):
-    return [t for t in _slug(s).split() if len(t) > 2]
+    """Tokeny do matchingu katalogu — bez form opakowania (rolka/kostka…)."""
+    pack_noise = {
+        "rolka", "rolki", "rolke", "kostka", "kostki", "blok", "bloki",
+        "plastry", "plaster", "krazek", "krazki", "kreg", "kregi",
+        "tacka", "tacki", "luz", "luzem", "porcja", "porcje", "paczka",
+        "paczk", "opak", "opakowanie", "szt", "sztuka", "sztuki",
+        "premium", "bio", "eko", "fresh", "swiezy", "swieze",
+    }
+    return [
+        t for t in _slug(s).split()
+        if len(t) > 2 and t not in pack_noise
+    ]
 
 
 def _match_score(req_name: str, cand_name: str) -> float:
-    """Ułamek istotnych tokenów zapytania obecnych w nazwie z katalogu (0..1)."""
+    """Ułamek istotnych tokenów zapytania obecnych w nazwie z katalogu (0..1).
+
+    Bonus: krótsze zapytanie w pełni zawarte w dłuższej ofercie
+    („ser kozi” ⊂ „ser kozi rolka” → ~1.0).
+    """
     rt = set(_tokens(req_name))
     ct = set(_tokens(cand_name))
     if not rt or not ct:
+        # fallback: znormalizowane klucze (_norm_pl też stripuje opakowania)
+        kn = _norm_pl(req_name)
+        cn = _norm_pl(cand_name)
+        if kn and cn and (kn == cn or kn in cn or cn in kn):
+            return 0.92 if kn != cn else 1.0
         return 0.0
     inter = rt & ct
     if not inter:
         return 0.0
-    return len(inter) / len(rt)
+    cover = len(inter) / len(rt)
+    # Wszystkie tokeny zapytania w ofercie + oferta nieco dłuższa → near-exact
+    if cover >= 0.999 and len(ct) >= len(rt):
+        return 1.0
+    if cover >= 0.8 and len(inter) >= 2:
+        return max(cover, 0.85)
+    return cover
+
+
+def _local_catalog_match_score(req_name: str, cand_name: str) -> float:
+    """Silniejsze lokalne dopasowanie ofert (0..1).
+
+    „ser kozi” ↔ „ser kozi rolka”: containment + token coverage + rapidfuzz.
+    Używane przed AI (OpenAI tylko dla niedopasowanych).
+    """
+    a = _norm_pl(req_name or "")
+    b = _norm_pl(cand_name or "")
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    # Zawieranie: krótsza nazwa w dłuższej (rolka / opakowanie / wariant)
+    if len(a) >= 4 and len(b) >= 4 and (a in b or b in a):
+        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+        ratio = len(shorter) / max(len(longer), 1)
+        return max(0.88, min(0.99, 0.75 + 0.25 * ratio))
+    token_cov = _match_score(req_name, cand_name)
+    try:
+        fuzz_sc = max(
+            float(fuzz.token_set_ratio(a, b)),
+            float(fuzz.partial_ratio(a, b)),
+        ) / 100.0
+    except Exception:
+        fuzz_sc = 0.0
+    # token_set dobrze łapie kolejność słów; partial — skróty
+    combined = max(token_cov, fuzz_sc)
+    if fuzz_sc >= 0.82 and token_cov >= 0.5:
+        combined = max(combined, 0.9)
+    return combined
+
+
+# Lokalny próg: powyżej → accept bez AI (np. ser kozi ⊂ ser kozi rolka)
+LOCAL_CATALOG_MATCH_MIN = 0.55
+
 
 
 def _catalog_base_price(row: dict):
@@ -7608,8 +7676,12 @@ async def compare_offers(req: CompareOffersRequest):
                 order_base = _qty_in_band(req_base_qty, qty_lo_base, qty_hi_base, pack)
                 if order_base <= 0:
                     continue
-                score = max((_match_score(n, row_name) for n in known_names), default=0.0)
-                if score >= 0.5:
+                # Lokalny fuzzy (ser kozi ↔ ser kozi rolka) — bez AI
+                score = max(
+                    (_local_catalog_match_score(n, row_name) for n in known_names),
+                    default=0.0,
+                )
+                if score >= LOCAL_CATALOG_MATCH_MIN:
                     _consider(best_by_supplier, row, price_base, base_dim,
                               order_base, req_base_qty, "fuzzy",
                               pack_base_qty=pack, band_hi_base=qty_hi_base)
@@ -7618,14 +7690,19 @@ async def compare_offers(req: CompareOffersRequest):
                     sim = max((max(float(fuzz.token_set_ratio(kn, rn)),
                                    float(fuzz.partial_ratio(kn, rn)))
                                for kn in known_norm), default=0.0)
+                    # Także lokalny score jako sim (0..100) — AI tylko gdy lokalnie słabo
+                    sim = max(sim, score * 100.0)
                     if sim >= AI_SYNONYM_SIM_MIN:
                         candidates.append((row, base_dim, price_base, sim, order_base, pack))
 
-            # AI Synonym Matching — tylko dla kandydatów poniżej progu fuzzy.
-            if inv_row and candidates and ai_budget > 0:
-                warehouse_name = inv_row.get("name") or it.product_name_or_id
-                # Grupujemy kandydatów po znormalizowanej nazwie — jedno pytanie AI
-                # obejmuje wszystkich dostawców z tą samą nazwą produktu.
+            # AI Synonym Matching — niedopasowane lokalnie (debit kredytów).
+            # Działa też bez wiersza magazynu (zamówienie głosowe / koszyk).
+            # Gdy lokalnie już są oferty — dociągaj synonimy tylko przy known inv_row.
+            run_ai = bool(candidates and ai_budget > 0 and (
+                not best_by_supplier or inv_row
+            ))
+            if run_ai:
+                warehouse_name = (inv_row.get("name") if inv_row else None) or it.product_name_or_id
                 by_name: dict[str, list] = {}
                 order: list[tuple] = []
                 for row, base_dim, price_base, sim, order_base, pack in candidates:

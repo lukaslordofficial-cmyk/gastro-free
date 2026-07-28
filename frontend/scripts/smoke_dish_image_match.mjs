@@ -29,6 +29,10 @@ function detectDishFamily(name) {
   if (/\b(zupa|krem|rosol|barszcz|zurek|flaki|chowder|bisque|gazpacho|bulion|chlodnik|krupnik|kapusniak|grochowk|pho|ramen|miso|tom yum|tom kha)\b/.test(n)) {
     return 'soups';
   }
+  if (/\b(pomidorow|tomato|gazpacho|passata|marinara|arrabbiata|napoletana|napoli)\b/.test(n)) {
+    if (/\b(sos|sauce|dip)\b/.test(n) || n.startsWith('sos ')) return 'sauces';
+    return 'soups';
+  }
   if (/\b(filet|piers|kurczak|schab|kotlet|stek|zeberk|wolow|wieprz|indyk|kaczka|de volaille|poledwic|antrykot)\b/.test(n)) {
     return 'meat';
   }
@@ -93,6 +97,7 @@ function findDishImageMatch(name, catalog) {
 
   const ranked = [];
   for (const entry of catalog) {
+    if (/opakowania\/|packaging\//.test(entry.storagePath || '')) continue;
     let score = bestCandidateScore(q, qTokens, entry);
     if (score <= 0) continue;
     const fam = familyFromEntry(entry);
@@ -107,10 +112,14 @@ function findDishImageMatch(name, catalog) {
 const CATALOG = [
   { slug: 'sos_smietankowo_ziolowy', labelPl: 'Sos śmietankowo-ziołowy', aliases: ['sos śmietankowy', 'cream herb sauce'], storagePath: 'dania/sauces/sauce_01.webp' },
   { slug: 'sos_aioli_pieczony_czosnek', labelPl: 'Sos czosnkowy aioli z pieczonym czosnkiem', aliases: ['aioli', 'sos czosnkowy', 'garlic aioli'], storagePath: 'dania/sauces/sauce_15.webp' },
+  { slug: 'sos_bolognese', labelPl: 'Sos mięsny Bolognese', aliases: ['bolognese', 'sos pomidorowy', 'tomato sauce', 'marinara'], storagePath: 'dania/sauces/sauce_22.webp' },
   { slug: 'hummus_klasyczny', labelPl: 'Hummus klasyczny', aliases: ['hummus', 'hummus z czosnkiem'], storagePath: 'dania/mediterranean/mediterranean_20.webp' },
   { slug: 'hummus_veg_sticks', labelPl: 'Hummus z warzywami', aliases: ['hummus', 'pasta sezamowa'], storagePath: 'dania/starters/starter_06.webp' },
   { slug: 'rosol', labelPl: 'Rosół', aliases: ['rosół', 'chicken soup'], storagePath: 'dania/soups_pl/soup_pl_01.webp' },
+  { slug: 'zupa_pomidorowa', labelPl: 'Zupa pomidorowa', aliases: ['pomidorowa', 'tomato soup', 'krem pomidorowy'], storagePath: 'dania/soups_pl/soup_pl_02.webp' },
+  { slug: 'gazpacho', labelPl: 'Gazpacho', aliases: ['gazpacho', 'cold tomato soup'], storagePath: 'dania/soups_pl/soup_pl_25.webp' },
   { slug: 'zupa_ogorkowa_pl', labelPl: 'Zupa ogórkowa', aliases: ['ogórkowa', 'pickle soup'], storagePath: 'dania/soups_polish/soup_pl_classic_01.webp' },
+  { slug: 'miska_zupa_papierowa', labelPl: 'Miska na zupę', aliases: ['miska zupa'], storagePath: 'opakowania/miska_zupa_papierowa.png' },
 ];
 
 let failed = 0;
@@ -120,6 +129,10 @@ const cases = [
   { name: 'Sos czosnkowy aioli', expectSlug: 'sos_aioli_pieczony_czosnek', rejectSlug: 'hummus_klasyczny' },
   { name: 'hummus', expectSlug: 'hummus_klasyczny' },
   { name: 'Zupa ogórkowa', expectSlug: 'zupa_ogorkowa_pl', expectFamily: 'soups' },
+  { name: 'Zupa pomidorowa', expectSlug: 'zupa_pomidorowa', expectFamily: 'soups', rejectSlug: 'miska_zupa_papierowa' },
+  { name: 'tomato soup', expectSlug: 'zupa_pomidorowa', rejectSlug: 'rosol' },
+  { name: 'Gazpacho', expectSlug: 'gazpacho' },
+  { name: 'sos pomidorowy', expectSlug: 'sos_bolognese', expectFamily: 'sauces' },
   { name: 'Filet z piersi kurczaka', expectFamily: 'meat', rejectSlug: 'rosol' },
   { name: 'losowy krem czosnkowy xyz', rejectSlug: 'hummus_klasyczny' },
 ];

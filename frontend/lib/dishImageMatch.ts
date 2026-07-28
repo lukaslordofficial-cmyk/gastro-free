@@ -62,6 +62,11 @@ export function detectDishFamily(name: string): DishFamily {
   if (/\b(zupa|krem|rosol|barszcz|zurek|flaki|chowder|bisque|gazpacho|bulion|chlodnik|krupnik|kapusniak|grochowk|pho|ramen|miso|tom yum|tom kha)\b/.test(n)) {
     return 'soups';
   }
+  // Czerwone / pomidorowe dania bez słowa „zupa” (np. „pomidorowa”, „tomato bisque”)
+  if (/\b(pomidorow|tomato|gazpacho|passata|marinara|arrabbiata|napoletana|napoli)\b/.test(n)) {
+    if (/\b(sos|sauce|dip)\b/.test(n) || n.startsWith('sos ')) return 'sauces';
+    return 'soups';
+  }
   if (/\b(burger|sandwich|kanapka|bagel|panini)\b/.test(n)) return 'burgers';
   if (/\b(makaron|pasta|spaghetti|tagliatelle|penne|lasagne|ravioli|gnocchi)\b/.test(n)) return 'pasta';
   if (/\b(pizza|calzone)\b/.test(n)) return 'pizza';
@@ -78,6 +83,12 @@ export function detectDishFamily(name: string): DishFamily {
     return 'meat';
   }
   return 'other';
+}
+
+/** Rodzina czerwonych / pomidorowych zup i sosów (placeholdery: gazpacho, pomidorowa, bolognese). */
+export function isRedTomatoFamily(name: string): boolean {
+  const n = normalizeDishName(name);
+  return /\b(pomidor|tomato|gazpacho|passata|marinara|arrabbiata|napoletana|napoli|ketchup|salsa roja|sos pomidor)\b/.test(n);
 }
 
 function familyFromEntry(entry: DishImageEntry): DishFamily {
@@ -191,6 +202,7 @@ export function findDishImageMatch(
 
   // 2) Token / fuzzy ≥ threshold, z bonusem za rodzinę kategorii
   const ranked: DishMatchResult[] = [];
+  const wantRed = isRedTomatoFamily(name);
   for (const entry of catalog) {
     let score = bestCandidateScore(q, qTokens, entry);
     if (score <= 0) continue;
@@ -204,6 +216,16 @@ export function findDishImageMatch(
         score = Math.max(0, score - 25);
       }
     }
+    // Pomidorowa / gazpacho / czerwone sosy — bonus wewnątrz rodziny
+    if (wantRed) {
+      const redSlug = /pomidor|gazpacho|bolognese|buffalo|marinara|tomato|passata/.test(
+        `${entry.slug} ${entry.labelPl} ${entry.aliases.join(' ')}`.toLowerCase(),
+      );
+      if (redSlug) score = Math.min(100, score + 10);
+      else if (fam === 'soups' || fam === 'sauces') score = Math.max(0, score - 8);
+    }
+    // Nigdy packaging paths jako dish match
+    if (/opakowania\/|packaging\//.test(entry.storagePath || '')) continue;
     if (score >= STRONG_THRESHOLD) {
       ranked.push({ slug: entry.slug, score, entry });
     }
@@ -221,7 +243,9 @@ export function findSlugForDishName(
   return findDishImageMatch(name, catalog)?.slug;
 }
 
-/** Placeholder slug z katalogu dań wg rodziny (gdy brak mocnego matcha). */
+/** Placeholder slug z katalogu dań wg rodziny (gdy brak mocnego matcha).
+ * Nigdy opakowania — tylko cooked dish plates / sosy.
+ */
 export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[]): string | undefined {
   const fam = detectDishFamily(name);
   const pick = (...slugs: string[]) => {
@@ -230,9 +254,16 @@ export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[])
     }
     return undefined;
   };
+  // Czerwone / pomidorowe: gazpacho → zupa pomidorowa → sos boloński (nie rosół, nie opakowanie)
+  if (isRedTomatoFamily(name)) {
+    if (fam === 'sauces') {
+      return pick('sos_bolognese', 'sos_buffalo', 'zupa_pomidorowa', 'gazpacho');
+    }
+    return pick('zupa_pomidorowa', 'gazpacho', 'sos_bolognese', 'sos_buffalo');
+  }
   switch (fam) {
     case 'sauces':
-      return pick('sos_smietankowo_ziolowy', 'sos_curry') ?? catalog.find((e) => /sauce|sos/.test(e.storagePath))?.slug;
+      return pick('sos_smietankowo_ziolowy', 'sos_curry') ?? catalog.find((e) => /sauce|sos/.test(e.storagePath) && !/opakowan|packaging|pudelko|miska_zupa_papier/.test(e.storagePath))?.slug;
     case 'soups':
       return pick('rosol', 'zupa_ogorkowa_pl', 'zupa_pomidorowa');
     case 'burgers':

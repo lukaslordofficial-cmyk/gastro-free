@@ -59,6 +59,11 @@ import { fetchJson } from '@/lib/safeFetch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import {
+  DEAL_HUNTER_GATE_MESSAGE,
+  DEAL_HUNTER_GATE_TITLE,
+  isDealHunterIntent,
+} from '@/lib/dealHunterGate';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
 import { WeightRealityCheckModal } from '@/components/WeightRealityCheckModal';
 import { offerWeightRealityCheck } from '@/lib/offerWeightRealityCheck';
@@ -261,24 +266,16 @@ export function VoiceReportModal({
   // Jarvis zawsze w Black Premium: zielone CTA, czarny tekst na przyciskach
   const jarvisAccent = DS.color.greenEnd;
   const jarvisCtaText = '#0A0A0A';
-  const { credits, tier, dealHunterUnlocked } = useSubscription();
+  const { credits, dealHunterUnlocked } = useSubscription();
   const commandsUnlocked = credits > 0;
   const visibleCommands = useMemo(() => {
     if (!commandsUnlocked) return [];
-    const allowDeal = dealHunterUnlocked || (tier === 0 && credits > 0);
+    // Łowca: wyłącznie tier ≥ 2 lub aktywny trial Premium (dealHunterUnlocked)
     return COMMAND_EXAMPLES.filter((c) => {
-      if (!allowDeal && (
-        c.intent === 'order_critical_items_by_category'
-        || c.intent === 'compare_catalogs_top_savings'
-        || c.intent === 'predictive_weekend_restock'
-        || c.intent === 'supplier_flip_order'
-        || c.intent === 'budget_cap_order'
-      )) {
-        return false;
-      }
+      if (!dealHunterUnlocked && isDealHunterIntent(c.intent)) return false;
       return true;
     });
-  }, [commandsUnlocked, dealHunterUnlocked, tier, credits]);
+  }, [commandsUnlocked, dealHunterUnlocked]);
   const router = useRouter();
   const { openProductCascade, setWakeListenEnabled, openDocumentScan, openMenuScan } = useUiOverlay();
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -872,6 +869,12 @@ export function VoiceReportModal({
     const curEdited = opts?.edited ?? editedRef.current ?? edited;
     const curTranscript = opts?.transcript ?? transcriptRef.current ?? transcript;
     if (!curInterp || curInterp.intent === 'unknown') return;
+
+    // Free / tier 1 bez trialu → PremiumAlert, bez compare-offers / Łowcy
+    if (isDealHunterIntent(curInterp.intent) && !dealHunterUnlocked) {
+      premiumAlert(DEAL_HUNTER_GATE_TITLE, DEAL_HUNTER_GATE_MESSAGE);
+      return;
+    }
 
     if (curInterp.intent === 'add_expiration_batch') {
       const stock = Number(curEdited.current_stock ?? 0);

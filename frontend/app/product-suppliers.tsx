@@ -28,6 +28,7 @@ import {
   RefreshCw,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { OrderModal } from '@/components/OrderModal';
 import { ProductExpiryEditor } from '@/components/ProductExpiryEditor';
 import { Colors } from '@/constants/colors';
@@ -94,6 +95,7 @@ export default function ProductSuppliersScreen() {
   const theme = useAppTheme();
   const prem = theme.isPremium;
   const { accountKey } = useAuth();
+  const { alert: premiumAlert } = usePremiumAlert();
   const { productId, productName } = useLocalSearchParams<{ productId: string; productName: string }>();
 
   const [tab, setTab] = useState<TabKey>('suppliers');
@@ -327,17 +329,23 @@ export default function ProductSuppliersScreen() {
 
   async function handleSaveEdit() {
     if (!productId) return;
-    if (!form.name.trim()) { Alert.alert('Wymagane pole', 'Podaj nazwę produktu.'); return; }
+    if (!form.name.trim()) { premiumAlert('Wymagane pole', 'Podaj nazwę produktu.'); return; }
     const qty = parseFloat(form.quantity);
     const minQty = parseFloat(form.minQuantity);
-    if (isNaN(qty) || qty < 0) { Alert.alert('Błąd', 'Aktualna ilość musi być liczbą nieujemną.'); return; }
-    if (isNaN(minQty) || minQty <= 0) { Alert.alert('Błąd', 'Próg krytyczny musi być liczbą > 0.'); return; }
+    if (isNaN(qty) || qty < 0) { premiumAlert('Błąd', 'Aktualna ilość musi być liczbą nieujemną.'); return; }
+    if (isNaN(minQty) || minQty <= 0) {
+      premiumAlert('Ustaw próg krytyczny', 'Stan krytyczny musi być liczbą większą od zera — bez niego system nie wie, kiedy alarmować o braku.');
+      return;
+    }
     let optimalQty: number | null = null;
     if (form.optimalQuantity.trim()) {
       const o = parseFloat(form.optimalQuantity);
-      if (isNaN(o) || o < 0) { Alert.alert('Błąd', 'Próg optymalny musi być liczbą ≥ 0.'); return; }
+      if (isNaN(o) || o < 0) {
+        premiumAlert('Próg optymalny', 'Próg optymalny musi być liczbą ≥ 0 (albo zostaw puste).');
+        return;
+      }
       if (o > 0 && o < minQty) {
-        Alert.alert('Błąd', 'Próg optymalny powinien być ≥ progu krytycznego (albo pusty).');
+        premiumAlert('Próg optymalny', 'Próg optymalny powinien być ≥ progu krytycznego (albo pusty).');
         return;
       }
       optimalQty = o > 0 ? o : null;

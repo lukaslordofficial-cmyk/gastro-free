@@ -520,10 +520,10 @@ function OrderLine({
           <Text style={styles.label}>Ilość</Text>
           <TextInput
             style={styles.input}
-            value={item.quantity == null ? '' : String(item.quantity)}
+            value={item.quantity == null || item.quantity === '' ? '' : String(item.quantity)}
             onChangeText={(v) => onChange({ quantity: v === '' ? null : Number(v.replace(',', '.')) })}
             keyboardType="decimal-pad"
-            placeholder="1"
+            placeholder="opt."
             placeholderTextColor="#777"
           />
         </View>
@@ -554,6 +554,7 @@ export function CriticalOrderEditor({
   const selected: string[] = Array.isArray(edited.categories) ? edited.categories : [];
   const items: any[] = Array.isArray(edited.items) ? edited.items : [];
   const allOn = selected.includes('all');
+  const [fillingOptimal, setFillingOptimal] = useState(false);
   const toggle = (name: string) => {
     if (name === 'all') {
       patch({ categories: allOn ? [] : ['all'] });
@@ -569,12 +570,102 @@ export function CriticalOrderEditor({
   const updateItem = (idx: number, changes: Record<string, any>) => {
     patch({ items: items.map((it, i) => (i === idx ? { ...it, ...changes } : it)) });
   };
+
+  const fillToOptimal = async () => {
+    setFillingOptimal(true);
+    try {
+      const { getAccountKey } = await import('@/lib/accountKey');
+      const ak = getAccountKey();
+      let rows: any[] = [];
+      const sel =
+        'id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,unit_weight_volume,weight_volume_unit';
+      let q = supabase.from('inventory_items').select(sel).limit(4000);
+      if (ak && ak !== 'default') q = q.eq('account_key', ak);
+      const { data, error } = await q;
+      if (error && /unit_weight_volume|optimal_quantity|safety_buffer/.test(error.message ?? '')) {
+        const { data: fallback } = await supabase
+          .from('inventory_items')
+          .select('id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent')
+          .limit(4000);
+        rows = fallback ?? [];
+      } else {
+        rows = data ?? [];
+      }
+
+      const norm = (s: string) =>
+        s
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const findHit = (productName: string) => {
+        const key = norm(productName);
+        if (!key) return null;
+        let best: any = null;
+        let bestScore = 0;
+        for (const r of rows) {
+          const rn = norm(String(r.name || ''));
+          if (!rn) continue;
+          if (rn === key) return r;
+          if (rn.includes(key) || key.includes(rn)) {
+            const sc = Math.min(rn.length, key.length) / Math.max(rn.length, key.length);
+            if (sc > bestScore) {
+              bestScore = sc;
+              best = r;
+            }
+          }
+        }
+        return bestScore >= 0.45 ? best : null;
+      };
+
+      const deficitFor = (hit: any): { quantity: number; unit: string } | null => {
+        if (!hit) return null;
+        const qty = Number(hit.quantity) || 0;
+        const minq = Number(hit.min_quantity) || 0;
+        const buf = Number(hit.safety_buffer_percent);
+        const bufPct = Number.isFinite(buf) ? buf : 20;
+        let optimal = Number(hit.optimal_quantity) || 0;
+        if (optimal <= 0 && minq > 0) optimal = minq * (1 + bufPct / 100);
+        if (optimal <= 0) optimal = Math.max(minq, 1);
+        const deficit = Math.max(0, Math.round((optimal - qty) * 10000) / 10000);
+        if (deficit <= 0) return { quantity: 0, unit: String(hit.unit || 'szt') };
+        return { quantity: deficit, unit: String(hit.unit || 'szt') };
+      };
+
+      const nextItems = items.map((it) => {
+        const name = String(it.product_name || it.name || '').trim();
+        if (!name) return it;
+        const hit = findHit(name);
+        const d = deficitFor(hit);
+        if (!d) return { ...it, quantity: it.quantity ?? null, unit: it.unit || 'szt' };
+        return {
+          ...it,
+          product_name: hit?.name || name,
+          quantity: d.quantity > 0 ? d.quantity : null,
+          unit: d.unit,
+          unit_weight_volume: hit?.unit_weight_volume ?? it.unit_weight_volume ?? null,
+          weight_volume_unit: hit?.weight_volume_unit ?? it.weight_volume_unit ?? null,
+        };
+      });
+
+      // Tylko ilości nazwanych pozycji — NIE zmieniaj stock_target kategorii
+      // (inaczej „Stan optymalny” wciągałby wszystkie pozycje poniżej optymalnego).
+      patch({ items: nextItems });
+    } finally {
+      setFillingOptimal(false);
+    }
+  };
+
   const target = edited.stock_target === 'optimal' ? 'optimal' : 'critical';
+
   return (
     <View style={styles.card}>
       <Text style={styles.hint}>
         Zaznacz kategorie braków (np. Warzywa) i/lub dodaj konkretne produkty z nazwy
-        (np. ser kozi). Po zatwierdzeniu otworzy się Łowca Okazji z połączonym koszykiem.
+        (np. ser kozi). Po zatwierdzeniu otworzy się Łowca Okazji z połączonym koszykiem —
+        bez dokładania produktów spoza wybranego zakresu.
       </Text>
       <Text style={styles.label}>Kategorie braków</Text>
       <View style={styles.pillRow}>
@@ -594,11 +685,12 @@ export function CriticalOrderEditor({
           );
         })}
       </View>
-      <Text style={[styles.label, { marginTop: 12 }]}>Zakres zamówienia (kategorie)</Text>
+      <Text style={[styles.label, { marginTop: 12 }]}>Zakres braków w kategorii</Text>
       <View style={styles.pillRow}>
         <TouchableOpacity
           style={[styles.pill, target === 'critical' && styles.pillOn]}
           onPress={() => patch({ stock_target: 'critical' })}
+          testID="voice-order-scope-critical"
         >
           <Text style={[styles.pillText, target === 'critical' && styles.pillTextOn]}>
             Tylko krytyczne
@@ -607,12 +699,31 @@ export function CriticalOrderEditor({
         <TouchableOpacity
           style={[styles.pill, target === 'optimal' && styles.pillOn]}
           onPress={() => patch({ stock_target: 'optimal' })}
+          testID="voice-order-scope-optimal"
         >
           <Text style={[styles.pillText, target === 'optimal' && styles.pillTextOn]}>
-            Do stanu optymalnego
+            Poniżej optymalnego
           </Text>
         </TouchableOpacity>
       </View>
+      <Text style={[styles.label, { marginTop: 12 }]}>Ilości nazwanych produktów</Text>
+      <TouchableOpacity
+        style={[styles.optimalBtn, fillingOptimal && { opacity: 0.6 }]}
+        onPress={() => void fillToOptimal()}
+        disabled={fillingOptimal}
+        activeOpacity={0.85}
+        testID="voice-order-fill-optimal"
+      >
+        {fillingOptimal ? (
+          <ActivityIndicator color={CTA_TEXT} />
+        ) : (
+          <Text style={styles.optimalBtnText}>Stan optymalny</Text>
+        )}
+      </TouchableOpacity>
+      <Text style={[styles.hint, { marginTop: 6 }]}>
+        Uzupełnia ilości tylko pozycji z nazwy do deficytu vs stan optymalny
+        (nie zmienia zakresu kategorii i nie domyśla 1 szt.).
+      </Text>
       <Text style={[styles.label, { marginTop: 14 }]}>Dodatkowe produkty (z nazwy)</Text>
       <Text style={[styles.hint, { marginBottom: 8 }]}>
         Np. „ser kozi”, „filet z kurczaka” — zawsze trafią do koszyka, nawet gdy nie są krytyczne.
@@ -627,7 +738,7 @@ export function CriticalOrderEditor({
       ))}
       <TouchableOpacity
         style={styles.addBtn}
-        onPress={() => patch({ items: [...items, { product_name: '', quantity: 1, unit: 'szt' }] })}
+        onPress={() => patch({ items: [...items, { product_name: '', quantity: null, unit: 'szt' }] })}
       >
         <Plus size={14} color={CTA_TEXT} strokeWidth={2.5} />
         <Text style={styles.addBtnText}>Dodaj produkt</Text>
@@ -755,6 +866,16 @@ const styles = StyleSheet.create({
   pillOn: { backgroundColor: GREEN, borderColor: GREEN },
   pillText: { fontSize: 12, fontWeight: '700', color: DS.color.heading },
   pillTextOn: { color: CTA_TEXT },
+  optimalBtn: {
+    marginTop: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: GREEN,
+    borderRadius: 12,
+    paddingVertical: 14,
+    minHeight: 48,
+  },
+  optimalBtnText: { fontSize: 15, fontWeight: '800', color: CTA_TEXT },
   suggestBox: {
     marginTop: 6,
     borderRadius: 10,

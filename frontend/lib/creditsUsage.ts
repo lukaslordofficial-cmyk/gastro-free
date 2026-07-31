@@ -51,18 +51,20 @@ export function weekOfMonth(d: Date): number {
 
 export function toLocalDateParts(iso: string): { date: string; time: string; year: number; month: number; week: number } {
   const dt = new Date(iso);
-  const y = dt.getFullYear();
-  const m = dt.getMonth() + 1;
-  const dd = String(dt.getDate()).padStart(2, '0');
+  // Invalid Date → dzisiaj (unikamy NaN w drzewie Rok/Miesiąc i crasha przy odświeżeniu).
+  const safe = Number.isNaN(dt.getTime()) ? new Date() : dt;
+  const y = safe.getFullYear();
+  const m = safe.getMonth() + 1;
+  const dd = String(safe.getDate()).padStart(2, '0');
   const mm = String(m).padStart(2, '0');
-  const hh = String(dt.getHours()).padStart(2, '0');
-  const min = String(dt.getMinutes()).padStart(2, '0');
+  const hh = String(safe.getHours()).padStart(2, '0');
+  const min = String(safe.getMinutes()).padStart(2, '0');
   return {
     date: `${y}-${mm}-${dd}`,
     time: `${hh}:${min}`,
     year: y,
     month: m,
-    week: weekOfMonth(dt),
+    week: weekOfMonth(safe),
   };
 }
 

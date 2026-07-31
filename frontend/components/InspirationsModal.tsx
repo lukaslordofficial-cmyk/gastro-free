@@ -37,6 +37,8 @@ import {
 } from '@/lib/inspirationUnlocks';
 import { normalizeRecipeQuantity } from '@/lib/recipeUnits';
 import { normalizeIngredientName } from '@/lib/fuzzyProductMatch';
+import { useSubscription } from '@/contexts/SubscriptionContext';
+import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 
 export type { InspirationRecipe };
 
@@ -68,6 +70,7 @@ function scaleQty(base: number, portions: number, defaultPortions: number): stri
 export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
   const theme = useAppTheme();
   const { alert } = usePremiumAlert();
+  const { credits, trialActive, dealHunterUnlocked, refresh } = useSubscription();
   const prem = theme.isPremium;
   const accent = prem ? DS.color.greenEnd : Colors.accent;
   const bg = prem ? DS.color.bgPrimary : Colors.background;
@@ -84,6 +87,7 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
   const [portions, setPortions] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [unlocked, setUnlocked] = useState<Record<string, { recipe: InspirationRecipe }>>({});
+  const [showCreditsGate, setShowCreditsGate] = useState(false);
 
   // Leniwe require katalogów dopiero gdy modal jest widoczny (nie przy imporcie Menu).
   useEffect(() => {
@@ -141,12 +145,18 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
       alert('Błąd', 'Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).');
       return;
     }
+    // Trial Premium = dostęp jak tier 2; blokuj tylko przy faktycznym braku kredytów.
+    if (credits <= 0) {
+      setShowCreditsGate(true);
+      return;
+    }
     setStage('loading');
     setError(null);
     try {
+      const { apiJsonHeaders } = await import('@/lib/apiHeaders');
       const res = await fetch(`${BACKEND_URL}/api/inspirations/recipe`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({ dish_name: dish.labelPl, slug: dish.slug }),
       });
       if (!res.ok) {
@@ -165,6 +175,15 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
           msg =
             'Endpoint Inspiracji nie jest dostępny na backendzie (404). ' +
             'Zrestartuj uvicorn w folderze backend (pełny stop + start).';
+        } else if (res.status === 403) {
+          void refresh();
+          const balHint = Number.isFinite(credits) ? ` Aktualne saldo: ${credits} kredytów.` : '';
+          if (/kredyt/i.test(msg)) {
+            msg = `${msg}${balHint}`;
+            setShowCreditsGate(true);
+          } else if (!dealHunterUnlocked && !trialActive) {
+            msg = `${msg}${balHint}`;
+          }
         }
         throw new Error(msg);
       }
@@ -174,6 +193,9 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
       setStage('recipe');
       await saveUnlockedInspiration(dish.slug, dish.labelPl, data);
       setUnlocked((prev) => ({ ...prev, [dish.slug]: { recipe: { ...data, cached: true } } }));
+      if (data.credits_deducted && data.credits_deducted > 0) {
+        void refresh();
+      }
     } catch (e: any) {
       setError(e?.message || 'Nie udało się wygenerować przepisu.');
       setStage('confirm');
@@ -431,6 +453,11 @@ export function InspirationsModal({ visible, onClose, onApplyToMenu }: Props) {
           </ScrollView>
         )}
       </SafeAreaView>
+      <CreditsGateModal
+        visible={showCreditsGate}
+        onClose={() => setShowCreditsGate(false)}
+        actionLabel="generowanie przepisu AI"
+      />
     </Modal>
   );
 }

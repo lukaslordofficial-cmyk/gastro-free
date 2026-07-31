@@ -70,7 +70,7 @@ import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunt
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
 
-type Unit = 'g' | 'ml' | 'szt' | 'opak' | 'L' | 'kg';
+type Unit = 'g' | 'ml' | 'szt' | 'opak' | 'L' | 'kg' | 'porcja';
 
 interface CategoryRow {
   id: string;
@@ -103,7 +103,7 @@ type ComboIngredientDraft = {
   warehouse_product_id: string | null;
 };
 
-const COMBO_UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
+const COMBO_UNIT_OPTIONS = ['porcja', 'g', 'ml', 'szt', 'kg', 'L'] as const;
 
 function newComboIngredient(): ComboIngredientDraft {
   return {
@@ -135,7 +135,7 @@ interface WasteLogRow {
 
 // ─── Constants ───────────────────────────────────────────────────────────────────────
 
-const UNIT_OPTIONS: Unit[] = ['g', 'kg', 'ml', 'L', 'szt', 'opak'];
+const UNIT_OPTIONS: Unit[] = ['g', 'kg', 'ml', 'L', 'szt', 'opak', 'porcja'];
 const FALLBACK_COLOR = '#64748B';
 
 const CAT_AUTO_COLORS = [
@@ -734,6 +734,7 @@ export default function MagazynScreen() {
   const [dbCategories, setDbCategories] = useState<CategoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [scanSyncing, setScanSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -764,18 +765,23 @@ export default function MagazynScreen() {
 
   // ── Data fetching ────────────────────────────────────────────────────────────────────────
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (opts?: { fast?: boolean }) => {
     // Czekaj na sesję — inaczej pierwsze query idzie na account_key=default (całe demo, 20–30s).
     if (!authReady || !isAuthenticated || !accountKey || accountKey === 'default') {
       return;
     }
     const ak = accountKey;
+    const fast = !!opts?.fast;
     try {
-      // Uzupełnij brakujące kategorie systemowe (nie kasuje własnych użytkownika).
-      await ensureDefaultWarehouseCategories(supabase, ak);
-      // Soft-dedupe: ta sama nazwa → jeden category_id (produkty przenoszone, puste dupy usuwane).
-      await dedupeWarehouseCategories(supabase, ak);
-      await ensureDefaultKitchenUtensils(supabase, ak);
+      // Po skanie: najpierw szybkie odczytanie produktów, seed/dedupe w tle.
+      if (!fast) {
+        await ensureDefaultWarehouseCategories(supabase, ak);
+        await dedupeWarehouseCategories(supabase, ak);
+        await ensureDefaultKitchenUtensils(supabase, ak);
+      } else {
+        void ensureDefaultWarehouseCategories(supabase, ak);
+        void ensureDefaultKitchenUtensils(supabase, ak);
+      }
 
       const [itemsRes, catsRes, wasteRes] = await Promise.all([
         supabase
@@ -833,6 +839,7 @@ export default function MagazynScreen() {
     } finally {
       setLoading(false);
       setRefreshing(false);
+      setScanSyncing(false);
     }
   }, [authReady, isAuthenticated, accountKey]);
 
@@ -847,10 +854,14 @@ export default function MagazynScreen() {
   }, [fetchData, authReady, isAuthenticated, accountKey]);
 
   useEffect(() => {
-    if (documentScanRevision > 0) void fetchData();
+    if (documentScanRevision > 0) {
+      setScanSyncing(true);
+      setRefreshing(true);
+      void fetchData({ fast: true });
+    }
   }, [documentScanRevision, fetchData]);
 
-  const onRefresh = () => { setRefreshing(true); fetchData(); };
+  const onRefresh = () => { setRefreshing(true); void fetchData(); };
 
   // ── Category derived data ───────────────────────────────────────────────────────────────
 
@@ -1319,11 +1330,17 @@ export default function MagazynScreen() {
   // ── Save product ───────────────────────────────────────────────────────────────────────
 
   async function handleSave() {
-    if (!form.name.trim()) { Alert.alert('Wymagane pole', 'Podaj nazwę produktu.'); return; }
+    if (!form.name.trim()) { premiumAlert('Wymagane pole', 'Podaj nazwę produktu.'); return; }
     const currentQty = parseFloat(form.currentQty);
     const criticalThreshold = parseFloat(form.criticalThreshold);
-    if (isNaN(currentQty) || currentQty < 0) { Alert.alert('Błąd', 'Aktualna ilość musi być liczbą nieujemną.'); return; }
-    if (isNaN(criticalThreshold) || criticalThreshold <= 0) { Alert.alert('Błąd', 'Stan krytyczny musi być liczbą > 0.'); return; }
+    if (isNaN(currentQty) || currentQty < 0) { premiumAlert('Błąd', 'Aktualna ilość musi być liczbą nieujemną.'); return; }
+    if (isNaN(criticalThreshold) || criticalThreshold <= 0) {
+      premiumAlert(
+        'Ustaw próg krytyczny',
+        'Stan krytyczny musi być liczbą większą od zera — bez niego aplikacja nie wie, kiedy ostrzec o braku produktu.',
+      );
+      return;
+    }
     let safetyBuffer = parseFloat(form.safetyBuffer);
     if (isNaN(safetyBuffer)) safetyBuffer = 20;
     if (safetyBuffer < 10) safetyBuffer = 10;
@@ -1331,9 +1348,15 @@ export default function MagazynScreen() {
     let optimalThreshold: number | null = null;
     if (form.optimalThreshold.trim()) {
       const o = parseFloat(form.optimalThreshold);
-      if (isNaN(o) || o < 0) { Alert.alert('Błąd', 'Próg optymalny musi być liczbą ≥ 0.'); return; }
+      if (isNaN(o) || o < 0) {
+        premiumAlert('Próg optymalny', 'Próg optymalny musi być liczbą ≥ 0 (albo zostaw puste).');
+        return;
+      }
       if (o > 0 && o < criticalThreshold) {
-        Alert.alert('Błąd', 'Próg optymalny powinien być ≥ stanu krytycznego (albo pusty).');
+        premiumAlert(
+          'Próg optymalny',
+          'Próg optymalny powinien być ≥ stanu krytycznego (albo pusty — wtedy system wyliczy go z bufora).',
+        );
         return;
       }
       optimalThreshold = o > 0 ? o : null;
@@ -1358,7 +1381,7 @@ export default function MagazynScreen() {
         return k === nameKey;
       });
       if (dup) {
-        Alert.alert(
+        premiumAlert(
           'Produkt już istnieje',
           `W magazynie jest już „${dup.product_name}”. Edytuj istniejący wpis zamiast tworzyć duplikat (Łowca Okazji scala oferty po nazwie).`,
         );
@@ -1477,7 +1500,7 @@ export default function MagazynScreen() {
       setEditingId(null);
       setShowAddModal(false);
     } catch (e: any) {
-      Alert.alert('Błąd zapisu', e.message ?? 'Nieznany błąd');
+      premiumAlert('Błąd zapisu', e.message ?? 'Nieznany błąd');
     } finally {
       setSaving(false);
     }
@@ -2047,7 +2070,14 @@ export default function MagazynScreen() {
                 <Switch
                   value={form.isCombo}
                   onValueChange={(v) => {
-                    setForm((f) => ({ ...f, isCombo: v }));
+                    setForm((f) => ({
+                      ...f,
+                      isCombo: v,
+                      unit: v ? 'porcja' : (f.unit === 'porcja' ? 'szt' : f.unit),
+                      category: v && (!f.category || f.category === 'Inne')
+                        ? 'Półprodukty'
+                        : f.category,
+                    }));
                     if (v && comboIngredients.length === 0) {
                       setComboIngredients([newComboIngredient()]);
                     }
@@ -2421,12 +2451,53 @@ export default function MagazynScreen() {
       ) : (
         body
       )}
+      {scanSyncing ? (
+        <View style={styles.scanSyncOverlay} pointerEvents="auto">
+          <View style={styles.scanSyncCard}>
+            <ActivityIndicator size="large" color={DS.color.greenEnd} />
+            <Text style={styles.scanSyncTitle}>Zapisywanie produktów…</Text>
+            <Text style={styles.scanSyncSub}>Odświeżam magazyn — chwilkę…</Text>
+          </View>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  scanSyncOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(6, 12, 10, 0.82)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 80,
+    paddingHorizontal: 28,
+  },
+  scanSyncCard: {
+    backgroundColor: DS.color.surfaceCard,
+    borderWidth: 1,
+    borderColor: DS.color.borderSubtle,
+    borderRadius: 18,
+    paddingVertical: 28,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+    gap: 10,
+    maxWidth: 320,
+    width: '100%',
+  },
+  scanSyncTitle: {
+    color: DS.color.heading,
+    fontSize: 17,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  scanSyncSub: {
+    color: DS.color.muted,
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10 },
   title: { fontSize: 24, fontWeight: '800', color: Colors.textPrimary, letterSpacing: -0.5 },
   subtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, fontWeight: '500' },

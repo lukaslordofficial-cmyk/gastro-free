@@ -147,6 +147,8 @@ export interface OptimizeResult {
   recommended_reason?: string;
   credits_deducted?: number;
   credits_remaining?: number | null;
+  /** Notatki PL gdy opakowanie ≠ dokładne zapotrzebowanie */
+  pack_adjustment_notes?: string[];
   /** Math/AI suggestions from Deal Hunter Phase 2+ */
   suggestions?: {
     type: string;
@@ -632,8 +634,15 @@ export function toSupplierGroups(
 
 /** Normalize API payload that may predate is_optimized field */
 export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<string, unknown>): OptimizeResult {
+  const packNotes = Array.isArray(data.pack_adjustment_notes)
+    ? (data.pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
+    : undefined;
   if (typeof data.is_optimized === 'boolean' && data.pricing_matrix) {
-    return data as OptimizeResult;
+    const out = data as OptimizeResult;
+    if (packNotes?.length && !out.pack_adjustment_notes?.length) {
+      out.pack_adjustment_notes = packNotes;
+    }
+    return out;
   }
   const split = (data.option_optimized ?? { type: 'optimized', suppliers: [], total_pln: 0, missing: [] }) as OptionOptimized;
   const mono = (data.option_all_one ?? null) as OptionAllOne | null;
@@ -653,16 +662,19 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
     assistant_speech: String(data.assistant_speech ?? ''),
     option_all_one: mono,
     option_optimized: split,
+    ...(packNotes?.length ? { pack_adjustment_notes: packNotes } : {}),
   };
   if (matrix.length) {
     const meta = suppliersMetaFromMatrix(matrix);
     const items = matrixToPerItem(matrix, initQuantities(stub));
-    return buildFromPerItem(items, meta, {
+    const built = buildFromPerItem(items, meta, {
       currency: stub.currency,
       items_requested: itemsReq,
       pricing_matrix: matrix,
       assistant_speech: stub.assistant_speech,
     });
+    if (packNotes?.length) built.pack_adjustment_notes = packNotes;
+    return built;
   }
   const unique = itemsReq.length;
   const totalA = mono && !mono.missing?.length ? mono.total_pln : null;

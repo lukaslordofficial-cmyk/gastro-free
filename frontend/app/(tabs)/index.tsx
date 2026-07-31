@@ -49,6 +49,11 @@ import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { PremiumFinanceScreen } from '@/components/premium/PremiumFinanceScreen';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import {
+  formatInvoiceLineLabel,
+  humanizeInvoiceNotePreview,
+  parseInvoiceCostNote,
+} from '@/lib/invoiceCostNote';
 import { DS } from '@/constants/premiumTheme';
 
 const _now = new Date();
@@ -805,7 +810,7 @@ export default function FinanseScreen() {
     { id: string; name: string; quantity: number; minQuantity: number; unit: string }[]
   >([]);
   const { isPremiumUi } = useThemeMode();
-  const { openProductCascade } = useUiOverlay();
+  const { openProductCascade, documentScanRevision } = useUiOverlay();
   const theme = useAppTheme();
   const [revenueJournal, setRevenueJournal] = useState<RevenueEntry[]>([]);
   const [fixedCostsJournal, setFixedCostsJournal] = useState<FixedCost[]>([]);
@@ -817,9 +822,13 @@ export default function FinanseScreen() {
   const [expandedNoteId, setExpandedNoteId] = useState<string | null>(null);
   const [noteText, setNoteText] = useState('');
   const [noteSaving, setNoteSaving] = useState(false);
+  const [financeSyncHint, setFinanceSyncHint] = useState(false);
   const { alert: premiumAlert } = usePremiumAlert();
+  const hasFinanceDataRef = useRef(false);
+  const scanRetryRef = useRef(0);
+  const varCountBeforeScanRef = useRef(0);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (): Promise<{ variableCount: number } | null> => {
     try {
       const { getAccountKey } = await import('@/lib/accountKey');
       const ak = getAccountKey();
@@ -856,16 +865,24 @@ export default function FinanseScreen() {
       if (fixedRes.error) throw fixedRes.error;
       if (varRes.error) throw varRes.error;
 
-      const revMerged = (revAllRes.data ?? []) as RevenueEntry[];
-      const fixedMerged = (fixedAllRes.data ?? []) as FixedCost[];
-      const varMerged = (varAllRes.data ?? []) as VariableCostEntry[];
+      const safeRows = <T extends { year_month?: string | null; created_at?: string | null }>(rows: T[] | null | undefined): T[] =>
+        (rows ?? []).filter((r) => {
+          const ym = (r.year_month || '').trim();
+          return /^\d{4}-\d{2}$/.test(ym);
+        });
 
-      setRevenueEntries((revRes.data ?? []) as RevenueEntry[]);
-      setRevenueJournal(revMerged.length ? revMerged : ((revRes.data ?? []) as RevenueEntry[]));
-      setFixedCosts((fixedRes.data ?? []) as FixedCost[]);
-      setFixedCostsJournal(fixedMerged.length ? fixedMerged : ((fixedRes.data ?? []) as FixedCost[]));
-      setVariableEntries((varRes.data ?? []) as VariableCostEntry[]);
-      setVariableCostsJournal(varMerged.length ? varMerged : ((varRes.data ?? []) as VariableCostEntry[]));
+      const revMerged = safeRows(revAllRes.data as RevenueEntry[] | null);
+      const fixedMerged = safeRows(fixedAllRes.data as FixedCost[] | null);
+      const varMerged = safeRows(varAllRes.data as VariableCostEntry[] | null);
+
+      setRevenueEntries(safeRows(revRes.data as RevenueEntry[] | null));
+      setRevenueJournal(revMerged.length ? revMerged : safeRows(revRes.data as RevenueEntry[] | null));
+      setFixedCosts(safeRows(fixedRes.data as FixedCost[] | null));
+      setFixedCostsJournal(fixedMerged.length ? fixedMerged : safeRows(fixedRes.data as FixedCost[] | null));
+      const varMonth = safeRows(varRes.data as VariableCostEntry[] | null);
+      setVariableEntries(varMonth);
+      setVariableCostsJournal(varMerged.length ? varMerged : varMonth);
+      hasFinanceDataRef.current = true;
 
       const revH = revHistRes.data ?? [];
       const varH = varHistRes.data ?? [];
@@ -874,11 +891,11 @@ export default function FinanseScreen() {
         ...revMerged.map((r) => r.year_month).filter(Boolean),
         ...varMerged.map((r) => r.year_month).filter(Boolean),
         ...fixedMerged.map((r) => r.year_month).filter(Boolean),
-        ...revH.map((r) => r.year_month).filter(Boolean),
-        ...varH.map((r) => r.year_month).filter(Boolean),
+        ...revH.map((r: any) => r.year_month).filter(Boolean),
+        ...varH.map((r: any) => r.year_month).filter(Boolean),
         CURRENT_MONTH,
       ]);
-      const sortedMonths = Array.from(allMonths).sort();
+      const sortedMonths = Array.from(allMonths).filter((m) => /^\d{4}-\d{2}$/.test(m)).sort();
       setChartRecords(
         sortedMonths.map((month) => ({
           id: month,
@@ -886,39 +903,88 @@ export default function FinanseScreen() {
           revenue_pln: revMerged
             .filter((r) => r.year_month === month)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || revH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
+            || revH.filter((r: any) => r.year_month === month).reduce((s: number, r: any) => s + Number(r.amount_pln), 0),
           variable_costs_pln: varMerged
             .filter((r) => r.year_month === month)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || varH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
+            || varH.filter((r: any) => r.year_month === month).reduce((s: number, r: any) => s + Number(r.amount_pln), 0),
           fixed_costs_pln: fixedMerged
             .filter((r) => r.year_month === month)
             .reduce((s, r) => s + Number(r.amount_pln), 0),
-          created_at: month,
+          created_at: `${month}-01T12:00:00`,
         }))
       );
 
-      const invRows = (inventoryRes.data ?? []).map((i: any) => ({
-        id: String(i.id),
-        name: String(i.name || 'Składnik'),
-        quantity: Number(i.quantity) || 0,
-        minQuantity: Number(i.min_quantity) || 0,
-        unit: String(i.unit || 'szt'),
-      }));
-      setInventorySnapshot(invRows);
-
-      const critical = invRows.filter((i) => i.quantity <= i.minQuantity);
-      setCriticalCount(critical.length);
-      setCriticalItems(critical);
+      if (!inventoryRes.error) {
+        const invRows = (inventoryRes.data ?? []).map((i: any) => ({
+          id: String(i.id),
+          name: String(i.name || 'Składnik'),
+          quantity: Number(i.quantity) || 0,
+          minQuantity: Number(i.min_quantity) || 0,
+          unit: String(i.unit || 'szt'),
+        }));
+        setInventorySnapshot(invRows);
+        const critical = invRows.filter((i) => i.quantity <= i.minQuantity);
+        setCriticalCount(critical.length);
+        setCriticalItems(critical);
+      }
+      setError(null);
+      setFinanceSyncHint(false);
+      return { variableCount: varMonth.length };
     } catch (e: any) {
-      setError(e.message ?? 'Nieznany błąd');
+      if (__DEV__) console.warn('[Finanse] fetchData', e?.message ?? e);
+      setFinanceSyncHint(true);
+      if (!hasFinanceDataRef.current) {
+        setError(e?.message ?? 'Nieznany błąd');
+      } else {
+        premiumAlert(
+          'Odświeżanie…',
+          'Koszty z faktury pojawią się za chwilę. Przeciągnij listę w dół, jeśli jeszcze ich nie widać.',
+          [{ text: 'OK', style: 'primary' }],
+        );
+      }
+      return null;
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [premiumAlert]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { void fetchData(); }, [fetchData]);
+
+  // Po skanie faktury — auto-odśwież koszty zmienne z retry.
+  useEffect(() => {
+    if (documentScanRevision <= 0) return;
+    let cancelled = false;
+    varCountBeforeScanRef.current = variableEntries.length;
+    scanRetryRef.current = 0;
+    setFinanceSyncHint(true);
+
+    const run = async () => {
+      setRefreshing(true);
+      const result = await fetchData();
+      if (cancelled) return;
+      if ((result?.variableCount ?? 0) > varCountBeforeScanRef.current) {
+        setFinanceSyncHint(false);
+        return;
+      }
+      if (scanRetryRef.current >= 3) {
+        premiumAlert(
+          'Koszty z faktury',
+          'Zapis może być jeszcze synchronizowany. Odśwież listę za chwilę (przeciągnij w dół) — pozycja powinna się pojawić.',
+          [{ text: 'OK', style: 'primary' }],
+        );
+        return;
+      }
+      scanRetryRef.current += 1;
+      setTimeout(() => {
+        if (!cancelled) void run();
+      }, 1800);
+    };
+    void run();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentScanRevision]);
 
   function toggleNote(id: string, currentNote: string | null | undefined) {
     if (expandedNoteId === id) {
@@ -955,10 +1021,16 @@ export default function FinanseScreen() {
       const { error: updateErr } = await q;
       if (updateErr) throw updateErr;
       const saved = noteText.trim() || null;
-      if (table === 'fixed') setFixedCosts((prev) => prev.map((c) => c.id === id ? { ...c, note: saved } : c));
-      else if (table === 'variable') setVariableEntries((prev) => prev.map((e) => e.id === id ? { ...e, note: saved } : e));
-      else setRevenueEntries((prev) => prev.map((e) => e.id === id ? { ...e, note: saved } : e));
-      setRevenueJournal((prev) => prev.map((e) => e.id === id ? { ...e, note: saved } : e));
+      if (table === 'fixed') {
+        setFixedCosts((prev) => prev.map((c) => (c.id === id ? { ...c, note: saved } : c)));
+        setFixedCostsJournal((prev) => prev.map((c) => (c.id === id ? { ...c, note: saved } : c)));
+      } else if (table === 'variable') {
+        setVariableEntries((prev) => prev.map((e) => (e.id === id ? { ...e, note: saved } : e)));
+        setVariableCostsJournal((prev) => prev.map((e) => (e.id === id ? { ...e, note: saved } : e)));
+      } else {
+        setRevenueEntries((prev) => prev.map((e) => (e.id === id ? { ...e, note: saved } : e)));
+      }
+      setRevenueJournal((prev) => prev.map((e) => (e.id === id ? { ...e, note: saved } : e)));
       setExpandedNoteId(null);
     } catch (e: any) {
       Alert.alert('Błąd', e.message ?? 'Nie udało się zapisać notatki.');
@@ -997,11 +1069,12 @@ export default function FinanseScreen() {
   }
 
   if (loading) return <LoadingScreen />;
-  if (error) return <ErrorScreen message={error} />;
+  // Tylko przy pierwszym nieudanym loadzie — nie wywalaj UI przy odświeżeniu (wygląda jak crash).
+  if (error && !hasFinanceDataRef.current) return <ErrorScreen message={error} />;
 
-  const totalRevenue = revenueEntries.reduce((s, e) => s + Number(e.amount_pln), 0);
-  const totalFixed = fixedCosts.reduce((s, c) => s + Number(c.amount_pln), 0);
-  const totalVariable = variableEntries.reduce((s, e) => s + Number(e.amount_pln), 0);
+  const totalRevenue = revenueEntries.reduce((s, e) => s + Number(e.amount_pln || 0), 0);
+  const totalFixed = fixedCosts.reduce((s, c) => s + Number(c.amount_pln || 0), 0);
+  const totalVariable = variableEntries.reduce((s, e) => s + Number(e.amount_pln || 0), 0);
   const totalCosts = totalFixed + totalVariable;
   const netProfit = totalRevenue - totalCosts;
 
@@ -1020,9 +1093,10 @@ export default function FinanseScreen() {
           criticalCount={criticalCount}
           criticalItems={criticalItems}
           refreshing={refreshing}
+          syncHint={financeSyncHint}
           onRefresh={() => {
             setRefreshing(true);
-            fetchData();
+            void fetchData();
           }}
           onOpenMagazyn={() => router.push('/(tabs)/magazyn')}
           onOpenCriticalCascade={() =>
@@ -1468,12 +1542,18 @@ export default function FinanseScreen() {
                           {getVarIcon(entry.type)}
                         </View>
                         <View style={styles.costNameCol}>
-                          <Text style={[styles.costName, { color: theme.text }]}>{entry.name}</Text>
-                          {(entry as any).note && !isExpanded ? (
-                            <Text style={styles.notePreview} numberOfLines={1}>
-                              {(entry as any).note}
-                            </Text>
-                          ) : null}
+                          <TouchableOpacity
+                            activeOpacity={0.75}
+                            onPress={() => toggleNote(entry.id, (entry as any).note)}
+                          >
+                            <Text style={[styles.costName, { color: theme.text }]}>{entry.name}</Text>
+                            {!isExpanded ? (
+                              <Text style={styles.notePreview} numberOfLines={1}>
+                                {humanizeInvoiceNotePreview((entry as any).note)
+                                  ?? ((entry as any).note ? String((entry as any).note) : 'Dotknij → szczegóły / notatka')}
+                              </Text>
+                            ) : null}
+                          </TouchableOpacity>
                         </View>
                         <TouchableOpacity
                           onPress={() => toggleNote(entry.id, (entry as any).note)}
@@ -1509,6 +1589,22 @@ export default function FinanseScreen() {
                       </View>
                       {isExpanded && (
                         <View style={[styles.noteExpanded, isLast && styles.noteExpandedLast]}>
+                          {(() => {
+                            const invoice = parseInvoiceCostNote((entry as any).note);
+                            if (!invoice?.lines?.length) return null;
+                            return (
+                              <View style={{ gap: 4, marginBottom: 10 }}>
+                                <Text style={[styles.costName, { color: theme.text, marginBottom: 2 }]}>
+                                  Pozycje faktury
+                                </Text>
+                                {invoice.lines.map((line, i) => (
+                                  <Text key={`${entry.id}-line-${i}`} style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 16 }}>
+                                    • {formatInvoiceLineLabel(line)}
+                                  </Text>
+                                ))}
+                              </View>
+                            );
+                          })()}
                           <TextInput
                             style={styles.noteInput}
                             value={noteText}

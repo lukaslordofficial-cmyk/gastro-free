@@ -48,9 +48,10 @@ export function DocumentScanHost() {
       <MenuScanModal
         visible={menuScanVisible}
         onClose={closeMenuScan}
-        onConfirmed={() => {
-          closeMenuScan();
+        onConfirmed={async () => {
           notifyDocumentScanComplete();
+          // Daj Reactowi czas na odpalenie listenerów fetchData w Menu/Magazynie.
+          await new Promise((r) => setTimeout(r, 80));
           try {
             router.push('/(tabs)/menu');
           } catch {

@@ -35,6 +35,7 @@ import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useAds } from '@/contexts/AdsProvider';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
+import { extractDishContextTags } from '@/lib/dishImageMatch';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
@@ -43,7 +44,7 @@ const SUGGEST_CHUNK = 4;
 
 const MENU_CATEGORIES = [
   'Przystawki', 'Zupy', 'Sałatki', 'Burgery', 'Dania główne',
-  'Makarony', 'Pizza', 'Desery', 'Napoje', 'Alkohole', 'Inne',
+  'Makarony', 'Pizza', 'Desery', 'Napoje', 'Alkohole', 'Półprodukty', 'Inne',
 ];
 
 const WEIGHT_UNITS = ['g', 'ml', 'szt'] as const;
@@ -69,6 +70,8 @@ interface DraftDish {
   portionWeightInput: string;
   portionWeightUnit: WeightUnit | null;
   ingredients: Ingredient[];
+  /** Tagi kontekstu grafiki (białko / typ) — z AI lub heurystyki nazwy */
+  imageContextTags?: string[];
 }
 
 interface Suggestion {
@@ -77,7 +80,15 @@ interface Suggestion {
   suggested_portion_weight_unit: string | null;
 }
 
-type Stage = 'choose' | 'scanning' | 'edit' | 'ask_suggest' | 'suggesting' | 'confirming' | 'done';
+type Stage =
+  | 'choose'
+  | 'scanning'
+  | 'edit'
+  | 'ask_suggest'
+  | 'suggesting'
+  | 'confirming'
+  | 'syncing'
+  | 'done';
 
 const C = {
   bg: '#0A120E',
@@ -181,7 +192,8 @@ async function fetchSuggestionsChunked(
 interface Props {
   visible: boolean;
   onClose: () => void;
-  onConfirmed: () => void;
+  /** Odśwież Menu/Magazyn — wywoływane zaraz po zapisie (może być async). */
+  onConfirmed: () => void | Promise<void>;
 }
 
 export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
@@ -237,9 +249,9 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
 
   const handleFinishDone = useCallback(async () => {
     await showInterstitial();
-    onConfirmed();
     reset();
-  }, [onConfirmed, reset, showInterstitial]);
+    onClose();
+  }, [onClose, reset, showInterstitial]);
 
   const processFile = useCallback(async (uri: string, name: string, mimeType: string) => {
     if (!ensureCredits()) return;
@@ -263,25 +275,32 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         throw new Error(friendlyApiError(res.status, detail));
       }
       const data = await res.json();
-      const parsedDishes: DraftDish[] = (data.dishes ?? []).map((d: any) => ({
-        key: newIngredientKey(),
-        name: d.name ?? '',
-        category: MENU_CATEGORIES.includes(d.category) ? d.category : 'Inne',
-        priceInput: formatPlnNumber(d.price_pln ?? 0),
-        portionWeightInput:
-          d.portion_weight_value != null ? String(d.portion_weight_value) : '',
-        portionWeightUnit:
-          d.portion_weight_unit === 'g' || d.portion_weight_unit === 'ml' || d.portion_weight_unit === 'szt'
-            ? d.portion_weight_unit
-            : null,
-        ingredients: (d.ingredients ?? []).map((i: any) =>
-          newIngredient(
-            i.name ?? '',
-            i.quantity != null ? String(i.quantity) : '',
-            i.unit === 'ml' || i.unit === 'szt' ? i.unit : 'g'
-          )
-        ),
-      }));
+      const parsedDishes: DraftDish[] = (data.dishes ?? []).map((d: any) => {
+        const name = d.name ?? '';
+        const fromApi = Array.isArray(d.image_context_tags)
+          ? d.image_context_tags.map(String)
+          : [];
+        return {
+          key: newIngredientKey(),
+          name,
+          category: MENU_CATEGORIES.includes(d.category) ? d.category : 'Inne',
+          priceInput: formatPlnNumber(d.price_pln ?? 0),
+          portionWeightInput:
+            d.portion_weight_value != null ? String(d.portion_weight_value) : '',
+          portionWeightUnit:
+            d.portion_weight_unit === 'g' || d.portion_weight_unit === 'ml' || d.portion_weight_unit === 'szt'
+              ? d.portion_weight_unit
+              : null,
+          ingredients: (d.ingredients ?? []).map((i: any) =>
+            newIngredient(
+              i.name ?? '',
+              i.quantity != null ? String(i.quantity) : '',
+              i.unit === 'ml' || i.unit === 'szt' ? i.unit : 'g'
+            )
+          ),
+          imageContextTags: fromApi.length ? fromApi : extractDishContextTags(name),
+        };
+      });
       setDishes(parsedDishes);
       if (parsedDishes.length === 0) {
         setError('AI nie rozpoznało żadnej potrawy. Spróbuj wgrać wyraźniejsze zdjęcie/PDF.');
@@ -381,33 +400,69 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
 
   const dishesMissingHelp = useCallback((list: DraftDish[]) => {
     const needIng: string[] = [];
+    const needQty: string[] = [];
     const needWeight: string[] = [];
     list.forEach((d) => {
-      const hasIngredients = d.ingredients.some((i) => i.name.trim());
+      const named = d.ingredients.filter((i) => i.name.trim());
+      const hasIngredients = named.length > 0;
+      const missingQty = named.some((i) => !i.quantity.trim());
       const hasWeight = !!d.portionWeightInput.trim() && !!d.portionWeightUnit;
       if (!hasIngredients) needIng.push(d.key);
+      else if (missingQty) needQty.push(d.key);
       if (!hasWeight) needWeight.push(d.key);
     });
-    return { needIng, needWeight };
+    return { needIng, needQty, needWeight };
   }, []);
 
   const applySuggestionsToDishes = useCallback(
-    (current: DraftDish[], byName: Record<string, Suggestion>, needIng: string[], needWeight: string[]) => {
+    (
+      current: DraftDish[],
+      byName: Record<string, Suggestion>,
+      needIng: string[],
+      needQty: string[],
+      needWeight: string[],
+    ) => {
       return current.map((d) => {
         const s = byName[d.name.trim().toLowerCase()];
         if (!s) return d;
         let next = { ...d };
+        const suggested = s.suggested_ingredients ?? [];
 
-        if (needIng.includes(d.key) && (s.suggested_ingredients ?? []).length > 0) {
+        if (needIng.includes(d.key) && suggested.length > 0) {
           next = {
             ...next,
-            ingredients: s.suggested_ingredients.map((si) =>
+            ingredients: suggested.map((si) =>
               newIngredient(
                 si.name,
-                si.quantity != null ? String(normalizeRecipeQuantity(si.quantity)) : '',
+                si.quantity != null ? String(normalizeRecipeQuantity(si.quantity)) : '1',
                 si.unit === 'ml' || si.unit === 'szt' ? si.unit : 'g'
               )
             ),
+          };
+        } else if (needQty.includes(d.key) && suggested.length > 0) {
+          // Nazwy są — doszacuj brakujące gramatury (match po nazwie, potem po indeksie).
+          const bySugName = new Map(
+            suggested.map((si) => [si.name.trim().toLowerCase(), si]),
+          );
+          next = {
+            ...next,
+            ingredients: next.ingredients.map((ing, idx) => {
+              if (!ing.name.trim() || ing.quantity.trim()) return ing;
+              const hit =
+                bySugName.get(ing.name.trim().toLowerCase()) ??
+                suggested[idx];
+              if (!hit || hit.quantity == null) {
+                return { ...ing, quantity: '1' };
+              }
+              return {
+                ...ing,
+                quantity: String(normalizeRecipeQuantity(hit.quantity)),
+                unit:
+                  hit.unit === 'ml' || hit.unit === 'szt'
+                    ? hit.unit
+                    : (ing.unit || 'g'),
+              };
+            }),
           };
         }
 
@@ -432,16 +487,17 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
   /** Top "Sugestie AI" — fill missing fields in the edit form. */
   const handleInlineSuggest = useCallback(async () => {
     if (!ensureCredits()) return;
-    const { needIng, needWeight } = dishesMissingHelp(dishes);
-    if (needIng.length === 0 && needWeight.length === 0) {
+    const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
+    if (needIng.length === 0 && needQty.length === 0 && needWeight.length === 0) {
       setError('Wszystkie potrawy mają już składniki i gramaturę — nie ma czego uzupełniać.');
       return;
     }
     setSuggestingInline(true);
     setError(null);
     try {
+      const askKeys = new Set([...needIng, ...needQty, ...needWeight]);
       const askDishes = dishes
-        .filter((d) => needIng.includes(d.key) || needWeight.includes(d.key))
+        .filter((d) => askKeys.has(d.key))
         .map((d) => ({
           name: d.name.trim(),
           category: d.category,
@@ -458,7 +514,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
           portion_weight_unit: d.portionWeightUnit,
         }));
       const byName = await fetchSuggestionsChunked(askDishes);
-      setDishes((prev) => applySuggestionsToDishes(prev, byName, needIng, needWeight));
+      setDishes((prev) => applySuggestionsToDishes(prev, byName, needIng, needQty, needWeight));
     } catch (e: any) {
       setError(e?.message ?? 'Nie udało się pobrać sugestii AI.');
     } finally {
@@ -474,12 +530,12 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     }
     setError(null);
 
-    const { needIng, needWeight } = dishesMissingHelp(dishes);
-    if (needIng.length === 0 && needWeight.length === 0) {
+    const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
+    if (needIng.length === 0 && needQty.length === 0 && needWeight.length === 0) {
       void confirmSave(false);
       return;
     }
-    setDishesNeedingIngredients(needIng);
+    setDishesNeedingIngredients([...needIng, ...needQty]);
     setDishesNeedingWeight(needWeight);
     setStage('ask_suggest');
   }, [dishes, dishesMissingHelp]);
@@ -495,12 +551,18 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     setError(null);
     try {
       let finalPayload = preparePayloadDishes();
+      const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
 
       if (withSuggestions) {
+        const askKeys = new Set([
+          ...dishesNeedingIngredients,
+          ...dishesNeedingWeight,
+          ...needIng,
+          ...needQty,
+          ...needWeight,
+        ]);
         const askDishes = dishes
-          .filter(
-            (d) => dishesNeedingIngredients.includes(d.key) || dishesNeedingWeight.includes(d.key)
-          )
+          .filter((d) => askKeys.has(d.key))
           .map((d) => ({
             name: d.name.trim(),
             category: d.category,
@@ -534,15 +596,31 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
           finalPayload = finalPayload.map((d) => {
             const s = byName[d.name.toLowerCase()];
             if (!s) return d;
+            const suggested = s.suggested_ingredients ?? [];
 
             let ingredients = d.ingredients;
-            if (ingredients.length === 0 && (s.suggested_ingredients ?? []).length > 0) {
-              ingredients = s.suggested_ingredients.map((si) => ({
+            if (ingredients.length === 0 && suggested.length > 0) {
+              ingredients = suggested.map((si) => ({
                 name: si.name,
-                quantity: normalizeRecipeQuantity(Number(si.quantity ?? 0)),
+                quantity: normalizeRecipeQuantity(Number(si.quantity ?? 1)),
                 unit: si.unit || 'g',
                 piece_weight_g: null as number | null,
               }));
+            } else if (suggested.length > 0) {
+              const bySugName = new Map(
+                suggested.map((si) => [si.name.trim().toLowerCase(), si]),
+              );
+              ingredients = ingredients.map((ing, idx) => {
+                if (ing.quantity != null && Number(ing.quantity) > 0) return ing;
+                const hit =
+                  bySugName.get((ing.name || '').trim().toLowerCase()) ??
+                  suggested[idx];
+                return {
+                  ...ing,
+                  quantity: normalizeRecipeQuantity(Number(hit?.quantity ?? 1)),
+                  unit: hit?.unit || ing.unit || 'g',
+                };
+              });
             }
 
             let portion_weight_value = d.portion_weight_value;
@@ -561,6 +639,15 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         }
       }
 
+      // Ostatnia bramka: żadna ilość nie może być null/0 przed zapisem.
+      finalPayload = finalPayload.map((d) => ({
+        ...d,
+        ingredients: d.ingredients.map((ing) => ({
+          ...ing,
+          quantity: normalizeRecipeQuantity(ing.quantity),
+        })),
+      }));
+
       const { apiJsonHeaders } = await import('@/lib/apiHeaders');
       const res = await fetch(`${BACKEND_URL}/api/menu/confirm-scan`, {
         method: 'POST',
@@ -578,20 +665,27 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         inventoryCreated: Number(data.inventory_created ?? 0),
         inventoryItems: data.inventory_items ?? [],
       });
+      // Odśwież listy zaraz po zapisie — użytkownik nie musi wracać do zakładki.
+      setStage('syncing');
+      try {
+        await Promise.resolve(onConfirmed());
+      } catch {
+        /* refresh best-effort */
+      }
       setStage('done');
     } catch (e: any) {
       setError(e.message ?? 'Nie udało się zapisać potraw.');
       setStage('edit');
     }
-  }, [dishes, dishesNeedingIngredients, dishesNeedingWeight, ensureCredits]);
+  }, [dishes, dishesNeedingIngredients, dishesNeedingWeight, dishesMissingHelp, ensureCredits, onConfirmed]);
 
   const suggestionCount =
     dishesNeedingIngredients.length + dishesNeedingWeight.length;
   const bothMissing = dishesNeedingIngredients.length > 0 && dishesNeedingWeight.length > 0;
   const askMessage = bothMissing
-    ? `Dla ${dishesNeedingIngredients.length} potraw brakuje składników, a dla ${dishesNeedingWeight.length} brakuje gramatury. Czy AI ma zaproponować brakujące wartości na podstawie wzorcowych przepisów?`
+    ? `Dla ${dishesNeedingIngredients.length} potraw brakuje składników lub gramatur, a dla ${dishesNeedingWeight.length} brakuje gramatury porcji. Czy AI ma zaproponować brakujące wartości na podstawie wzorcowych przepisów?`
     : dishesNeedingIngredients.length > 0
-    ? `Dla ${dishesNeedingIngredients.length} potraw nie podano składników. Czy AI ma zaproponować składniki i gramatury na podstawie wzorcowych przepisów?`
+    ? `Dla ${dishesNeedingIngredients.length} potraw brakuje składników lub gramatur. Czy AI ma zaproponować składniki i gramatury na podstawie wzorcowych przepisów?`
     : `Dla ${dishesNeedingWeight.length} potraw nie podano gramatury porcji. Czy AI ma zaproponować gramatury na podstawie wzorcowych przepisów?`;
 
   return (
@@ -981,13 +1075,21 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
           </View>
         )}
 
-        {(stage === 'suggesting' || stage === 'confirming') && (
+        {(stage === 'suggesting' || stage === 'confirming' || stage === 'syncing') && (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={C.green} />
             <Text style={styles.analyzingTitle}>
-              {stage === 'suggesting' ? 'AI proponuje składniki…' : 'Zapisuję potrawy…'}
+              {stage === 'suggesting'
+                ? 'AI proponuje składniki…'
+                : stage === 'syncing'
+                  ? 'Zapisywanie potraw…'
+                  : 'Zapisywanie potraw…'}
             </Text>
-            <Text style={styles.analyzingSub}>Chwilkę…</Text>
+            <Text style={styles.analyzingSub}>
+              {stage === 'syncing'
+                ? 'Odświeżam menu i magazyn — chwilkę…'
+                : 'Chwilkę…'}
+            </Text>
           </View>
         )}
 

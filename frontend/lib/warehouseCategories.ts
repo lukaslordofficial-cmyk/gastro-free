@@ -24,6 +24,7 @@ export const DEFAULT_WAREHOUSE_CATEGORIES: WarehouseCategorySeed[] = [
   { name: 'Napoje', color: '#0891B2', sort_order: 100 },
   { name: 'Alkohole', color: '#7C3AED', sort_order: 110 },
   { name: 'Wywary i sosy', color: '#EA580C', sort_order: 120 },
+  { name: 'Półprodukty', color: '#A855F7', sort_order: 125 },
   { name: 'Chemia i czystość', color: '#6366F1', sort_order: 130 },
   { name: 'Opakowania', color: '#64748B', sort_order: 140 },
   { name: 'Inne', color: '#94A3B8', sort_order: 150 },

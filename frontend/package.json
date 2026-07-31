@@ -9,7 +9,10 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "gen:image-library": "node ./scripts/generate_image_library.mjs",
+    "gen:image-library:enrich": "node ./scripts/generate_image_library.mjs --enrich",
+    "smoke:dish-images": "node ./scripts/smoke_dish_image_match.mjs && node ./scripts/smoke_dish_image_waterfall.mjs"
   },
   "dependencies": {
     "@expo/metro-runtime": "6.1.2",

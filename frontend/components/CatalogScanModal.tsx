@@ -116,6 +116,12 @@ const PROCESSING_MESSAGES = [
   'Po zakończeniu zapiszę dane i Cię powiadomię.',
 ];
 
+const SAVING_MESSAGES = [
+  'Zapisywanie produktów…',
+  'Aktualizuję stany magazynowe…',
+  'Odświeżam listy w Magazynie…',
+];
+
 function friendlyApiError(status: number, detail: string): string {
   const raw = `${detail || ''}`.toLowerCase();
   if (
@@ -162,7 +168,7 @@ export function CatalogScanModal({
 }: Props) {
   const insets = useSafeAreaInsets();
   const footerPad = Math.max(insets.bottom, 12) + 8;
-  const { setCameraOverlay } = useUiOverlay();
+  const { setCameraOverlay, openDocumentScan } = useUiOverlay();
   const { showInterstitial } = useAds();
   const { tier, credits } = useSubscription();
   const { alert: premiumAlert } = usePremiumAlert();
@@ -175,12 +181,12 @@ export function CatalogScanModal({
   const [invTotal, setInvTotal] = useState<number>(0);
   const [invProducts, setInvProducts] = useState<InvoiceProduct[]>([]);
   const [pickerIndex, setPickerIndex] = useState<number | null>(null);
-  const [destination, setDestination] = useState<'inventory' | 'variable_cost' | 'fixed_cost'>('inventory');
   const [expiryDrafts, setExpiryDrafts] = useState<ExpiryProductDraft[]>([]);
   const [userCategories, setUserCategories] = useState<string[]>(DOC_CATEGORIES);
   const [processingMsgIdx, setProcessingMsgIdx] = useState(0);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [scanBusy, setScanBusy] = useState(false);
+  const [isSavingProducts, setIsSavingProducts] = useState(false);
   const backgroundRef = useRef(false);
   const processingRef = useRef(false);
 
@@ -199,11 +205,11 @@ export function CatalogScanModal({
     setResult(null);
     setInvProducts([]);
     setPickerIndex(null);
-    setDestination('inventory');
     setExpiryDrafts([]);
     setProcessingMsgIdx(0);
     setElapsedSec(0);
     setScanBusy(false);
+    setIsSavingProducts(false);
     backgroundRef.current = false;
     processingRef.current = false;
   }, []);
@@ -239,8 +245,9 @@ export function CatalogScanModal({
     if (stage !== 'processing') return;
     setProcessingMsgIdx(0);
     setElapsedSec(0);
+    const msgs = isSavingProducts ? SAVING_MESSAGES : PROCESSING_MESSAGES;
     const msgTimer = setInterval(() => {
-      setProcessingMsgIdx((i) => (i + 1) % PROCESSING_MESSAGES.length);
+      setProcessingMsgIdx((i) => (i + 1) % msgs.length);
     }, 3500);
     const secTimer = setInterval(() => {
       setElapsedSec((s) => s + 1);
@@ -249,17 +256,17 @@ export function CatalogScanModal({
       clearInterval(msgTimer);
       clearInterval(secTimer);
     };
-  }, [stage]);
+  }, [stage, isSavingProducts]);
 
   const handleClose = useCallback(() => {
-    if (stage === 'processing') {
+    if (stage === 'processing' && !isSavingProducts) {
       backgroundRef.current = true;
       onClose();
       return;
     }
     reset();
     onClose();
-  }, [stage, reset, onClose]);
+  }, [stage, isSavingProducts, reset, onClose]);
 
   const handleDoneClose = useCallback(async () => {
     await showInterstitial();
@@ -365,9 +372,11 @@ export function CatalogScanModal({
           setStage('invoice_preview');
           if (backgroundRef.current) {
             backgroundRef.current = false;
+            // Automatycznie otwórz okno zatwierdzenia — bez wracania do skanera ręcznie.
+            openDocumentScan('invoice');
             premiumAlert(
               'Faktura rozpoznana',
-              'Otwórz ponownie skaner, aby sprawdzić pozycje i zatwierdzić.',
+              'Sprawdź pozycje i zatwierdź — otworzyliśmy podgląd automatycznie.',
               [{ text: 'OK', style: 'primary' }],
             );
           }
@@ -391,7 +400,7 @@ export function CatalogScanModal({
         clearTimeout(timer);
       }
     },
-    [supplierId, ensureCredits, onMenuDetected, onClose, finishWithResult, premiumAlert]
+    [supplierId, ensureCredits, onMenuDetected, onClose, finishWithResult, premiumAlert, openDocumentScan]
   );
 
   const handlePickFile = useCallback(async () => {
@@ -458,6 +467,7 @@ export function CatalogScanModal({
 
   const confirmInvoice = useCallback(async (productsOverride?: Array<InvoiceProduct | CommitProduct>) => {
     if (!ensureCredits()) return;
+    setIsSavingProducts(true);
     setStage('processing');
     setError(null);
     processingRef.current = true;
@@ -473,7 +483,7 @@ export function CatalogScanModal({
           supplier_name: invSupplierName,
           total_amount: invTotal,
           products,
-          destination,
+          destination: 'inventory',
         }),
       });
       if (!res.ok) {
@@ -481,23 +491,21 @@ export function CatalogScanModal({
         throw new Error(friendlyApiError(res.status, detail));
       }
       const data = await res.json();
+      setIsSavingProducts(false);
       finishWithResult(data);
     } catch (e: any) {
       processingRef.current = false;
       setScanBusy(false);
+      setIsSavingProducts(false);
       setError(e.message ?? 'Nie udało się zaksięgować faktury.');
-      setStage(destination === 'inventory' && expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
+      setStage(expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
     }
-  }, [invSupplierId, invSupplierName, invTotal, invProducts, destination, ensureCredits, expiryDrafts.length, finishWithResult]);
+  }, [invSupplierId, invSupplierName, invTotal, invProducts, ensureCredits, expiryDrafts.length, finishWithResult]);
 
   const goToExpiryReview = useCallback(() => {
-    if (destination !== 'inventory') {
-      void confirmInvoice();
-      return;
-    }
     setExpiryDrafts(buildExpiryDrafts(invProducts));
     setStage('expiry_review');
-  }, [destination, invProducts, confirmInvoice]);
+  }, [invProducts]);
 
   const setRowCategory = useCallback((idx: number, cat: string) => {
     setInvProducts((prev) => prev.map((p, i) => (i === idx ? { ...p, category: cat } : p)));
@@ -613,15 +621,19 @@ export function CatalogScanModal({
             <View style={[styles.processingOrb, { backgroundColor: C.greenSoft, borderColor: C.green }]}>
               <ActivityIndicator size="large" color={C.green} />
             </View>
-            <Text style={[styles.analyzingTitle, { color: C.text }]}>Skan dokumentu AI</Text>
+            <Text style={[styles.analyzingTitle, { color: C.text }]}>
+              {isSavingProducts ? 'Zapisywanie produktów…' : 'Skan dokumentu AI'}
+            </Text>
             <Text style={[styles.analyzingSub, { color: C.body }]}>
-              {PROCESSING_MESSAGES[processingMsgIdx]}
+              {(isSavingProducts ? SAVING_MESSAGES : PROCESSING_MESSAGES)[
+                processingMsgIdx % (isSavingProducts ? SAVING_MESSAGES.length : PROCESSING_MESSAGES.length)
+              ]}
             </Text>
             <View style={[styles.processingCard, { backgroundColor: C.card, borderColor: C.border }]}>
               <Text style={[styles.processingCardText, { color: C.muted }]}>
-                Po zakończeniu agent zapisze dane we właściwych zakładkach (Dostawcy / Magazyn)
-                i wyświetli podsumowanie. Możesz zostawić ten ekran otwarty albo wrócić do pulpitu —
-                praca trwa w tle.
+                {isSavingProducts
+                  ? 'Zapisuję produkty w magazynie i koszt zmienny. Listy odświeżą się automatycznie.'
+                  : 'Po zakończeniu agent przygotuje podgląd pozycji. Możesz zostawić ten ekran otwarty albo wrócić do pulpitu — po rozpoznaniu faktury otworzymy zatwierdzenie automatycznie.'}
               </Text>
               <Text style={[styles.elapsed, { color: C.green }]}>
                 {elapsedSec < 60
@@ -629,14 +641,16 @@ export function CatalogScanModal({
                   : `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')}`}
               </Text>
             </View>
-            <TouchableOpacity
-              style={[styles.bgBtn, { borderColor: C.border }]}
-              onPress={handleClose}
-              activeOpacity={0.85}
-              testID="doc-scan-background"
-            >
-              <Text style={[styles.bgBtnText, { color: C.body }]}>Kontynuuj w tle</Text>
-            </TouchableOpacity>
+            {!isSavingProducts ? (
+              <TouchableOpacity
+                style={[styles.bgBtn, { borderColor: C.border }]}
+                onPress={handleClose}
+                activeOpacity={0.85}
+                testID="doc-scan-background"
+              >
+                <Text style={[styles.bgBtnText, { color: C.body }]}>Kontynuuj w tle</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         )}
 
@@ -704,35 +718,9 @@ export function CatalogScanModal({
               <View style={{ height: 12 }} />
             </ScrollView>
             <View style={[styles.footer, { backgroundColor: C.card, borderTopColor: C.border, paddingBottom: footerPad }]}>
-              <Text style={[styles.destLabel, { color: C.muted }]}>Gdzie zaksięgować?</Text>
-              <View style={styles.destRow}>
-                {(
-                  [
-                    ['inventory', 'Magazyn'],
-                    ['variable_cost', 'Koszt zmienny'],
-                    ['fixed_cost', 'Koszt stały'],
-                  ] as const
-                ).map(([id, label]) => (
-                  <TouchableOpacity
-                    key={id}
-                    style={[
-                      styles.destChip,
-                      { borderColor: C.border, backgroundColor: C.inputBg },
-                      destination === id && { borderColor: C.green, backgroundColor: C.greenSoft },
-                    ]}
-                    onPress={() => setDestination(id)}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[
-                      styles.destChipText,
-                      { color: C.muted },
-                      destination === id && { color: C.green },
-                    ]}>
-                      {label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+              <Text style={[styles.destLabel, { color: C.muted }]}>
+                Po zatwierdzeniu: magazyn (stan) + koszt zmienny automatycznie.
+              </Text>
               <TouchableOpacity
                 style={[styles.confirmBtn, { backgroundColor: C.green }]}
                 onPress={goToExpiryReview}
@@ -741,11 +729,7 @@ export function CatalogScanModal({
               >
                 <Check size={18} color={C.blackOnGreen} strokeWidth={2.5} />
                 <Text style={[styles.confirmBtnText, { color: C.blackOnGreen }]}>
-                  {destination === 'inventory'
-                    ? `Dalej → daty ważności (${invProducts.length})`
-                    : destination === 'variable_cost'
-                      ? 'Zatwierdź → koszt zmienny'
-                      : 'Zatwierdź → koszt stały'}
+                  Dalej → daty ważności ({invProducts.length})
                 </Text>
               </TouchableOpacity>
             </View>
@@ -775,12 +759,7 @@ export function CatalogScanModal({
                 </View>
                 <Text style={[styles.resultTitle, { color: C.text }]}>Faktura zaksięgowana</Text>
                 <Text style={[styles.resultSub, { color: C.body }]}>
-                  {result.supplier_name || 'Dostawca'} ·{' '}
-                  {(result as any).destination === 'fixed_cost'
-                    ? 'dopisano koszt stały.'
-                    : (result as any).destination === 'variable_cost'
-                      ? 'dopisano koszt zmienny.'
-                      : 'zaktualizowano magazyn i koszty.'}
+                  {result.supplier_name || 'Dostawca'} · zaktualizowano magazyn i dopisano koszt zmienny.
                 </Text>
                 <View style={styles.statsRow}>
                   <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>

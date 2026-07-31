@@ -28,6 +28,23 @@ export function isPremiumTrialActive(trialEndsAt: string | null | undefined): bo
   return Number.isFinite(t) && t > Date.now();
 }
 
+/** Tier efektywny do feature-gate: aktywny trial = min. poziom Profesjonalny (2). */
+export function effectiveFeatureTier(
+  tierLevel: number,
+  trialEndsAt: string | null | undefined,
+): number {
+  const tier = Number(tierLevel ?? 0);
+  return isPremiumTrialActive(trialEndsAt) ? Math.max(tier, 2) : tier;
+}
+
+/** Płatny Profesjonalny LUB aktywny trial Premium → pełny dostęp feature jak tier 2. */
+export function isPremiumEntitled(
+  tierLevel: number,
+  trialEndsAt: string | null | undefined,
+): boolean {
+  return effectiveFeatureTier(tierLevel, trialEndsAt) >= 2;
+}
+
 export type SubscriptionRow = {
   id: string;
   account_key: string;
@@ -47,6 +64,8 @@ export type SubscriptionState = {
   needs_migration?: boolean;
   load_error?: 'config' | 'network' | 'migration';
   tier_level: number;
+  /** Feature-gate tier: trial Premium → min. 2 (jak Profesjonalny). */
+  effective_tier_level: number;
   tier_name: string;
   credits_balance: number;
   status: string;
@@ -76,7 +95,8 @@ function buildView(row: SubscriptionRow, message?: string | null): SubscriptionS
   const trialEnds = row.trial_ends_at ?? null;
   const trialActive = isPremiumTrialActive(trialEnds);
   // Paid Profesjonalny LUB aktywny 30-dniowy trial → Łowca + feature gate jak tier 2
-  const premiumEntitled = tier >= 2 || trialActive;
+  const premiumEntitled = isPremiumEntitled(tier, trialEnds);
+  const effTier = effectiveFeatureTier(tier, trialEnds);
   const features = FEATURE_CATALOG.map((f) => {
     let reason: string | null = null;
     if (bal <= 0) {
@@ -102,6 +122,7 @@ function buildView(row: SubscriptionRow, message?: string | null): SubscriptionS
     topup_packages: TOPUP_PACKAGES,
     plans: TIER_PLANS,
     message: message ?? null,
+    effective_tier_level: effTier,
   };
 }
 
@@ -170,6 +191,7 @@ export async function fetchSubscriptionState(): Promise<SubscriptionState> {
       needs_migration: true,
       load_error: 'migration',
       tier_level: 0,
+      effective_tier_level: 0,
       tier_name: '—',
       credits_balance: 0,
       status: 'unknown',

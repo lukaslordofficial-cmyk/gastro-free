@@ -45,6 +45,7 @@ import {
   CriticalOrderEditor,
   DishPickEditor,
   IngredientNameSuggest,
+  JarvisSuggestBox,
   MenuCategorySuggest,
   NavigateScreenEditor,
   OrderProductEditor,
@@ -255,6 +256,19 @@ const COMMAND_EXAMPLES: { intent: Intent; example: string }[] = [
   { intent: 'filter_ui_inventory', example: 'Pokaż produkty z krytycznym stanem magazynowym' },
 ];
 
+/** Dodatkowe frazy PL/EN do typeaheadu przy niepewnej intencji. */
+const INTENT_SEARCH_ALIASES: Partial<Record<Intent, string[]>> = {
+  add_revenue: ['dodaj przychód', 'przychód', 'nowy przychód', 'utarg', 'add revenue', 'add income'],
+  add_fixed_cost: ['koszt stały', 'dodaj koszt stały', 'pensje', 'wynagrodzenia', 'fixed cost'],
+  add_variable_cost: ['koszt zmienny', 'dodaj koszt zmienny', 'variable cost'],
+  waste: ['strata', 'wyrzuciłem', 'waste'],
+  add_menu_item: ['dodaj do menu', 'nowe danie', 'add menu'],
+  summarize_custom_period: ['pokaż zyski', 'dane z okresu', 'podsumowanie'],
+  compare_two_periods: ['porównaj okresy', 'porównanie'],
+  upload_invoice: ['wgraj fakturę', 'skanuj fakturę'],
+  upload_offer: ['wgraj ofertę', 'skanuj ofertę'],
+};
+
 export function VoiceReportModal({
   visible,
   onClose,
@@ -300,6 +314,7 @@ export function VoiceReportModal({
   const [wakeStatus, setWakeStatus] = useState<string | null>(null);
   const [showCommands, setShowCommands] = useState(false);
   const [commandHint, setCommandHint] = useState<string | null>(null);
+  const [clarifyQuery, setClarifyQuery] = useState('');
   const [showWeightCheck, setShowWeightCheck] = useState(false);
   const [weightCheckItem, setWeightCheckItem] = useState<string | null>(null);
   const [weightCheckSuggestedG, setWeightCheckSuggestedG] = useState<number | null>(null);
@@ -742,6 +757,7 @@ export function VoiceReportModal({
         setCreditsNotice(`Ta akcja kosztowała: ${data.credits_deducted} kredytów. Pozostałe saldo: ${rem}.`);
       }
       setInterp(data);
+      setClarifyQuery('');
       // Intencje nawigacji/filtrów wykonujemy natychmiast (bez ekranu potwierdzenia).
       if (NAV_INTENTS.has(data.intent)) {
         performNavigation(data.intent, data.payload || {});
@@ -997,7 +1013,22 @@ export function VoiceReportModal({
         }));
       let categories = curEdited.categories;
       if (applyIntent === 'order_critical_items_by_category') {
-        if (!Array.isArray(categories) || categories.length === 0) categories = ['all'];
+        // NIGDY nie wstrzykuj categories=['all'] gdy puste — to dokładało
+        // wszystkie braki magazynowe do koszyka (np. przy samym „ser kozi”
+        // albo MIX bez rozpoznanej kategorii). „all” tylko gdy użytkownik/LLM
+        // jawnie wybrał „Wszystkie” / „wszystkie braki”.
+        if (!Array.isArray(categories)) categories = [];
+        const namedItems = Array.isArray(curEdited.items)
+          ? curEdited.items.filter((it: any) =>
+              String(it?.product_name || it?.name || '').trim())
+          : [];
+        if (categories.length === 0 && namedItems.length === 0) {
+          setErrorMsg(
+            'Wybierz kategorię braków (lub „Wszystkie”) albo dodaj produkt z nazwy.',
+          );
+          setStage('error');
+          return;
+        }
       }
       const payload = {
         ...curEdited,
@@ -1197,7 +1228,79 @@ export function VoiceReportModal({
     setApplyResult(null);
     setErrorMsg(null);
     setElapsed(0);
+    setClarifyQuery('');
   }
+
+  function applyClarifiedIntent(nextIntent: Intent) {
+    const prevPayload = { ...(interp?.payload || {}), ...(edited || {}) };
+    const amountFromPayload = Number(prevPayload.amount_pln);
+    const amountFromText = extractAmountFromText(transcript || '');
+    const merged: Record<string, any> = { ...prevPayload };
+    if (
+      (nextIntent === 'add_revenue' || nextIntent === 'add_fixed_cost' || nextIntent === 'add_variable_cost')
+      && !(amountFromPayload > 0)
+      && amountFromText != null
+    ) {
+      merged.amount_pln = amountFromText;
+    }
+    const seeded = seedPayload(nextIntent, merged, { transcript });
+    setInterp((prev) => (prev
+      ? {
+          ...prev,
+          intent: nextIntent,
+          confidence: 0.95,
+          reason: 'Wybrane z podpowiedzi (wpis / autocomplete)',
+          payload: seeded,
+        }
+      : {
+          intent: nextIntent,
+          confidence: 0.95,
+          reason: 'Wybrane z podpowiedzi (wpis / autocomplete)',
+          payload: seeded,
+        }));
+    setEdited(seeded);
+    setClarifyQuery('');
+  }
+
+  const needsIntentClarify = !!interp && (
+    interp.intent === 'unknown'
+    || (Array.isArray(interp.alternate_intents) && interp.alternate_intents.length >= 2)
+    || (typeof interp.confidence === 'number' && interp.confidence < 0.7)
+  );
+
+  const clarifySuggestions = useMemo(() => {
+    const q = clarifyQuery.trim().toLowerCase();
+    if (q.length < 1) return [];
+    const pool = visibleCommands.length
+      ? visibleCommands
+      : COMMAND_EXAMPLES.filter((c) => !isDealHunterIntent(c.intent) || dealHunterUnlocked);
+    const scored: { id: string; name: string; hint?: string; intent: Intent; score: number }[] = [];
+    for (const c of pool) {
+      if (c.intent === 'unknown') continue;
+      const meta = INTENT_META[c.intent];
+      const aliases = INTENT_SEARCH_ALIASES[c.intent] || [];
+      const hay = [
+        meta.label,
+        c.example,
+        c.intent.replace(/_/g, ' '),
+        ...aliases,
+      ].join(' ').toLowerCase();
+      if (!hay.includes(q) && !q.split(/\s+/).every((tok) => hay.includes(tok))) continue;
+      const starts =
+        meta.label.toLowerCase().startsWith(q)
+        || aliases.some((a) => a.startsWith(q))
+        || c.example.toLowerCase().startsWith(q);
+      scored.push({
+        id: c.intent,
+        name: `${meta.icon} ${meta.label}`,
+        hint: c.example,
+        intent: c.intent,
+        score: starts ? 0 : 1,
+      });
+    }
+    scored.sort((a, b) => a.score - b.score || a.name.localeCompare(b.name, 'pl'));
+    return scored.slice(0, 8).map(({ id, name, hint, intent }) => ({ id, name, hint, intent }));
+  }, [clarifyQuery, visibleCommands, dealHunterUnlocked]);
 
   const patchEdited = (patch: Record<string, any>) => {
     setEdited((prev) => {
@@ -1477,11 +1580,7 @@ export function VoiceReportModal({
                           styles.altIntentBtn,
                           interp.intent === alt.intent && styles.altIntentBtnOn,
                         ]}
-                        onPress={() => {
-                          const nextIntent = alt.intent as Intent;
-                          setInterp((prev) => prev ? { ...prev, intent: nextIntent, confidence: 0.9 } : prev);
-                          setEdited((prev) => seedPayload(nextIntent, { ...prev, ...interp.payload }));
-                        }}
+                        onPress={() => applyClarifiedIntent(alt.intent as Intent)}
                         activeOpacity={0.85}
                       >
                         <Text style={[styles.altIntentText, interp.intent === alt.intent && { color: '#0A0A0A' }]}>
@@ -1489,6 +1588,37 @@ export function VoiceReportModal({
                         </Text>
                       </TouchableOpacity>
                     ))}
+                    <Text style={styles.clarifyHint}>Albo wpisz, co chcesz zrobić:</Text>
+                    <JarvisSuggestBox
+                      query={clarifyQuery}
+                      onChangeQuery={setClarifyQuery}
+                      suggestions={clarifySuggestions}
+                      onPick={(s) => {
+                        const intent = (s.id || '') as Intent;
+                        if (intent && INTENT_META[intent]) applyClarifiedIntent(intent);
+                      }}
+                      placeholder="np. dodaj przychód, koszt stały…"
+                      testID="voice-clarify-input"
+                    />
+                  </View>
+                ) : needsIntentClarify ? (
+                  <View style={styles.altIntentsBox} testID="voice-clarify-box">
+                    <Text style={styles.periodConfirmWarn}>
+                      {interp.intent === 'unknown'
+                        ? 'Nie rozpoznano komendy — wpisz, co chcesz zrobić:'
+                        : 'Jarvis nie jest pewien — doprecyzuj wpisując komendę:'}
+                    </Text>
+                    <JarvisSuggestBox
+                      query={clarifyQuery}
+                      onChangeQuery={setClarifyQuery}
+                      suggestions={clarifySuggestions}
+                      onPick={(s) => {
+                        const intent = (s.id || '') as Intent;
+                        if (intent && INTENT_META[intent]) applyClarifiedIntent(intent);
+                      }}
+                      placeholder="np. dodaj przychód, koszt stały…"
+                      testID="voice-clarify-input"
+                    />
                   </View>
                 ) : null}
 
@@ -1532,7 +1662,7 @@ export function VoiceReportModal({
                   />
                 )}
 
-                {interp.intent === 'unknown' && (
+                {interp.intent === 'unknown' && !needsIntentClarify && (
                   <View style={styles.errorBox}>
                     <AlertTriangle size={14} color={Colors.danger} strokeWidth={2.5} />
                     <Text style={styles.errorText}>
@@ -1542,6 +1672,12 @@ export function VoiceReportModal({
                     </Text>
                   </View>
                 )}
+
+                {interp.intent === 'unknown' && needsIntentClarify ? (
+                  <Text style={styles.editHint}>
+                    Wybierz podpowiedź powyżej albo nagraj jeszcze raz z jaśniejszą komendą.
+                  </Text>
+                ) : null}
 
                 <View style={styles.actionsRow}>
                   <TouchableOpacity style={styles.secondaryBtn} onPress={resetAll} activeOpacity={0.85} testID="voice-review-retry">
@@ -3403,6 +3539,20 @@ function correctPeriodIntentFromTranscript(
  * Convert those 0s to null so the TextInput shows placeholder — makes the user
  * notice they must fill it in instead of silently saving zero.
  */
+function extractAmountFromText(text: string): number | null {
+  if (!text) return null;
+  // Prefer jawne kwoty przy słowach finansowych; inaczej ostatnia sensowna liczba w tekście.
+  const normalized = text.replace(/\u00a0/g, ' ').replace(/(\d)\s+(\d{3})\b/g, '$1$2');
+  const moneyNear = normalized.match(
+    /(?:przych[oó]d|utarg|wpłat|kwot|zł|pln|koszt|pensj|wynagrodzeni)[^\d]{0,24}(\d+(?:[.,]\d{1,2})?)/i,
+  );
+  const raw = moneyNear?.[1]
+    ?? [...normalized.matchAll(/\b(\d{2,6}(?:[.,]\d{1,2})?)\b/g)].map((m) => m[1]).pop();
+  if (!raw) return null;
+  const n = Number(String(raw).replace(',', '.'));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function seedPayload(
   intent: Intent,
   payload: Record<string, any>,
@@ -3434,24 +3584,41 @@ function seedPayload(
     let cats: string[] = [];
     if (Array.isArray(raw)) cats = raw.filter((x) => typeof x === 'string' && x.trim());
     else if (typeof raw === 'string' && raw.trim()) cats = [raw.trim()];
-    if (opts?.fromLegend || cats.length === 0) cats = [];
+    // Z legendy: użytkownik sam zaznacza kategorie (nie zgaduj „all”)
+    if (opts?.fromLegend) cats = [];
     p.categories = cats;
-    if (!p.stock_target) p.stock_target = 'critical';
+    // „Brakujące / krytyczne” = critical. Optimal tylko gdy LLM/UI jawnie poda.
+    // NIE nadpisuj critical→optimal — to wciągało produkty poza zakresem braków.
+    const st = String(p.stock_target || '').trim().toLowerCase();
+    if (st !== 'optimal' && st !== 'critical') {
+      p.stock_target = 'critical';
+    } else {
+      p.stock_target = st;
+    }
     // MIX: „ser kozi + brakujące warzywa” — zachowaj items[] z interpretacji
     if (!Array.isArray(p.items)) p.items = [];
     else {
       p.items = p.items
         .filter((it: any) => it && String(it.product_name || it.name || '').trim())
-        .map((it: any) => ({
-          product_name: String(it.product_name || it.name || '').trim(),
-          quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1,
-          unit: String(it.unit || 'szt').trim() || 'szt',
-        }));
+        .map((it: any) => {
+          const rawQty = Number(it.quantity);
+          const unit = String(it.unit || 'szt').trim() || 'szt';
+          // Voice często wstawia „1 szt” bez sensu — zostaw puste pod „Stan optymalny”
+          const isPlaceholderSzt =
+            Number.isFinite(rawQty) && rawQty === 1 && /^(szt|sztuka|sztuki|opak|op)$/i.test(unit);
+          const qty =
+            Number.isFinite(rawQty) && rawQty > 0 && !isPlaceholderSzt ? rawQty : null;
+          return {
+            product_name: String(it.product_name || it.name || '').trim(),
+            quantity: qty,
+            unit,
+          };
+        });
     }
   }
   if (intent === 'order_product') {
     if (!Array.isArray(p.items) || p.items.length === 0) {
-      p.items = [{ product_name: '', quantity: 1, unit: 'szt' }];
+      p.items = [{ product_name: '', quantity: null, unit: 'szt' }];
     }
   }
   if (intent === 'bulk_edit_menu_prices_percentage' || intent === 'bulk_edit_menu_prices_fixed') {
@@ -3690,6 +3857,12 @@ const styles = StyleSheet.create({
     borderColor: DS.color.greenEnd,
   },
   altIntentText: { fontSize: 13, fontWeight: '700', color: DS.color.heading },
+  clarifyHint: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: DS.color.muted,
+    marginTop: 4,
+  },
   wakeStatus: { fontSize: 11, color: Colors.textSecondary, textAlign: 'center' },
   recBtn: {
     width: 96, height: 96, borderRadius: 48, alignItems: 'center', justifyContent: 'center',

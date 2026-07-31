@@ -1187,8 +1187,9 @@ function resolveDishCategoryPlaceholder(
     // Zupy — tylko gdy nazwa/kategoria ma kontekst zupy (nie „kurczak” sam)
     { keys: ['zupa', 'rosol', 'barszcz', 'zurek', 'flaki', 'chowder', 'bisque', 'gazpacho', 'bulion', 'zupy', 'krupnik', 'kapusniak', 'chlodnik'], slug: 'rosol' },
     { keys: ['krem z ', 'kremem'], slug: 'rosol' },
-    // Mięsa / filety / piersi — PRZED ogólnymi regułami
-    { keys: ['filet', 'piers', 'kurczak', 'schab', 'kotlet', 'de volaille', 'udziec', 'skrzyde', 'indyk', 'kaczka', 'poledwic', 'antrykot', 'karkow'], slug: 'kotlet_schabowy' },
+  // Mięsa / filety / piersi / drób — PRZED ogólnymi regułami
+    { keys: ['kaczka', 'udko', 'udo kacz', 'pekinsk', 'peking duck', 'magret'], slug: 'pieczona_kaczka' },
+    { keys: ['filet', 'piers', 'kurczak', 'schab', 'kotlet', 'de volaille', 'udziec', 'skrzyde', 'indyk', 'poledwic', 'antrykot', 'karkow'], slug: 'kotlet_schabowy' },
     { keys: ['burger', 'smash', 'cheeseburger', 'hamburger', 'sandwich', 'kanapka', 'burgery'], slug: 'classic_cheeseburger' },
     { keys: ['frytk', 'nachos', 'hot dog', 'nugget', 'taco', 'zapiekank', 'street', 'wings', 'onion ring', 'quesadilla'], slug: 'french_fries' },
     { keys: ['tatar', 'carpaccio', 'ceviche', 'ostrygi', 'foie', 'gravlax', 'przystawk', 'tataki', 'krewet', 'starter'], slug: 'beef_tartare' },
@@ -1297,6 +1298,9 @@ export type ResolvedProductImage = {
   uri: string | null;
   localAsset?: number;
   score: number;
+  /** Cascading match tier — UI badge for placeholders */
+  matchTier?: 'exact' | 'tags' | 'category';
+  placeholderLabel?: string;
 };
 
 /** Cache dopasowań bez exclude — Menu/Magazyn nie skanują katalogu przy każdym wierszu. */
@@ -1317,10 +1321,21 @@ function rememberResolve(key: string, value: ResolvedProductImage | null): Resol
   return value;
 }
 
-function toImageSource(r: ResolvedProductImage | null): number | { uri: string } {
+function toImageSource(r: ResolvedProductImage | null, preferDishes = false): number | { uri: string } {
   if (r?.localAsset != null) return r.localAsset;
   if (r?.uri) return { uri: r.uri };
-  // Unikaj białych opakowań jako fallback dania — lepiej skrzynka / mięso niż karton
+  // Menu / dania: NIGDY skrzynka warzyw / kartony — brak matcha = brak źródła (caller używa category placeholder)
+  if (preferDishes) {
+    try {
+      return require('@/assets/premium/dishes/dinners/dinner_04.webp'); // pieczona kaczka / danie główne fallback visual
+    } catch {
+      try {
+        return require('@/assets/premium/dishes/soups_pl/soup_pl_01.webp');
+      } catch {
+        return require('@/assets/premium/placeholders/ph_mieso_surowe_stek.webp');
+      }
+    }
+  }
   try {
     return require('@/assets/premium/placeholders/ph_skrzynka_warzywa.webp');
   } catch {
@@ -1438,24 +1453,38 @@ export function resolveProductImage(
     ? [dishCatalog(), catalogAll().filter((e) => !isPackagingEntry(e) && e.category !== 'placeholdery')]
     : [catalogAll()];
 
-  // Menu / receptury: najpierw ścisły matcher dań
+  // Menu / receptury: cascading waterfall matcher (exact → tags → category)
   if (preferDishes) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { findDishImageMatch } = require('@/lib/dishImageMatch') as {
-        findDishImageMatch: (
+      const { resolveDishMatchWithFallback } = require('@/lib/dishImageMatch') as {
+        resolveDishMatchWithFallback: (
           name: string,
           catalog: ProductImageEntry[],
-        ) => { slug: string; score: number; entry: ProductImageEntry } | undefined;
+          opts?: { menuCategory?: string; excludeSlugs?: Set<string> | string[] },
+        ) =>
+          | {
+              slug: string;
+              score: number;
+              entry: ProductImageEntry;
+              tier: 'exact' | 'tags' | 'category';
+              placeholderLabel?: string;
+            }
+          | undefined;
       };
-      const strict = findDishImageMatch(productName, dishCatalog());
-      if (strict && strict.score >= 85 && (!excluded || !excluded.has(strict.slug))) {
-        const resolved = {
-          slug: strict.entry.slug,
-          labelPl: strict.entry.labelPl,
-          uri: publicIconUrl(strict.entry.storagePath),
-          localAsset: strict.entry.localAsset,
-          score: strict.score,
+      const water = resolveDishMatchWithFallback(productName, dishCatalog(), {
+        menuCategory,
+        excludeSlugs: excluded ?? undefined,
+      });
+      if (water) {
+        const resolved: ResolvedProductImage = {
+          slug: water.entry.slug,
+          labelPl: water.entry.labelPl,
+          uri: publicIconUrl(water.entry.storagePath),
+          localAsset: water.entry.localAsset,
+          score: water.score,
+          matchTier: water.tier,
+          placeholderLabel: water.placeholderLabel,
         };
         return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
       }
@@ -1560,33 +1589,37 @@ export function resolveProductImage(
 
   const best = ranked[0] ?? null;
 
-  // Poziom 2 — kategoria premium (tylko Menu)
+  // Poziom 2 — kategoria premium (tylko Menu) — nigdy packaging / skrzynka
   if (preferDishes) {
     const catPh = resolveDishCategoryPlaceholder(q, menuCategory);
     if (catPh && !isPackagingEntry(catPh)) {
-      const resolved = {
+      const resolved: ResolvedProductImage = {
         slug: catPh.slug,
         labelPl: catPh.labelPl,
         uri: publicIconUrl(catPh.storagePath),
         localAsset: catPh.localAsset,
         score: 45,
+        matchTier: 'category',
+        placeholderLabel: menuCategory?.trim() || 'Danie',
       };
       return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
     }
+    // Soft keyword placeholders — TYLKO cooked dish paths, nigdy ph_skrzynka / kartony / opakowania
     const soft = resolvePlaceholderByKeywords(q);
     if (
       soft &&
       !isPackagingEntry(soft) &&
-      !String(soft.slug).startsWith('ph_pojemniki') &&
-      !String(soft.slug).startsWith('ph_kartony') &&
-      !String(soft.slug).startsWith('ph_skrzynka') // warzywa crate ≠ danie
+      !String(soft.slug).startsWith('ph_') &&
+      isCookedDishPath(soft)
     ) {
-      const resolved = {
+      const resolved: ResolvedProductImage = {
         slug: soft.slug,
         labelPl: soft.labelPl,
         uri: publicIconUrl(soft.storagePath),
         localAsset: soft.localAsset,
         score: 40,
+        matchTier: 'category',
+        placeholderLabel: menuCategory?.trim() || 'Danie',
       };
       return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
     }
@@ -1700,17 +1733,32 @@ export function imageSourceForProduct(
 
 /**
  * Jednorazowo przypisz unikalne grafiki do listy dań (O(n) resolve zamiast O(n²) per karta).
+ * Zwraca źródło + tier/badge do UI.
  */
+export type DishThumbAssignment = {
+  source: number | { uri: string };
+  slug?: string;
+  matchTier?: 'exact' | 'tags' | 'category';
+  placeholderLabel?: string;
+  score?: number;
+};
+
 export function assignUniqueDishImageSources(
   items: ReadonlyArray<{ name: string; category?: string }>,
-): Map<string, number | { uri: string }> {
+): Map<string, DishThumbAssignment> {
   const used = new Set<string>();
-  const out = new Map<string, number | { uri: string }>();
+  const out = new Map<string, DishThumbAssignment>();
   for (const item of items) {
     if (out.has(item.name)) continue;
     const r = resolveProductImage(item.name, used, true, item.category);
     if (r?.slug) used.add(r.slug);
-    out.set(item.name, toImageSource(r));
+    out.set(item.name, {
+      source: toImageSource(r, true),
+      slug: r?.slug,
+      matchTier: r?.matchTier,
+      placeholderLabel: r?.placeholderLabel,
+      score: r?.score,
+    });
   }
   return out;
 }
@@ -1730,5 +1778,5 @@ export function imageSourceForProductUnique(
     const r = resolveProductImage(n, undefined, true);
     if (r?.slug) used.add(r.slug);
   }
-  return toImageSource(resolveProductImage(productName, used, true, menuCategory));
+  return toImageSource(resolveProductImage(productName, used, true, menuCategory), true);
 }

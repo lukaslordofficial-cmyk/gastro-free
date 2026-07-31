@@ -1773,6 +1773,9 @@ export function DealHunterModal({
       }
       return out;
     })();
+    const packNotes: string[] = Array.isArray((result as any)?.pack_adjustment_notes)
+      ? ((result as any).pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
+      : [];
 
     return (
       <View style={styles.editCart} testID="deal-hunter-edit-cart">
@@ -1843,6 +1846,16 @@ export function DealHunterModal({
           })
         )}
 
+        {packNotes.length > 0 ? (
+          <View style={[styles.missingBox, { borderColor: C.accent, backgroundColor: C.isPremium ? 'rgba(92,255,176,0.08)' : 'rgba(0,0,0,0.04)' }]} testID="deal-hunter-pack-notes">
+            <Text style={[styles.missingTitle, { color: C.accentDark || C.accent }]}>Dopasowanie opakowań</Text>
+            {packNotes.map((note, i) => (
+              <Text key={`pack-note-${i}`} style={[styles.missingName, { color: C.text, marginBottom: 6 }]}>
+                {note}
+              </Text>
+            ))}
+          </View>
+        ) : null}
         {missingNotes.length > 0 ? (
           <View style={styles.missingBox} testID="deal-hunter-missing-notes">
             <Text style={styles.missingTitle}>Brak w ofercie dostawców</Text>

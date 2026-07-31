@@ -23,7 +23,7 @@ import uuid
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Literal
+from typing import Any, Optional, Literal, Tuple
 
 import re
 import unicodedata
@@ -1206,41 +1206,44 @@ DOSTĘPNE INTENCJE:
     „zamów mięso i nabiał", „zamów braki z warzyw", „uzupełnij magazyn",
     „ile brakuje", „braki magazynowe", „zamów wszystko czego brakuje",
     MIX: „zamów ser kozi, filet z kurczaka i wszystkie brakujące warzywa".
-    * pole `categories: string[]` — twarda lista nazw kategorii magazynowych.
+    * pole `categories: string[]` — TYLKO nazwy KATEGORII magazynowych (NIGDY nazwy produktów!).
       Sztywne nazwy do dopasowania (użyj dokładnie tych stringów):
         'Mięso i wędliny', 'Ryby i owoce morza', 'Nabiał', 'Warzywa i owoce', 'Pieczywo',
         'Suchy magazyn', 'Oleje i tłuszcze', 'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole',
         'Wywary i sosy', 'Chemia i czystość', 'Opakowania', 'Inne'.
-    * Fuzzy dopasowanie po potocznych słowach użytkownika:
-        „mięso"/„wędliny"/„wołowinę" → 'Mięso i wędliny'
-        „ryby"/„łosoś"/„krewetki"    → 'Ryby i owoce morza'
-        „nabiał"/„mleko"/„sery"      → 'Nabiał'
+    * Fuzzy dopasowanie po potocznych słowach KATEGORII (nie produktów!):
+        „mięso"/„wędliny"            → 'Mięso i wędliny'
+        „ryby"/„owoce morza"         → 'Ryby i owoce morza'
+        „nabiał"                     → 'Nabiał'
         „warzywa"/„owoce"/„jarzyny"  → 'Warzywa i owoce'
-        „pieczywo"/„chleb"           → 'Pieczywo'
-        „napoje"/„soki"/„woda"       → 'Napoje'
-        „alkohole"/„wódka"/„piwo"    → 'Alkohole'
-        „mrożonki"/„mrożone"          → 'Mrożonki'
-        „suchy"/„makarony"/„mąka"    → 'Suchy magazyn'
-        „olej"/„oliwa"/„tłuszcze"    → 'Oleje i tłuszcze'
+        „pieczywo"                   → 'Pieczywo'
+        „napoje"                     → 'Napoje'
+        „alkohole"                   → 'Alkohole'
+        „mrożonki"/„mrożone"         → 'Mrożonki'
+        „suchy magazyn"/„suchy"      → 'Suchy magazyn'
+        „olej"/„tłuszcze"            → 'Oleje i tłuszcze'
         „przyprawy"                  → 'Przyprawy'
-        „wywary"/„sosy"/„bulion"     → 'Wywary i sosy'
+        „wywary"/„sosy"              → 'Wywary i sosy'
         „chemia"/„środki czystości"  → 'Chemia i czystość'
-        „opakowania"/„kubki"/„folie" → 'Opakowania'
+        „opakowania"                 → 'Opakowania'
+    * stock_target:
+        „brakujące"/„braki"/„krytyczne"/„kończy się" → "critical" (DOMYŚLNE)
+        „do optymalnego"/„uzupełnij magazyn do pełna" → "optimal"
     * Jeśli użytkownik mówi „zamów WSZYSTKIE braki"/„zamów wszystko czego brakuje"
       bez wskazania kategorii → categories = ["all"].
-    * Jeśli mówi „zamów mięso i nabiał" → categories = ["Mięso i wędliny", "Nabiał"].
+      NIGDY nie ustawiaj categories=["all"], gdy użytkownik wymienił konkretną kategorię
+      LUB konkretne produkty z nazwy.
+    * Jeśli mówi „zamów mięso i nabiał" → categories = ["Mięso i wędliny", "Nabiał"], items = null.
     * MIX nazwy + kategoria (WAŻNE): gdy wymienia KONKRETNE produkty ORAZ braki z kategorii
-      (np. „zamów ser kozi, filet z kurczaka i wszystkie brakujące warzywa"):
+      (np. „zamów ser kozi i brakujące mięso"):
         intent = order_critical_items_by_category
-        categories = ["Warzywa i owoce"]
-        items = [
-          {{"product_name": "ser kozi", "quantity": 1, "unit": "szt"}},
-          {{"product_name": "filet z kurczaka", "quantity": 1, "unit": "kg"}}
-        ]
-      (użyj sensownych domyślnych quantity/unit gdy użytkownik nie podał ilości;
-       dopasuj nazwy do listy składników magazynu jeśli pasują).
-      Backend scali nazwiane pozycje z brakami kategorii w jeden koszyk Łowcy.
-    * Samo „zamów ser kozi i filet" BEZ kategorii braków → użyj "order_product" (items[]).
+        categories = ["Mięso i wędliny"]   ← TYLKO kategoria braków, NIE „ser kozi”
+        items = [{{"product_name": "ser kozi", "quantity": null, "unit": "szt"}}]
+        stock_target = "critical"
+      Backend scali nazwiane pozycje z brakami WYŁĄCZNIE wskazanej kategorii.
+      NIE dodawaj produktów z innych kategorii / globalnych braków.
+    * Samo „zamów ser kozi i filet" BEZ kategorii braków → użyj "order_product" (items[]),
+      categories = null. NIE używaj order_critical_items_by_category.
     * Same braki kategorii BEZ nazwanych produktów → categories wypełnione, items = null.
 
 14. "supplier_flip_order" – PRZERZUCENIE koszyka z jednego dostawcy do drugiego (zmiana ceny/oferty).
@@ -1787,10 +1790,11 @@ async def _check_ai_access(client: httpx.AsyncClient, *, needs_credits: bool = T
             detail="Moduł „Łowca Okazji” dostępny w planie Profesjonalnym (Tier 2) "
                    "lub podczas 30-dniowego trialu Premium. "
                    "Ulepsz subskrypcję w zakładce Subskrypcja.")
-    if needs_credits and int(sub.get("credits_balance") or 0) <= 0:
+    bal = int(sub.get("credits_balance") or 0)
+    if needs_credits and bal <= 0:
         raise HTTPException(
             status_code=403,
-            detail="Brak kredytów AI. Doładuj portfel w zakładce Subskrypcja, "
+            detail=f"Brak kredytów AI (saldo: {bal}). Doładuj portfel w zakładce Subskrypcja, "
                    "aby korzystać z funkcji AI (operacje ręczne pozostają dostępne).")
     return sub
 
@@ -2330,18 +2334,26 @@ def _normalize_recipe_quantity(qty, unit: str = "") -> int:
 
 
 def _apply_integer_quantities_to_dishes(dishes: list) -> None:
-    """In-place: quantity → int ≥ 1 dla suggest-recipe / confirm-scan."""
+    """In-place: quantity → int ≥ 1 dla suggest-recipe / confirm-scan.
+
+    Null quantity (OCR bez gramatury) → 1, żeby AI/skan nigdy nie zapisał 0.
+    """
     for d in dishes:
         for ing in _iter_ingredients(d):
             if isinstance(ing, dict):
-                if ing.get("quantity") is None:
-                    continue
-                ing["quantity"] = _normalize_recipe_quantity(ing.get("quantity"), ing.get("unit") or "")
+                q = ing.get("quantity")
+                ing["quantity"] = _normalize_recipe_quantity(
+                    1 if q is None else q, ing.get("unit") or ""
+                )
             else:
                 q = getattr(ing, "quantity", None)
-                if q is None:
-                    continue
-                setattr(ing, "quantity", _normalize_recipe_quantity(q, getattr(ing, "unit", "") or ""))
+                setattr(
+                    ing,
+                    "quantity",
+                    _normalize_recipe_quantity(
+                        1 if q is None else q, getattr(ing, "unit", "") or ""
+                    ),
+                )
 
 
 def _normalize_inspiration_quantities(recipe) -> None:
@@ -4295,6 +4307,60 @@ class ConfirmInvoiceRequest(BaseModel):
     destination: str = "inventory"
 
 
+async def _upsert_supplier_catalog_from_invoice(
+    client: httpx.AsyncClient,
+    supplier_id: str,
+    products: list[dict],
+) -> int:
+    """Dodaje/aktualizuje pozycje faktury w supplier_catalog danego dostawcy."""
+    if not supplier_id or not products:
+        return 0
+    has_extra = await _has_catalog_extra_cols(client)
+    existing = await sb_get(
+        client,
+        "supplier_catalog",
+        params={"select": "id,name,sort_order", "supplier_id": f"eq.{supplier_id}"},
+    ) or []
+    by_name = {_norm(r["name"]): r for r in existing}
+    max_sort = max((int(r.get("sort_order") or 0) for r in existing), default=0)
+    saved = 0
+    for p in products:
+        name = (p.get("product_name") or "").strip()
+        if not name:
+            continue
+        price = float(p.get("price_netto") or 0)
+        unit = (p.get("unit") or "szt").strip() or "szt"
+        variant = unit or name
+        payload: dict = {
+            "supplier_id": supplier_id,
+            "name": name,
+            "variant": variant,
+            "volume_label": "",
+            "price_pln": price,
+            "unit_count": 1,
+            "liters_total": 0,
+        }
+        if has_extra:
+            payload["unit"] = unit
+        match = by_name.get(_norm(name))
+        try:
+            if match:
+                upd = {"price_pln": price, "variant": variant}
+                if has_extra:
+                    upd["unit"] = unit
+                await sb_patch(client, "supplier_catalog", {"id": f"eq.{match['id']}"}, upd)
+            else:
+                max_sort += 1
+                payload["sort_order"] = max_sort
+                row = await sb_post(client, "supplier_catalog", payload)
+                if row:
+                    by_name[_norm(name)] = (row[0] if isinstance(row, list) else row)
+            saved += 1
+        except httpx.HTTPStatusError:
+            continue
+    return saved
+
+
 async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_name: str,
                         products: list[dict], total: float,
                         destination: str = "inventory") -> dict:
@@ -4489,17 +4555,55 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
 
         if total > 0:
             cost_name = f"Faktura — {supplier_name}".strip(" —") or "Zakup towaru (faktura)"
+            line_payload = {
+                "v": 1,
+                "kind": "invoice_lines",
+                "supplier_id": supplier_id,
+                "supplier_name": supplier_name,
+                "total": float(total or 0),
+                "lines": [
+                    {
+                        "name": (p.get("product_name") or "").strip(),
+                        "qty": float(p.get("quantity") or 0),
+                        "unit": (p.get("unit") or "szt").strip(),
+                        "price_netto": float(p.get("price_netto") or 0),
+                    }
+                    for p in products
+                    if (p.get("product_name") or "").strip()
+                ],
+            }
+            try:
+                import json as _json
+                note_body = (
+                    f"Skan faktury · supplier:{supplier_id}\n"
+                    f"GM_INVOICE_LINES:{_json.dumps(line_payload, ensure_ascii=False)}"
+                )
+            except Exception:
+                note_body = f"Skan faktury · supplier:{supplier_id}"
             try:
                 cost_row = await sb_post(client, "variable_cost_entries", {
                     "year_month": _current_year_month(),
                     "type": "materials",
                     "name": cost_name,
                     "amount_pln": total,
-                    "note": f"Skan faktury · supplier:{supplier_id}",
+                    "note": note_body,
                 })
                 cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
             except httpx.HTTPStatusError as e:
                 warnings.append(f"Nie udało się dopisać kosztu: {e.response.text[:80]}")
+
+        # Katalog własny dostawcy — produkty z faktury (nowy lub istniejący dostawca)
+        if supplier_id and (updated or created or products):
+            try:
+                catalog_saved = await _upsert_supplier_catalog_from_invoice(
+                    client, supplier_id, products
+                )
+                if catalog_saved:
+                    warnings.append(
+                        f"Dodano/zaktualizowano {catalog_saved} poz. w katalogu dostawcy."
+                    )
+            except Exception as ce:  # noqa: BLE001
+                warnings.append(f"Katalog dostawcy: nie udało się zsynchronizować ({ce}).")
 
         if updated or created:
             try:
@@ -4513,12 +4617,37 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
             total = sum(float(p.get("quantity") or 0) * float(p.get("price_netto") or 0) for p in products)
         cost_name = f"Faktura (koszt zmienny) — {supplier_name}".strip(" —") or "Koszt zmienny (skan)"
         try:
+            import json as _json
+            line_payload = {
+                "v": 1,
+                "kind": "invoice_lines",
+                "supplier_id": supplier_id,
+                "supplier_name": supplier_name,
+                "total": float(total or 0),
+                "lines": [
+                    {
+                        "name": (p.get("product_name") or "").strip(),
+                        "qty": float(p.get("quantity") or 0),
+                        "unit": (p.get("unit") or "szt").strip(),
+                        "price_netto": float(p.get("price_netto") or 0),
+                    }
+                    for p in products
+                    if (p.get("product_name") or "").strip()
+                ],
+            }
+            note_body = (
+                f"Skan faktury → koszt zmienny · supplier:{supplier_id}\n"
+                f"GM_INVOICE_LINES:{_json.dumps(line_payload, ensure_ascii=False)}"
+            )
+        except Exception:
+            note_body = f"Skan faktury → koszt zmienny · supplier:{supplier_id} · {len(products)} poz."
+        try:
             cost_row = await sb_post(client, "variable_cost_entries", {
                 "year_month": _current_year_month(),
                 "type": "materials",
                 "name": cost_name,
                 "amount_pln": float(total),
-                "note": f"Skan faktury → koszt zmienny · supplier:{supplier_id} · {len(products)} poz.",
+                "note": note_body,
             })
             cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
         except httpx.HTTPStatusError as e:
@@ -4700,7 +4829,8 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
 @app.post("/api/documents/confirm-invoice")
 async def confirm_invoice(req: ConfirmInvoiceRequest):
     """Zatwierdzenie faktury z podglądu (po ewentualnej korekcie kategorii).
-    Zwiększa magazyn + dopisuje koszt. Tworzy dostawcę jeśli podano tylko nazwę."""
+    Zawsze: aktualizacja/utworzenie produktów w magazynie + koszt zmienny (materiały).
+    Tworzy dostawcę jeśli podano tylko nazwę; dopisuje pozycje do katalogu dostawcy."""
     require_tenant_account_key()
     if not req.products:
         raise HTTPException(status_code=400, detail="Brak pozycji do zaksięgowania.")
@@ -4715,9 +4845,10 @@ async def confirm_invoice(req: ConfirmInvoiceRequest):
             supplier_id, supplier_name = await _find_or_create_supplier(client, req.supplier_name)
 
         products = [p.model_dump() for p in req.products]
+        # Zakupy: magazyn + koszt zmienny (ignorujemy stare destination tiles z FE).
         result = await _save_invoice(
             client, supplier_id, supplier_name, products, float(req.total_amount or 0),
-            destination=getattr(req, "destination", None) or "inventory",
+            destination="inventory",
         )
     return {"document_type": "FAKTURA_ZAKUPOWA", **result}
 
@@ -4835,7 +4966,7 @@ async def portions_yield(item_id: str):
 
 MENU_CATEGORIES = [
     "Przystawki", "Zupy", "Sałatki", "Burgery", "Dania główne",
-    "Makarony", "Pizza", "Desery", "Napoje", "Alkohole", "Inne",
+    "Makarony", "Pizza", "Desery", "Napoje", "Alkohole", "Półprodukty", "Inne",
 ]
 
 _MENU_SCAN_JSON_SCHEMA = {
@@ -4891,7 +5022,9 @@ _MENU_SCAN_SYSTEM_PROMPT = (
     "Dla każdej pozycji:\n"
     "- name: nazwa dania (bez ceny, bez gramatury; np. 'Burger Podwójny').\n"
     "- category: jedna z dozwolonych kategorii: "
-    f"{', '.join(MENU_CATEGORIES)}. Wybierz najbardziej pasującą na podstawie nazwy i sekcji menu.\n"
+    f"{', '.join(MENU_CATEGORIES)}. Wybierz najbardziej pasującą na podstawie nazwy i sekcji menu. "
+    "Pozycje typu półprodukt / mise en place / warzywa grillowane / pieczone / mix sałat "
+    "(przygotowywane wewnętrznie, nie danie sprzedażowe) → kategoria 'Półprodukty'.\n"
     "- price_pln: cena w PLN jako liczba dziesiętna (przecinek zamień na kropkę, "
     "usuń symbole '/zł/PLN'). Jeśli brak ceny → 0.\n"
     "- portion_weight_value: gramatura porcji jeśli widoczna na menu (np. '250 g' → 250, "
@@ -4927,6 +5060,58 @@ class MenuScanDish(BaseModel):
     portion_weight_value: Optional[float] = None
     portion_weight_unit: Optional[str] = None
     ingredients: list[MenuScanIngredient] = Field(default_factory=list)
+    image_context_tags: list[str] = Field(default_factory=list)
+
+
+def _norm_pl_tag(raw: str) -> str:
+    import unicodedata
+    s = (raw or "").lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _extract_image_context_tags(name: str) -> list[str]:
+    """Heurystyczne tagi grafiki z nazwy dania (bez dodatkowego kosztu OpenAI)."""
+    n = _norm_pl_tag(name)
+    tags: list[str] = []
+    rules = [
+        (r"\bkaczk", ["kaczka", "drób", "mięso pieczone"]),
+        (r"\b(kurczak|chicken|de volaille)", ["kurczak", "drób"]),
+        (r"\bindyk", ["indyk", "drób"]),
+        (r"\b(wolow|beef|stek|ribeye|tatar)", ["wołowina", "mięso"]),
+        (r"\b(wieprz|schab|golonk|boczek|zeberk)", ["wieprzowina", "mięso"]),
+        (r"\b(ryb|losos|dorsz|pstrag|tunczyk|fish)", ["ryba"]),
+        (r"\b(wege|vegan|tofu|falafel)", ["wege"]),
+        (r"\b(zupa|rosol|barszcz|zurek|gazpacho|ramen|pho)", ["zupa"]),
+        (r"\bpomidor|tomato", ["pomidor", "czerwone"]),
+        (r"\bburger", ["burger"]),
+        (r"\bpizza", ["pizza"]),
+        (r"\b(makaron|pasta|spaghetti)", ["makaron"]),
+        (r"\bsalatk|salad", ["sałatka"]),
+        (r"\b(udko|udo)\b", ["udo", "pieczeń"]),
+        (r"\b(pieczon|roast|grill)", ["pieczeń", "mięso pieczone"]),
+        (r"\bchrupiac|crispy", ["chrupiące"]),
+        (r"\bjablk|apple", ["jabłko"]),
+        (r"\bpekin|peking", ["kaczka", "azja"]),
+        (r"\bsushi|nigiri|maki", ["sushi", "ryba"]),
+        (r"\b(deser|ciasto|lody|tiramisu)", ["deser"]),
+    ]
+    seen: set[str] = set()
+    for pattern, add in rules:
+        if re.search(pattern, n):
+            for t in add:
+                if t not in seen:
+                    seen.add(t)
+                    tags.append(t)
+    return tags
+
+
+def _attach_image_context_tags(dishes: list[MenuScanDish]) -> None:
+    for d in dishes:
+        if d.image_context_tags:
+            continue
+        d.image_context_tags = _extract_image_context_tags(d.name)
 
 
 class MenuScanResponse(BaseModel):
@@ -5410,6 +5595,7 @@ async def menu_scan(file: UploadFile = File(...)):
         warnings.append("Nie udało się rozpoznać żadnej potrawy na wgranym menu.")
     # Ujednolić jednostki: ten sam składnik = ta sama jednostka we wszystkich potrawach.
     _canonicalize_ingredient_units(dishes)
+    _attach_image_context_tags(dishes)
     return MenuScanResponse(
         dishes=dishes, warnings=warnings,
         credits_deducted=int(billing.get("credits_deducted") or 0),
@@ -5881,6 +6067,8 @@ class InspirationRecipeResponse(BaseModel):
 @app.post("/api/inspirations/recipe", response_model=InspirationRecipeResponse)
 async def inspiration_recipe(req: InspirationRecipeRequest):
     """Pełny przepis JSON dla modułu Inspiracje — z cache po slug/nazwie."""
+    # Wymuś prawdziwy tenant (X-Account-Key / JWT) — nigdy nie debituj shared „default”.
+    require_tenant_account_key()
     dish_name = (req.dish_name or "").strip()
     if not dish_name:
         raise HTTPException(status_code=400, detail="Podaj nazwę potrawy.")
@@ -5991,17 +6179,18 @@ def _make_pos_id_for_category(category: str, offset: int) -> str:
 
 # Sztywne kategorie systemowe (Menu-to-Inventory Onboarding).
 MENU_CATEGORIES = ['Burgery', 'Pizze', 'Zupy', 'Dania obiadowe', 'Sałatki',
-                   'Desery', 'Napoje', 'Inne']
+                   'Desery', 'Napoje', 'Półprodukty', 'Inne']
 WAREHOUSE_CATEGORIES = [
     'Mięso i wędliny', 'Ryby i owoce morza', 'Nabiał', 'Warzywa i owoce', 'Pieczywo',
     'Suchy magazyn', 'Oleje i tłuszcze', 'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole',
-    'Wywary i sosy', 'Chemia i czystość', 'Opakowania', 'Inne',
+    'Wywary i sosy', 'Półprodukty', 'Chemia i czystość', 'Opakowania', 'Inne',
 ]
 _WAREHOUSE_CAT_COLORS = {
     'Mięso i wędliny': '#DC2626', 'Ryby i owoce morza': '#0284C7', 'Nabiał': '#F59E0B',
     'Warzywa i owoce': '#16A34A', 'Pieczywo': '#78716C', 'Suchy magazyn': '#B45309',
     'Oleje i tłuszcze': '#CA8A04', 'Przyprawy': '#D97706', 'Mrożonki': '#0EA5E9',
     'Napoje': '#0891B2', 'Alkohole': '#7C3AED', 'Wywary i sosy': '#EA580C',
+    'Półprodukty': '#A855F7',
     'Chemia i czystość': '#6366F1', 'Opakowania': '#64748B', 'Inne': '#94A3B8',
 }
 
@@ -6108,12 +6297,16 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     cat_cache: dict = {}
     created: list[dict] = []
     for name in to_create:
-        cat_name = cat_map.get(name, "Inne")
-        cat_id = await _resolve_category_id_cached(client, cat_name, cat_cache)
         is_combo = _is_combo_polprodukt_name(name)
+        # Półprodukt combo → zawsze kategoria „Półprodukty” + jednostka „porcja”.
+        cat_name = "Półprodukty" if is_combo else cat_map.get(name, "Inne")
+        if cat_name not in WAREHOUSE_CATEGORIES:
+            cat_name = "Inne"
+        cat_id = await _resolve_category_id_cached(client, cat_name, cat_cache)
         payload = {
             "name": name, "category_id": cat_id, "quantity": 0,
-            "unit": "szt", "min_quantity": 5, "safety_buffer_percent": 20,
+            "unit": "porcja" if is_combo else "szt",
+            "min_quantity": 5, "safety_buffer_percent": 20,
             "is_combo_polprodukt": is_combo, "unit_cost": 0,
         }
         try:
@@ -6201,6 +6394,9 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
             if not name:
                 continue
             category = dish.category or "Inne"
+            # Półprodukty / combo (mise en place) → kategoria Menu „Półprodukty”
+            if _is_combo_polprodukt_name(name):
+                category = "Półprodukty"
             price = float(dish.price_pln or 0)
 
             # Deduplikacja: ta sama AKTYWNA potrawa już w menu → pomiń (bez restore)
@@ -6268,10 +6464,13 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
                 # Pomiń wielkość porcji — to parametr nadrzędny, nie składnik.
                 if _is_porcja_row(iname):
                     continue
+                qty_raw = getattr(ing, "quantity", None)
+                qty_norm = _normalize_recipe_quantity(qty_raw, ing.unit or "g") if qty_raw is not None else None
+                # Brak gramatury z OCR/AI → minimum 1 (użytkownik może edytować), nigdy 0.
                 row_ing: dict = {
                     "menu_item_id": menu_id,
                     "ingredient_name": _normalize_ingredient_name(iname),
-                    "quantity": float(ing.quantity or 0),
+                    "quantity": float(qty_norm if qty_norm is not None else 1),
                     "unit": ing.unit or "g",
                     "sort_order": i + 1,
                 }
@@ -6889,24 +7088,25 @@ def _catalog_pack_base_qty(row: dict, base_dim: str) -> float:
     return 1.0
 
 
-def _qty_in_band(target: float, lo: float, hi: float, pack: float) -> float:
+def _qty_in_band(target: float, lo: float, hi: float, pack: float) -> Tuple[float, bool]:
     """Dobiera ilość w paśmie [lo, hi] (±10% wokół targetu), preferując pełne opakowania.
 
-    Jeśli większe/mniejsze opakowanie w paśmie ma sens (pełne paczki) — wybiera je.
-    Inaczej zwraca target przycięty do [lo, hi].
+    Zwraca (qty, pack_adjusted). pack_adjusted=True gdy żadne opakowanie nie dało
+    dokładnie żądanej ilości / nie mieściło się w paśmie — wybrano najmniejsze
+    pełne opakowanie pokrywające zapotrzebowanie (może być powyżej hi).
     """
     import math
     t = max(0.0, float(target or 0))
     lo_v = max(0.0, float(lo if lo is not None else t * 0.9))
     hi_v = max(lo_v, float(hi if hi is not None else t * 1.1))
     if t <= 0:
-        return 0.0
+        return 0.0, False
     pack_v = float(pack or 1.0)
     if pack_v <= 0:
         pack_v = 1.0
     # ciągłe / jednostkowe — trzymaj target w paśmie
     if pack_v <= 1.0001 and abs(pack_v - 1.0) < 1e-6:
-        return round(min(hi_v, max(lo_v, t)), 4)
+        return round(min(hi_v, max(lo_v, t)), 4), False
     # pełne paczki w paśmie
     n_lo = max(1, int(math.ceil(lo_v / pack_v - 1e-9)))
     n_hi = max(n_lo, int(math.floor(hi_v / pack_v + 1e-9)))
@@ -6916,7 +7116,6 @@ def _qty_in_band(target: float, lo: float, hi: float, pack: float) -> float:
         qty = n * pack_v
         if qty < lo_v - 1e-9 or qty > hi_v + 1e-9:
             continue
-        # preferuj pokrycie ≥ target, potem bliskość targetu
         under = max(0.0, t - qty)
         dist = abs(qty - t)
         score = (under, dist, qty)
@@ -6924,13 +7123,95 @@ def _qty_in_band(target: float, lo: float, hi: float, pack: float) -> float:
             best_score = score
             best_n = n
     if best_n is not None:
-        return round(best_n * pack_v, 4)
-    # żadna paczka nie mieści się — zaokrąglij w górę do cover target, jeśli ≤ hi
+        qty = round(best_n * pack_v, 4)
+        adjusted = abs(qty - t) > max(0.001, t * 0.02)
+        return qty, adjusted
+    # Żadna paczka w paśmie — zaokrąglij w górę do pokrycia targetu (nawet powyżej hi)
     n_need = max(1, int(math.ceil(t / pack_v - 1e-9)))
-    qty_up = n_need * pack_v
-    if lo_v - 1e-9 <= qty_up <= hi_v + 1e-9:
-        return round(qty_up, 4)
-    return round(min(hi_v, max(lo_v, t)), 4)
+    qty_up = round(n_need * pack_v, 4)
+    return qty_up, True
+
+
+def _fmt_base_qty(q: float, dim: str) -> str:
+    """Czytelna PL etykieta ilości w jednostce bazowej kg/l/szt."""
+    qq = float(q or 0)
+    if dim == "kg":
+        if qq >= 1:
+            return f"{_fmt_qty(qq)} kg"
+        return f"{_fmt_qty(qq * 1000)} g"
+    if dim == "l":
+        if qq >= 1:
+            return f"{_fmt_qty(qq)} l"
+        return f"{_fmt_qty(qq * 1000)} ml"
+    return f"{_fmt_qty(qq)} szt"
+
+
+def _piece_mass_base(pieces: float, unit_weight_volume, weight_volume_unit: Optional[str]):
+    """Przelicza sztuki → (base_dim, qty) przez gramaturę 1 szt. (unit_weight_volume)."""
+    try:
+        uwv = float(unit_weight_volume) if unit_weight_volume is not None else 0.0
+    except (TypeError, ValueError):
+        uwv = 0.0
+    if uwv <= 0:
+        uwv = _PIECE_DEFAULT_SIZE
+    wvu = (weight_volume_unit or "g").strip().lower().rstrip(".")
+    pcs = float(pieces or 0)
+    if wvu in ("kg", "kilogram"):
+        return "kg", pcs * uwv
+    if wvu in ("l", "litr", "litry"):
+        return "l", pcs * uwv
+    if wvu in ("ml", "mililitr"):
+        return "l", pcs * uwv * 0.001
+    # domyślnie g
+    return "kg", pcs * uwv * 0.001
+
+
+def _convert_req_to_catalog_dim(
+    req_base_qty: float,
+    req_dim: str,
+    catalog_dim: str,
+    unit_weight_volume=None,
+    weight_volume_unit: Optional[str] = None,
+) -> Optional[float]:
+    """Przelicza zapotrzebowanie do wymiaru oferty katalogowej (kg/l/szt)."""
+    if req_dim == catalog_dim:
+        return float(req_base_qty)
+    if req_dim == "szt" and catalog_dim in ("kg", "l"):
+        dim, qty = _piece_mass_base(req_base_qty, unit_weight_volume, weight_volume_unit)
+        if dim != catalog_dim:
+            return None
+        return qty
+    if catalog_dim == "szt" and req_dim in ("kg", "l"):
+        try:
+            uwv = float(unit_weight_volume) if unit_weight_volume is not None else 0.0
+        except (TypeError, ValueError):
+            uwv = 0.0
+        if uwv <= 0:
+            uwv = _PIECE_DEFAULT_SIZE
+        wvu = (weight_volume_unit or "g").strip().lower().rstrip(".")
+        if req_dim == "kg":
+            per = uwv if wvu in ("kg", "kilogram") else uwv * 0.001
+        else:
+            per = uwv if wvu in ("l", "litr", "litry") else uwv * 0.001
+        if per <= 0:
+            return None
+        import math
+        return float(math.ceil(float(req_base_qty) / per - 1e-9))
+    return None
+
+
+def _pack_mismatch_note(product: str, needed_base: float, ordered_base: float, dim: str) -> Optional[str]:
+    """Polska notatka gdy opakowanie nie daje dokładnie żądanej ilości."""
+    if ordered_base <= 0 or needed_base <= 0:
+        return None
+    if abs(ordered_base - needed_base) <= max(0.001, needed_base * 0.02):
+        return None
+    need_s = _fmt_base_qty(needed_base, dim)
+    got_s = _fmt_base_qty(ordered_base, dim)
+    return (
+        f"{product}: dostawcy nie mają opakowań dających dokładnie {need_s} — "
+        f"dodano {got_s} jako najmniejszą / najlepszą opcję pokrywającą zapotrzebowanie."
+    )
 
 
 def _fmt_pln(v: float) -> str:
@@ -7587,15 +7868,29 @@ async def compare_offers(req: CompareOffersRequest):
         catalog, suppliers = await _fetch_catalog_and_suppliers(client)
         sup_by_id = {s["id"]: s for s in suppliers}
 
-        # Magazyn (nazwa + synonimy) — natychmiastowe dopasowanie bez AI.
+        # Magazyn (nazwa + synonimy + gramatura 1 szt.) — natychmiastowe dopasowanie bez AI.
         has_syn = await _has_inventory_synonyms(client)
-        inv_select = "id,name,synonyms" if has_syn else "id,name"
-        inv_rows = await sb_get(client, "inventory_items",
-                                params={"select": inv_select, "limit": "2000"}) or []
+        inv_select = (
+            "id,name,synonyms,unit,unit_weight_volume,weight_volume_unit"
+            if has_syn else
+            "id,name,unit,unit_weight_volume,weight_volume_unit"
+        )
+        try:
+            inv_rows = await sb_get(client, "inventory_items",
+                                    params={"select": inv_select, "limit": "2000"}) or []
+        except httpx.HTTPStatusError as e:
+            text = (e.response.text if e.response is not None else "") or ""
+            if "unit_weight_volume" in text or "weight_volume_unit" in text:
+                inv_select = "id,name,synonyms" if has_syn else "id,name"
+                inv_rows = await sb_get(client, "inventory_items",
+                                        params={"select": inv_select, "limit": "2000"}) or []
+            else:
+                raise
 
         ai_budget = AI_MAX_CHECKS
         synonym_additions: dict = {}   # inv_id -> {"existing": [...], "new": set()}
         billing_events: list[dict] = []
+        pack_notes: list[str] = []
 
         def _consider(bbs: dict, row: dict, price_base: float, base_dim: str,
                       order_base_qty: float, target_base_qty: float, via: str,
@@ -7648,10 +7943,12 @@ async def compare_offers(req: CompareOffersRequest):
             if qty_hi_base < qty_lo_base:
                 qty_lo_base, qty_hi_base = qty_hi_base, qty_lo_base
 
-            # Rozpoznaj produkt w magazynie → id + istniejące synonimy.
+            # Rozpoznaj produkt w magazynie → id + istniejące synonimy + gramatura 1 szt.
             inv_row, _ = _resolve_by_fuzzy(it.product_name_or_id, inv_rows, threshold=70)
             inv_id = inv_row.get("id") if inv_row else None
             existing_syn = list(inv_row.get("synonyms") or []) if inv_row else []
+            uwv = (inv_row or {}).get("unit_weight_volume")
+            wvu = (inv_row or {}).get("weight_volume_unit")
             known_names = [it.product_name_or_id]
             if inv_row:
                 known_names.append(inv_row.get("name", ""))
@@ -7661,6 +7958,9 @@ async def compare_offers(req: CompareOffersRequest):
 
             best_by_supplier: dict[str, dict] = {}
             candidates: list[tuple] = []   # (row, base_dim, price_base, sim, order_base)
+            item_pack_adjusted = False
+            match_dim_used = req_dim
+            match_target_base = req_base_qty
 
             for row in catalog:
                 if row.get("is_visible") is False:
@@ -7670,12 +7970,34 @@ async def compare_offers(req: CompareOffersRequest):
                 if bp is None:
                     continue
                 base_dim, price_base = bp
-                if base_dim != req_dim:
+                # Ten sam wymiar LUB konwersja przez gramaturę 1 szt. (magazyn szt ↔ oferta kg/g)
+                target_in_dim = _convert_req_to_catalog_dim(
+                    req_base_qty, req_dim, base_dim, uwv, wvu,
+                )
+                if target_in_dim is None:
                     continue
+                lo_in_dim = _convert_req_to_catalog_dim(
+                    qty_lo_base, req_dim, base_dim, uwv, wvu,
+                )
+                hi_in_dim = _convert_req_to_catalog_dim(
+                    qty_hi_base, req_dim, base_dim, uwv, wvu,
+                )
+                if lo_in_dim is None:
+                    lo_in_dim = target_in_dim * 0.9
+                if hi_in_dim is None:
+                    hi_in_dim = target_in_dim * 1.1
+                if hi_in_dim < lo_in_dim:
+                    lo_in_dim, hi_in_dim = hi_in_dim, lo_in_dim
                 pack = _catalog_pack_base_qty(row, base_dim)
-                order_base = _qty_in_band(req_base_qty, qty_lo_base, qty_hi_base, pack)
+                order_base, adjusted = _qty_in_band(
+                    target_in_dim, lo_in_dim, hi_in_dim, pack,
+                )
                 if order_base <= 0:
                     continue
+                if adjusted:
+                    item_pack_adjusted = True
+                    match_dim_used = base_dim
+                    match_target_base = target_in_dim
                 # Lokalny fuzzy (ser kozi ↔ ser kozi rolka) — bez AI
                 score = max(
                     (_local_catalog_match_score(n, row_name) for n in known_names),
@@ -7683,8 +8005,8 @@ async def compare_offers(req: CompareOffersRequest):
                 )
                 if score >= LOCAL_CATALOG_MATCH_MIN:
                     _consider(best_by_supplier, row, price_base, base_dim,
-                              order_base, req_base_qty, "fuzzy",
-                              pack_base_qty=pack, band_hi_base=qty_hi_base)
+                              order_base, target_in_dim, "fuzzy",
+                              pack_base_qty=pack, band_hi_base=hi_in_dim)
                 else:
                     rn = _norm_pl(row_name)
                     sim = max((max(float(fuzz.token_set_ratio(kn, rn)),
@@ -7693,7 +8015,7 @@ async def compare_offers(req: CompareOffersRequest):
                     # Także lokalny score jako sim (0..100) — AI tylko gdy lokalnie słabo
                     sim = max(sim, score * 100.0)
                     if sim >= AI_SYNONYM_SIM_MIN:
-                        candidates.append((row, base_dim, price_base, sim, order_base, pack))
+                        candidates.append((row, base_dim, price_base, sim, order_base, pack, target_in_dim, hi_in_dim))
 
             # AI Synonym Matching — niedopasowane lokalnie (debit kredytów).
             # Działa też bez wiersza magazynu (zamówienie głosowe / koszyk).
@@ -7705,14 +8027,14 @@ async def compare_offers(req: CompareOffersRequest):
                 warehouse_name = (inv_row.get("name") if inv_row else None) or it.product_name_or_id
                 by_name: dict[str, list] = {}
                 order: list[tuple] = []
-                for row, base_dim, price_base, sim, order_base, pack in candidates:
+                for row, base_dim, price_base, sim, order_base, pack, target_in_dim, hi_in_dim in candidates:
                     key = _norm_pl(row.get("name", ""))
                     if not key:
                         continue
                     if key not in by_name:
                         by_name[key] = []
                         order.append((key, row.get("name", ""), sim))
-                    by_name[key].append((row, base_dim, price_base, order_base, pack))
+                    by_name[key].append((row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim))
                 order.sort(key=lambda o: o[2], reverse=True)
                 per_item_checks = 0
                 for key, disp_name, _sim in order:
@@ -7725,10 +8047,10 @@ async def compare_offers(req: CompareOffersRequest):
                     )
                     billing_events.append(bill)
                     if is_match and conf >= AI_SYNONYM_CONF_MIN:
-                        for row, base_dim, price_base, order_base, pack in by_name[key]:
+                        for row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim in by_name[key]:
                             _consider(best_by_supplier, row, price_base, base_dim,
-                                      order_base, req_base_qty, "ai",
-                                      pack_base_qty=pack, band_hi_base=qty_hi_base)
+                                      order_base, target_in_dim, "ai",
+                                      pack_base_qty=pack, band_hi_base=hi_in_dim)
                         if inv_id:
                             slot = synonym_additions.setdefault(
                                 inv_id, {"existing": existing_syn, "new": set()})
@@ -7739,24 +8061,51 @@ async def compare_offers(req: CompareOffersRequest):
                 float(v.get("order_base_qty") or req_base_qty)
                 for v in best_by_supplier.values()
             ]
+            chosen_dim = req_dim
             if ordered_bases:
                 ordered_bases.sort()
                 chosen_base = ordered_bases[len(ordered_bases) // 2]
+                # wymiar z najlepszej oferty (po konwersji może być kg mimo req szt)
+                sample = next(iter(best_by_supplier.values()), None)
+                if sample and sample.get("base_dim"):
+                    chosen_dim = sample["base_dim"]
+                    match_target_base = float(sample.get("target_base_qty") or match_target_base)
             else:
                 chosen_base = req_base_qty
-            display_qty = chosen_base / req_factor if req_factor else chosen_base
+
+            # Notatka PL gdy opakowanie ≠ dokładne zapotrzebowanie
+            note_target = match_target_base if item_pack_adjusted else req_base_qty
+            note_dim = match_dim_used if item_pack_adjusted else chosen_dim
+            if best_by_supplier:
+                note = _pack_mismatch_note(
+                    it.product_name_or_id, note_target, chosen_base, note_dim,
+                )
+                if note:
+                    pack_notes.append(note)
+                    item_pack_adjusted = True
+
+            # Wyświetl ilość w jednostce żądania gdy da się przeliczyć z powrotem
+            if chosen_dim == req_dim:
+                display_qty = chosen_base / req_factor if req_factor else chosen_base
+                display_unit = it.unit
+            else:
+                display_qty = chosen_base
+                display_unit = chosen_dim
 
             per_item.append({
                 "product_name": it.product_name_or_id,
                 "quantity": round(display_qty, 4),
-                "unit": it.unit,
-                "base_dim": req_dim,
+                "unit": display_unit,
+                "base_dim": chosen_dim,
                 "base_quantity": round(chosen_base, 4),
                 "target_quantity": float(it.quantity),
                 "quantity_min": float(it.quantity_min) if it.quantity_min is not None else round(float(it.quantity) * 0.9, 4),
                 "quantity_max": float(it.quantity_max) if it.quantity_max is not None else round(float(it.quantity) * 1.1, 4),
                 "best_by_supplier": best_by_supplier,
                 "inventory_id": inv_id,
+                "pack_adjusted": item_pack_adjusted,
+                "unit_weight_volume": uwv,
+                "weight_volume_unit": wvu,
                 "food_key": _food_match_key(it.product_name_or_id),
             })
 
@@ -7807,6 +8156,12 @@ async def compare_offers(req: CompareOffersRequest):
             waste_top=waste_top,
             fillers=fillers,
         )
+        if pack_notes:
+            result["pack_adjustment_notes"] = pack_notes
+            # Dołącz do speech, żeby FE / Jarvis widziały od razu
+            speech = (result.get("assistant_speech") or "").strip()
+            extra = " ".join(pack_notes)
+            result["assistant_speech"] = f"{speech} {extra}".strip() if speech else extra
         # Warstwa AI: tylko interpretacja tipów (koszyki już policzone matematycznie)
         try:
             result = await _enrich_deal_hunter_ai_tips(client, result, per_item)
@@ -7912,43 +8267,45 @@ async def optimizer_critical_order(req: CriticalOrderRequest):
 
 # --- Bulk Category-Targeted Orders (Łowca Okazji na braki) ------------------
 
-# Potoczne słowa → nasze sztywne nazwy kategorii magazynowych.
+# Potoczne słowa KATEGORII → sztywne nazwy (BEZ nazw pojedynczych produktów!).
+# „ser"/"kurczak" w synonimach powodowało, że MIX wrzucał nazwę produktu do categories
+# i wciągał całą kategorię Nabiał/Mięso zamiast tylko nazwanej pozycji.
 _CATEGORY_SYNONYMS: dict[str, list[str]] = {
-    'Mięso i wędliny':   ['mieso', 'mięso', 'wedliny', 'wędliny', 'wolowina', 'wołowina',
-                          'wieprzowina', 'drob', 'drób', 'kurczak', 'szynka', 'kielbasa',
-                          'kiełbasa', 'boczek', 'salami'],
-    'Ryby i owoce morza': ['ryby', 'ryba', 'owoce morza', 'losos', 'łosoś', 'krewetki', 'dorsz'],
-    'Nabiał':            ['nabial', 'nabiał', 'mleko', 'jogurt', 'ser', 'sery', 'masło',
-                          'maslo', 'smietana', 'śmietana', 'jajka', 'twarog', 'twaróg'],
-    'Warzywa i owoce':   ['warzywa', 'owoce', 'jarzyny', 'sałata', 'salata', 'pomidor',
-                          'ogorek', 'ogórek', 'cebula', 'ziemniaki', 'marchew', 'papryka',
-                          'jablka', 'jabłka', 'banany', 'cytryny'],
-    'Pieczywo':          ['pieczywo', 'chleb', 'bulki', 'bułki', 'bagietka'],
-    'Alkohole':          ['alkohol', 'alkohole', 'wodka', 'wódka', 'piwo', 'wino',
-                          'whisky', 'gin', 'rum'],
-    'Napoje':            ['napoje', 'napoj', 'napój', 'soki', 'sok', 'woda', 'kola',
-                          'cola', 'tonik', 'lemoniada'],
-    'Mrożonki':          ['mrozonki', 'mrożonki', 'mrozone', 'mrożone', 'lody', 'frytki mrozone'],
-    'Suchy magazyn':     ['suchy', 'makaron', 'makarony', 'maka', 'mąka', 'ryż', 'ryz',
-                          'kasza', 'cukier', 'sol', 'sól', 'konserwy'],
-    'Oleje i tłuszcze':  ['olej', 'oleje', 'oliwa', 'oliwy', 'tluszcze', 'tłuszcze', 'smalec',
-                          'frytura', 'olive oil'],
-    'Przyprawy':         ['przyprawy', 'przyprawa', 'pieprz', 'solniczka', 'ziola', 'zioła'],
-    'Wywary i sosy':     ['wywary', 'sosy', 'bulion', 'wywar', 'sos'],
-    'Chemia i czystość': ['chemia', 'srodki czystosci', 'środki czystości', 'plyn',
-                          'płyn', 'mydlo', 'mydło', 'reczniki', 'ręczniki'],
-    'Opakowania':        ['opakowania', 'kubki', 'talerze', 'folie', 'folia', 'sztucce',
-                          'sztućce', 'serwetki', 'papier'],
+    'Mięso i wędliny':   ['mieso', 'mięso', 'wedliny', 'wędliny', 'mieso i wedliny',
+                          'mięso i wędliny'],
+    'Ryby i owoce morza': ['ryby', 'ryba', 'owoce morza', 'ryby i owoce morza'],
+    'Nabiał':            ['nabial', 'nabiał', 'nabialowe', 'nabiałowe'],
+    'Warzywa i owoce':   ['warzywa', 'owoce', 'jarzyny', 'warzywa i owoce', 'warzywo'],
+    'Pieczywo':          ['pieczywo'],
+    'Alkohole':          ['alkohol', 'alkohole'],
+    'Napoje':            ['napoje', 'napoj', 'napój'],
+    'Mrożonki':          ['mrozonki', 'mrożonki', 'mrozone', 'mrożone'],
+    'Suchy magazyn':     ['suchy', 'suchy magazyn', 'sucha pantry', 'pantry'],
+    'Oleje i tłuszcze':  ['olej', 'oleje', 'oliwa', 'oliwy', 'tluszcze', 'tłuszcze',
+                          'oleje i tluszcze', 'oleje i tłuszcze'],
+    'Przyprawy':         ['przyprawy', 'przyprawa', 'ziola', 'zioła'],
+    'Wywary i sosy':     ['wywary', 'sosy', 'wywar', 'sos', 'wywary i sosy'],
+    'Chemia i czystość': ['chemia', 'srodki czystosci', 'środki czystości',
+                          'chemia i czystosc', 'chemia i czystość'],
+    'Opakowania':        ['opakowania', 'opakowanie'],
     'Inne':              ['inne', 'pozostale', 'pozostałe'],
 }
 
 
 def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]:
     """Zwraca (matched_canonical, unmatched_raw) — dopasowuje potoczne nazwy do
-    sztywnych kategorii z `WAREHOUSE_CATEGORIES`. Fuzzy matching + słownik synonimów."""
+    sztywnych kategorii z `WAREHOUSE_CATEGORIES`.
+
+    Tylko exact / token-exact / fuzzy do nazwy kategorii — BEZ substring
+    („ser" ∈ „ser kozi" NIE może stać się Nabiałem).
+    """
     matched: list[str] = []
     unmatched: list[str] = []
     canonical_norm = {_norm_pl(c): c for c in WAREHOUSE_CATEGORIES}
+    syn_index: dict[str, str] = {}
+    for canon, syns in _CATEGORY_SYNONYMS.items():
+        for x in syns:
+            syn_index[_norm_pl(x)] = canon
     for r in raw or []:
         s = (r or "").strip()
         if not s:
@@ -7956,27 +8313,38 @@ def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]
         if s.lower() == "all":
             return ["all"], []
         key = _norm_pl(s)
-        # 1) exact norm match
+        # 1) exact canonical
         if key in canonical_norm and canonical_norm[key] not in matched:
             matched.append(canonical_norm[key])
             continue
-        # 2) synonim map (norm)
+        # 2) exact synonym (cały string)
+        if key in syn_index and syn_index[key] not in matched:
+            matched.append(syn_index[key])
+            continue
+        # 3) token-exact: „brakujace mieso" → token „mieso"
+        tokens = [t for t in key.replace(",", " ").split() if t and t not in {
+            "brakujace", "brakujacych", "brakujacy", "braki", "wszystkie",
+            "wszystkich", "kategoria", "kategorii", "z", "i", "oraz",
+        }]
         found = None
-        for canon, syns in _CATEGORY_SYNONYMS.items():
-            if any(_norm_pl(x) == key or _norm_pl(x) in key or key in _norm_pl(x) for x in syns):
-                found = canon
+        for t in tokens:
+            if t in syn_index:
+                found = syn_index[t]
+                break
+            if t in canonical_norm:
+                found = canonical_norm[t]
                 break
         if found and found not in matched:
             matched.append(found)
             continue
-        # 3) rapidfuzz do sztywnych kategorii
+        # 4) rapidfuzz tylko do pełnych nazw kategorii (wysoki próg)
         best = None
         best_score = 0.0
         for canon_norm, canon in canonical_norm.items():
             score = float(fuzz.token_set_ratio(key, canon_norm))
             if score > best_score:
                 best_score, best = score, canon
-        if best and best_score >= 70 and best not in matched:
+        if best and best_score >= 82 and best not in matched:
             matched.append(best)
         else:
             unmatched.append(s)
@@ -7986,7 +8354,7 @@ def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]
 class ExtraOrderItem(BaseModel):
     """Nazwany produkt do dorzucenia do koszyka braków (voice MIX)."""
     product_name: str = ""
-    quantity: float = 1.0
+    quantity: Optional[float] = None
     unit: str = "szt"
 
 
@@ -7994,7 +8362,7 @@ class CriticalByCategoryRequest(BaseModel):
     categories: list[str] = Field(default_factory=list)
     restaurant_name: Optional[str] = None
     skip_compare: bool = False  # True = tylko detekcja braków (bez Łowcy)
-    # critical = tylko qty <= min; optimal = wszystkie poniżej progu optymalnego
+    # critical = qty <= min (domyślne dla „brakujące”); optimal = poniżej progu optymalnego
     stock_target: str = "critical"
     # MIX: konkretne produkty z nazwy (np. ser kozi) + braki z categories
     items: list[ExtraOrderItem] = Field(default_factory=list)
@@ -8021,11 +8389,11 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             if not n:
                 continue
             try:
-                q = float(it.quantity) if it.quantity is not None else 1.0
+                q = float(it.quantity) if it.quantity is not None else None
             except (TypeError, ValueError):
-                q = 1.0
-            if q <= 0:
-                q = 1.0
+                q = None
+            if q is not None and q <= 0:
+                q = None
             named_raw.append({
                 "name": n,
                 "quantity": q,
@@ -8036,16 +8404,34 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             if not n:
                 continue
             try:
-                q = float(it.get("quantity") or 1)
+                raw_q = it.get("quantity")
+                q = float(raw_q) if raw_q is not None and raw_q != "" else None
             except (TypeError, ValueError):
-                q = 1.0
-            if q <= 0:
-                q = 1.0
+                q = None
+            if q is not None and q <= 0:
+                q = None
             named_raw.append({
                 "name": n,
                 "quantity": q,
                 "unit": str(it.get("unit") or "szt").strip() or "szt",
             })
+
+    # LLM często wrzuca nazwę produktu do categories[] („ser kozi”).
+    # Nierozpoznane „kategorie” → traktuj jako nazwiane produkty, NIE jako „all”.
+    if unmatched:
+        already = {_norm_pl(x["name"]) for x in named_raw}
+        kept_unmatched: list[str] = []
+        for u in unmatched:
+            uk = _norm_pl(u)
+            if not uk or uk in already:
+                continue
+            # Krótkie / ogólne tokeny zostaw jako unmatched (nie produkt)
+            if uk in {"inne", "all", "wszystko", "braki"}:
+                kept_unmatched.append(u)
+                continue
+            named_raw.append({"name": u.strip(), "quantity": None, "unit": "szt"})
+            already.add(uk)
+        unmatched = kept_unmatched
 
     if not matched and not named_raw:
         return {
@@ -8074,14 +8460,27 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 client, "inventory_items",
                 params={
                     "select": ("id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
+                               "unit_weight_volume,weight_volume_unit,"
                                "category_id,inventory_categories(name)"),
                     "limit": "5000",
                 },
             ) or []
         except httpx.HTTPStatusError as e:
-            # Fallback: bez optimal_quantity / safety_buffer / joina
+            # Fallback: bez optimal_quantity / safety_buffer / joina / gramatury
             text = (e.response.text if e.response is not None else "") or ""
-            if "optimal_quantity" in text:
+            if "unit_weight_volume" in text or "weight_volume_unit" in text:
+                try:
+                    inv_all = await sb_get(
+                        client, "inventory_items",
+                        params={
+                            "select": ("id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
+                                       "category_id,inventory_categories(name)"),
+                            "limit": "5000",
+                        },
+                    ) or []
+                except httpx.HTTPStatusError:
+                    inv_all = []
+            if not inv_all and "optimal_quantity" in text:
                 try:
                     inv_all = await sb_get(
                         client, "inventory_items",
@@ -8116,7 +8515,12 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         critical = []
         # Braki z kategorii — pomiń skan gdy brak categories (tylko named items)
         if matched:
-            for r in inv_all:
+            # Stabilna kolejność skanu magazynu
+            inv_all_sorted = sorted(
+                inv_all,
+                key=lambda r: (_norm_pl((r.get("name") or "").strip()), str(r.get("id") or "")),
+            )
+            for r in inv_all_sorted:
                 name = (r.get("name") or "").strip()
                 if not name or "(dup)" in name.lower():
                     continue
@@ -8215,7 +8619,32 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                     hit = best_row
             display_name = (hit.get("name") if hit else nr["name"]).strip()
             unit = (hit.get("unit") if hit else None) or nr["unit"]
-            qty_order = float(nr["quantity"])
+            qty_order = nr.get("quantity")
+            # Brak jawnej ilości + produkt w magazynie → dopełnij do stanu optymalnego
+            if hit is not None and qty_order is None:
+                try:
+                    cur = float(hit.get("quantity") or 0)
+                    minq = float(hit.get("min_quantity") or 0)
+                except (TypeError, ValueError):
+                    cur, minq = 0.0, 0.0
+                buf_pct = float(hit.get("safety_buffer_percent") or 20.0)
+                try:
+                    opt_user = float(hit.get("optimal_quantity") or 0)
+                except (TypeError, ValueError):
+                    opt_user = 0.0
+                if opt_user > 0:
+                    optimal = opt_user
+                elif minq > 0:
+                    optimal = minq * (1.0 + buf_pct / 100.0)
+                else:
+                    optimal = 1.0
+                qty_order = max(0.0, round(optimal - cur, 4))
+            if qty_order is None:
+                qty_order = 1.0
+            qty_order = float(qty_order)
+            if qty_order <= 0:
+                # Już na optymalnym — nie dodawaj pustej pozycji
+                continue
             nkey = _norm_pl(display_name)
             if nkey in seen:
                 # Już w brakach kategorii — podnieś qty do max(deficit, żądane)
@@ -8247,6 +8676,9 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             }
             critical.append(entry)
             named_added.append(entry)
+
+        # Deterministyczna kolejność (powtarzalność koszyka)
+        critical.sort(key=lambda c: (_norm_pl(c.get("name") or ""), str(c.get("id") or "")))
 
         if not critical:
             return {
@@ -9997,11 +10429,11 @@ async def voice_dispatch(req: VoiceDispatchRequest):
                 if not pname:
                     continue
                 try:
-                    qty = float(itx.get("quantity") or 1)
+                    qty = float(itx.get("quantity")) if itx.get("quantity") is not None else None
                 except (TypeError, ValueError):
-                    qty = 1.0
-                if qty <= 0:
-                    qty = 1.0
+                    qty = None
+                if qty is not None and qty <= 0:
+                    qty = None
                 extra.append(ExtraOrderItem(
                     product_name=pname,
                     quantity=qty,
@@ -12289,6 +12721,7 @@ def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
     bal = int(sub.get("credits_balance") or 0)
     trial_active = _trial_active(sub)
     premium = _premium_entitled(sub)
+    effective_tier = max(tier, 2) if premium else tier
     features = []
     for f in FEATURE_CATALOG:
         needs_dh = f["requires_deal_hunter"]
@@ -12303,6 +12736,7 @@ def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
         tier_label = f"{cfg['name']} · trial Premium"
     return {
         "tier_level": tier,
+        "effective_tier_level": effective_tier,
         "tier_name": tier_label,
         "credits_balance": bal,
         "max_credits": cfg["max_credits"],

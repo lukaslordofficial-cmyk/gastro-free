@@ -46,6 +46,7 @@ import { ReportsArchive } from '@/components/ReportsArchive';
 import { SubscriptionPanel } from '@/components/SubscriptionPanel';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
+import { formatInvoiceLineLabel, parseInvoiceCostNote } from '@/lib/invoiceCostNote';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { ChartYAxis, GreenAreaLineChart } from '@/components/GreenAreaLineChart';
 
@@ -99,6 +100,8 @@ type Props = {
   onSaveNote: (id: string, table: 'fixed' | 'variable' | 'revenue') => void;
   onOpenUsageHistory: () => void;
   onFetchApplied: () => void;
+  /** Hint po skanie faktury — koszty mogą pojawić się z lekkim opóźnieniem. */
+  syncHint?: boolean;
 };
 
 const MONTH_SHORT: Record<string, string> = {
@@ -106,6 +109,15 @@ const MONTH_SHORT: Record<string, string> = {
   '05': 'Maj', '06': 'Cze', '07': 'Lip', '08': 'Sie',
   '09': 'Wrz', '10': 'Paź', '11': 'Lis', '12': 'Gru',
 };
+
+/** Kompaktowa kwota na dolną oś wykresu (nie fragment roku typu „202”). */
+function compactAxisAmount(n: number): string {
+  const v = Number(n) || 0;
+  const abs = Math.abs(v);
+  if (abs >= 10000) return `${Math.round(v / 1000)}k`;
+  if (abs >= 1000) return `${(v / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return Math.round(v).toLocaleString('pl-PL');
+}
 
 function BarChart({
   points,
@@ -137,15 +149,21 @@ function BarChart({
   const trendPct = Math.abs(first) > 1e-6 ? ((second - first) / Math.abs(first)) * 100 : null;
   const lineColor = total < 0 ? '#FF5252' : PremiumColors.neon;
 
-  const chartPts = points.map((p) => ({
-    label: p.weekday
-      ? (p.weekday.replace('.', '').slice(0, 3) || p.label)
-      : p.label,
-    value: Number(p.value) || 0,
-  }));
+  // Dolna oś SVG = kwoty. Nie używaj weekday.slice(0,3) — dla miesięcy/lat
+  // weekday bywało „2026-01” / „2026” i dawało „202” na każdym ticku.
+  const chartPts = points.map((p) => {
+    const value = Number(p.value) || 0;
+    return { label: compactAxisAmount(value), value };
+  });
 
   const slot = Math.max(48, Math.min(64, Math.floor((SCREEN_W - 64) / Math.min(points.length, 7))));
-  const plotW = Math.max(SCREEN_W - 88, points.length * slot);
+  const chipW = Math.max(48, slot - 8);
+  const chipGap = 6;
+  // Szerokość musi uwzględniać gap między chipami — inaczej ostatnie dni miesiąca są obcinane (~27 zamiast 28–31).
+  const plotW = Math.max(
+    SCREEN_W - 88,
+    points.length * chipW + Math.max(0, points.length - 1) * chipGap + 8,
+  );
   const chartH = 170;
 
   return (
@@ -188,7 +206,7 @@ function BarChart({
               dark
               width={plotW}
             />
-            <View style={{ flexDirection: 'row', gap: 6, marginTop: 4, paddingLeft: 4 }}>
+            <View style={{ flexDirection: 'row', gap: chipGap, marginTop: 4, paddingLeft: 4, width: plotW }}>
               {points.map((r, i) => {
                 const v = values[i];
                 const neg = v < 0;
@@ -202,7 +220,8 @@ function BarChart({
                       borderRadius: 10,
                       paddingHorizontal: 10,
                       paddingVertical: 8,
-                      minWidth: Math.max(48, slot - 8),
+                      minWidth: chipW,
+                      width: chipW,
                       alignItems: 'center',
                     }}
                     testID={`premium-bar-${r.dateKey || i}`}
@@ -420,11 +439,11 @@ export function PremiumFinanceScreen(props: Props) {
         const rev = revByDay.get(key) || 0;
         const vc = varByDay.get(key) || 0;
         const d = new Date(key + 'T12:00:00');
-        // Puste dni bez ruchu = 0 (bez „fantomowej” dziennej części kosztów stałych)
+        // Zysk dzienny: przychód − (koszty stałe miesiąca / dni w miesiącu) − koszty zmienne dnia
         let value = 0;
         if (chartMetric === 'revenue') {
           value = rev;
-        } else if (rev > 0 || vc > 0) {
+        } else {
           value = rev - dailyFixed - vc;
         }
         pts.push({
@@ -448,7 +467,6 @@ export function PremiumFinanceScreen(props: Props) {
           label: MONTH_SHORT[String(m).padStart(2, '0')] ?? key,
           value: metricVal(rev, fc, vc),
           dateKey: `${key}-01`,
-          weekday: key,
         });
       }
       return pts;
@@ -470,7 +488,6 @@ export function PremiumFinanceScreen(props: Props) {
         label: String(y),
         value: metricVal(rev, fc, vc),
         dateKey: `${y}-01-01`,
-        weekday: String(y),
       };
     });
   }, [
@@ -568,6 +585,15 @@ export function PremiumFinanceScreen(props: Props) {
             darkText
           />
         </View>
+
+        {props.syncHint ? (
+          <View style={styles.syncHint}>
+            <Text style={styles.syncHintTitle}>Synchronizacja kosztów…</Text>
+            <Text style={styles.syncHintBody}>
+              Po fakturze koszty zmienne pojawią się za chwilę. Jeśli ich nie widać — przeciągnij listę w dół.
+            </Text>
+          </View>
+        ) : null}
 
         <View style={styles.segment}>
           {(['panel', 'raporty', 'subskrypcja'] as const).map((key) => (
@@ -695,13 +721,21 @@ export function PremiumFinanceScreen(props: Props) {
               }
             >
               <ExpandableDateJournal
-                items={(props.variableCostsJournal?.length ? props.variableCostsJournal : props.variableEntries).map((e) => ({
-                  id: e.id,
-                  created_at: e.created_at || `${e.year_month}-01T12:00:00`,
-                  title: e.name,
-                  amount: Number(e.amount_pln),
-                  meta: e.year_month,
-                }))}
+                items={(props.variableCostsJournal?.length ? props.variableCostsJournal : props.variableEntries).map((e) => {
+                  const invoice = parseInvoiceCostNote(e.note);
+                  return {
+                    id: e.id,
+                    created_at: e.created_at || `${e.year_month}-01T12:00:00`,
+                    title: e.name,
+                    amount: Number(e.amount_pln),
+                    meta: invoice?.supplier_name
+                      ? `${e.year_month} · ${invoice.supplier_name}`
+                      : e.year_month,
+                    detailLines: invoice
+                      ? invoice.lines.map(formatInvoiceLineLabel)
+                      : undefined,
+                  };
+                })}
                 emptyText="Brak kosztów zmiennych — kliknij +"
                 formatAmount={formatPLN}
                 renderActions={(item) => (
@@ -1202,6 +1236,17 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   noteSaveText: { color: '#0A0A0A', fontWeight: '800', fontSize: 12 },
+  syncHint: {
+    marginBottom: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,255,120,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,255,120,0.22)',
+  },
+  syncHintTitle: { color: PremiumColors.text, fontSize: 13, fontWeight: '700' },
+  syncHintBody: { color: PremiumColors.textMuted, fontSize: 12, marginTop: 4, lineHeight: 17 },
   lowRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   lowBadge: {
     backgroundColor: PremiumColors.alertSoft,

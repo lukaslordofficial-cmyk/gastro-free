@@ -19,6 +19,8 @@ export type InspirationRecipe = {
   steps: string[];
   chef_tip: string;
   cached?: boolean;
+  credits_deducted?: number;
+  credits_remaining?: number | null;
 };
 
 export type UnlockedInspiration = {

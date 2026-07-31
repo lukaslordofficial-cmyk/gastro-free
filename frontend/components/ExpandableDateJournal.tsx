@@ -23,6 +23,8 @@ export type JournalLeaf = {
   meta?: string;
   /** Gdy podane — pokazywane zamiast formatAmount(amount) (np. „−5 l”). */
   amountLabel?: string;
+  /** Szczegóły faktury (pozycje) — widoczne po rozwinięciu dnia. */
+  detailLines?: string[];
 };
 
 type Props = {
@@ -62,6 +64,8 @@ export function ExpandableDateJournal({
   const [openMonth, setOpenMonth] = useState<string | null>(null);
   const [openWeek, setOpenWeek] = useState<string | null>(null);
   const [openDay, setOpenDay] = useState<string | null>(null);
+  /** Rozwinięte pozycje faktury (produkty / ilości / kwoty). */
+  const [openLeafId, setOpenLeafId] = useState<string | null>(null);
 
   const tree: UsageTree = useMemo(() => buildUsageTree(toPseudoUsage(items) as any), [items]);
   const years = Array.from(tree.keys()).sort((a, b) => b - a);
@@ -188,19 +192,32 @@ export function ExpandableDateJournal({
                                       dayGroup.items.map((entry) => {
                                         const leaf = leafById.get(entry.id);
                                         if (!leaf) return null;
-                                        return (
-                                          <View
-                                            key={entry.id}
-                                            style={[styles.leaf, { borderBottomColor: t.border }]}
-                                          >
-                                            <View style={{ flex: 1 }}>
+                                        const hasDetails =
+                                          !!leaf.detailLines && leaf.detailLines.length > 0;
+                                        const leafOpen = openLeafId === leaf.id;
+                                        const main = (
+                                          <>
+                                            <View style={{ flex: 1, minWidth: 0 }}>
                                               <Text style={[styles.leafTitle, { color: t.text }]}>
                                                 {leaf.title}
                                               </Text>
                                               <Text style={{ color: t.textMuted, fontSize: 11 }}>
                                                 {entry.time}
                                                 {leaf.meta ? ` · ${leaf.meta}` : ''}
+                                                {hasDetails && !leafOpen ? ' · dotknij → pozycje' : ''}
                                               </Text>
+                                              {hasDetails && leafOpen ? (
+                                                <View style={styles.detailBox}>
+                                                  {leaf.detailLines!.map((line, i) => (
+                                                    <Text
+                                                      key={`${leaf.id}-d-${i}`}
+                                                      style={[styles.detailLine, { color: t.textSecondary }]}
+                                                    >
+                                                      • {line}
+                                                    </Text>
+                                                  ))}
+                                                </View>
+                                              ) : null}
                                             </View>
                                             <Text
                                               style={[
@@ -212,6 +229,29 @@ export function ExpandableDateJournal({
                                                 + (leaf.amountLabel
                                                   ?? formatAmount(leaf.amount))}
                                             </Text>
+                                          </>
+                                        );
+                                        return (
+                                          <View
+                                            key={entry.id}
+                                            style={[styles.leaf, { borderBottomColor: t.border }]}
+                                          >
+                                            {hasDetails ? (
+                                              <TouchableOpacity
+                                                style={{ flex: 1, flexDirection: 'row', alignItems: 'flex-start', minWidth: 0 }}
+                                                onPress={() =>
+                                                  setOpenLeafId(leafOpen ? null : leaf.id)
+                                                }
+                                                activeOpacity={0.75}
+                                                testID={`journal-invoice-${leaf.id}`}
+                                              >
+                                                {main}
+                                              </TouchableOpacity>
+                                            ) : (
+                                              <View style={{ flex: 1, flexDirection: 'row', alignItems: 'flex-start', minWidth: 0 }}>
+                                                {main}
+                                              </View>
+                                            )}
                                             {renderActions?.(leaf)}
                                           </View>
                                         );
@@ -281,4 +321,6 @@ const styles = StyleSheet.create({
   },
   leafTitle: { fontSize: 13, fontWeight: '600' },
   leafAmt: { fontSize: 13, fontWeight: '700', marginRight: 4 },
+  detailBox: { marginTop: 6, gap: 3, paddingRight: 8 },
+  detailLine: { fontSize: 11, lineHeight: 15, fontWeight: '500' },
 });

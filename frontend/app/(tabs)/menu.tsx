@@ -52,7 +52,15 @@ import {
   PremiumStatTile,
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
-import { assignUniqueDishImageSources } from '@/lib/productImages';
+import { assignUniqueDishImageSources, type DishThumbAssignment } from '@/lib/productImages';
+import {
+  loadDishCustomImages,
+  setDishCustomImage,
+  clearDishCustomImage,
+  subscribeDishCustomImages,
+  getDishCustomImageSync,
+} from '@/lib/dishCustomImages';
+import * as ImagePicker from 'expo-image-picker';
 import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
@@ -115,7 +123,7 @@ interface InventoryItem {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const FORM_CATEGORIES = ['Burgery', 'Dania główne', 'Sałatki', 'Makarony', 'Zupy'];
+const FORM_CATEGORIES = ['Burgery', 'Dania główne', 'Sałatki', 'Makarony', 'Zupy', 'Półprodukty'];
 
 const CATEGORY_COLORS: Record<string, string> = {
   Burgery: '#D97706',
@@ -123,6 +131,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   Sałatki: '#16A34A',
   Makarony: '#7C3AED',
   Zupy: '#DC2626',
+  Półprodukty: '#A855F7',
 };
 
 const INV_CATEGORY_COLORS: Record<string, string> = {
@@ -201,18 +210,24 @@ function DishCard({
   onDelete,
   onBatchPrep,
   premium,
-  thumbSrc,
+  thumb,
+  onChangePhoto,
 }: {
   dish: Dish;
   onEdit: (dish: Dish) => void;
   onDelete: (dish: Dish) => void;
   onBatchPrep?: (dish: Dish) => void;
   premium?: boolean;
-  thumbSrc: number | { uri: string };
+  thumb: DishThumbAssignment;
+  onChangePhoto?: (dish: Dish) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const anim = useRef(new Animated.Value(0)).current;
   const catColor = CATEGORY_COLORS[dish.category] ?? Colors.textSecondary;
+  const customUri = getDishCustomImageSync(dish.id);
+  const thumbSrc = customUri ? { uri: customUri } : thumb.source;
+  const showPlaceholderBadge =
+    !customUri && (thumb.matchTier === 'category' || thumb.matchTier === 'tags') && !!thumb.placeholderLabel;
 
   const toggle = () => {
     const toValue = expanded ? 0 : 1;
@@ -226,14 +241,30 @@ function DishCard({
     return (
       <View style={dishStyles.premCard}>
         <TouchableOpacity style={dishStyles.premHeader} onPress={toggle} activeOpacity={0.8}>
-          <Image
-            source={thumbSrc as any}
-            style={dishStyles.premThumb}
-            contentFit="contain"
-            cachePolicy="disk"
-            transition={120}
-            recyclingKey={dish.id}
-          />
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={(e) => {
+              e.stopPropagation?.();
+              onChangePhoto?.(dish);
+            }}
+            style={dishStyles.premThumbWrap}
+          >
+            <Image
+              source={thumbSrc as any}
+              style={dishStyles.premThumb}
+              contentFit="contain"
+              cachePolicy="disk"
+              transition={120}
+              recyclingKey={dish.id}
+            />
+            {showPlaceholderBadge && (
+              <View style={dishStyles.thumbBadge}>
+                <Text style={dishStyles.thumbBadgeText} numberOfLines={1} allowFontScaling={false}>
+                  Placeholder: {thumb.placeholderLabel}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
           <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
             <Text style={dishStyles.premName} numberOfLines={1} allowFontScaling={false}>{dish.name}</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -401,6 +432,27 @@ const dishStyles = StyleSheet.create({
     height: 68,
     borderRadius: DS.radius.image,
     backgroundColor: DS.color.bgTertiary,
+  },
+  premThumbWrap: {
+    width: 68,
+    position: 'relative',
+  },
+  thumbBadge: {
+    marginTop: 4,
+    alignSelf: 'stretch',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  thumbBadgeText: {
+    color: 'rgba(255,255,255,0.88)',
+    fontSize: 8,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+    textAlign: 'center',
   },
   premName: {
     color: DS.color.heading,
@@ -839,7 +891,7 @@ const BLANK_INV_FORM = {
 
 export default function MenuScreen() {
   const theme = useAppTheme();
-  const { openVoiceReport, documentScanRevision } = useUiOverlay();
+  const { openVoiceReport, documentScanRevision, notifyDocumentScanComplete } = useUiOverlay();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const { alert: premiumAlert } = usePremiumAlert();
   const [dishes, setDishes] = useState<Dish[]>([]);
@@ -973,7 +1025,10 @@ export default function MenuScreen() {
 
   // Odśwież listę po skanie menu (DocumentScanHost / globalny modal) — jak magazyn po fakturze.
   useEffect(() => {
-    if (documentScanRevision > 0) void fetchData();
+    if (documentScanRevision > 0) {
+      setRefreshing(true);
+      void fetchData();
+    }
   }, [documentScanRevision, fetchData]);
 
   const editingDishRef = useRef<Dish | null>(null);
@@ -1023,24 +1078,30 @@ export default function MenuScreen() {
     return ['Wszystkie', ...Array.from(seen)];
   }, [dishes]);
 
-  // Start od kategorii z najmniejszą liczbą dań — szybki pierwszy paint, „Wszystkie” na żądanie.
-  useEffect(() => {
-    if (!dishes.length || catInitRef.current) return;
+  /** Kategoria z najmniejszą liczbą dań — domyślny widok wejścia do Menu. */
+  const fewestCategory = useMemo(() => {
+    if (!dishes.length) return null;
     const counts = new Map<string, number>();
     for (const d of dishes) counts.set(d.category, (counts.get(d.category) ?? 0) + 1);
-    let best = 'Wszystkie';
+    let best: string | null = null;
     let bestN = Number.POSITIVE_INFINITY;
     for (const [cat, n] of counts) {
-      if (n < bestN) {
+      if (n < bestN || (n === bestN && (best == null || cat.localeCompare(best) < 0))) {
         best = cat;
         bestN = n;
       }
     }
-    catInitRef.current = true;
-    setSelectedCat(best);
+    return best;
   }, [dishes]);
 
-  const activeCat = selectedCat ?? 'Wszystkie';
+  // Start od kategorii z najmniejszą liczbą dań — nigdy od „Wszystkie”.
+  useEffect(() => {
+    if (!fewestCategory || catInitRef.current) return;
+    catInitRef.current = true;
+    setSelectedCat(fewestCategory);
+  }, [fewestCategory]);
+
+  const activeCat = selectedCat ?? fewestCategory ?? 'Wszystkie';
 
   const filtered = useMemo(() => {
     let list = dishes;
@@ -1073,6 +1134,68 @@ export default function MenuScreen() {
   const dishThumbByName = useMemo(
     () => assignUniqueDishImageSources(filtered.map((d) => ({ name: d.name, category: d.category }))),
     [filtered],
+  );
+
+  const [customImageTick, setCustomImageTick] = useState(0);
+  useEffect(() => {
+    void loadDishCustomImages().then(() => setCustomImageTick((t) => t + 1));
+    return subscribeDishCustomImages(() => setCustomImageTick((t) => t + 1));
+  }, []);
+
+  const handleChangeDishPhoto = useCallback(
+    (dish: Dish) => {
+      const hasCustom = !!getDishCustomImageSync(dish.id);
+      premiumAlert('Zmień zdjęcie', dish.name, [
+        {
+          text: 'Wybierz z galerii',
+          onPress: async () => {
+            const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            if (!perm.granted) {
+              premiumAlert('Brak dostępu', 'Pozwól na dostęp do galerii, aby zmienić zdjęcie.');
+              return;
+            }
+            const r = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ['images'],
+              quality: 0.85,
+            });
+            if (r.canceled || !r.assets?.[0]?.uri) return;
+            await setDishCustomImage(dish.id, r.assets[0].uri);
+          },
+        },
+        {
+          text: 'Zrób zdjęcie',
+          onPress: async () => {
+            let perm = await ImagePicker.getCameraPermissionsAsync();
+            if (!perm.granted && perm.canAskAgain) {
+              perm = await ImagePicker.requestCameraPermissionsAsync();
+            }
+            if (!perm.granted) {
+              premiumAlert('Brak dostępu', 'Pozwól na dostęp do aparatu, aby zmienić zdjęcie.');
+              return;
+            }
+            const r = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 0.85,
+            });
+            if (r.canceled || !r.assets?.[0]?.uri) return;
+            await setDishCustomImage(dish.id, r.assets[0].uri);
+          },
+        },
+        ...(hasCustom
+          ? [
+              {
+                text: 'Przywróć z biblioteki',
+                style: 'destructive' as const,
+                onPress: () => {
+                  void clearDishCustomImage(dish.id);
+                },
+              },
+            ]
+          : []),
+        { text: 'Anuluj', style: 'cancel' as const },
+      ]);
+    },
+    [premiumAlert],
   );
 
   // ── Ingredient autocomplete ───────────────────────────────────────────────
@@ -1234,11 +1357,18 @@ export default function MenuScreen() {
             })
           }
           premium
-          thumbSrc={dishThumbByName.get(item.dish.name) ?? require('@/assets/premium/placeholders/ph_kartony_brazowe.webp')}
+          thumb={
+            dishThumbByName.get(item.dish.name) ?? {
+              source: require('@/assets/premium/dishes/dinners/dinner_04.webp'),
+              matchTier: 'category',
+              placeholderLabel: item.dish.category || 'Danie',
+            }
+          }
+          onChangePhoto={handleChangeDishPhoto}
         />
       );
     },
-    [dishThumbByName],
+    [dishThumbByName, handleChangeDishPhoto, customImageTick],
   );
 
   // ── Save / update dish ────────────────────────────────────────────────────
@@ -1457,11 +1587,14 @@ export default function MenuScreen() {
   // ── Quick-add inventory item ───────────────────────────────────────────────
 
   async function handleSaveInventoryItem() {
-    if (!invForm.name.trim()) { Alert.alert('Wymagane pole', 'Podaj nazwę produktu.'); return; }
+    if (!invForm.name.trim()) { premiumAlert('Wymagane pole', 'Podaj nazwę produktu.'); return; }
     const currentQty = parseFloat(invForm.currentQty);
     const criticalThreshold = parseFloat(invForm.criticalThreshold);
-    if (isNaN(currentQty) || currentQty < 0) { Alert.alert('Błąd', 'Aktualna ilość musi być liczbą nieujemną.'); return; }
-    if (isNaN(criticalThreshold) || criticalThreshold <= 0) { Alert.alert('Błąd', 'Stan krytyczny musi być liczbą większą od zera.'); return; }
+    if (isNaN(currentQty) || currentQty < 0) { premiumAlert('Błąd', 'Aktualna ilość musi być liczbą nieujemną.'); return; }
+    if (isNaN(criticalThreshold) || criticalThreshold <= 0) {
+      premiumAlert('Ustaw próg krytyczny', 'Stan krytyczny musi być liczbą większą od zera — bez niego system nie wie, kiedy alarmować o braku.');
+      return;
+    }
 
     setInvSaving(true);
     try {
@@ -1510,7 +1643,7 @@ export default function MenuScreen() {
       setPendingIngKey(null);
       setShowInvModal(false);
     } catch (e: any) {
-      Alert.alert('Błąd zapisu', e.message ?? 'Nieznany błąd');
+      premiumAlert('Błąd zapisu', e.message ?? 'Nieznany błąd');
     } finally {
       setInvSaving(false);
     }
@@ -1763,7 +1896,14 @@ export default function MenuScreen() {
                 dish={dish}
                 onEdit={handleOpenEdit}
                 onDelete={handleDeleteDish}
-                thumbSrc={dishThumbByName.get(dish.name) ?? require('@/assets/premium/placeholders/ph_kartony_brazowe.webp')}
+                thumb={
+                  dishThumbByName.get(dish.name) ?? {
+                    source: require('@/assets/premium/dishes/dinners/dinner_04.webp'),
+                    matchTier: 'category',
+                    placeholderLabel: dish.category || 'Danie',
+                  }
+                }
+                onChangePhoto={handleChangeDishPhoto}
               />
             ))}
           </View>
@@ -2232,7 +2372,11 @@ export default function MenuScreen() {
       <MenuScanModal
         visible={showScanModal}
         onClose={() => setShowScanModal(false)}
-        onConfirmed={() => { setShowScanModal(false); fetchData(); }}
+        onConfirmed={async () => {
+          notifyDocumentScanComplete();
+          setRefreshing(true);
+          await fetchData();
+        }}
       />
       <BatchPrepModal
         visible={!!batchPrepDish}

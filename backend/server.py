@@ -3558,11 +3558,32 @@ _DOCUMENT_JSON_SCHEMA = {
     "schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["document_type", "supplier_name", "total_amount", "products"],
+        "required": ["document_type", "supplier_name", "total_amount", "supplier", "products"],
         "properties": {
             "document_type": {"type": "string", "enum": ["FAKTURA_ZAKUPOWA", "OFERTA_HANDLOWA", "MENU_RESTAURACYJNE"]},
             "supplier_name": {"type": ["string", "null"]},
             "total_amount": {"type": "number"},
+            "supplier": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "nip", "phone", "email", "contact_person", "address",
+                    "payment_terms", "shipping_cost", "min_order_value",
+                    "free_shipping_threshold", "lead_time_days",
+                ],
+                "properties": {
+                    "nip": {"type": ["string", "null"]},
+                    "phone": {"type": ["string", "null"]},
+                    "email": {"type": ["string", "null"]},
+                    "contact_person": {"type": ["string", "null"]},
+                    "address": {"type": ["string", "null"]},
+                    "payment_terms": {"type": ["string", "null"]},
+                    "shipping_cost": {"type": ["number", "null"]},
+                    "min_order_value": {"type": ["number", "null"]},
+                    "free_shipping_threshold": {"type": ["number", "null"]},
+                    "lead_time_days": {"type": ["number", "null"]},
+                },
+            },
             "products": {
                 "type": "array",
                 "items": {
@@ -3597,9 +3618,25 @@ _DOCUMENT_SYSTEM_PROMPT = (
     "ceny netto dla restauracji) BEZ danych faktury — to jest 'OFERTA_HANDLOWA'.\n\n"
     "Następnie wypełnij pola:\n"
     "- document_type: 'MENU_RESTAURACYJNE' albo 'FAKTURA_ZAKUPOWA' albo 'OFERTA_HANDLOWA'.\n"
-    "- supplier_name: dla oferty/faktury nazwa sprzedawcy; dla MENU_RESTAURACYJNE → null.\n"
+    "- supplier_name: dla oferty/faktury nazwa SPRZEDAWCY / dostawcy (NIE nabywcy); "
+    "dla MENU_RESTAURACYJNE → null.\n"
     "- total_amount: dla FAKTURA_ZAKUPOWA → końcowa kwota 'Do zapłaty' (brutto) jako liczba; "
     "dla OFERTA_HANDLOWA i MENU_RESTAURACYJNE → 0.\n"
+    "- supplier{}: DANE PROFILU DOSTAWCY (panel Dostawcy). AKTYWNIE szukaj w nagłówku, stopce, "
+    "bloku 'Sprzedawca' / 'Dostawca' / 'Sprzedający' / 'Wykonawca' oraz w warunkach handlowych:\n"
+    "  * nip — NIP sprzedawcy/dostawcy (nie nabywcy); zachowaj cyfry i myślniki jak na dokumencie.\n"
+    "  * phone — telefon kontaktowy / zamówień.\n"
+    "  * email — e-mail zamówień / biura.\n"
+    "  * contact_person — osoba do kontaktu, jeśli podana.\n"
+    "  * address — pełny adres siedziby/magazynu sprzedawcy (ulica, kod, miasto).\n"
+    "  * payment_terms — termin płatności / warunki (np. '14 dni', 'przelew 7 dni', 'gotówka').\n"
+    "  * shipping_cost — koszt dostawy / transportu / logistyki w PLN (liczba). "
+    "null gdy brak na dokumencie; 0 TYLKO gdy dokument wyraźnie mówi 'darmowa dostawa' / 'gratis'.\n"
+    "  * min_order_value — minimum logistyczne / min. wartość zamówienia / 'zamówienia od X zł' w PLN.\n"
+    "  * free_shipping_threshold — próg darmowej dostawy w PLN (np. 'darmowa dostawa od 500 zł').\n"
+    "  * lead_time_days — czas realizacji / dostawy w dniach (liczba, np. '1-2 dni robocze' → 2).\n"
+    "  Gdy pola NIE ma na dokumencie → null (NIE zgaduj, NIE wstawiaj 0).\n"
+    "  Dla MENU_RESTAURACYJNE wszystkie pola supplier → null.\n"
     "- products[]: dla faktury/oferty pozycje towarowe; dla MENU_RESTAURACYJNE wpisz potrawy "
     "(product_name = nazwa dania, price_netto = cena dla gościa, quantity=0, unit='szt', "
     "category najlepiej dopasuj lub 'Inne').\n\n"
@@ -3609,7 +3646,7 @@ _DOCUMENT_SYSTEM_PROMPT = (
     "'Opakowania', 'Inne'.\n"
     "WAŻNE: oliwa / olive oil / olej / masło klarowane / smalec → 'Oleje i tłuszcze' "
     "(NIGDY 'Alkohole'). Extra Virgin ≠ alkohol.\n"
-    "Nie wymyślaj pozycji. Zwróć wyłącznie poprawny JSON zgodny ze schematem."
+    "Nie wymyślaj pozycji ani danych dostawcy. Zwróć wyłącznie poprawny JSON zgodny ze schematem."
 )
 
 
@@ -3628,20 +3665,343 @@ async def _has_catalog_visible(client: httpx.AsyncClient) -> bool:
     return bool(_catalog_visible_col)
 
 
-async def _find_or_create_supplier(client: httpx.AsyncClient, name: Optional[str]) -> tuple[str, str]:
-    """Zwraca (supplier_id, supplier_name). Tworzy dostawcę jeśli nie istnieje."""
+def _nip_digits(value: Optional[str]) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _normalize_supplier_scan_meta(raw: Optional[dict]) -> dict:
+    """Normalizuje blok `supplier` z Vision JSON do pól panelu Dostawcy."""
+    src = raw if isinstance(raw, dict) else {}
+
+    def _str(key: str) -> Optional[str]:
+        v = src.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    def _num(key: str) -> Optional[float]:
+        v = src.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _int(key: str) -> Optional[int]:
+        n = _num(key)
+        if n is None:
+            return None
+        try:
+            return int(round(n))
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "nip": _str("nip"),
+        "phone": _str("phone"),
+        "email": _str("email"),
+        "contact_person": _str("contact_person"),
+        "address": _str("address"),
+        "payment_terms": _str("payment_terms"),
+        "shipping_cost": _num("shipping_cost"),
+        "min_order_value": _num("min_order_value"),
+        "free_shipping_threshold": _num("free_shipping_threshold"),
+        "lead_time_days": _int("lead_time_days"),
+    }
+
+
+def _compose_supplier_notes_from_scan(meta: dict) -> Optional[str]:
+    parts: list[str] = []
+    addr = (meta.get("address") or "").strip()
+    pay = (meta.get("payment_terms") or "").strip()
+    if addr:
+        parts.append(f"Adres: {addr}")
+    if pay:
+        parts.append(f"Termin płatności: {pay}")
+    return "\n".join(parts) if parts else None
+
+
+def _merge_supplier_notes(existing: Optional[str], incoming: Optional[str]) -> Optional[str]:
+    """Dokłada linie z dokumentu bez kasowania istniejących notatek."""
+    ex = (existing or "").strip()
+    inc = (incoming or "").strip()
+    if not inc:
+        return None  # brak aktualizacji
+    if not ex:
+        return inc
+    to_add = []
+    for line in inc.split("\n"):
+        line = line.strip()
+        if line and line not in ex:
+            to_add.append(line)
+    if not to_add:
+        return None  # już jest
+    return f"{ex}\n" + "\n".join(to_add)
+
+
+def _prefer_supplier_str(existing: Optional[str], new: Optional[str], *, kind: str = "text") -> Optional[str]:
+    """Zwraca nową wartość do zapisu albo None (= nie zmieniaj).
+
+    - puste z dokumentu → nie nadpisuj
+    - puste w DB → uzupełnij
+    - obie niepuste → aktualizuj gdy dokument wygląda jaśniej / kompletniej
+    """
+    n = (new or "").strip()
+    e = (existing or "").strip()
+    if not n:
+        return None
+    if not e:
+        return n
+    if kind == "nip":
+        nd, ed = _nip_digits(n), _nip_digits(e)
+        if not nd:
+            return None
+        if len(nd) > len(ed) or (len(nd) == 10 and len(ed) != 10):
+            return n
+        if nd == ed:
+            return None  # ten sam NIP, bez kosmetyki
+        return n  # inny NIP z dokumentu — aktualny dokument wygrywa
+    if kind == "phone":
+        nd = sum(ch.isdigit() for ch in n)
+        ed = sum(ch.isdigit() for ch in e)
+        if nd > ed:
+            return n
+        if nd == ed and n != e:
+            return n
+        return None
+    if kind == "email":
+        if "@" in n and "@" not in e:
+            return n
+        if n.lower() != e.lower():
+            return n
+        return None
+    # text / contact: dłuższy lub wyraźnie inny
+    if len(n) > len(e) + 2 or n.lower() != e.lower():
+        return n
+    return None
+
+
+def _prefer_supplier_num(
+    existing,
+    new: Optional[float],
+    *,
+    allow_zero: bool = False,
+) -> Optional[float]:
+    """Zwraca liczbę do zapisu albo None (= nie zmieniaj)."""
+    if new is None:
+        return None
+    try:
+        v = float(new)
+    except (TypeError, ValueError):
+        return None
+    if allow_zero:
+        if v < 0:
+            return None
+    elif v <= 0:
+        return None
+    try:
+        ex = float(existing) if existing is not None and existing != "" else 0.0
+    except (TypeError, ValueError):
+        ex = 0.0
+    # Uzupełnij brak / zaktualizuj gdy dokument podaje wartość (w tym 0 = darmowa dostawa)
+    if allow_zero:
+        if ex == v:
+            return None
+        return v
+    if ex <= 0 or abs(ex - v) > 0.009:
+        return v
+    return None
+
+
+def build_supplier_patch_from_scan(existing: dict, meta: dict) -> dict:
+    """Czysta logika merge — używana przy zapisie i w testach jednostkowych."""
+    patch: dict = {}
+    for key, kind in (
+        ("nip", "nip"),
+        ("phone", "phone"),
+        ("email", "email"),
+        ("contact_person", "text"),
+    ):
+        chosen = _prefer_supplier_str(existing.get(key), meta.get(key), kind=kind)
+        if chosen is not None:
+            patch[key] = chosen
+
+    notes_in = _compose_supplier_notes_from_scan(meta)
+    notes_merged = _merge_supplier_notes(existing.get("notes"), notes_in)
+    if notes_merged is not None:
+        patch["notes"] = notes_merged
+
+    ship = _prefer_supplier_num(
+        existing.get("shipping_cost"), meta.get("shipping_cost"), allow_zero=True,
+    )
+    if ship is not None:
+        patch["shipping_cost"] = ship
+
+    min_o = _prefer_supplier_num(
+        existing.get("min_order_value"), meta.get("min_order_value"), allow_zero=False,
+    )
+    if min_o is not None:
+        patch["min_order_value"] = min_o
+
+    free_th = _prefer_supplier_num(
+        existing.get("free_shipping_threshold"),
+        meta.get("free_shipping_threshold"),
+        allow_zero=False,
+    )
+    if free_th is not None:
+        patch["free_shipping_threshold"] = free_th
+
+    lead = meta.get("lead_time_days")
+    if lead is not None:
+        try:
+            lead_i = int(lead)
+        except (TypeError, ValueError):
+            lead_i = None
+        if lead_i is not None and lead_i > 0:
+            ex_lead = existing.get("lead_time_days")
+            try:
+                ex_i = int(ex_lead) if ex_lead is not None and ex_lead != "" else None
+            except (TypeError, ValueError):
+                ex_i = None
+            if ex_i is None or ex_i <= 0 or ex_i != lead_i:
+                patch["lead_time_days"] = lead_i
+
+    return patch
+
+
+def supplier_meta_preview(meta: dict) -> dict:
+    """Kompaktowy podgląd pól dostawcy dla FE (pomija puste)."""
+    out: dict = {}
+    for k in (
+        "nip", "phone", "email", "contact_person", "address", "payment_terms",
+        "shipping_cost", "min_order_value", "free_shipping_threshold", "lead_time_days",
+    ):
+        v = meta.get(k)
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        out[k] = v
+    return out
+
+
+async def _find_or_create_supplier(
+    client: httpx.AsyncClient,
+    name: Optional[str],
+    *,
+    nip: Optional[str] = None,
+) -> tuple[str, str]:
+    """Zwraca (supplier_id, supplier_name). Tworzy dostawcę jeśli nie istnieje.
+
+    Dopasowanie: najpierw NIP (cyfry), potem nazwa (znormalizowana).
+    """
     clean = (name or "").strip() or "Nieznany dostawca"
-    existing = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "1000"})
+    nip_d = _nip_digits(nip)
+    existing = await sb_get(
+        client, "suppliers",
+        params={"select": "id,name,nip", "limit": "1000"},
+    )
+    if nip_d and len(nip_d) >= 8:
+        for r in (existing or []):
+            if _nip_digits(r.get("nip")) == nip_d:
+                return r["id"], r["name"]
     for r in (existing or []):
         if _norm(r["name"]) == _norm(clean):
             return r["id"], r["name"]
     colors = ["#2563EB", "#DC2626", "#16A34A", "#D97706", "#7C3AED", "#0891B2"]
     color = colors[len(existing or []) % len(colors)]
-    row = await sb_post(client, "suppliers", {
+    payload: dict = {
         "name": clean, "category": "Dodany ze skanu", "icon_color": color,
-    })
+    }
+    if nip and str(nip).strip():
+        payload["nip"] = str(nip).strip()
+    row = await sb_post(client, "suppliers", payload)
     created = row[0] if isinstance(row, list) else row
     return created["id"], created["name"]
+
+
+async def _apply_supplier_scan_meta(
+    client: httpx.AsyncClient,
+    supplier_id: str,
+    meta: Optional[dict],
+) -> dict:
+    """Inteligentny upsert pól panelu Dostawcy po skanie. Nie nadpisuje pustym."""
+    normalized = _normalize_supplier_scan_meta(meta)
+    if not any(v is not None for v in normalized.values()):
+        return {"updated_fields": [], "supplier_meta": {}}
+
+    select_cols = (
+        "id,name,nip,phone,email,contact_person,notes,"
+        "min_order_value,shipping_cost,free_shipping_threshold,lead_time_days"
+    )
+    rows = None
+    try:
+        rows = await sb_get(
+            client, "suppliers",
+            params={"select": select_cols, "id": f"eq.{supplier_id}", "limit": "1"},
+        )
+    except Exception:
+        # Graceful: migracje shipping/lead_time mogą nie być uruchomione
+        for cols in (
+            "id,name,nip,phone,email,contact_person,notes,min_order_value,shipping_cost,free_shipping_threshold",
+            "id,name,nip,phone,email,contact_person,notes,min_order_value",
+            "id,name,nip,phone,email,contact_person,notes",
+        ):
+            try:
+                rows = await sb_get(
+                    client, "suppliers",
+                    params={"select": cols, "id": f"eq.{supplier_id}", "limit": "1"},
+                )
+                break
+            except Exception:
+                continue
+    if not rows:
+        return {"updated_fields": [], "supplier_meta": supplier_meta_preview(normalized)}
+
+    existing = rows[0]
+    patch = build_supplier_patch_from_scan(existing, normalized)
+    if not patch:
+        return {"updated_fields": [], "supplier_meta": supplier_meta_preview(normalized)}
+
+    # Próby zapisu z fallbackiem na brakujące kolumny
+    attempts = [dict(patch)]
+    if "lead_time_days" in patch:
+        p2 = dict(patch)
+        del p2["lead_time_days"]
+        attempts.append(p2)
+    if any(k in patch for k in ("shipping_cost", "free_shipping_threshold")):
+        p3 = {k: v for k, v in patch.items()
+              if k not in ("shipping_cost", "free_shipping_threshold", "lead_time_days")}
+        if p3:
+            attempts.append(p3)
+    # Tylko podstawowe pola kontaktowe
+    p4 = {k: v for k, v in patch.items()
+          if k in ("nip", "phone", "email", "contact_person", "notes")}
+    if p4 and p4 not in attempts:
+        attempts.append(p4)
+
+    saved_keys: list[str] = []
+    last_err: Optional[Exception] = None
+    for attempt in attempts:
+        if not attempt:
+            continue
+        try:
+            await sb_patch(client, "suppliers", {"id": f"eq.{supplier_id}"}, attempt)
+            saved_keys = list(attempt.keys())
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err and not saved_keys:
+        logger.warning(f"_apply_supplier_scan_meta failed: {last_err}")
+
+    return {
+        "updated_fields": saved_keys,
+        "supplier_meta": supplier_meta_preview(normalized),
+    }
 
 
 async def _resolve_category_id_cached(client: httpx.AsyncClient, cat_name: str, cache: dict) -> Optional[str]:
@@ -4305,6 +4665,18 @@ class ConfirmInvoiceRequest(BaseModel):
     # variable_cost = tylko koszt zmienny
     # fixed_cost = tylko koszt stały
     destination: str = "inventory"
+    # Pola panelu Dostawcy wyodrębnione ze skanu (opcjonalne — merge przy zapisie)
+    supplier: Optional[dict] = None
+    supplier_nip: Optional[str] = None
+    supplier_phone: Optional[str] = None
+    supplier_email: Optional[str] = None
+    supplier_contact_person: Optional[str] = None
+    supplier_address: Optional[str] = None
+    supplier_payment_terms: Optional[str] = None
+    supplier_shipping_cost: Optional[float] = None
+    supplier_min_order_value: Optional[float] = None
+    supplier_free_shipping_threshold: Optional[float] = None
+    supplier_lead_time_days: Optional[int] = None
 
 
 async def _upsert_supplier_catalog_from_invoice(
@@ -4745,6 +5117,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
 
     doc_type = data.get("document_type") or "OFERTA_HANDLOWA"
     supplier_name = data.get("supplier_name")
+    supplier_meta = _normalize_supplier_scan_meta(data.get("supplier"))
 
     if doc_type == "MENU_RESTAURACYJNE":
         # Menu restauracji → NIE twórz dostawcy / katalogu. FE otworzy skaner menu.
@@ -4806,22 +5179,28 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
             "document_type": doc_type,
             "supplier_id": supplier_id,
             "supplier_name": supplier_name,
+            "supplier": supplier_meta_preview(supplier_meta),
             "total_amount": float(data.get("total_amount") or 0),
             "products": enriched or raw_products,
             "user_categories": user_cat_names,
         }, billing)
 
-    # OFERTA → rozpoznaj/utwórz dostawcę i zapisz od razu
+    # OFERTA → rozpoznaj/utwórz dostawcę, uzupełnij panel Dostawcy, zapisz katalog
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client_db:
         if supplier_id:
             resolved_id, resolved_name = supplier_id, (data.get("supplier_name") or "")
         else:
-            resolved_id, resolved_name = await _find_or_create_supplier(client_db, supplier_name)
+            resolved_id, resolved_name = await _find_or_create_supplier(
+                client_db, supplier_name, nip=supplier_meta.get("nip"),
+            )
+        meta_result = await _apply_supplier_scan_meta(client_db, resolved_id, supplier_meta)
         result = await _process_offer(client_db, resolved_id, data)
         return _with_billing({
             "document_type": doc_type,
             "supplier_id": resolved_id,
             "supplier_name": resolved_name or supplier_name,
+            "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
+            "supplier_fields_updated": meta_result.get("updated_fields") or [],
             **result,
         }, billing)
 
@@ -4830,10 +5209,31 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
 async def confirm_invoice(req: ConfirmInvoiceRequest):
     """Zatwierdzenie faktury z podglądu (po ewentualnej korekcie kategorii).
     Zawsze: aktualizacja/utworzenie produktów w magazynie + koszt zmienny (materiały).
-    Tworzy dostawcę jeśli podano tylko nazwę; dopisuje pozycje do katalogu dostawcy."""
+    Tworzy dostawcę jeśli podano tylko nazwę; dopisuje pozycje do katalogu dostawcy;
+    uzupełnia pola panelu Dostawcy (NIP, telefon, dostawa, min. zamówienie itd.)."""
     require_tenant_account_key()
     if not req.products:
         raise HTTPException(status_code=400, detail="Brak pozycji do zaksięgowania.")
+
+    # Złóż meta z obiektu `supplier` lub płaskich pól FE
+    flat_meta = {
+        "nip": req.supplier_nip,
+        "phone": req.supplier_phone,
+        "email": req.supplier_email,
+        "contact_person": req.supplier_contact_person,
+        "address": req.supplier_address,
+        "payment_terms": req.supplier_payment_terms,
+        "shipping_cost": req.supplier_shipping_cost,
+        "min_order_value": req.supplier_min_order_value,
+        "free_shipping_threshold": req.supplier_free_shipping_threshold,
+        "lead_time_days": req.supplier_lead_time_days,
+    }
+    if isinstance(req.supplier, dict):
+        merged_src = {**flat_meta, **{k: v for k, v in req.supplier.items() if v is not None}}
+    else:
+        merged_src = flat_meta
+    supplier_meta = _normalize_supplier_scan_meta(merged_src)
+
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
         if req.supplier_id:
             sup = await sb_get(client, "suppliers",
@@ -4842,7 +5242,11 @@ async def confirm_invoice(req: ConfirmInvoiceRequest):
                 raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
             supplier_id, supplier_name = sup[0]["id"], sup[0]["name"]
         else:
-            supplier_id, supplier_name = await _find_or_create_supplier(client, req.supplier_name)
+            supplier_id, supplier_name = await _find_or_create_supplier(
+                client, req.supplier_name, nip=supplier_meta.get("nip"),
+            )
+
+        meta_result = await _apply_supplier_scan_meta(client, supplier_id, supplier_meta)
 
         products = [p.model_dump() for p in req.products]
         # Zakupy: magazyn + koszt zmienny (ignorujemy stare destination tiles z FE).
@@ -4850,7 +5254,12 @@ async def confirm_invoice(req: ConfirmInvoiceRequest):
             client, supplier_id, supplier_name, products, float(req.total_amount or 0),
             destination="inventory",
         )
-    return {"document_type": "FAKTURA_ZAKUPOWA", **result}
+    return {
+        "document_type": "FAKTURA_ZAKUPOWA",
+        "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
+        "supplier_fields_updated": meta_result.get("updated_fields") or [],
+        **result,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5799,6 +6208,8 @@ _MENU_SUGGEST_SYSTEM_PROMPT = (
     "liczone na sztuki (jajko, plaster, bułka) w 'szt'. Nigdy nie mieszaj g i ml dla "
     "tego samego produktu.\n"
     "   * Ilości > 0 — WYŁĄCZNIE liczby całkowite (integer). Zakaz ułamków typu 0.25.\n"
+    "   * KAŻDY składnik MUSI mieć quantity > 0 (nigdy null / 0) — typowe gramatury porcji: "
+    "mięso 120–180 g, warzywa 40–80 g, sos 20–40 ml, przyprawy 1–3 g.\n"
     "   * Przyprawy / małe ilości (sól, pieprz, przyprawy): minimum 1–2 jednostki na porcję "
     "(np. 1 g lub 2 g), nigdy ułamki gramów.\n"
     "   * CAŁY PRODUKT (KRYTYCZNE): jeśli przepis używa części (żółtko, białko, skórka cytryny, "
@@ -7231,11 +7642,16 @@ class CompareItem(BaseModel):
     # Pasmo ±10% wokół deficytu do progu optymalnego — tańsze opakowanie w paśmie wygrywa
     quantity_min: Optional[float] = None
     quantity_max: Optional[float] = None
+    # Gramatura 1 sztuki (g/ml) — gdy zamówienie w szt. i magazyn nie ma unit_weight_volume
+    unit_weight_volume: Optional[float] = None
+    weight_volume_unit: Optional[str] = None
 
 
 class CompareOffersRequest(BaseModel):
     items: list[CompareItem]
     restaurant_name: Optional[str] = None
+    # Strategia koszyka: fast_delivery | min_deliveries | lowest_price
+    cart_objective: Optional[str] = None
 
 
 class MessageSupplierGroup(BaseModel):
@@ -7947,8 +8363,13 @@ async def compare_offers(req: CompareOffersRequest):
             inv_row, _ = _resolve_by_fuzzy(it.product_name_or_id, inv_rows, threshold=70)
             inv_id = inv_row.get("id") if inv_row else None
             existing_syn = list(inv_row.get("synonyms") or []) if inv_row else []
-            uwv = (inv_row or {}).get("unit_weight_volume")
-            wvu = (inv_row or {}).get("weight_volume_unit")
+            # Preferuj gramaturę z requestu (UI „gramatura 1 sztuki”), potem magazyn
+            uwv = it.unit_weight_volume
+            if uwv is None:
+                uwv = (inv_row or {}).get("unit_weight_volume")
+            wvu = it.weight_volume_unit
+            if not wvu:
+                wvu = (inv_row or {}).get("weight_volume_unit")
             known_names = [it.product_name_or_id]
             if inv_row:
                 known_names.append(inv_row.get("name", ""))
@@ -8148,7 +8569,7 @@ async def compare_offers(req: CompareOffersRequest):
         except Exception as e:
             logger.warning(f"deal_hunter kitchen signals skipped: {e}")
 
-        from smart_basket_optimizer import build_smart_optimize_response
+        from smart_basket_optimizer import build_smart_optimize_response, apply_cart_objective
         result = build_smart_optimize_response(
             per_item,
             suppliers_meta,
@@ -8156,6 +8577,7 @@ async def compare_offers(req: CompareOffersRequest):
             waste_top=waste_top,
             fillers=fillers,
         )
+        result = apply_cart_objective(result, req.cart_objective, suppliers_meta)
         if pack_notes:
             result["pack_adjustment_notes"] = pack_notes
             # Dołącz do speech, żeby FE / Jarvis widziały od razu
@@ -8292,20 +8714,50 @@ _CATEGORY_SYNONYMS: dict[str, list[str]] = {
 }
 
 
+_CATEGORY_STOPWORDS = frozenset({
+    "brakujace", "brakujacych", "brakujacy", "braki", "wszystkie",
+    "wszystkich", "kategoria", "kategorii", "z", "i", "oraz", "a", "też",
+    "tez", "plus", "zamow", "zamów", "prosze", "proszę",
+})
+
+
+def _category_syn_index() -> dict[str, str]:
+    syn_index: dict[str, str] = {}
+    for canon, syns in _CATEGORY_SYNONYMS.items():
+        for x in syns:
+            syn_index[_norm_pl(x)] = canon
+        syn_index[_norm_pl(canon)] = canon
+    return syn_index
+
+
 def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]:
     """Zwraca (matched_canonical, unmatched_raw) — dopasowuje potoczne nazwy do
     sztywnych kategorii z `WAREHOUSE_CATEGORIES`.
 
     Tylko exact / token-exact / fuzzy do nazwy kategorii — BEZ substring
     („ser" ∈ „ser kozi" NIE może stać się Nabiałem).
+
+    Gdy w jednym stringu jest kategoria + nazwy produktów
+    („warzywa oraz ser kozi i borowiki"), kategoria trafia do matched,
+    a reszta tokenów do unmatched (później → named products).
     """
     matched: list[str] = []
     unmatched: list[str] = []
     canonical_norm = {_norm_pl(c): c for c in WAREHOUSE_CATEGORIES}
-    syn_index: dict[str, str] = {}
-    for canon, syns in _CATEGORY_SYNONYMS.items():
-        for x in syns:
-            syn_index[_norm_pl(x)] = canon
+    syn_index = _category_syn_index()
+
+    def _cat_tokens_for(canon: str) -> set[str]:
+        toks = {_norm_pl(canon)}
+        for syn in _CATEGORY_SYNONYMS.get(canon, []):
+            toks.add(_norm_pl(syn))
+            for part in _norm_pl(syn).split():
+                if part:
+                    toks.add(part)
+        for part in _norm_pl(canon).split():
+            if part:
+                toks.add(part)
+        return toks
+
     for r in raw or []:
         s = (r or "").strip()
         if not s:
@@ -8314,28 +8766,40 @@ def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]
             return ["all"], []
         key = _norm_pl(s)
         # 1) exact canonical
-        if key in canonical_norm and canonical_norm[key] not in matched:
-            matched.append(canonical_norm[key])
+        if key in canonical_norm:
+            if canonical_norm[key] not in matched:
+                matched.append(canonical_norm[key])
             continue
         # 2) exact synonym (cały string)
-        if key in syn_index and syn_index[key] not in matched:
-            matched.append(syn_index[key])
+        if key in syn_index:
+            canon = syn_index[key]
+            if canon not in matched:
+                matched.append(canon)
             continue
         # 3) token-exact: „brakujace mieso" → token „mieso"
-        tokens = [t for t in key.replace(",", " ").split() if t and t not in {
-            "brakujace", "brakujacych", "brakujacy", "braki", "wszystkie",
-            "wszystkich", "kategoria", "kategorii", "z", "i", "oraz",
-        }]
+        #    „warzywa oraz ser kozi" → Warzywa + unmatched „ser kozi"
+        tokens = [
+            t for t in key.replace(",", " ").replace("+", " ").split()
+            if t and t not in _CATEGORY_STOPWORDS
+        ]
         found = None
+        found_token = None
         for t in tokens:
             if t in syn_index:
                 found = syn_index[t]
+                found_token = t
                 break
             if t in canonical_norm:
                 found = canonical_norm[t]
+                found_token = t
                 break
-        if found and found not in matched:
-            matched.append(found)
+        if found:
+            if found not in matched:
+                matched.append(found)
+            cat_toks = _cat_tokens_for(found)
+            leftover = [t for t in tokens if t not in cat_toks and t != found_token]
+            if leftover:
+                unmatched.append(" ".join(leftover))
             continue
         # 4) rapidfuzz tylko do pełnych nazw kategorii (wysoki próg)
         best = None
@@ -8344,11 +8808,39 @@ def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]
             score = float(fuzz.token_set_ratio(key, canon_norm))
             if score > best_score:
                 best_score, best = score, canon
-        if best and best_score >= 82 and best not in matched:
-            matched.append(best)
+        if best and best_score >= 82:
+            if best not in matched:
+                matched.append(best)
         else:
             unmatched.append(s)
     return matched, unmatched
+
+
+def _product_in_wanted_categories(
+    effective_cat: str,
+    category_id: Optional[str],
+    wanted_set: set[str],
+    wanted_ids: set[str],
+) -> bool:
+    """True gdy produkt należy do wybranej kategorii — bez fuzzy bleed.
+
+    Matching: category_id ∈ wanted_ids LUB znormalizowana nazwa kategorii
+    (po resolve synonimów) ∈ wanted_set. Brak kategorii → „Inne" — NIGDY
+    nie wpada do Warzywa/Nabiał itd.
+    """
+    if wanted_ids and category_id and str(category_id) in wanted_ids:
+        return True
+    ec = (effective_cat or "").strip() or "Inne"
+    ec_norm = _norm_pl(ec)
+    if ec_norm in wanted_set:
+        return True
+    resolved, _ = _resolve_warehouse_categories([ec])
+    for r in resolved:
+        if r == "all":
+            continue
+        if _norm_pl(r) in wanted_set:
+            return True
+    return False
 
 
 class ExtraOrderItem(BaseModel):
@@ -8356,6 +8848,8 @@ class ExtraOrderItem(BaseModel):
     product_name: str = ""
     quantity: Optional[float] = None
     unit: str = "szt"
+    unit_weight_volume: Optional[float] = None
+    weight_volume_unit: Optional[str] = None
 
 
 class CriticalByCategoryRequest(BaseModel):
@@ -8366,6 +8860,8 @@ class CriticalByCategoryRequest(BaseModel):
     stock_target: str = "critical"
     # MIX: konkretne produkty z nazwy (np. ser kozi) + braki z categories
     items: list[ExtraOrderItem] = Field(default_factory=list)
+    # Strategia koszyka Łowcy: fast_delivery | min_deliveries | lowest_price
+    cart_objective: Optional[str] = None
 
 
 @app.post("/api/orders/critical-by-category")
@@ -8398,6 +8894,8 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 "name": n,
                 "quantity": q,
                 "unit": (it.unit or "szt").strip() or "szt",
+                "unit_weight_volume": it.unit_weight_volume,
+                "weight_volume_unit": it.weight_volume_unit,
             })
         elif isinstance(it, dict):
             n = str(it.get("product_name") or it.get("name") or "").strip()
@@ -8410,10 +8908,17 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 q = None
             if q is not None and q <= 0:
                 q = None
+            try:
+                raw_uwv = it.get("unit_weight_volume")
+                uwv = float(raw_uwv) if raw_uwv is not None and raw_uwv != "" else None
+            except (TypeError, ValueError):
+                uwv = None
             named_raw.append({
                 "name": n,
                 "quantity": q,
                 "unit": str(it.get("unit") or "szt").strip() or "szt",
+                "unit_weight_volume": uwv,
+                "weight_volume_unit": (str(it.get("weight_volume_unit") or "").strip() or None),
             })
 
     # LLM często wrzuca nazwę produktu do categories[] („ser kozi”).
@@ -8429,7 +8934,8 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             if uk in {"inne", "all", "wszystko", "braki"}:
                 kept_unmatched.append(u)
                 continue
-            named_raw.append({"name": u.strip(), "quantity": None, "unit": "szt"})
+            named_raw.append({"name": u.strip(), "quantity": None, "unit": "szt",
+                              "unit_weight_volume": None, "weight_volume_unit": None})
             already.add(uk)
         unmatched = kept_unmatched
 
@@ -8510,6 +9016,28 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         if target_mode not in ("critical", "optimal"):
             target_mode = "critical"
 
+        # Mapuj nazwy kategorii → id z inventory_categories (spójnie z FE category_id)
+        wanted_ids: set[str] = set()
+        if matched and not want_all:
+            try:
+                cat_rows = await sb_get(
+                    client, "inventory_categories",
+                    params={"select": "id,name", "limit": "500"},
+                ) or []
+            except Exception:
+                cat_rows = []
+            for cr in cat_rows:
+                cname = (cr.get("name") or "").strip()
+                if not cname:
+                    continue
+                cn = _norm_pl(cname)
+                if cn in wanted_set:
+                    wanted_ids.add(str(cr["id"]))
+                    continue
+                resolved, _ = _resolve_warehouse_categories([cname])
+                if any(_norm_pl(r) in wanted_set for r in resolved if r != "all"):
+                    wanted_ids.add(str(cr["id"]))
+
         # Ile produktów jest w wybranych kategoriach (mianownik do X/Y)
         category_total = 0
         critical = []
@@ -8536,12 +9064,13 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 # FE: brak category_id → wyświetla „Inne” (mapDbRow). Backend musi robić to samo.
                 effective_cat = (cat_name or "").strip() or "Inne"
                 if not want_all:
-                    if _norm_pl(effective_cat) not in wanted_set:
-                        if not any(
-                            fuzz.token_set_ratio(_norm_pl(effective_cat), w) >= 88
-                            for w in wanted_set
-                        ):
-                            continue
+                    if not _product_in_wanted_categories(
+                        effective_cat,
+                        r.get("category_id"),
+                        wanted_set,
+                        wanted_ids,
+                    ):
+                        continue
                 category_total += 1
                 buf_pct = float(r.get("safety_buffer_percent") or 20.0)
                 try:
@@ -8594,7 +9123,10 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                     "order_qty_min": qty_lo,
                     "order_qty_max": qty_hi,
                     "category": effective_cat,
+                    "category_id": r.get("category_id"),
                     "source": "category_shortage",
+                    "unit_weight_volume": r.get("unit_weight_volume"),
+                    "weight_volume_unit": r.get("weight_volume_unit"),
                 })
 
         # MIX: dorzuć nazwiane produkty (ser kozi, filet…) — dedupe po nazwie
@@ -8673,6 +9205,15 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                     if hit else None
                 ) or "—",
                 "source": "named",
+                "unit_weight_volume": (
+                    nr.get("unit_weight_volume")
+                    if nr.get("unit_weight_volume") is not None
+                    else (hit or {}).get("unit_weight_volume")
+                ),
+                "weight_volume_unit": (
+                    nr.get("weight_volume_unit")
+                    or (hit or {}).get("weight_volume_unit")
+                ),
             }
             critical.append(entry)
             named_added.append(entry)
@@ -8726,10 +9267,13 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 unit=c["unit"],
                 quantity_min=c.get("order_qty_min"),
                 quantity_max=c.get("order_qty_max"),
+                unit_weight_volume=c.get("unit_weight_volume"),
+                weight_volume_unit=c.get("weight_volume_unit"),
             )
             for c in critical
         ],
         restaurant_name=req.restaurant_name,
+        cart_objective=req.cart_objective,
     )
     compare_result: Optional[dict] = None
     compare_error: Optional[str] = None
@@ -10434,16 +10978,30 @@ async def voice_dispatch(req: VoiceDispatchRequest):
                     qty = None
                 if qty is not None and qty <= 0:
                     qty = None
+                uwv_val = None
+                try:
+                    if itx.get("unit_weight_volume") is not None and str(itx.get("unit_weight_volume")).strip() != "":
+                        uwv_val = float(itx["unit_weight_volume"])
+                except (TypeError, ValueError):
+                    uwv_val = None
                 extra.append(ExtraOrderItem(
                     product_name=pname,
                     quantity=qty,
                     unit=str(itx.get("unit") or "szt").strip() or "szt",
+                    unit_weight_volume=uwv_val,
+                    weight_volume_unit=(
+                        str(itx.get("weight_volume_unit") or "").strip() or None
+                    ),
                 ))
         return await orders_critical_by_category(CriticalByCategoryRequest(
             categories=list(cats),
             restaurant_name=p.get("restaurant_name"),
             stock_target=str(p.get("stock_target") or "critical"),
             items=extra,
+            cart_objective=(
+                str(p.get("cart_objective")).strip()
+                if p.get("cart_objective") else None
+            ),
         ))
     raise HTTPException(status_code=400, detail=f"Intencja {it!r} nie obsługiwana przez /voice/dispatch.")
 

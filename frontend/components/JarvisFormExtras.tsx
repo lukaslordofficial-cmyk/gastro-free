@@ -459,13 +459,22 @@ function OrderLine({
   onChange: (c: Record<string, any>) => void;
   onRemove: () => void;
 }) {
-  const [suggestions, setSuggestions] = useState<{ id: string; name: string; unit?: string }[]>([]);
+  const [suggestions, setSuggestions] = useState<{
+    id: string;
+    name: string;
+    unit?: string;
+    unit_weight_volume?: number | null;
+    weight_volume_unit?: string | null;
+  }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [accepted, setAccepted] = useState(!!item?.inventory_id);
   const name = String(item.product_name || '');
+  const unitStr = String(item.unit || '').trim().toLowerCase();
+  const isPieces = /^(szt|sztuka|sztuki|szt\.)$/i.test(unitStr);
 
   useEffect(() => {
     const q = name.trim();
-    if (q.length < 1) {
+    if (q.length < 1 || accepted) {
       setSuggestions([]);
       return;
     }
@@ -473,12 +482,21 @@ function OrderLine({
     const t = setTimeout(async () => {
       setLoading(true);
       try {
-        const { data } = await supabase
+        let { data, error } = await supabase
           .from('inventory_items')
-          .select('id, name, unit')
+          .select('id, name, unit, unit_weight_volume, weight_volume_unit')
           .ilike('name', `%${q}%`)
           .order('name')
           .limit(8);
+        if (error && /unit_weight_volume|weight_volume_unit/.test(error.message ?? '')) {
+          const retry = await supabase
+            .from('inventory_items')
+            .select('id, name, unit')
+            .ilike('name', `%${q}%`)
+            .order('name')
+            .limit(8);
+          data = retry.data;
+        }
         if (!cancelled) setSuggestions((data as any[]) ?? []);
       } catch {
         if (!cancelled) setSuggestions([]);
@@ -490,7 +508,7 @@ function OrderLine({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [name]);
+  }, [name, accepted]);
 
   return (
     <View style={styles.ingCard}>
@@ -503,16 +521,28 @@ function OrderLine({
       <JarvisSuggestBox
         query={name}
         loading={loading}
+        accepted={accepted}
         placeholder="np. Bakłażan"
         suggestions={suggestions.map((s) => ({
           id: s.id,
           name: s.name,
           hint: s.unit || undefined,
         }))}
-        onChangeQuery={(v) => onChange({ product_name: v })}
+        onChangeQuery={(v) => {
+          setAccepted(false);
+          onChange({ product_name: v, inventory_id: null });
+        }}
         onPick={(s) => {
-          const hit = suggestions.find((x) => x.name === s.name);
-          onChange({ product_name: s.name, unit: hit?.unit || item.unit || 'szt' });
+          const hit = suggestions.find((x) => x.name === s.name || x.id === s.id);
+          setAccepted(true);
+          setSuggestions([]);
+          onChange({
+            product_name: s.name,
+            inventory_id: hit?.id || s.id || null,
+            unit: hit?.unit || item.unit || 'szt',
+            unit_weight_volume: hit?.unit_weight_volume ?? item.unit_weight_volume ?? null,
+            weight_volume_unit: hit?.weight_volume_unit ?? item.weight_volume_unit ?? null,
+          });
         }}
       />
       <View style={styles.twoCol}>
@@ -538,6 +568,44 @@ function OrderLine({
           />
         </View>
       </View>
+      {isPieces ? (
+        <View style={{ marginTop: 8 }}>
+          <Text style={styles.label}>Gramatura 1 sztuki</Text>
+          <View style={styles.twoCol}>
+            <View style={{ flex: 1 }}>
+              <TextInput
+                style={styles.input}
+                value={
+                  item.unit_weight_volume == null || item.unit_weight_volume === ''
+                    ? ''
+                    : String(item.unit_weight_volume)
+                }
+                onChangeText={(v) =>
+                  onChange({
+                    unit_weight_volume: v === '' ? null : Number(v.replace(',', '.')),
+                  })
+                }
+                keyboardType="decimal-pad"
+                placeholder="np. 200"
+                placeholderTextColor="#777"
+                testID="voice-order-piece-mass"
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <TextInput
+                style={styles.input}
+                value={item.weight_volume_unit || 'g'}
+                onChangeText={(v) => onChange({ weight_volume_unit: v })}
+                placeholder="g"
+                placeholderTextColor="#777"
+              />
+            </View>
+          </View>
+          <Text style={[styles.hint, { marginTop: 4, marginBottom: 0 }]}>
+            Łowca szuka opakowań dostawcy o zbliżonej masie.
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -659,13 +727,18 @@ export function CriticalOrderEditor({
   };
 
   const target = edited.stock_target === 'optimal' ? 'optimal' : 'critical';
+  const objective = String(edited.cart_objective || '').trim() || null;
+  const objectives: { key: string; label: string }[] = [
+    { key: 'fast_delivery', label: 'szybki czas dostawy' },
+    { key: 'min_deliveries', label: 'minimalna liczba dostaw' },
+    { key: 'lowest_price', label: 'najniższa cena' },
+  ];
 
   return (
     <View style={styles.card}>
       <Text style={styles.hint}>
         Zaznacz kategorie braków (np. Warzywa) i/lub dodaj konkretne produkty z nazwy
-        (np. ser kozi). Po zatwierdzeniu otworzy się Łowca Okazji z połączonym koszykiem —
-        bez dokładania produktów spoza wybranego zakresu.
+        (np. ser kozi). Po zatwierdzeniu Łowca Okazji, zbuduje dla Ciebie koszyk zakupowy.
       </Text>
       <Text style={styles.label}>Kategorie braków</Text>
       <View style={styles.pillRow}>
@@ -685,7 +758,7 @@ export function CriticalOrderEditor({
           );
         })}
       </View>
-      <Text style={[styles.label, { marginTop: 12 }]}>Zakres braków w kategorii</Text>
+      <Text style={[styles.label, { marginTop: 12 }]}>Zakres zamówienia w kategorii</Text>
       <View style={styles.pillRow}>
         <TouchableOpacity
           style={[styles.pill, target === 'critical' && styles.pillOn]}
@@ -693,7 +766,7 @@ export function CriticalOrderEditor({
           testID="voice-order-scope-critical"
         >
           <Text style={[styles.pillText, target === 'critical' && styles.pillTextOn]}>
-            Tylko krytyczne
+            Tylko z poziomem krytycznym
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -702,10 +775,31 @@ export function CriticalOrderEditor({
           testID="voice-order-scope-optimal"
         >
           <Text style={[styles.pillText, target === 'optimal' && styles.pillTextOn]}>
-            Poniżej optymalnego
+            Wszystkie poniżej optymalnego
           </Text>
         </TouchableOpacity>
       </View>
+      <Text style={[styles.label, { marginTop: 12 }]}>Preferencja koszyka</Text>
+      <View style={styles.pillRow}>
+        {objectives.map((o) => {
+          const on = objective === o.key;
+          return (
+            <TouchableOpacity
+              key={o.key}
+              style={[styles.pill, on && styles.pillOn]}
+              onPress={() => patch({ cart_objective: o.key })}
+              testID={`voice-order-objective-${o.key}`}
+            >
+              <Text style={[styles.pillText, on && styles.pillTextOn]}>{o.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      {!objective ? (
+        <Text style={[styles.warnHint, { marginTop: 4 }]}>
+          Wybierz strategię — szybka dostawa, mało dostawców albo najniższa cena.
+        </Text>
+      ) : null}
       <Text style={[styles.label, { marginTop: 12 }]}>Ilości nazwanych produktów</Text>
       <TouchableOpacity
         style={[styles.optimalBtn, fillingOptimal && { opacity: 0.6 }]}
@@ -720,11 +814,7 @@ export function CriticalOrderEditor({
           <Text style={styles.optimalBtnText}>Stan optymalny</Text>
         )}
       </TouchableOpacity>
-      <Text style={[styles.hint, { marginTop: 6 }]}>
-        Uzupełnia ilości tylko pozycji z nazwy do deficytu vs stan optymalny
-        (nie zmienia zakresu kategorii i nie domyśla 1 szt.).
-      </Text>
-      <Text style={[styles.label, { marginTop: 14 }]}>Dodatkowe produkty (z nazwy)</Text>
+      <Text style={[styles.label, { marginTop: 14 }]}>Zamów dodatkowe produkty (z nazwy)</Text>
       <Text style={[styles.hint, { marginBottom: 8 }]}>
         Np. „ser kozi”, „filet z kurczaka” — zawsze trafią do koszyka, nawet gdy nie są krytyczne.
       </Text>

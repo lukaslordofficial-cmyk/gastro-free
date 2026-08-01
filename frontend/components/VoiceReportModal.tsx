@@ -1029,6 +1029,13 @@ export function VoiceReportModal({
           setStage('error');
           return;
         }
+        if (!curEdited.cart_objective) {
+          setErrorMsg(
+            'Wybierz preferencję koszyka: szybki czas dostawy, minimalna liczba dostaw albo najniższa cena.',
+          );
+          setStage('error');
+          return;
+        }
       }
       const payload = {
         ...curEdited,
@@ -1327,13 +1334,20 @@ export function VoiceReportModal({
     && (interp.intent !== 'order_product'
       || (Array.isArray(edited.items) && edited.items.some((it: any) => String(it?.product_name || '').trim())))
     && (interp.intent !== 'order_critical_items_by_category'
-      || ((Array.isArray(edited.categories) && edited.categories.length > 0)
-        || (Array.isArray(edited.items) && edited.items.some((it: any) => String(it?.product_name || '').trim()))));
+      || (((Array.isArray(edited.categories) && edited.categories.length > 0)
+        || (Array.isArray(edited.items) && edited.items.some((it: any) => String(it?.product_name || '').trim())))
+        && !!edited.cart_objective));
   const meta = interp ? INTENT_META[interp.intent] : INTENT_META.unknown;
+  const dealHunterApplying =
+    stage === 'applying'
+    && (interp?.intent === 'order_critical_items_by_category' || interp?.intent === 'order_product');
   const workingMessage =
     stage === 'transcribing' ? 'Zamieniam mowę na tekst (Whisper)…'
       : stage === 'interpreting' ? 'AI klasyfikuje intencję (GPT-4o mini)…'
-      : stage === 'applying' ? (PERIOD_INTENTS.has(interp?.intent as Intent) ? 'Analizuję dane…' : 'Zapisuję do Supabase…')
+      : stage === 'applying'
+        ? (dealHunterApplying
+          ? 'Analizuję oferty dostawców…'
+          : (PERIOD_INTENTS.has(interp?.intent as Intent) ? 'Analizuję dane…' : 'Zapisuję do Supabase…'))
       : '';
 
   return (
@@ -1799,7 +1813,7 @@ export function VoiceReportModal({
           restaurantName={undefined}
           initialCompare={bulkCompare}
           bulkContextLabel={bulkContextLabel}
-          onClose={() => { setBulkCompare(null); setBulkContextLabel(''); onClose(); }}
+          onClose={() => { setBulkCompare(null); setBulkContextLabel(''); }}
         />
       ) : null}
       <WeightRealityCheckModal
@@ -3073,6 +3087,9 @@ function IntentDoneSummary({
       : (Array.isArray(extras?.compare?.items_requested)
         ? extras.compare.items_requested.length
         : critical);
+    const products: any[] = Array.isArray(extras?.critical_products)
+      ? extras.critical_products
+      : (Array.isArray(extras?.compare?.items_requested) ? extras.compare.items_requested : []);
     return (
       <>
         {extras?.message ? <Text style={styles.doneMessage}>{extras.message}</Text> : null}
@@ -3092,6 +3109,30 @@ function IntentDoneSummary({
             {found} / {denom}
           </Text>
         </View>
+        {products.length > 0 ? (
+          <>
+            <Text style={[styles.sectionLabel, { marginTop: 12 }]}>
+              Podgląd koszyka ({products.length})
+            </Text>
+            {products.map((row: any, idx: number) => {
+              const name = String(row?.name || row?.product_name || '—');
+              const qty = row?.deficit ?? row?.quantity;
+              const unit = row?.unit || '';
+              const src = row?.source ? String(row.source) : '';
+              return (
+                <View key={`basket-${idx}-${name}`} style={styles.deductRow}>
+                  <Text style={styles.deductName} numberOfLines={2}>
+                    {name}
+                    {src.includes('named') ? ' · z nazwy' : ''}
+                  </Text>
+                  <Text style={styles.deductQty}>
+                    {qty != null ? `${qty} ${unit}`.trim() : unit || '—'}
+                  </Text>
+                </View>
+              );
+            })}
+          </>
+        ) : null}
       </>
     );
   }
@@ -3553,6 +3594,107 @@ function extractAmountFromText(text: string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function normPlVoice(s: string): string {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Synonimy kategorii magazynowych (mirrors backend _CATEGORY_SYNONYMS — bez nazw produktów). */
+const VOICE_CATEGORY_SYNONYMS: Record<string, string[]> = {
+  'Mięso i wędliny': ['mieso', 'mięso', 'wedliny', 'wędliny', 'mieso i wedliny', 'mięso i wędliny'],
+  'Ryby i owoce morza': ['ryby', 'ryba', 'owoce morza', 'ryby i owoce morza'],
+  Nabiał: ['nabial', 'nabiał', 'nabialowe', 'nabiałowe'],
+  'Warzywa i owoce': ['warzywa', 'owoce', 'jarzyny', 'warzywa i owoce', 'warzywo'],
+  Pieczywo: ['pieczywo'],
+  Alkohole: ['alkohol', 'alkohole'],
+  Napoje: ['napoje', 'napoj', 'napój'],
+  Mrożonki: ['mrozonki', 'mrożonki', 'mrozone', 'mrożone'],
+  'Suchy magazyn': ['suchy', 'suchy magazyn', 'sucha pantry', 'pantry'],
+  'Oleje i tłuszcze': ['olej', 'oleje', 'oliwa', 'oliwy', 'tluszcze', 'tłuszcze', 'oleje i tluszcze', 'oleje i tłuszcze'],
+  Przyprawy: ['przyprawy', 'przyprawa', 'ziola', 'zioła'],
+  'Wywary i sosy': ['wywary', 'sosy', 'wywar', 'sos', 'wywary i sosy'],
+  'Chemia i czystość': ['chemia', 'srodki czystosci', 'środki czystości', 'chemia i czystosc', 'chemia i czystość'],
+  Opakowania: ['opakowania', 'opakowanie'],
+  Inne: ['inne', 'pozostale', 'pozostałe'],
+};
+
+const VOICE_CAT_STOP = new Set([
+  'brakujace', 'brakujacych', 'brakujacy', 'braki', 'wszystkie', 'wszystkich',
+  'kategoria', 'kategorii', 'z', 'i', 'oraz', 'a', 'tez', 'też', 'plus',
+  'zamow', 'zamów', 'prosze', 'proszę',
+]);
+
+function resolveVoiceCategories(raw: string[]): { matched: string[]; unmatched: string[] } {
+  const matched: string[] = [];
+  const unmatched: string[] = [];
+  const synIndex = new Map<string, string>();
+  for (const [canon, syns] of Object.entries(VOICE_CATEGORY_SYNONYMS)) {
+    synIndex.set(normPlVoice(canon), canon);
+    for (const s of syns) synIndex.set(normPlVoice(s), canon);
+  }
+  const catTokensFor = (canon: string): Set<string> => {
+    const toks = new Set<string>([normPlVoice(canon)]);
+    for (const syn of VOICE_CATEGORY_SYNONYMS[canon] || []) {
+      const n = normPlVoice(syn);
+      toks.add(n);
+      for (const p of n.split(' ')) if (p) toks.add(p);
+    }
+    for (const p of normPlVoice(canon).split(' ')) if (p) toks.add(p);
+    return toks;
+  };
+
+  for (const r of raw) {
+    const s = String(r || '').trim();
+    if (!s) continue;
+    if (s.toLowerCase() === 'all') return { matched: ['all'], unmatched: [] };
+    const key = normPlVoice(s);
+    if (synIndex.has(key)) {
+      const canon = synIndex.get(key)!;
+      if (!matched.includes(canon)) matched.push(canon);
+      continue;
+    }
+    const tokens = key
+      .replace(/[,+]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t && !VOICE_CAT_STOP.has(t));
+    let found: string | null = null;
+    for (const t of tokens) {
+      if (synIndex.has(t)) {
+        found = synIndex.get(t)!;
+        break;
+      }
+    }
+    if (found) {
+      if (!matched.includes(found)) matched.push(found);
+      const catToks = catTokensFor(found);
+      const leftover = tokens.filter((t) => !catToks.has(t));
+      if (leftover.length) unmatched.push(leftover.join(' '));
+      continue;
+    }
+    unmatched.push(s);
+  }
+  return { matched, unmatched };
+}
+
+/** Wyłuskaj nazwy produktów z categories[] (LLM MIX) → items. */
+function peelNamedFromCategories(cats: string[]): { categories: string[]; named: string[] } {
+  const { matched, unmatched } = resolveVoiceCategories(cats);
+  const named: string[] = [];
+  for (const u of unmatched) {
+    const key = normPlVoice(u);
+    if (!key || ['inne', 'all', 'wszystko', 'braki'].includes(key)) continue;
+    // „ser kozi i borowiki” → spróbuj rozdzielić po „i”
+    const parts = u.split(/\s+(?:i|oraz|,)\s+/i).map((x) => x.trim()).filter(Boolean);
+    if (parts.length > 1) named.push(...parts);
+    else named.push(u.trim());
+  }
+  return { categories: matched, named };
+}
+
 function seedPayload(
   intent: Intent,
   payload: Record<string, any>,
@@ -3586,7 +3728,13 @@ function seedPayload(
     else if (typeof raw === 'string' && raw.trim()) cats = [raw.trim()];
     // Z legendy: użytkownik sam zaznacza kategorie (nie zgaduj „all”)
     if (opts?.fromLegend) cats = [];
+
+    // MIX: „ser kozi + warzywa” — LLM często wrzuca nazwy produktów do categories[].
+    // Rozdziel: prawdziwe kategorie vs nazwane produkty → items[].
+    const peeled = peelNamedFromCategories(cats);
+    cats = peeled.categories;
     p.categories = cats;
+
     // „Brakujące / krytyczne” = critical. Optimal tylko gdy LLM/UI jawnie poda.
     // NIE nadpisuj critical→optimal — to wciągało produkty poza zakresem braków.
     const st = String(p.stock_target || '').trim().toLowerCase();
@@ -3608,13 +3756,50 @@ function seedPayload(
             Number.isFinite(rawQty) && rawQty === 1 && /^(szt|sztuka|sztuki|opak|op)$/i.test(unit);
           const qty =
             Number.isFinite(rawQty) && rawQty > 0 && !isPlaceholderSzt ? rawQty : null;
+          let uwv: number | null = null;
+          if (it.unit_weight_volume != null && it.unit_weight_volume !== '') {
+            const n = Number(it.unit_weight_volume);
+            uwv = Number.isFinite(n) && n > 0 ? n : null;
+          }
           return {
             product_name: String(it.product_name || it.name || '').trim(),
             quantity: qty,
             unit,
+            unit_weight_volume: uwv,
+            weight_volume_unit: it.weight_volume_unit
+              ? String(it.weight_volume_unit).trim()
+              : null,
+            inventory_id: it.inventory_id || null,
           };
         });
     }
+    // Dołącz produkty wyłuskane z categories[] (bez duplikatów)
+    const existingKeys = new Set(
+      p.items.map((it: any) => normPlVoice(String(it.product_name || ''))).filter(Boolean),
+    );
+    for (const name of peeled.named) {
+      const key = normPlVoice(name);
+      if (!key || existingKeys.has(key)) continue;
+      existingKeys.add(key);
+      p.items.push({
+        product_name: name,
+        quantity: null,
+        unit: 'szt',
+        unit_weight_volume: null,
+        weight_volume_unit: null,
+      });
+    }
+    const obj = String(p.cart_objective || '').trim().toLowerCase();
+    const objMap: Record<string, string> = {
+      fast_delivery: 'fast_delivery',
+      min_deliveries: 'min_deliveries',
+      lowest_price: 'lowest_price',
+      'szybki czas dostawy': 'fast_delivery',
+      'minimalna liczba dostaw': 'min_deliveries',
+      'najniższa cena': 'lowest_price',
+      'najnizsza cena': 'lowest_price',
+    };
+    p.cart_objective = objMap[obj] || null;
   }
   if (intent === 'order_product') {
     if (!Array.isArray(p.items) || p.items.length === 0) {

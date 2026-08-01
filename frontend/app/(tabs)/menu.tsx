@@ -260,7 +260,7 @@ function DishCard({
             {showPlaceholderBadge && (
               <View style={dishStyles.thumbBadge}>
                 <Text style={dishStyles.thumbBadgeText} numberOfLines={1} allowFontScaling={false}>
-                  Placeholder: {thumb.placeholderLabel}
+                  {thumb.placeholderLabel}
                 </Text>
               </View>
             )}
@@ -1137,10 +1137,25 @@ export default function MenuScreen() {
   );
 
   const [customImageTick, setCustomImageTick] = useState(0);
+  const [photoSaving, setPhotoSaving] = useState(false);
   useEffect(() => {
     void loadDishCustomImages().then(() => setCustomImageTick((t) => t + 1));
     return subscribeDishCustomImages(() => setCustomImageTick((t) => t + 1));
   }, []);
+
+  const saveDishPhotoWebP = useCallback(
+    async (dishId: string, sourceUri: string) => {
+      setPhotoSaving(true);
+      try {
+        await setDishCustomImage(dishId, sourceUri);
+      } catch (e: any) {
+        premiumAlert('Nie udało się zapisać', e?.message || 'Kompresja WebP nie powiodła się.');
+      } finally {
+        setPhotoSaving(false);
+      }
+    },
+    [premiumAlert],
+  );
 
   const handleChangeDishPhoto = useCallback(
     (dish: Dish) => {
@@ -1159,7 +1174,7 @@ export default function MenuScreen() {
               quality: 0.85,
             });
             if (r.canceled || !r.assets?.[0]?.uri) return;
-            await setDishCustomImage(dish.id, r.assets[0].uri);
+            await saveDishPhotoWebP(dish.id, r.assets[0].uri);
           },
         },
         {
@@ -1178,7 +1193,7 @@ export default function MenuScreen() {
               quality: 0.85,
             });
             if (r.canceled || !r.assets?.[0]?.uri) return;
-            await setDishCustomImage(dish.id, r.assets[0].uri);
+            await saveDishPhotoWebP(dish.id, r.assets[0].uri);
           },
         },
         ...(hasCustom
@@ -1195,7 +1210,7 @@ export default function MenuScreen() {
         { text: 'Anuluj', style: 'cancel' as const },
       ]);
     },
-    [premiumAlert],
+    [premiumAlert, saveDishPhotoWebP],
   );
 
   // ── Ingredient autocomplete ───────────────────────────────────────────────
@@ -1669,6 +1684,29 @@ export default function MenuScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]} edges={['top']}>
+      {photoSaving ? (
+        <View
+          style={{
+            position: 'absolute',
+            zIndex: 50,
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.55)',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 10,
+          }}
+          pointerEvents="auto"
+          testID="dish-photo-webp-loader"
+        >
+          <ActivityIndicator size="large" color="#C8F54B" />
+          <Text style={{ color: '#F5F5F5', fontWeight: '700', fontSize: 14 }}>
+            Kompresuję zdjęcie do WebP…
+          </Text>
+        </View>
+      ) : null}
       {theme.isPremium ? (
         <PremiumTabChrome
           title="Menu"

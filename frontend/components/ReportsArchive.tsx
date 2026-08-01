@@ -643,7 +643,7 @@ function makeArchiveStyles(theme: ReturnType<typeof useAppTheme>) {
     mono: { fontWeight: '800', color: theme.isPremium ? DS.color.warning : '#7C2D12' },
     emptyBox: { alignItems: 'center', gap: 10, paddingVertical: 30, backgroundColor: card, borderRadius: 14, borderWidth: 1, borderColor: border },
     emptyText: { fontSize: 13, color: muted, textAlign: 'center', paddingHorizontal: 24, lineHeight: 19 },
-    tree: { backgroundColor: card, borderRadius: 14, borderWidth: 1, borderColor: border, paddingVertical: 4, overflow: 'hidden' },
+    tree: { backgroundColor: card, borderRadius: 14, borderWidth: 1, borderColor: border, paddingVertical: 4, overflow: 'visible' },
     node: {},
     rowL1: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 13, paddingHorizontal: 14 },
     l1Text: { fontSize: 16, fontWeight: '800', color: text },

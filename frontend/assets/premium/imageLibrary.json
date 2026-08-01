@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-31T16:16:09.451Z",
+  "generatedAt": "2026-08-01T18:29:38.159Z",
   "source": "heuristic+catalog",
   "enrich": {
     "enriched": 0,
@@ -1568,17 +1568,17 @@
       "category": "Danie główne / BBQ",
       "folder": "bbq",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
-        "bbq",
         "faszerowany",
-        "pieczony",
         "ziemniak"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -1596,16 +1596,17 @@
       "category": "Danie główne / BBQ",
       "folder": "bbq",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
-        "bbq",
         "frytki",
         "batatow"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -1819,16 +1820,17 @@
       "category": "Danie główne / BBQ",
       "folder": "bbq",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
-        "bbq",
         "atka",
         "coleslaw"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -2864,7 +2866,13 @@
         "hash",
         "batatow"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0112",
@@ -3174,7 +3182,13 @@
         "gniezdzie",
         "ziemniaczanym"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0125",
@@ -3967,7 +3981,6 @@
       "category": "Desery / Ciasta",
       "folder": "cakes",
       "fallbackTags": [
-        "zupa",
         "deser",
         "słodkie",
         "ciasto",
@@ -3994,7 +4007,6 @@
       "category": "Desery / Ciasta",
       "folder": "cakes",
       "fallbackTags": [
-        "zupa",
         "deser",
         "słodkie",
         "tarta",
@@ -5124,16 +5136,18 @@
       "category": "Catering",
       "folder": "catering",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
         "koryto",
         "pieczonymi",
         "warzywami"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -7535,14 +7549,17 @@
       "fallbackTags": [
         "deser",
         "słodkie",
-        "danie główne",
         "placuszki",
         "ziemniaczane"
       ],
       "forbiddenTags": [
         "mięso",
         "zupa",
-        "ryba"
+        "ryba",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka"
       ]
     },
     {
@@ -7797,10 +7814,15 @@
       "category": "Danie główne",
       "folder": "dinners",
       "fallbackTags": [
-        "danie główne",
         "ziemniaki"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0319",
@@ -8338,7 +8360,13 @@
         "farszem",
         "ziemniaczanym"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0343",
@@ -9205,7 +9233,9 @@
         "wieprzowina",
         "deser",
         "mięso",
-        "zupa"
+        "zupa",
+        "kurczak",
+        "kaczka"
       ]
     },
     {
@@ -9266,7 +9296,10 @@
       "forbiddenTags": [
         "wołowina",
         "wieprzowina",
-        "deser"
+        "deser",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -11406,7 +11439,13 @@
         "aloo",
         "gobi"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0464",
@@ -12362,11 +12401,15 @@
       "folder": "kebabs",
       "fallbackTags": [
         "kebab",
-        "mięso",
         "talerzu"
       ],
       "forbiddenTags": [
-        "deser"
+        "deser",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -12882,13 +12925,16 @@
       "folder": "kebabs",
       "fallbackTags": [
         "kebab",
-        "mięso",
-        "chrupiące",
         "chipsy",
         "pity"
       ],
       "forbiddenTags": [
-        "deser"
+        "deser",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -13993,7 +14039,13 @@
         "śródziemnomorska",
         "gemista"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0569",
@@ -15188,7 +15240,11 @@
       "forbiddenTags": [
         "mięso",
         "zupa",
-        "ryba"
+        "ryba",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka"
       ]
     },
     {
@@ -18106,12 +18162,7 @@
       "category": "Danie główne / Pieczenie",
       "folder": "roasts",
       "fallbackTags": [
-        "kurczak",
         "drób",
-        "mięso",
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
         "rolada",
         "kurczaka",
         "nadzieniem"
@@ -18119,7 +18170,12 @@
       "forbiddenTags": [
         "wege",
         "ryba",
-        "deser"
+        "deser",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -19738,7 +19794,13 @@
         "surowka",
         "coleslaw"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0802",
@@ -19757,7 +19819,13 @@
       "fallbackTags": [
         "mizeria"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0803",
@@ -19777,7 +19845,13 @@
         "buraczki",
         "tarte"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0804",
@@ -19797,7 +19871,13 @@
         "kapusta",
         "zasmazana"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0805",
@@ -19814,15 +19894,17 @@
       "category": "Dodatki",
       "folder": "sides",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
         "warzywa",
         "grillowane"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -19845,7 +19927,13 @@
         "surowka",
         "marchewki"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0807",
@@ -19869,7 +19957,12 @@
       ],
       "forbiddenTags": [
         "zupa",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -19890,7 +19983,13 @@
         "surowka",
         "boczniaka"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0809",
@@ -19910,7 +20009,13 @@
         "ogorki",
         "kiszone"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0810",
@@ -19931,7 +20036,13 @@
         "czerwonej",
         "kapusty"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0811",
@@ -19954,7 +20065,12 @@
       ],
       "forbiddenTags": [
         "zupa",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -19976,7 +20092,13 @@
         "kapusty",
         "marchewka"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0813",
@@ -19993,16 +20115,17 @@
       "category": "Dodatki",
       "folder": "sides",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
-        "pieczone",
         "warzywa",
         "korzeniowe"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -20023,7 +20146,13 @@
         "buraczki",
         "marynowane"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0815",
@@ -20043,7 +20172,13 @@
         "szpinak",
         "zasmazany"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0816",
@@ -20063,7 +20198,13 @@
         "marchewka",
         "groszkiem"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0817",
@@ -20083,7 +20224,13 @@
         "broku",
         "parze"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0818",
@@ -20107,7 +20254,12 @@
       ],
       "forbiddenTags": [
         "zupa",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -20125,16 +20277,17 @@
       "category": "Dodatki",
       "folder": "sides",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
-        "pieczone",
         "czastki",
         "kalafiora"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -20155,7 +20308,13 @@
         "marynowane",
         "karczochy"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0821",
@@ -20175,7 +20334,13 @@
         "cebulki",
         "konserwowe"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0822",
@@ -20202,7 +20367,12 @@
       ],
       "forbiddenTags": [
         "zupa",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -20225,7 +20395,13 @@
         "selera",
         "korzeniowego"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0824",
@@ -20242,15 +20418,17 @@
       "category": "Dodatki",
       "folder": "sides",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
         "pieczona",
         "dynia"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -20274,7 +20452,12 @@
       ],
       "forbiddenTags": [
         "zupa",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -21333,7 +21516,12 @@
       ],
       "forbiddenTags": [
         "deser",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -22034,7 +22222,12 @@
       ],
       "forbiddenTags": [
         "deser",
-        "pizza"
+        "pizza",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -23240,16 +23433,18 @@
       "category": "Przystawki",
       "folder": "starters",
       "fallbackTags": [
-        "pieczeń",
-        "grill",
-        "mięso pieczone",
         "pieczona",
         "pieczarka",
         "faszerowana"
       ],
       "forbiddenTags": [
         "deser",
-        "wege"
+        "wege",
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -23453,7 +23648,13 @@
         "frytki",
         "klasyczne"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0952",
@@ -23473,7 +23674,13 @@
         "frytki",
         "batata"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0953",
@@ -23491,9 +23698,16 @@
       "folder": "street",
       "fallbackTags": [
         "loaded",
-        "fries"
+        "fries",
+        "frytki"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_0954",
@@ -23743,7 +23957,10 @@
       "forbiddenTags": [
         "wołowina",
         "wieprzowina",
-        "deser"
+        "deser",
+        "kurczak",
+        "kaczka",
+        "mięso"
       ]
     },
     {
@@ -25386,8 +25603,6 @@
       "fallbackTags": [
         "wege",
         "warzywa",
-        "makaron",
-        "pasta",
         "pierogi",
         "kluski",
         "gnocchi",
@@ -25399,7 +25614,8 @@
         "kurczak",
         "kaczka",
         "ryba",
-        "zupa"
+        "zupa",
+        "mięso"
       ]
     },
     {
@@ -25986,7 +26202,8 @@
         "kaczka",
         "ryba",
         "deser",
-        "napój"
+        "napój",
+        "mięso"
       ]
     },
     {
@@ -26740,7 +26957,13 @@
         "board",
         "sides"
       ],
-      "forbiddenTags": []
+      "forbiddenTags": [
+        "wołowina",
+        "wieprzowina",
+        "kurczak",
+        "kaczka",
+        "mięso"
+      ]
     },
     {
       "id": "img_1081",

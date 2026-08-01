@@ -110,13 +110,15 @@ const MONTH_SHORT: Record<string, string> = {
   '09': 'Wrz', '10': 'Paź', '11': 'Lis', '12': 'Gru',
 };
 
-/** Kompaktowa kwota na dolną oś wykresu (nie fragment roku typu „202”). */
+/** Kompaktowa kwota na dolną oś / chipy (musi mieścić się w wąskim boxie). */
 function compactAxisAmount(n: number): string {
   const v = Number(n) || 0;
   const abs = Math.abs(v);
-  if (abs >= 10000) return `${Math.round(v / 1000)}k`;
-  if (abs >= 1000) return `${(v / 1000).toFixed(1).replace(/\.0$/, '')}k`;
-  return Math.round(v).toLocaleString('pl-PL');
+  const sign = v < 0 ? '-' : '';
+  if (abs >= 100000) return `${sign}${Math.round(abs / 1000)}k`;
+  if (abs >= 10000) return `${sign}${Math.round(abs / 1000)}k`;
+  if (abs >= 1000) return `${sign}${(abs / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return `${sign}${Math.round(abs)}`;
 }
 
 function BarChart({
@@ -156,8 +158,8 @@ function BarChart({
     return { label: compactAxisAmount(value), value };
   });
 
-  const slot = Math.max(48, Math.min(64, Math.floor((SCREEN_W - 64) / Math.min(points.length, 7))));
-  const chipW = Math.max(48, slot - 8);
+  const slot = Math.max(56, Math.min(72, Math.floor((SCREEN_W - 64) / Math.min(points.length, 7))));
+  const chipW = Math.max(56, slot - 6);
   const chipGap = 6;
   // Szerokość musi uwzględniać gap między chipami — inaczej ostatnie dni miesiąca są obcinane (~27 zamiast 28–31).
   const plotW = Math.max(
@@ -218,15 +220,21 @@ function BarChart({
                     style={{
                       backgroundColor: neg ? 'rgba(255,82,82,0.12)' : 'rgba(0,230,118,0.12)',
                       borderRadius: 10,
-                      paddingHorizontal: 10,
+                      paddingHorizontal: 6,
                       paddingVertical: 8,
                       minWidth: chipW,
                       width: chipW,
                       alignItems: 'center',
+                      overflow: 'visible',
                     }}
                     testID={`premium-bar-${r.dateKey || i}`}
                   >
-                    <Text style={{ color: PremiumColors.textMuted, fontSize: 10, fontWeight: '700' }}>
+                    <Text
+                      style={{ color: PremiumColors.textMuted, fontSize: 10, fontWeight: '700' }}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.75}
+                    >
                       {r.label}
                     </Text>
                     <Text
@@ -235,9 +243,15 @@ function BarChart({
                         fontSize: 11,
                         fontWeight: '800',
                         marginTop: 2,
+                        width: '100%',
+                        textAlign: 'center',
                       }}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.65}
+                      allowFontScaling={false}
                     >
-                      {Math.round(v).toLocaleString('pl-PL')}
+                      {compactAxisAmount(v)}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -367,7 +381,6 @@ export function PremiumFinanceScreen(props: Props) {
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
     const revByDay = new Map<string, number>();
-    const varByDay = new Map<string, number>();
     const fixedByMonth = new Map<string, number>();
     const revByMonth = new Map<string, number>();
     const varByMonth = new Map<string, number>();
@@ -389,17 +402,6 @@ export function PremiumFinanceScreen(props: Props) {
     for (const e of varJ) {
       const ym = e.year_month || '';
       if (ym) varByMonth.set(ym, (varByMonth.get(ym) || 0) + Number(e.amount_pln));
-      const raw = (e as any).created_at || `${ym}-15T12:00:00`;
-      const iso = String(raw).slice(0, 10);
-      if (/^\d{4}-\d{2}-\d{2}$/.test(iso) && (!ym || iso.startsWith(ym))) {
-        varByDay.set(iso, (varByDay.get(iso) || 0) + Number(e.amount_pln));
-      } else if (ym) {
-        const d = new Date(raw);
-        if (!Number.isNaN(d.getTime())) {
-          const k = `${ym}-${String(d.getDate()).padStart(2, '0')}`;
-          varByDay.set(k, (varByDay.get(k) || 0) + Number(e.amount_pln));
-        }
-      }
     }
     for (const e of fixedJ) {
       const ym = e.year_month || '';
@@ -432,19 +434,22 @@ export function PremiumFinanceScreen(props: Props) {
       const [yy, mm] = ym.split('-').map(Number);
       const dim = new Date(yy, mm, 0).getDate();
       const monthFixed = fixedByMonth.get(ym) || 0;
+      const monthVar = varByMonth.get(ym) || 0;
+      // Jak koszty stałe: rozkładamy sumę miesiąca / dni — wtedy dodanie kosztu zmiennego
+      // przesuwa całą linię zysku (wcześniej tylko jeden dzień z created_at).
       const dailyFixed = monthFixed / Math.max(dim, 1);
+      const dailyVar = monthVar / Math.max(dim, 1);
       const pts: { label: string; value: number; dateKey?: string; weekday?: string }[] = [];
       for (let day = 1; day <= dim; day++) {
         const key = `${ym}-${String(day).padStart(2, '0')}`;
         const rev = revByDay.get(key) || 0;
-        const vc = varByDay.get(key) || 0;
         const d = new Date(key + 'T12:00:00');
-        // Zysk dzienny: przychód − (koszty stałe miesiąca / dni w miesiącu) − koszty zmienne dnia
+        // Zysk dzienny: przychód − fixed/dni − variable/dni
         let value = 0;
         if (chartMetric === 'revenue') {
           value = rev;
         } else {
-          value = rev - dailyFixed - vc;
+          value = rev - dailyFixed - dailyVar;
         }
         pts.push({
           label: String(day).padStart(2, '0'),

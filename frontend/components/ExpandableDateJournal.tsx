@@ -197,11 +197,13 @@ export function ExpandableDateJournal({
                                         const leafOpen = openLeafId === leaf.id;
                                         const main = (
                                           <>
-                                            <View style={{ flex: 1, minWidth: 0 }}>
+                                            <View style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
                                               <Text style={[styles.leafTitle, { color: t.text }]}>
                                                 {leaf.title}
                                               </Text>
-                                              <Text style={{ color: t.textMuted, fontSize: 11 }}>
+                                              <Text
+                                                style={{ color: t.textMuted, fontSize: 11, flexShrink: 1 }}
+                                              >
                                                 {entry.time}
                                                 {leaf.meta ? ` · ${leaf.meta}` : ''}
                                                 {hasDetails && !leafOpen ? ' · dotknij → pozycje' : ''}
@@ -313,14 +315,31 @@ const styles = StyleSheet.create({
   meta: { fontSize: 12, fontWeight: '700' },
   leaf: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 8,
     paddingVertical: 10,
     paddingHorizontal: 44,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  leafTitle: { fontSize: 13, fontWeight: '600' },
-  leafAmt: { fontSize: 13, fontWeight: '700', marginRight: 4 },
-  detailBox: { marginTop: 6, gap: 3, paddingRight: 8 },
-  detailLine: { fontSize: 11, lineHeight: 15, fontWeight: '500' },
+  leafTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    flexShrink: 1,
+    flexWrap: 'wrap',
+  },
+  leafAmt: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginRight: 4,
+    flexShrink: 0,
+    marginTop: 1,
+  },
+  detailBox: { marginTop: 6, gap: 3, paddingRight: 8, width: '100%' },
+  detailLine: {
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '500',
+    flexShrink: 1,
+    flexWrap: 'wrap',
+  },
 });

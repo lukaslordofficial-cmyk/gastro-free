@@ -1216,7 +1216,15 @@ export function DealHunterModal({
   useEffect(() => {
     if (!compare) return;
     setManualCart(null);
-    if (compare.is_multivariable && compare.recommended_scenario_id) {
+    const rec = String(compare.recommended_scenario_id || '').trim();
+    if (compare.is_multivariable && rec) {
+      if (rec === 'split_max') setSelectedOption('split_max');
+      else if (rec === 'monolith') setSelectedOption('monolith');
+      else if (rec === 'smart_hybrid') setSelectedOption('smart_hybrid');
+      else if (compare.recommended_scenario_id) {
+        setSelectedOption(compare.recommended_scenario_id as SelectedOption);
+      }
+    } else if (compare.is_multivariable && compare.recommended_scenario_id) {
       setSelectedOption(compare.recommended_scenario_id as SelectedOption);
     } else if (compare.is_optimized) {
       setSelectedOption(compare.cheaper_variant === 'split' ? 'optimized' : 'all_one');
@@ -2247,11 +2255,28 @@ export function DealHunterModal({
           loading ? (
             <View style={styles.centerBox}>
               <ActivityIndicator size="large" color={C.accent} />
-              <Text style={styles.loadingText}>Przeszukuję katalog dostawców...</Text>
+              <Text style={styles.loadingText}>Analizuję oferty dostawców…</Text>
             </View>
           ) : result ? (
             <>
               <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+                {isBulkMode && Array.isArray(result.items_requested) && result.items_requested.length > 0 ? (
+                  <View style={styles.speechCard} testID="deal-hunter-basket-preview">
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 6 }]}>
+                        Koszyk ({result.items_requested.length})
+                        {bulkContextLabel ? ` · ${bulkContextLabel}` : ''}
+                      </Text>
+                      {result.items_requested.map((it, idx) => (
+                        <Text key={`dh-item-${idx}-${it.product_name}`} style={styles.speechText}>
+                          • {it.product_name}
+                          {it.quantity != null ? ` — ${it.quantity} ${it.unit || ''}`.trimEnd() : ''}
+                          {it.found === false ? ' (brak w ofertach)' : ''}
+                        </Text>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
                 <View style={styles.speechCard} testID="deal-hunter-speech">
                   <Volume2 size={15} color={C.accent} strokeWidth={2.2} />
                   <View style={{ flex: 1 }}>

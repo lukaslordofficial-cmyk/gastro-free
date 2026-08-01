@@ -46,3 +46,21 @@ def test_warzywa_and_nabial():
     matched, unmatched = _resolve_warehouse_categories(["warzywa", "nabiał"])
     assert matched == ["Warzywa i owoce", "Nabiał"]
     assert unmatched == []
+
+
+def test_compound_warzywa_plus_named_products():
+    """„warzywa oraz ser kozi i borowiki” → kategoria + leftover named tokens."""
+    matched, unmatched = _resolve_warehouse_categories(
+        ["warzywa oraz ser kozi i borowiki"]
+    )
+    assert matched == ["Warzywa i owoce"]
+    assert unmatched
+    blob = " ".join(unmatched).lower()
+    assert "ser" in blob or "kozi" in blob
+    assert "borowik" in blob or "borowiki" in blob
+
+
+def test_warzywa_exact_no_bleed():
+    matched, unmatched = _resolve_warehouse_categories(["Warzywa i owoce"])
+    assert matched == ["Warzywa i owoce"]
+    assert unmatched == []

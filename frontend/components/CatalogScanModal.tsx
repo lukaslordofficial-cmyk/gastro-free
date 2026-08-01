@@ -81,9 +81,25 @@ interface InvoiceProduct {
   category: string;
 }
 
+/** Pola panelu Dostawcy wyodrębnione ze skanu (podgląd + zapis). */
+export interface SupplierScanMeta {
+  nip?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  contact_person?: string | null;
+  address?: string | null;
+  payment_terms?: string | null;
+  shipping_cost?: number | null;
+  min_order_value?: number | null;
+  free_shipping_threshold?: number | null;
+  lead_time_days?: number | null;
+}
+
 interface DocResult {
   document_type: 'FAKTURA_ZAKUPOWA' | 'OFERTA_HANDLOWA' | 'MENU_RESTAURACYJNE';
   supplier_name?: string | null;
+  supplier?: SupplierScanMeta | null;
+  supplier_fields_updated?: string[];
   items_updated?: number;
   items_created?: number;
   total_amount?: number;
@@ -113,14 +129,43 @@ const PROCESSING_MESSAGES = [
   'Agent AI analizuje wgrany dokument…',
   'Rozpoznaję typ dokumentu i pozycje…',
   'Segreguję produkty do właściwych zakładek…',
+  'Szukam danych dostawcy (NIP, telefon, dostawa)…',
   'Po zakończeniu zapiszę dane i Cię powiadomię.',
 ];
 
 const SAVING_MESSAGES = [
   'Zapisywanie produktów…',
+  'Aktualizuję profil dostawcy…',
   'Aktualizuję stany magazynowe…',
   'Odświeżam listy w Magazynie…',
 ];
+
+function normalizeSupplierMeta(raw: any): SupplierScanMeta | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const out: SupplierScanMeta = {};
+  const strKeys = ['nip', 'phone', 'email', 'contact_person', 'address', 'payment_terms'] as const;
+  for (const k of strKeys) {
+    const v = raw[k];
+    if (v != null && String(v).trim()) out[k] = String(v).trim();
+  }
+  const numKeys = [
+    'shipping_cost',
+    'min_order_value',
+    'free_shipping_threshold',
+    'lead_time_days',
+  ] as const;
+  for (const k of numKeys) {
+    const v = raw[k];
+    if (v == null || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) out[k] = n;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function supplierMetaHasContent(m: SupplierScanMeta | null | undefined): boolean {
+  return !!m && Object.keys(m).length > 0;
+}
 
 function friendlyApiError(status: number, detail: string): string {
   const raw = `${detail || ''}`.toLowerCase();
@@ -178,6 +223,7 @@ export function CatalogScanModal({
   const [result, setResult] = useState<DocResult | null>(null);
   const [invSupplierId, setInvSupplierId] = useState<string | null>(null);
   const [invSupplierName, setInvSupplierName] = useState<string>('');
+  const [invSupplierMeta, setInvSupplierMeta] = useState<SupplierScanMeta | null>(null);
   const [invTotal, setInvTotal] = useState<number>(0);
   const [invProducts, setInvProducts] = useState<InvoiceProduct[]>([]);
   const [pickerIndex, setPickerIndex] = useState<number | null>(null);
@@ -204,6 +250,10 @@ export function CatalogScanModal({
     setError(null);
     setResult(null);
     setInvProducts([]);
+    setInvSupplierId(null);
+    setInvSupplierName('');
+    setInvSupplierMeta(null);
+    setInvTotal(0);
     setPickerIndex(null);
     setExpiryDrafts([]);
     setProcessingMsgIdx(0);
@@ -356,6 +406,7 @@ export function CatalogScanModal({
           setScanBusy(false);
           setInvSupplierId(data.supplier_id ?? null);
           setInvSupplierName(data.supplier_name ?? '');
+          setInvSupplierMeta(normalizeSupplierMeta(data.supplier));
           setInvTotal(Number(data.total_amount ?? 0));
           if (Array.isArray(data.user_categories) && data.user_categories.length) {
             setUserCategories(data.user_categories.map((c: any) => String(c).trim()).filter(Boolean));
@@ -376,7 +427,7 @@ export function CatalogScanModal({
             openDocumentScan('invoice');
             premiumAlert(
               'Faktura rozpoznana',
-              'Sprawdź pozycje i zatwierdź — otworzyliśmy podgląd automatycznie.',
+              'Sprawdź pozycje i dane dostawcy, potem zatwierdź — otworzyliśmy podgląd automatycznie.',
               [{ text: 'OK', style: 'primary' }],
             );
           }
@@ -484,6 +535,7 @@ export function CatalogScanModal({
           total_amount: invTotal,
           products,
           destination: 'inventory',
+          supplier: invSupplierMeta ?? undefined,
         }),
       });
       if (!res.ok) {
@@ -500,7 +552,7 @@ export function CatalogScanModal({
       setError(e.message ?? 'Nie udało się zaksięgować faktury.');
       setStage(expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
     }
-  }, [invSupplierId, invSupplierName, invTotal, invProducts, ensureCredits, expiryDrafts.length, finishWithResult]);
+  }, [invSupplierId, invSupplierName, invSupplierMeta, invTotal, invProducts, ensureCredits, expiryDrafts.length, finishWithResult]);
 
   const goToExpiryReview = useCallback(() => {
     setExpiryDrafts(buildExpiryDrafts(invProducts));
@@ -667,6 +719,91 @@ export function CatalogScanModal({
               Sprawdź ilość, cenę i kategorię. Możesz je poprawić przy każdej pozycji — AI mogło się pomylić przy niewyraźnych cyfrach.
             </Text>
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.previewContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {supplierMetaHasContent(invSupplierMeta) ? (
+                <View style={[styles.supplierMetaCard, { backgroundColor: C.card, borderColor: C.border }]} testID="invoice-supplier-meta">
+                  <Text style={[styles.supplierMetaTitle, { color: C.text }]}>
+                    Dane dostawcy{invSupplierName ? ` · ${invSupplierName}` : ''}
+                  </Text>
+                  <Text style={[styles.supplierMetaSub, { color: C.muted }]}>
+                    Zostaną zapisane w panelu Dostawcy (uzupełnienie bez kasowania istniejących pól).
+                  </Text>
+                  <View style={styles.supplierMetaGrid}>
+                    {!!invSupplierMeta?.nip && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>NIP</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.nip}</Text>
+                      </View>
+                    )}
+                    {!!invSupplierMeta?.phone && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Telefon</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.phone}</Text>
+                      </View>
+                    )}
+                    {!!invSupplierMeta?.email && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>E-mail</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.email}</Text>
+                      </View>
+                    )}
+                    {!!invSupplierMeta?.contact_person && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Kontakt</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.contact_person}</Text>
+                      </View>
+                    )}
+                    {!!invSupplierMeta?.address && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Adres</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.address}</Text>
+                      </View>
+                    )}
+                    {!!invSupplierMeta?.payment_terms && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Płatność</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.payment_terms}</Text>
+                      </View>
+                    )}
+                    {invSupplierMeta?.min_order_value != null && invSupplierMeta.min_order_value > 0 && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Min. zamówienie</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>
+                          {formatPln(invSupplierMeta.min_order_value)}
+                        </Text>
+                      </View>
+                    )}
+                    {invSupplierMeta?.shipping_cost != null && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Koszt dostawy</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>
+                          {invSupplierMeta.shipping_cost > 0
+                            ? formatPln(invSupplierMeta.shipping_cost)
+                            : 'Darmowa'}
+                        </Text>
+                      </View>
+                    )}
+                    {invSupplierMeta?.free_shipping_threshold != null
+                      && invSupplierMeta.free_shipping_threshold > 0 && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Gratis od</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>
+                          {formatPln(invSupplierMeta.free_shipping_threshold)}
+                        </Text>
+                      </View>
+                    )}
+                    {invSupplierMeta?.lead_time_days != null && invSupplierMeta.lead_time_days > 0 && (
+                      <View style={styles.supplierMetaRow}>
+                        <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Czas dostawy</Text>
+                        <Text style={[styles.supplierMetaValue, { color: C.body }]}>
+                          {invSupplierMeta.lead_time_days === 1
+                            ? '1 dzień'
+                            : `${invSupplierMeta.lead_time_days} dni`}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              ) : null}
               {invProducts.map((p, idx) => (
                 <View key={`${p.product_name}-${idx}`} style={[styles.row, { backgroundColor: C.card, borderColor: C.border }]} testID={`invoice-row-${idx}`}>
                   <View style={{ flex: 1, gap: 8 }}>
@@ -719,7 +856,7 @@ export function CatalogScanModal({
             </ScrollView>
             <View style={[styles.footer, { backgroundColor: C.card, borderTopColor: C.border, paddingBottom: footerPad }]}>
               <Text style={[styles.destLabel, { color: C.muted }]}>
-                Po zatwierdzeniu: magazyn (stan) + koszt zmienny automatycznie.
+                Po zatwierdzeniu: magazyn + koszt zmienny + dane w panelu Dostawcy.
               </Text>
               <TouchableOpacity
                 style={[styles.confirmBtn, { backgroundColor: C.green }]}
@@ -759,7 +896,13 @@ export function CatalogScanModal({
                 </View>
                 <Text style={[styles.resultTitle, { color: C.text }]}>Faktura zaksięgowana</Text>
                 <Text style={[styles.resultSub, { color: C.body }]}>
-                  {result.supplier_name || 'Dostawca'} · zaktualizowano magazyn i dopisano koszt zmienny.
+                  {result.supplier_name || 'Dostawca'} · zaktualizowano magazyn, koszt zmienny
+                  {result.supplier_fields_updated?.length
+                    ? ` i profil dostawcy (${result.supplier_fields_updated.length} pól)`
+                    : supplierMetaHasContent(result.supplier)
+                      ? ' i dane dostawcy'
+                      : ''}
+                  .
                 </Text>
                 <View style={styles.statsRow}>
                   <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
@@ -790,7 +933,11 @@ export function CatalogScanModal({
                 </View>
                 <Text style={[styles.resultTitle, { color: C.text }]}>Oferta przeanalizowana</Text>
                 <Text style={[styles.resultSub, { color: C.body }]}>
-                  {result.supplier_name || 'Dostawca'} · produkty w katalogu.
+                  {result.supplier_name || 'Dostawca'} · produkty w katalogu
+                  {result.supplier_fields_updated?.length
+                    ? ` · uzupełniono profil (${result.supplier_fields_updated.length} pól)`
+                    : ''}
+                  .
                 </Text>
                 <View style={styles.statsRow}>
                   <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
@@ -958,6 +1105,30 @@ const styles = StyleSheet.create({
   invTotal: { fontSize: 15, fontWeight: '800' },
   invHint: { fontSize: 12, paddingHorizontal: 16, paddingBottom: 8, lineHeight: 16 },
   previewContent: { paddingHorizontal: 12, paddingTop: 4 },
+  supplierMetaCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 12,
+    gap: 8,
+  },
+  supplierMetaTitle: { fontSize: 14, fontWeight: '800' },
+  supplierMetaSub: { fontSize: 11, lineHeight: 15 },
+  supplierMetaGrid: { gap: 6, marginTop: 2 },
+  supplierMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  supplierMetaLabel: {
+    width: 108,
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    paddingTop: 1,
+  },
+  supplierMetaValue: { flex: 1, fontSize: 13, fontWeight: '600', lineHeight: 18 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

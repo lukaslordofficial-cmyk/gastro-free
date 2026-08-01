@@ -434,7 +434,9 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             ingredients: suggested.map((si) =>
               newIngredient(
                 si.name,
-                si.quantity != null ? String(normalizeRecipeQuantity(si.quantity)) : '1',
+                si.quantity != null && Number(si.quantity) > 0
+                  ? String(normalizeRecipeQuantity(si.quantity))
+                  : (si.unit === 'szt' ? '1' : si.unit === 'ml' ? '30' : '50'),
                 si.unit === 'ml' || si.unit === 'szt' ? si.unit : 'g'
               )
             ),
@@ -451,8 +453,21 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
               const hit =
                 bySugName.get(ing.name.trim().toLowerCase()) ??
                 suggested[idx];
-              if (!hit || hit.quantity == null) {
-                return { ...ing, quantity: '1' };
+              if (!hit || hit.quantity == null || !(Number(hit.quantity) > 0)) {
+                const fallback =
+                  ing.unit === 'szt' || hit?.unit === 'szt'
+                    ? '1'
+                    : ing.unit === 'ml' || hit?.unit === 'ml'
+                      ? '30'
+                      : '50';
+                return {
+                  ...ing,
+                  quantity: fallback,
+                  unit:
+                    hit?.unit === 'ml' || hit?.unit === 'szt'
+                      ? hit.unit
+                      : (ing.unit || 'g'),
+                };
               }
               return {
                 ...ing,

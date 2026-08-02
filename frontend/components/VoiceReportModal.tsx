@@ -3082,15 +3082,14 @@ function IntentDoneSummary({
     );
   }
   if (intent === 'order_critical_items_by_category') {
-    // Rozpiska produktów / znalezionych ofert jest w Łowcy Okazji — nie dubluj tu listy.
+    // Tylko skrót — lista produktów i braki ofert są wyłącznie w Łowcy Okazji.
     const cats = Array.isArray(extras?.matched_categories) ? extras.matched_categories : [];
-    const critical = Number(extras?.critical_count ?? extras?.critical_products?.length ?? 0);
+    const critical = Number(extras?.critical_count ?? 0);
     const found = Number(extras?.found_in_offers_count ?? 0);
     return (
       <>
-        <Text style={styles.doneMessage}>
-          {extras?.message
-            || 'Otworzono Łowcę Okazji — tam edytujesz koszyki i widzisz, co znaleziono u dostawców.'}
+        <Text style={styles.doneMessage} testID="voice-done-critical-short">
+          Otworzono Łowcę Okazji — tam jest rozpiska znalezionych pozycji i koszyki dostawców.
         </Text>
         {cats.length > 0 ? (
           <View style={styles.deductRow}>

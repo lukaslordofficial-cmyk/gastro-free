@@ -9894,28 +9894,22 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             compare_result["not_found_products"] = not_found_names
             compare_result["not_found_count"] = len(not_found_names)
 
-    # Mianownik = pozycje w TYM koszyku (nie cała kategoria magazynu)
+    # Krótki komunikat do panelu Jarvisa — bez listy nazw produktów.
+    # Pełna rozpiska found/missing jest w compare → Deal Hunter (scope_*).
     denom = len(critical) if critical else 0
     named_n = sum(1 for c in critical if c.get("source") in ("named", "named+category"))
     msg_parts = [
-        f"Do zamówienia: {len(critical)} pozycji"
-        + (f" z kategorii {', '.join(matched)}" if matched and not want_all else
-           " (globalnie)" if matched else "")
+        f"Otworzono Łowcę Okazji · {len(critical)} pozycji"
+        + (f" · {', '.join(matched)}" if matched and not want_all else
+           " · wszystkie kategorie" if matched else "")
         + (f" · w tym {named_n} nazwanych" if named_n else "")
-        + (f" · w wybranych kategoriach łącznie {category_total} produktów" if category_total else "")
         + "."
     ]
     if denom > 0:
         msg_parts.append(
-            f"W ofertach dostawców znaleziono {found_in_offers} z {denom} zamówionych pozycji."
+            f"W ofertach: {found_in_offers}/{denom}."
+            " Szczegóły pozycji są w Łowcy Okazji."
         )
-        if not_found_names:
-            msg_parts.append(
-                f"Brak w ofertach ({len(not_found_names)}): "
-                + ", ".join(not_found_names[:12])
-                + ("…" if len(not_found_names) > 12 else "")
-                + "."
-            )
     if unmatched:
         msg_parts.append(f"Nierozpoznane kategorie: {', '.join(unmatched)}.")
     if compare_error:

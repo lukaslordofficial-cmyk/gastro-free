@@ -134,6 +134,18 @@ export interface OptimizeResult {
   is_multivariable?: boolean;
   optimizer_version?: number;
   items_requested: { product_name: string; quantity: number; unit: string; found: boolean }[];
+  /** Zakres z critical-by-category — rozpiska w Łowcy (nie w panelu Jarvisa). */
+  scope_categories?: string[];
+  scope_products?: {
+    name?: string;
+    category?: string;
+    quantity?: number;
+    unit?: string;
+    source?: string;
+  }[];
+  scope_summary?: string;
+  not_found_products?: string[];
+  not_found_count?: number;
   best_option: BestOption | null;
   tied_suppliers: TiedSupplier[];
   variant_monolith: OptionAllOne | null;
@@ -637,8 +649,17 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
   const packNotes = Array.isArray(data.pack_adjustment_notes)
     ? (data.pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
     : undefined;
+  const scopeFields = {
+    ...(Array.isArray(data.scope_categories) ? { scope_categories: data.scope_categories as string[] } : {}),
+    ...(Array.isArray(data.scope_products) ? { scope_products: data.scope_products as OptimizeResult['scope_products'] } : {}),
+    ...(data.scope_summary ? { scope_summary: String(data.scope_summary) } : {}),
+    ...(Array.isArray(data.not_found_products)
+      ? { not_found_products: data.not_found_products as string[] }
+      : {}),
+    ...(data.not_found_count != null ? { not_found_count: Number(data.not_found_count) } : {}),
+  };
   if (typeof data.is_optimized === 'boolean' && data.pricing_matrix) {
-    const out = data as OptimizeResult;
+    const out = { ...(data as OptimizeResult), ...scopeFields };
     if (packNotes?.length && !out.pack_adjustment_notes?.length) {
       out.pack_adjustment_notes = packNotes;
     }
@@ -663,6 +684,7 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
     option_all_one: mono,
     option_optimized: split,
     ...(packNotes?.length ? { pack_adjustment_notes: packNotes } : {}),
+    ...scopeFields,
   };
   if (matrix.length) {
     const meta = suppliersMetaFromMatrix(matrix);
@@ -674,7 +696,7 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
       assistant_speech: stub.assistant_speech,
     });
     if (packNotes?.length) built.pack_adjustment_notes = packNotes;
-    return built;
+    return { ...built, ...scopeFields };
   }
   const unique = itemsReq.length;
   const totalA = mono && !mono.missing?.length ? mono.total_pln : null;

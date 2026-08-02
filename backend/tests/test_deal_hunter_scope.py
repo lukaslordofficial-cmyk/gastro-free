@@ -68,6 +68,16 @@ def test_product_in_wanted_excludes_inne_and_vegetables():
     assert not _product_in_wanted_categories("", None, wanted, wanted_ids)
 
 
+def test_product_in_wanted_includes_inne_when_selected():
+    from server import _product_in_wanted_categories, _norm_pl
+
+    wanted = {_norm_pl("Mięso i wędliny"), _norm_pl("Inne")}
+    wanted_ids = {"meat-id", "inne-id"}
+    assert _product_in_wanted_categories("Inne", "inne-id", wanted, wanted_ids)
+    assert _product_in_wanted_categories("Inne", None, wanted, wanted_ids)
+    assert not _product_in_wanted_categories("Warzywa i owoce", "veg-id", wanted, wanted_ids)
+
+
 def test_compound_warzywa_plus_named_products():
     """„warzywa oraz ser kozi i borowiki” → kategoria + leftover named tokens."""
     matched, unmatched = _resolve_warehouse_categories(

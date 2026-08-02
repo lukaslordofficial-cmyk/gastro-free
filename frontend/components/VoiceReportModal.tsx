@@ -3082,60 +3082,28 @@ function IntentDoneSummary({
     );
   }
   if (intent === 'order_critical_items_by_category') {
+    // Rozpiska produktów / znalezionych ofert jest w Łowcy Okazji — nie dubluj tu listy.
+    const cats = Array.isArray(extras?.matched_categories) ? extras.matched_categories : [];
     const critical = Number(extras?.critical_count ?? extras?.critical_products?.length ?? 0);
     const found = Number(extras?.found_in_offers_count ?? 0);
-    const categoryTotal = Number(extras?.category_total ?? 0);
-    const denom = categoryTotal > 0
-      ? categoryTotal
-      : (Array.isArray(extras?.compare?.items_requested)
-        ? extras.compare.items_requested.length
-        : critical);
-    const products: any[] = Array.isArray(extras?.critical_products)
-      ? extras.critical_products
-      : (Array.isArray(extras?.compare?.items_requested) ? extras.compare.items_requested : []);
     return (
       <>
-        {extras?.message ? <Text style={styles.doneMessage}>{extras.message}</Text> : null}
-        <View style={styles.deductRow}>
-          <Text style={styles.deductName}>Braki do zamówienia</Text>
-          <Text style={styles.deductQty}>{critical}</Text>
-        </View>
-        {categoryTotal > 0 ? (
+        <Text style={styles.doneMessage}>
+          {extras?.message
+            || 'Otworzono Łowcę Okazji — tam edytujesz koszyki i widzisz, co znaleziono u dostawców.'}
+        </Text>
+        {cats.length > 0 ? (
           <View style={styles.deductRow}>
-            <Text style={styles.deductName}>Produktów w kategorii</Text>
-            <Text style={styles.deductQty}>{categoryTotal}</Text>
+            <Text style={styles.deductName}>Kategorie</Text>
+            <Text style={styles.deductQty} numberOfLines={2}>{cats.join(', ')}</Text>
           </View>
         ) : null}
         <View style={styles.deductRow}>
-          <Text style={styles.deductName}>Znalezione w ofertach dostawców</Text>
+          <Text style={styles.deductName}>Pozycje / w ofertach</Text>
           <Text style={[styles.deductQty, { color: Colors.success }]}>
-            {found} / {denom}
+            {found} / {critical}
           </Text>
         </View>
-        {products.length > 0 ? (
-          <>
-            <Text style={[styles.sectionLabel, { marginTop: 12 }]}>
-              Podgląd koszyka ({products.length})
-            </Text>
-            {products.map((row: any, idx: number) => {
-              const name = String(row?.name || row?.product_name || '—');
-              const qty = row?.deficit ?? row?.quantity;
-              const unit = row?.unit || '';
-              const src = row?.source ? String(row.source) : '';
-              return (
-                <View key={`basket-${idx}-${name}`} style={styles.deductRow}>
-                  <Text style={styles.deductName} numberOfLines={2}>
-                    {name}
-                    {src.includes('named') ? ' · z nazwy' : ''}
-                  </Text>
-                  <Text style={styles.deductQty}>
-                    {qty != null ? `${qty} ${unit}`.trim() : unit || '—'}
-                  </Text>
-                </View>
-              );
-            })}
-          </>
-        ) : null}
       </>
     );
   }

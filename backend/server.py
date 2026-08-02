@@ -8590,6 +8590,16 @@ def _dedupe_products_across_supplier_groups(groups: list[dict]) -> list[dict]:
     return out
 
 
+def _recompute_scenario_totals(sc: dict) -> None:
+    if not isinstance(sc, dict):
+        return
+    groups = sc.get("suppliers") or []
+    sc["supplier_count"] = len(groups)
+    sc["products_pln"] = round(sum(float(g.get("subtotal_pln") or 0) for g in groups), 2)
+    ship = float(sc.get("shipping_pln") or 0)
+    sc["total_pln"] = round(float(sc["products_pln"]) + ship, 2)
+
+
 def _sanitize_optimize_unique_products(result: dict) -> dict:
     """Po optymalizacji: zero podwójnych SKU między dostawcami w scenariuszach."""
     if not isinstance(result, dict):
@@ -8598,23 +8608,13 @@ def _sanitize_optimize_unique_products(result: dict) -> dict:
         sc = result.get(key)
         if isinstance(sc, dict) and isinstance(sc.get("suppliers"), list):
             sc["suppliers"] = _dedupe_products_across_supplier_groups(sc["suppliers"])
-            sc["supplier_count"] = len(sc["suppliers"])
-            sc["products_pln"] = round(
-                sum(float(g.get("subtotal_pln") or 0) for g in sc["suppliers"]), 2,
-            )
-            ship = float(sc.get("shipping_pln") or 0)
-            sc["total_pln"] = round(sc["products_pln"] + ship, 2)
+            _recompute_scenario_totals(sc)
     scenarios = result.get("scenarios")
     if isinstance(scenarios, list):
         for sc in scenarios:
             if isinstance(sc, dict) and isinstance(sc.get("suppliers"), list):
                 sc["suppliers"] = _dedupe_products_across_supplier_groups(sc["suppliers"])
-                sc["supplier_count"] = len(sc["suppliers"])
-                sc["products_pln"] = round(
-                    sum(float(g.get("subtotal_pln") or 0) for g in sc["suppliers"]), 2,
-                )
-                ship = float(sc.get("shipping_pln") or 0)
-                sc["total_pln"] = round(sc["products_pln"] + ship, 2)
+                _recompute_scenario_totals(sc)
     for key in ("variant_split", "option_optimized"):
         vs = result.get(key)
         if isinstance(vs, dict) and isinstance(vs.get("suppliers"), list):
@@ -8626,7 +8626,82 @@ def _sanitize_optimize_unique_products(result: dict) -> dict:
     if isinstance(best, dict):
         if isinstance(best.get("suppliers"), list):
             best["suppliers"] = _dedupe_products_across_supplier_groups(best["suppliers"])
-        # single-supplier best: nic do dedupu między grupami
+    return result
+
+
+def _filter_compare_to_requested_products(result: dict, allowed_names: list[str]) -> dict:
+    """Usuń z koszyków dostawców pozycje spoza listy zamówionych braków (anti-bleed)."""
+    if not isinstance(result, dict) or not allowed_names:
+        return result
+    allowed_norm = {_norm_pl(n) for n in allowed_names if n and str(n).strip()}
+    allowed_food = {_food_match_key(n) for n in allowed_names if n and str(n).strip()}
+
+    def _ok(name: str) -> bool:
+        raw = (name or "").strip()
+        if not raw:
+            return False
+        n = _norm_pl(raw)
+        if n in allowed_norm:
+            return True
+        fk = _food_match_key(raw)
+        if fk and fk in allowed_food:
+            return True
+        for an in allowed_names:
+            if _food_keys_same_product(fk, _food_match_key(an), raw, an):
+                return True
+        return False
+
+    def _filter_groups(groups: list) -> list:
+        out = []
+        for g in groups or []:
+            if not isinstance(g, dict):
+                continue
+            items = [
+                it for it in (g.get("items") or [])
+                if _ok(str(it.get("product_name") or it.get("matched_name") or ""))
+            ]
+            if not items:
+                continue
+            ng = dict(g)
+            ng["items"] = items
+            ng["subtotal_pln"] = round(sum(float(x.get("line_total") or 0) for x in items), 2)
+            min_v = float(ng.get("min_order_value") or 0)
+            ng["meets_minimum_order"] = (min_v <= 0) or (ng["subtotal_pln"] >= min_v)
+            if min_v > 0:
+                ng["gap_to_minimum_pln"] = round(max(0.0, min_v - ng["subtotal_pln"]), 2)
+            out.append(ng)
+        return out
+
+    for key in ("scenario_split_max", "scenario_monolith", "scenario_smart_hybrid"):
+        sc = result.get(key)
+        if isinstance(sc, dict) and isinstance(sc.get("suppliers"), list):
+            sc["suppliers"] = _filter_groups(sc["suppliers"])
+            _recompute_scenario_totals(sc)
+    if isinstance(result.get("scenarios"), list):
+        for sc in result["scenarios"]:
+            if isinstance(sc, dict) and isinstance(sc.get("suppliers"), list):
+                sc["suppliers"] = _filter_groups(sc["suppliers"])
+                _recompute_scenario_totals(sc)
+    for key in ("variant_split", "option_optimized"):
+        vs = result.get(key)
+        if isinstance(vs, dict) and isinstance(vs.get("suppliers"), list):
+            vs["suppliers"] = _filter_groups(vs["suppliers"])
+            vs["total_pln"] = round(
+                sum(float(g.get("subtotal_pln") or 0) for g in vs["suppliers"]), 2,
+            )
+    best = result.get("best_option")
+    if isinstance(best, dict):
+        if isinstance(best.get("suppliers"), list):
+            best["suppliers"] = _filter_groups(best["suppliers"])
+        if isinstance(best.get("items"), list):
+            best["items"] = [
+                it for it in best["items"]
+                if _ok(str(it.get("product_name") or it.get("matched_name") or ""))
+            ]
+            best["subtotal_pln"] = round(
+                sum(float(x.get("line_total") or 0) for x in best["items"]), 2,
+            )
+            best["total_pln"] = best.get("total_pln") or best["subtotal_pln"]
     return result
 
 
@@ -9198,12 +9273,9 @@ def _product_in_wanted_categories(
 ) -> bool:
     """True gdy produkt należy do wybranej kategorii — bez fuzzy bleed.
 
-    Matching: category_id ∈ wanted_ids LUB kanoniczna nazwa kategorii
-    (po resolve synonimów) ∈ wanted_set. Brak kategorii → „Inne" — NIGDY
-    nie wpada do Warzywa/Nabiał itd.
-
-    Gdy mamy wanted_ids, sam category_id wystarcza. Nazwa kategorii jest
-    dodatkowym bezpiecznikiem (gdy join/id niespójne).
+    Matching: category_id ∈ wanted_ids LUB nazwa kategorii ∈ wanted_set
+    (po resolve synonimów). Gdy użytkownik WYBRAŁ „Inne" — produkty z „Inne"
+    wchodzą. Gdy nie wybrał — „Inne"/pusta nie bleedują do Mięso/Nabiał itd.
     """
     if not wanted_set and not wanted_ids:
         return False
@@ -9211,10 +9283,8 @@ def _product_in_wanted_categories(
     if wanted_ids and cid and cid in wanted_ids:
         return True
     ec = (effective_cat or "").strip() or "Inne"
-    # „Inne" / pusta NIGDY nie wchodzi do konkretnych kategorii braków
-    if _norm_pl(ec) in {"inne", "pozostale", "pozostałe", ""}:
-        return False
     ec_norm = _norm_pl(ec)
+    # Najpierw positive match (także gdy wybrano „Inne")
     if ec_norm in wanted_set:
         return True
     resolved, _ = _resolve_warehouse_categories([ec])
@@ -9223,6 +9293,9 @@ def _product_in_wanted_categories(
             continue
         if _norm_pl(r) in wanted_set:
             return True
+    # Bez wyboru „Inne": puste / Inne nie wchodzą do innych kategorii
+    if ec_norm in {"inne", "pozostale", "pozostałe", ""}:
+        return False
     return False
 
 
@@ -9437,32 +9510,79 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         inv_all = [r for r in inv_all if r.get("is_active") is not False]
 
         want_all = matched == ["all"]
-        wanted_set = {_norm_pl(x) for x in matched} if matched and not want_all else set()
         target_mode = (req.stock_target or "critical").strip().lower()
         if target_mode not in ("critical", "optimal"):
             target_mode = "critical"
 
-        # Mapuj nazwy kategorii → id z inventory_categories (spójnie z FE category_id)
+        # Dowolna kategoria z magazynu użytkownika (nie tylko sztywne WAREHOUSE_CATEGORIES).
+        # FE wysyła nazwy z inventory_categories — mapuj 1:1 po norm + synonimach.
         wanted_ids: set[str] = set()
+        raw_cat_norms = {
+            _norm_pl(x) for x in (req.categories or [])
+            if isinstance(x, str) and x.strip() and x.strip().lower() != "all"
+        }
+        try:
+            cat_rows = await sb_get(
+                client, "inventory_categories",
+                params={"select": "id,name", "limit": "500"},
+            ) or []
+        except Exception:
+            cat_rows = []
+        user_cat_by_norm = {
+            _norm_pl((c.get("name") or "").strip()): c
+            for c in cat_rows
+            if (c.get("name") or "").strip()
+        }
+
+        # Nierozpoznane przez synonimy, ale istniejące w magazynie użytkownika → matched
+        if not want_all:
+            still_unmatched: list[str] = []
+            for u in unmatched:
+                uk = _norm_pl(u)
+                hit = user_cat_by_norm.get(uk)
+                if hit:
+                    cname = (hit.get("name") or "").strip()
+                    if cname and cname not in matched:
+                        matched.append(cname)
+                else:
+                    still_unmatched.append(u)
+            unmatched = still_unmatched
+            # Surowy wybór z FE (nazwa pilla) też musi trafić do matched
+            for rn in raw_cat_norms:
+                hit = user_cat_by_norm.get(rn)
+                if not hit:
+                    continue
+                cname = (hit.get("name") or "").strip()
+                if cname and cname not in matched:
+                    matched.append(cname)
+
+        wanted_set = {_norm_pl(x) for x in matched} if matched and not want_all else set()
+        # Dołącz też surowe normy z FE (gdy FE wysłał dokładną nazwę z DB)
+        if not want_all:
+            wanted_set |= raw_cat_norms
+
         if matched and not want_all:
-            try:
-                cat_rows = await sb_get(
-                    client, "inventory_categories",
-                    params={"select": "id,name", "limit": "500"},
-                ) or []
-            except Exception:
-                cat_rows = []
             for cr in cat_rows:
                 cname = (cr.get("name") or "").strip()
                 if not cname:
                     continue
                 cn = _norm_pl(cname)
-                if cn in wanted_set:
+                if cn in wanted_set or cn in raw_cat_norms:
                     wanted_ids.add(str(cr["id"]))
                     continue
                 resolved, _ = _resolve_warehouse_categories([cname])
                 if any(_norm_pl(r) in wanted_set for r in resolved if r != "all"):
                     wanted_ids.add(str(cr["id"]))
+
+        # Nazwy kategorii NIE mogą zostać „produktami nazwanymi” (to wciągało warzywa).
+        if not want_all:
+            syn_idx = _category_syn_index()
+            cat_block = set(wanted_set) | set(raw_cat_norms) | {_norm_pl(m) for m in matched}
+            named_raw = [
+                n for n in named_raw
+                if _norm_pl(n.get("name") or "") not in cat_block
+                and _norm_pl(n.get("name") or "") not in syn_idx
+            ]
 
         # Ile produktów jest w wybranych kategoriach (mianownik do X/Y)
         category_total = 0
@@ -9732,6 +9852,11 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
     found_in_offers = 0
     not_found_names: list[str] = []
     if isinstance(compare_result, dict):
+        # Twarda bramka: koszyki dostawców TYLKO z zamówionych braków (bez warzyw „znikąd”)
+        allowed_names = [str(c.get("name") or "").strip() for c in critical if c.get("name")]
+        compare_result = _filter_compare_to_requested_products(compare_result, allowed_names)
+        compare_result = _sanitize_optimize_unique_products(compare_result)
+
         req_items = compare_result.get("items_requested") or []
         found_in_offers = sum(1 for it in req_items if it.get("found"))
         not_found_names = [
@@ -9739,7 +9864,23 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             for it in req_items
             if not it.get("found") and str(it.get("product_name") or "").strip()
         ]
-        # Uczciwy opis braków w speech Łowcy
+        # Metadane zakresu — FE Łowca pokazuje rozpiskę (nie panel Jarvisa)
+        compare_result["scope_categories"] = matched
+        compare_result["scope_products"] = [
+            {
+                "name": c.get("name"),
+                "category": c.get("category"),
+                "quantity": c.get("deficit"),
+                "unit": c.get("unit"),
+                "source": c.get("source"),
+            }
+            for c in critical
+        ]
+        compare_result["scope_summary"] = (
+            f"Zakres: {', '.join(matched) if matched and not want_all else 'wszystkie kategorie'}"
+            f" · {len(critical)} poz. do zamówienia"
+            f" · w ofertach {found_in_offers}/{len(critical) if critical else 0}."
+        )
         if not_found_names:
             speech = (compare_result.get("assistant_speech") or "").strip()
             listed = ", ".join(not_found_names[:12])

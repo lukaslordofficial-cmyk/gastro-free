@@ -2302,12 +2302,63 @@ export function DealHunterModal({
                 {bulkContextLabel ? (
                   <Text style={[styles.editCartHint, { marginBottom: 8 }]} testID="deal-hunter-bulk-label">
                     {bulkContextLabel}
-                    {Array.isArray(result.items_requested) && result.items_requested.length > 0
-                      ? ` · ${result.items_requested.length} poz.`
-                      : ''}
                   </Text>
                 ) : null}
-                {/* Najpierw edytowalny koszyk — bez klikania i bez przewijania pod listę AI. */}
+                {/* Rozpiska zakresu — w Łowcy, nie w panelu komendy głosowej. */}
+                {(Array.isArray(result.scope_products) && result.scope_products.length > 0)
+                  || (Array.isArray(result.items_requested) && result.items_requested.length > 0) ? (
+                  <View style={styles.speechCard} testID="deal-hunter-scope">
+                    <View style={{ flex: 1, gap: 6 }}>
+                      <Text style={[styles.speechText, { fontWeight: '800' }]}>
+                        Zakres zamówienia
+                      </Text>
+                      {Array.isArray(result.scope_categories) && result.scope_categories.length > 0 ? (
+                        <Text style={styles.editCartHint}>
+                          Kategorie: {result.scope_categories.join(', ')}
+                        </Text>
+                      ) : null}
+                      {!!result.scope_summary && (
+                        <Text style={styles.foundInOffers}>{result.scope_summary}</Text>
+                      )}
+                      {Array.isArray(result.items_requested) && result.items_requested.length > 0 ? (
+                        <Text style={styles.foundInOffers}>
+                          W ofertach dostawców:{' '}
+                          {result.items_requested.filter((i) => i.found).length} /{' '}
+                          {result.items_requested.length} pozycji
+                        </Text>
+                      ) : null}
+                      {(result.scope_products ?? result.items_requested ?? []).slice(0, 40).map((row: any, idx: number) => {
+                        const name = String(row?.name || row?.product_name || '—');
+                        const qty = row?.quantity ?? row?.deficit;
+                        const unit = row?.unit || '';
+                        const found = result.items_requested?.find(
+                          (ir) => String(ir.product_name || '').toLowerCase() === name.toLowerCase(),
+                        );
+                        const ok = found ? found.found !== false : true;
+                        const cat = row?.category ? ` · ${row.category}` : '';
+                        return (
+                          <Text
+                            key={`scope-${idx}-${name}`}
+                            style={[styles.speechText, !ok && { color: C.danger }]}
+                          >
+                            {ok ? '✓' : '✗'} {name}
+                            {qty != null ? ` — ${qty} ${unit}`.trimEnd() : ''}
+                            {cat}
+                            {!ok ? ' (brak w ofertach)' : ''}
+                          </Text>
+                        );
+                      })}
+                      {Array.isArray(result.not_found_products) && result.not_found_products.length > 0 ? (
+                        <Text style={[styles.editCartHint, { color: C.danger, marginTop: 4 }]}>
+                          Nie znaleziono u dostawców ({result.not_found_products.length}):{' '}
+                          {result.not_found_products.slice(0, 12).join(', ')}
+                          {result.not_found_products.length > 12 ? '…' : ''}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+                ) : null}
+                {/* Edytowalny koszyk dostawców — tylko pozycje z zakresu. */}
                 {(result.is_optimized || result.is_multivariable) ? renderCompareMode() : renderSingleMode()}
                 {creditsNotice ? (
                   <View style={styles.creditsNotice} testID="deal-hunter-credits-notice">
@@ -2320,13 +2371,6 @@ export function DealHunterModal({
                     <Text style={styles.speechText}>
                       {result.analysis_summary || result.assistant_speech}
                     </Text>
-                    {Array.isArray(result.items_requested) && result.items_requested.length > 0 ? (
-                      <Text style={styles.foundInOffers}>
-                        W ofertach dostawców:{' '}
-                        {result.items_requested.filter((i: any) => i.found).length} /{' '}
-                        {result.items_requested.length} pozycji
-                      </Text>
-                    ) : null}
                   </View>
                 </View>
                 {Array.isArray(result.suggestions) && result.suggestions.length > 0 ? (

@@ -265,10 +265,22 @@ export function IngredientNameSuggest({
         const { data } = await supabase
           .from('inventory_items')
           .select('id, name, unit')
+          .eq('is_active', true)
           .ilike('name', `%${q}%`)
           .order('name')
-          .limit(8);
-        if (!cancelled) setSuggestions((data as any[]) ?? []);
+          .limit(20);
+        const seen = new Set<string>();
+        const deduped = ((data as any[]) ?? []).filter((row) => {
+          const k = String(row.name || '')
+            .trim()
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+          if (!k || seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        }).slice(0, 8);
+        if (!cancelled) setSuggestions(deduped);
       } catch {
         if (!cancelled) setSuggestions([]);
       } finally {
@@ -486,19 +498,31 @@ function OrderLine({
         let { data, error } = await supabase
           .from('inventory_items')
           .select('id, name, unit, unit_weight_volume, weight_volume_unit')
+          .eq('is_active', true)
           .ilike('name', `%${q}%`)
           .order('name')
-          .limit(8);
-        if (error && /unit_weight_volume|weight_volume_unit/.test(error.message ?? '')) {
+          .limit(20);
+        if (error && /unit_weight_volume|weight_volume_unit|is_active/.test(error.message ?? '')) {
           const retry = await supabase
             .from('inventory_items')
             .select('id, name, unit')
             .ilike('name', `%${q}%`)
             .order('name')
-            .limit(8);
+            .limit(20);
           data = retry.data;
         }
-        if (!cancelled) setSuggestions((data as any[]) ?? []);
+        const seen = new Set<string>();
+        const deduped = ((data as any[]) ?? []).filter((row) => {
+          const k = String(row.name || '')
+            .trim()
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+          if (!k || seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        }).slice(0, 8);
+        if (!cancelled) setSuggestions(deduped);
       } catch {
         if (!cancelled) setSuggestions([]);
       } finally {

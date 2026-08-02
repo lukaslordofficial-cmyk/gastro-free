@@ -287,3 +287,43 @@ def test_merge_duplicate_compare_items_sums_qty():
     assert len(merged) == 1
     assert float(merged[0]["quantity"]) == 12.0
     assert float(merged[0]["best_by_supplier"]["A"]["unit_price_base"]) == 21.0
+
+
+def test_merge_rukola_and_salata_rukola():
+    from server import _merge_duplicate_compare_items, _food_match_key
+
+    a = _item("rukola", 2, {"A": 10, "B": 12})
+    b = _item("sałata rukola", 2, {"A": 11, "B": 9})
+    a["food_key"] = _food_match_key("rukola")
+    b["food_key"] = _food_match_key("sałata rukola")
+    merged = _merge_duplicate_compare_items([a, b])
+    assert len(merged) == 1
+
+
+def test_dedupe_products_across_supplier_groups():
+    from server import _dedupe_products_across_supplier_groups
+
+    groups = [
+        {
+            "supplier_id": "a",
+            "supplier_name": "A",
+            "min_order_value": 0,
+            "items": [
+                {"product_name": "rukola", "line_total": 20.0},
+                {"product_name": "mleko", "line_total": 10.0},
+            ],
+        },
+        {
+            "supplier_id": "b",
+            "supplier_name": "B",
+            "min_order_value": 0,
+            "items": [
+                {"product_name": "rukola", "line_total": 15.0},
+            ],
+        },
+    ]
+    out = _dedupe_products_across_supplier_groups(groups)
+    names = [(g["supplier_id"], [i["product_name"] for i in g["items"]]) for g in out]
+    # tańsza rukola u B; mleko zostaje u A
+    assert ("b", ["rukola"]) in names
+    assert ("a", ["mleko"]) in names

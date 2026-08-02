@@ -6576,6 +6576,8 @@ class ConfirmMenuDish(BaseModel):
 
 class ConfirmMenuScanRequest(BaseModel):
     dishes: list[ConfirmMenuDish]
+    # True tylko gdy użytkownik wybrał TAK w dialogu AI — NIE = zapis bez uzupełnień.
+    fill_empty_with_ai: bool = False
 
 
 def _make_pos_id_for_category(category: str, offset: int) -> str:
@@ -6991,14 +6993,15 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     all_ingredient_names: list[str] = []
     portion_column_missing = False
 
-    # gastro-manager-15: bez składników nie ma produktów w magazynie — uzupełnij AI.
-    try:
-        await _fill_empty_ingredients_for_confirm(req.dishes, warnings=warnings)
-        _canonicalize_ingredient_units(req.dishes)
-        _apply_whole_product_names_to_dishes(req.dishes)
-        _apply_integer_quantities_to_dishes(req.dishes)
-    except Exception as e:  # noqa: BLE001
-        warnings.append(f"Uzupełnianie receptur AI pominięte: {e}")
+    # Uzupełnianie AI tylko po świadomym TAK (fill_empty_with_ai). NIE = puste pola zostają.
+    if req.fill_empty_with_ai:
+        try:
+            await _fill_empty_ingredients_for_confirm(req.dishes, warnings=warnings)
+            _canonicalize_ingredient_units(req.dishes)
+            _apply_whole_product_names_to_dishes(req.dishes)
+            _apply_integer_quantities_to_dishes(req.dishes)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"Uzupełnianie receptur AI pominięte: {e}")
 
     async with httpx.AsyncClient(timeout=180.0, verify=_httpx_verify()) as client:
         try:
@@ -8412,6 +8415,29 @@ async def _enrich_deal_hunter_ai_tips(
     return result
 
 
+def _food_keys_same_product(ka: str, kb: str, name_a: str, name_b: str) -> bool:
+    """Czy dwa food_key wskazują ten sam produkt (rukola ≈ sałata rukola).
+
+    Krótkie 1-tokenowe stem'y (np. „ser”) NIE łączą różnych serów.
+    """
+    ka, kb = (ka or "").strip(), (kb or "").strip()
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    ta, tb = set(ka.split()), set(kb.split())
+    if not ta or not tb:
+        return False
+    if ta <= tb or tb <= ta:
+        smaller = ta if len(ta) <= len(tb) else tb
+        if len(smaller) >= 2:
+            return True
+        only = next(iter(smaller))
+        if len(only) >= 5 and float(fuzz.token_set_ratio(_norm_pl(name_a), _norm_pl(name_b))) >= 80:
+            return True
+    return float(fuzz.token_set_ratio(_norm_pl(name_a), _norm_pl(name_b))) >= 92
+
+
 def _merge_duplicate_compare_items(per_item: list[dict]) -> list[dict]:
     """Łączy linie porównania, które to ten sam produkt magazynowy / ten sam food_key.
 
@@ -8429,9 +8455,44 @@ def _merge_duplicate_compare_items(per_item: list[dict]) -> list[dict]:
         unit = (pi.get("unit") or "").strip().lower()
         return f"fk:{fk}|{unit}" if fk else f"name:{_norm_pl(pi.get('product_name') or '')}|{unit}"
 
+    # Najpierw scal po kompatybilnym food_key (rukola / sałata rukola)
+    coalesced: list[dict] = []
+    used = [False] * len(per_item)
+    for i, a in enumerate(per_item):
+        if used[i]:
+            continue
+        cluster = [a]
+        used[i] = True
+        ka = (a.get("food_key") or _food_match_key(a.get("product_name") or "")).strip()
+        ua = (a.get("unit") or "").strip().lower()
+        ia = a.get("inventory_id")
+        for j in range(i + 1, len(per_item)):
+            if used[j]:
+                continue
+            b = per_item[j]
+            if ia and b.get("inventory_id") and str(ia) == str(b.get("inventory_id")):
+                cluster.append(b)
+                used[j] = True
+                continue
+            ub = (b.get("unit") or "").strip().lower()
+            if ua and ub and ua != ub:
+                continue
+            kb = (b.get("food_key") or _food_match_key(b.get("product_name") or "")).strip()
+            if _food_keys_same_product(
+                ka, kb, a.get("product_name") or "", b.get("product_name") or "",
+            ):
+                cluster.append(b)
+                used[j] = True
+        merge_token = id(cluster[0])
+        for c in cluster:
+            c["_merge_into"] = merge_token
+        coalesced.extend(cluster)
+
     buckets: dict[str, list[dict]] = {}
-    for pi in per_item:
-        buckets.setdefault(_group_key(pi), []).append(pi)
+    for pi in coalesced:
+        mk = pi.get("_merge_into")
+        key = f"merge:{mk}" if mk is not None else _group_key(pi)
+        buckets.setdefault(key, []).append(pi)
 
     merged: list[dict] = []
     for group in buckets.values():
@@ -8487,8 +8548,86 @@ def _merge_duplicate_compare_items(per_item: list[dict]) -> list[dict]:
             base["quantity_max"] = round(total_target * 1.1, 4)
             base["best_by_supplier"] = bbs
             base["merged_from"] = names
+            base.pop("_merge_into", None)
             merged.append(base)
+    for m in merged:
+        m.pop("_merge_into", None)
     return merged
+
+
+def _dedupe_products_across_supplier_groups(groups: list[dict]) -> list[dict]:
+    """Jeden produkt może być tylko u jednego dostawcy — zostaw najtańszą linię."""
+    if not groups:
+        return groups
+    best: dict[str, tuple[float, int, dict]] = {}
+    for gi, g in enumerate(groups):
+        for it in g.get("items") or []:
+            key = _norm_pl(it.get("product_name") or it.get("matched_name") or "")
+            if not key:
+                continue
+            lt = float(it.get("line_total") or 0)
+            prev = best.get(key)
+            if prev is None or lt < prev[0] - 1e-9:
+                best[key] = (lt, gi, it)
+    out: list[dict] = []
+    for gi, g in enumerate(groups):
+        kept = []
+        for it in g.get("items") or []:
+            key = _norm_pl(it.get("product_name") or it.get("matched_name") or "")
+            hit = best.get(key)
+            if hit and hit[1] == gi:
+                kept.append(it)
+        if not kept:
+            continue
+        ng = dict(g)
+        ng["items"] = kept
+        ng["subtotal_pln"] = round(sum(float(x.get("line_total") or 0) for x in kept), 2)
+        min_v = float(ng.get("min_order_value") or 0)
+        ng["meets_minimum_order"] = (min_v <= 0) or (ng["subtotal_pln"] >= min_v)
+        if min_v > 0:
+            ng["gap_to_minimum_pln"] = round(max(0.0, min_v - ng["subtotal_pln"]), 2)
+        out.append(ng)
+    return out
+
+
+def _sanitize_optimize_unique_products(result: dict) -> dict:
+    """Po optymalizacji: zero podwójnych SKU między dostawcami w scenariuszach."""
+    if not isinstance(result, dict):
+        return result
+    for key in ("scenario_split_max", "scenario_monolith", "scenario_smart_hybrid"):
+        sc = result.get(key)
+        if isinstance(sc, dict) and isinstance(sc.get("suppliers"), list):
+            sc["suppliers"] = _dedupe_products_across_supplier_groups(sc["suppliers"])
+            sc["supplier_count"] = len(sc["suppliers"])
+            sc["products_pln"] = round(
+                sum(float(g.get("subtotal_pln") or 0) for g in sc["suppliers"]), 2,
+            )
+            ship = float(sc.get("shipping_pln") or 0)
+            sc["total_pln"] = round(sc["products_pln"] + ship, 2)
+    scenarios = result.get("scenarios")
+    if isinstance(scenarios, list):
+        for sc in scenarios:
+            if isinstance(sc, dict) and isinstance(sc.get("suppliers"), list):
+                sc["suppliers"] = _dedupe_products_across_supplier_groups(sc["suppliers"])
+                sc["supplier_count"] = len(sc["suppliers"])
+                sc["products_pln"] = round(
+                    sum(float(g.get("subtotal_pln") or 0) for g in sc["suppliers"]), 2,
+                )
+                ship = float(sc.get("shipping_pln") or 0)
+                sc["total_pln"] = round(sc["products_pln"] + ship, 2)
+    for key in ("variant_split", "option_optimized"):
+        vs = result.get(key)
+        if isinstance(vs, dict) and isinstance(vs.get("suppliers"), list):
+            vs["suppliers"] = _dedupe_products_across_supplier_groups(vs["suppliers"])
+            vs["total_pln"] = round(
+                sum(float(g.get("subtotal_pln") or 0) for g in vs["suppliers"]), 2,
+            )
+    best = result.get("best_option")
+    if isinstance(best, dict):
+        if isinstance(best.get("suppliers"), list):
+            best["suppliers"] = _dedupe_products_across_supplier_groups(best["suppliers"])
+        # single-supplier best: nic do dedupu między grupami
+    return result
 
 
 @app.post("/api/orders/compare-offers")
@@ -8513,15 +8652,31 @@ async def compare_offers(req: CompareOffersRequest):
         )
         try:
             inv_rows = await sb_get(client, "inventory_items",
-                                    params={"select": inv_select, "limit": "2000"}) or []
+                                    params={
+                                        "select": inv_select + ",is_active",
+                                        "is_active": "eq.true",
+                                        "limit": "2000",
+                                    }) or []
         except httpx.HTTPStatusError as e:
             text = (e.response.text if e.response is not None else "") or ""
-            if "unit_weight_volume" in text or "weight_volume_unit" in text:
-                inv_select = "id,name,synonyms" if has_syn else "id,name"
+            if "is_active" in text:
                 inv_rows = await sb_get(client, "inventory_items",
                                         params={"select": inv_select, "limit": "2000"}) or []
+            elif "unit_weight_volume" in text or "weight_volume_unit" in text:
+                inv_select = "id,name,synonyms" if has_syn else "id,name"
+                try:
+                    inv_rows = await sb_get(client, "inventory_items",
+                                            params={
+                                                "select": inv_select + ",is_active",
+                                                "is_active": "eq.true",
+                                                "limit": "2000",
+                                            }) or []
+                except httpx.HTTPStatusError:
+                    inv_rows = await sb_get(client, "inventory_items",
+                                            params={"select": inv_select, "limit": "2000"}) or []
             else:
                 raise
+        inv_rows = [r for r in inv_rows if r.get("is_active") is not False]
 
         ai_budget = AI_MAX_CHECKS
         synonym_additions: dict = {}   # inv_id -> {"existing": [...], "new": set()}
@@ -8798,6 +8953,7 @@ async def compare_offers(req: CompareOffersRequest):
             fillers=fillers,
         )
         result = apply_cart_objective(result, req.cart_objective, suppliers_meta)
+        result = _sanitize_optimize_unique_products(result)
         if pack_notes:
             result["pack_adjustment_notes"] = pack_notes
             # Dołącz do speech, żeby FE / Jarvis widziały od razu
@@ -8996,28 +9152,26 @@ def _resolve_warehouse_categories(raw: list[str]) -> tuple[list[str], list[str]]
             if canon not in matched:
                 matched.append(canon)
             continue
-        # 3) token-exact: „brakujace mieso" → token „mieso"
+        # 3) token-exact: WSZYSTKIE kategorie w frazie
+        #    „mieso i nabial" → Mięso + Nabiał (nie tylko pierwsza!)
         #    „warzywa oraz ser kozi" → Warzywa + unmatched „ser kozi"
         tokens = [
             t for t in key.replace(",", " ").replace("+", " ").split()
             if t and t not in _CATEGORY_STOPWORDS
         ]
-        found = None
-        found_token = None
+        found_cats: list[str] = []
         for t in tokens:
-            if t in syn_index:
-                found = syn_index[t]
-                found_token = t
-                break
-            if t in canonical_norm:
-                found = canonical_norm[t]
-                found_token = t
-                break
-        if found:
-            if found not in matched:
-                matched.append(found)
-            cat_toks = _cat_tokens_for(found)
-            leftover = [t for t in tokens if t not in cat_toks and t != found_token]
+            hit = syn_index.get(t) or canonical_norm.get(t)
+            if hit and hit not in found_cats:
+                found_cats.append(hit)
+        if found_cats:
+            for found in found_cats:
+                if found not in matched:
+                    matched.append(found)
+            cat_toks: set[str] = set()
+            for found in found_cats:
+                cat_toks |= _cat_tokens_for(found)
+            leftover = [t for t in tokens if t not in cat_toks]
             if leftover:
                 unmatched.append(" ".join(leftover))
             continue
@@ -9044,13 +9198,22 @@ def _product_in_wanted_categories(
 ) -> bool:
     """True gdy produkt należy do wybranej kategorii — bez fuzzy bleed.
 
-    Matching: category_id ∈ wanted_ids LUB znormalizowana nazwa kategorii
+    Matching: category_id ∈ wanted_ids LUB kanoniczna nazwa kategorii
     (po resolve synonimów) ∈ wanted_set. Brak kategorii → „Inne" — NIGDY
     nie wpada do Warzywa/Nabiał itd.
+
+    Gdy mamy wanted_ids, sam category_id wystarcza. Nazwa kategorii jest
+    dodatkowym bezpiecznikiem (gdy join/id niespójne).
     """
-    if wanted_ids and category_id and str(category_id) in wanted_ids:
+    if not wanted_set and not wanted_ids:
+        return False
+    cid = str(category_id) if category_id else ""
+    if wanted_ids and cid and cid in wanted_ids:
         return True
     ec = (effective_cat or "").strip() or "Inne"
+    # „Inne" / pusta NIGDY nie wchodzi do konkretnych kategorii braków
+    if _norm_pl(ec) in {"inne", "pozostale", "pozostałe", ""}:
+        return False
     ec_norm = _norm_pl(ec)
     if ec_norm in wanted_set:
         return True
@@ -9061,6 +9224,30 @@ def _product_in_wanted_categories(
         if _norm_pl(r) in wanted_set:
             return True
     return False
+
+
+def _dedupe_critical_products(critical: list[dict]) -> list[dict]:
+    """Jedna pozycja na inventory_id / znormalizowaną nazwę (max deficit)."""
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
+    for c in critical:
+        iid = str(c.get("id") or "").strip()
+        nk = _norm_pl(c.get("name") or "")
+        key = f"id:{iid}" if iid else f"n:{nk}"
+        if not nk and not iid:
+            continue
+        prev = by_key.get(key)
+        if prev is None:
+            by_key[key] = c
+            order.append(key)
+            continue
+        if float(c.get("deficit") or 0) > float(prev.get("deficit") or 0):
+            by_key[key] = {**c, "source": c.get("source") or prev.get("source")}
+        else:
+            # zachowaj silniejsze source (named > category)
+            if c.get("source") in ("named", "named+category") and prev.get("source") == "category_shortage":
+                by_key[key] = {**prev, "source": c.get("source")}
+    return [by_key[k] for k in order]
 
 
 class ExtraOrderItem(BaseModel):
@@ -9179,28 +9366,44 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
     want_all = matched == ["all"]
 
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
-        # Pobierz magazyn wraz z powiązaną kategorią.
+        # Pobierz magazyn wraz z powiązaną kategorią — TYLKO aktywne (is_active).
         inv_all: list[dict] = []
+        base_sel = (
+            "id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
+            "unit_weight_volume,weight_volume_unit,is_active,"
+            "category_id,inventory_categories(name)"
+        )
         try:
             inv_all = await sb_get(
                 client, "inventory_items",
                 params={
-                    "select": ("id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
-                               "unit_weight_volume,weight_volume_unit,"
-                               "category_id,inventory_categories(name)"),
+                    "select": base_sel,
+                    "is_active": "eq.true",
                     "limit": "5000",
                 },
             ) or []
         except httpx.HTTPStatusError as e:
-            # Fallback: bez optimal_quantity / safety_buffer / joina / gramatury
+            # Fallback: bez optimal_quantity / safety_buffer / joina / gramatury / is_active
             text = (e.response.text if e.response is not None else "") or ""
+            if "is_active" in text:
+                try:
+                    inv_all = await sb_get(
+                        client, "inventory_items",
+                        params={
+                            "select": base_sel.replace("is_active,", ""),
+                            "limit": "5000",
+                        },
+                    ) or []
+                except httpx.HTTPStatusError:
+                    inv_all = []
             if "unit_weight_volume" in text or "weight_volume_unit" in text:
                 try:
                     inv_all = await sb_get(
                         client, "inventory_items",
                         params={
                             "select": ("id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
-                                       "category_id,inventory_categories(name)"),
+                                       "is_active,category_id,inventory_categories(name)"),
+                            "is_active": "eq.true",
                             "limit": "5000",
                         },
                     ) or []
@@ -9212,7 +9415,8 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                         client, "inventory_items",
                         params={
                             "select": ("id,name,quantity,unit,min_quantity,safety_buffer_percent,"
-                                       "category_id,inventory_categories(name)"),
+                                       "is_active,category_id,inventory_categories(name)"),
+                            "is_active": "eq.true",
                             "limit": "5000",
                         },
                     ) or []
@@ -9229,6 +9433,8 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 cat_by_id = {c["id"]: c.get("name") for c in cat_rows}
                 for r in inv_all:
                     r["inventory_categories"] = {"name": cat_by_id.get(r.get("category_id"))}
+        # Twardy filtr po stronie (gdy kolumna jest, a filtr query nie zadziałał)
+        inv_all = [r for r in inv_all if r.get("is_active") is not False]
 
         want_all = matched == ["all"]
         wanted_set = {_norm_pl(x) for x in matched} if matched and not want_all else set()
@@ -9438,6 +9644,25 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             critical.append(entry)
             named_added.append(entry)
 
+        # Twarda bramka zakresu: braki z kategorii NIE mogą wypłynąć poza matched
+        if matched and not want_all:
+            kept: list[dict] = []
+            for c in critical:
+                src = str(c.get("source") or "")
+                if src in ("named", "named+category"):
+                    kept.append(c)
+                    continue
+                if _product_in_wanted_categories(
+                    str(c.get("category") or "Inne"),
+                    c.get("category_id"),
+                    wanted_set,
+                    wanted_ids,
+                ):
+                    kept.append(c)
+            critical = kept
+
+        critical = _dedupe_critical_products(critical)
+
         # Deterministyczna kolejność (powtarzalność koszyka)
         critical.sort(key=lambda c: (_norm_pl(c.get("name") or ""), str(c.get("id") or "")))
 
@@ -9505,24 +9730,51 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         compare_error = f"compare-offers: {str(e)[:120]}"
 
     found_in_offers = 0
+    not_found_names: list[str] = []
     if isinstance(compare_result, dict):
         req_items = compare_result.get("items_requested") or []
         found_in_offers = sum(1 for it in req_items if it.get("found"))
+        not_found_names = [
+            str(it.get("product_name") or "").strip()
+            for it in req_items
+            if not it.get("found") and str(it.get("product_name") or "").strip()
+        ]
+        # Uczciwy opis braków w speech Łowcy
+        if not_found_names:
+            speech = (compare_result.get("assistant_speech") or "").strip()
+            listed = ", ".join(not_found_names[:12])
+            if len(not_found_names) > 12:
+                listed += "…"
+            miss_msg = (
+                f"W ofertach dostawców nie znaleziono {len(not_found_names)} "
+                f"z {len(req_items)} zamówionych produktów: {listed}."
+            )
+            compare_result["assistant_speech"] = f"{speech} {miss_msg}".strip() if speech else miss_msg
+            compare_result["not_found_products"] = not_found_names
+            compare_result["not_found_count"] = len(not_found_names)
 
-    # Mianownik = wszystkie produkty w kategorii (np. 80), licznik = znalezione w ofertach
-    denom = category_total if category_total > 0 else len(critical)
+    # Mianownik = pozycje w TYM koszyku (nie cała kategoria magazynu)
+    denom = len(critical) if critical else 0
     named_n = sum(1 for c in critical if c.get("source") in ("named", "named+category"))
     msg_parts = [
         f"Do zamówienia: {len(critical)} pozycji"
         + (f" z kategorii {', '.join(matched)}" if matched and not want_all else
            " (globalnie)" if matched else "")
         + (f" · w tym {named_n} nazwanych" if named_n else "")
-        + (f" · w kategorii łącznie {category_total} pozycji" if category_total else "")
+        + (f" · w wybranych kategoriach łącznie {category_total} produktów" if category_total else "")
         + "."
     ]
-    msg_parts.append(
-        f"W ofertach dostawców dopasowano {found_in_offers} z {denom} pozycji."
-    )
+    if denom > 0:
+        msg_parts.append(
+            f"W ofertach dostawców znaleziono {found_in_offers} z {denom} zamówionych pozycji."
+        )
+        if not_found_names:
+            msg_parts.append(
+                f"Brak w ofertach ({len(not_found_names)}): "
+                + ", ".join(not_found_names[:12])
+                + ("…" if len(not_found_names) > 12 else "")
+                + "."
+            )
     if unmatched:
         msg_parts.append(f"Nierozpoznane kategorie: {', '.join(unmatched)}.")
     if compare_error:
@@ -9538,6 +9790,8 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         "named_products": [c for c in critical if c.get("source") in ("named", "named+category")],
         "critical_count": len(critical),
         "found_in_offers_count": found_in_offers,
+        "not_found_count": len(not_found_names),
+        "not_found_products": not_found_names,
         "compare": compare_result,
         "message": " ".join(msg_parts),
     }

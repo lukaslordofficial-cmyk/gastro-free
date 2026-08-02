@@ -48,6 +48,26 @@ def test_warzywa_and_nabial():
     assert unmatched == []
 
 
+def test_compound_mieso_and_nabial_one_string():
+    """„mięso i nabiał” w jednym stringu → OBIE kategorie (nie tylko mięso)."""
+    matched, unmatched = _resolve_warehouse_categories(["mięso i nabiał"])
+    assert "Mięso i wędliny" in matched
+    assert "Nabiał" in matched
+    assert unmatched == []
+
+
+def test_product_in_wanted_excludes_inne_and_vegetables():
+    from server import _product_in_wanted_categories, _norm_pl
+
+    wanted = {_norm_pl("Mięso i wędliny"), _norm_pl("Nabiał")}
+    wanted_ids = {"meat-id", "dairy-id"}
+    assert _product_in_wanted_categories("Mięso i wędliny", "meat-id", wanted, wanted_ids)
+    assert _product_in_wanted_categories("Nabiał", "dairy-id", wanted, wanted_ids)
+    assert not _product_in_wanted_categories("Warzywa i owoce", "veg-id", wanted, wanted_ids)
+    assert not _product_in_wanted_categories("Inne", None, wanted, wanted_ids)
+    assert not _product_in_wanted_categories("", None, wanted, wanted_ids)
+
+
 def test_compound_warzywa_plus_named_products():
     """„warzywa oraz ser kozi i borowiki” → kategoria + leftover named tokens."""
     matched, unmatched = _resolve_warehouse_categories(

@@ -1144,9 +1144,8 @@ export function VoiceReportModal({
           /* best-effort */
         }
       }
-      setStage('done');
       onApplied?.(applyIntent);
-      // Bulk Category-Targeted Orders — otwórz Łowcę Okazji z gotowym compare.
+      // Bulk: od razu Łowca z edytowalnym koszykiem — nie trzymaj użytkownika na „done”.
       if (applyIntent === 'order_critical_items_by_category') {
         const compare = extras.compare;
         if (compare) {
@@ -1157,8 +1156,12 @@ export function VoiceReportModal({
             : 'Zbiorcze zamówienie braków';
           setBulkContextLabel(label);
           setBulkCompare(normalizeOptimizeResult(compare));
+          // Łowca na wierzchu z edytowalnym koszykiem od razu (bez dodatkowego klikania).
+          setStage('done');
+          return;
         }
       }
+      setStage('done');
       if (applyIntent === 'waste') {
         const itemLabel = String(payload.item_name || curEdited.item_name || '');
         const unitStr = String(payload.unit || '');
@@ -3661,16 +3664,20 @@ function resolveVoiceCategories(raw: string[]): { matched: string[]; unmatched: 
       .replace(/[,+]/g, ' ')
       .split(/\s+/)
       .filter((t) => t && !VOICE_CAT_STOP.has(t));
-    let found: string | null = null;
+    // Wszystkie kategorie w frazie („mięso i nabiał”), nie tylko pierwsza.
+    const foundCats: string[] = [];
     for (const t of tokens) {
-      if (synIndex.has(t)) {
-        found = synIndex.get(t)!;
-        break;
-      }
+      const hit = synIndex.get(t);
+      if (hit && !foundCats.includes(hit)) foundCats.push(hit);
     }
-    if (found) {
-      if (!matched.includes(found)) matched.push(found);
-      const catToks = catTokensFor(found);
+    if (foundCats.length) {
+      for (const found of foundCats) {
+        if (!matched.includes(found)) matched.push(found);
+      }
+      const catToks = new Set<string>();
+      for (const found of foundCats) {
+        for (const x of catTokensFor(found)) catToks.add(x);
+      }
       const leftover = tokens.filter((t) => !catToks.has(t));
       if (leftover.length) unmatched.push(leftover.join(' '));
       continue;

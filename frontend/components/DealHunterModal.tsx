@@ -504,6 +504,40 @@ interface Props {
 type Step = 'qty' | 'compare' | 'contact' | 'preview';
 type SelectedOption = 'all_one' | 'optimized' | 'single' | 'split_max' | 'monolith' | 'smart_hybrid';
 
+/** Wybór wariantu od razu przy otwarciu — bez czekania na klik w kafelek. */
+function resolveSelectionFromCompare(compare: OptimizeResult): {
+  option: SelectedOption;
+  tiedId: string | null;
+} {
+  const rec = String(compare.recommended_scenario_id || '').trim();
+  if (compare.is_multivariable) {
+    if (rec === 'split_max' || rec === 'monolith' || rec === 'smart_hybrid') {
+      return { option: rec, tiedId: null };
+    }
+    if (rec) return { option: rec as SelectedOption, tiedId: null };
+    const scenarios = (compare.scenarios?.length
+      ? compare.scenarios
+      : [compare.scenario_split_max, compare.scenario_monolith, compare.scenario_smart_hybrid].filter(Boolean)
+    ) as NonNullable<OptimizeResult['scenarios']>;
+    const first =
+      scenarios.find((s) => (s.suppliers?.length ?? 0) > 0 || (s.missing?.length ?? 0) > 0)
+      ?? scenarios[0];
+    if (first?.id) return { option: first.id as SelectedOption, tiedId: null };
+  }
+  if (compare.is_optimized) {
+    return {
+      option: compare.cheaper_variant === 'split' ? 'optimized' : 'all_one',
+      tiedId: null,
+    };
+  }
+  const tied = compare.tied_suppliers ?? [];
+  const tiedId =
+    tied.length > 0
+      ? tied[0].supplier_id
+      : (compare.best_option?.supplier_id ?? null);
+  return { option: 'single', tiedId };
+}
+
 interface MessageCard {
   supplier_id: string | null;
   supplier_name: string;
@@ -1160,8 +1194,12 @@ export function DealHunterModal({
 
   const applyCompareResult = useCallback((raw: unknown) => {
     const normalized = normalizeOptimizeResult(raw as OptimizeResult);
+    const sel = resolveSelectionFromCompare(normalized);
     setCompare(normalized);
     setQuantities(initQuantities(normalized));
+    setSelectedOption(sel.option);
+    setTiedSupplierId(sel.tiedId);
+    setManualCart(null);
     if (normalized.credits_deducted && normalized.credits_deducted > 0) {
       const rem = normalized.credits_remaining ?? '—';
       setCreditsNotice(
@@ -1181,30 +1219,32 @@ export function DealHunterModal({
         onClose();
         return;
       }
-      if (initialCompare) {
-        setStep('compare');
-        applyCompareResult(initialCompare);
-        setQty('1');
-      } else if (product) {
-        setStep('qty');
-        setQty(String(suggestQty(product)));
-        setCompare(null);
-        setQuantities({});
-      }
       setError(null);
-      setSelectedOption(null);
-      setTiedSupplierId(null);
       setManualCart(null);
       setCatalogPicker(null);
       setPendingGroups(null);
       setShowNewOrder(false);
-      setCreditsNotice(null);
       setMessages([]);
       setCopiedId(null);
       setSendStatus({});
       setBodyText({});
       setFromEmails({});
       setToEmails({});
+      setDraftSavedInfo(null);
+      if (initialCompare) {
+        setStep('compare');
+        setQty('1');
+        // Selection + compare w jednym kroku — edytowalny koszyk od razu, bez klikania kafelka.
+        applyCompareResult(initialCompare);
+      } else if (product) {
+        setStep('qty');
+        setQty(String(suggestQty(product)));
+        setCompare(null);
+        setQuantities({});
+        setSelectedOption(null);
+        setTiedSupplierId(null);
+        setCreditsNotice(null);
+      }
     }
   }, [visible, product, initialCompare, applyCompareResult, dealHunterUnlocked, premiumAlert, onClose]);
 
@@ -1214,48 +1254,29 @@ export function DealHunterModal({
     return recalcFromMatrix(compare, quantities);
   }, [compare, quantities]);
 
-  useEffect(() => {
-    if (!compare) return;
-    setManualCart(null);
-    const rec = String(compare.recommended_scenario_id || '').trim();
-    if (compare.is_multivariable && rec) {
-      if (rec === 'split_max') setSelectedOption('split_max');
-      else if (rec === 'monolith') setSelectedOption('monolith');
-      else if (rec === 'smart_hybrid') setSelectedOption('smart_hybrid');
-      else if (compare.recommended_scenario_id) {
-        setSelectedOption(compare.recommended_scenario_id as SelectedOption);
-      }
-    } else if (compare.is_multivariable && compare.recommended_scenario_id) {
-      setSelectedOption(compare.recommended_scenario_id as SelectedOption);
-    } else if (compare.is_optimized) {
-      setSelectedOption(compare.cheaper_variant === 'split' ? 'optimized' : 'all_one');
-    } else {
-      setSelectedOption('single');
-      const tied = compare.tied_suppliers ?? [];
-      if (tied.length > 0) {
-        setTiedSupplierId(tied[0].supplier_id);
-      } else if (compare.best_option?.supplier_id) {
-        setTiedSupplierId(compare.best_option.supplier_id);
-      }
-    }
-  }, [compare]);
+  /** Gdy state chwilowo null — i tak pokaż koszyk rekomendowanego wariantu. */
+  const effectiveSelectedOption = useMemo((): SelectedOption | null => {
+    if (selectedOption) return selectedOption;
+    if (!liveResult) return null;
+    return resolveSelectionFromCompare(liveResult).option;
+  }, [selectedOption, liveResult]);
 
   const baseSelectedSuppliers = useCallback((): SupplierGroup[] => {
-    if (!liveResult || !selectedOption) return [];
+    if (!liveResult || !effectiveSelectedOption) return [];
     if (
-      selectedOption === 'split_max'
-      || selectedOption === 'monolith'
-      || selectedOption === 'smart_hybrid'
+      effectiveSelectedOption === 'split_max'
+      || effectiveSelectedOption === 'monolith'
+      || effectiveSelectedOption === 'smart_hybrid'
     ) {
-      return toSupplierGroups(liveResult, selectedOption, tiedSupplierId);
+      return toSupplierGroups(liveResult, effectiveSelectedOption, tiedSupplierId);
     }
     const variant = liveResult.is_optimized
-      ? selectedOption === 'optimized'
+      ? effectiveSelectedOption === 'optimized'
         ? 'optimized'
         : 'all_one'
       : 'single';
     return toSupplierGroups(liveResult, variant, tiedSupplierId);
-  }, [liveResult, selectedOption, tiedSupplierId]);
+  }, [liveResult, effectiveSelectedOption, tiedSupplierId]);
 
   const updateQty = useCallback((key: string, value: number) => {
     setQuantities((prev) => ({ ...prev, [key]: value }));
@@ -1757,7 +1778,7 @@ export function DealHunterModal({
     : stepIndex;
 
   const renderEditableCart = () => {
-    if (!selectedOption) return null;
+    if (!effectiveSelectedOption) return null;
     const groups = selectedSuppliers().filter((g) => g.items.length > 0);
     const orderable = groups.filter(
       (g) => (g.min_order_value ?? 0) <= 0 || g.meets_minimum_order !== false,
@@ -1806,6 +1827,11 @@ export function DealHunterModal({
                 <Text style={styles.groupName}>{g.supplier_name}</Text>
                 <Text style={styles.groupSub}>{formatPln(g.subtotal_pln)}</Text>
               </View>
+              {!!g.supplier_email && (
+                <Text style={[styles.editCartHint, { marginBottom: 6 }]}>
+                  E-mail: {g.supplier_email}
+                </Text>
+              )}
               <MinOrderBadge meets={g.meets_minimum_order} minVal={g.min_order_value} />
               {g.items.map((it, idx) => (
                 <OfferLine
@@ -1951,6 +1977,7 @@ export function DealHunterModal({
 
     return (
       <>
+        {renderEditableCart()}
         <View style={styles.singleCard} testID="deal-hunter-single-option">
           <View style={styles.optHeader}>
             <View style={styles.optBadge}>
@@ -1989,13 +2016,15 @@ export function DealHunterModal({
             <Text style={styles.optSupplier}>{best?.supplier_name ?? '—'}</Text>
           )}
 
+          {!!best?.supplier_email && (
+            <Text style={styles.editCartHint}>E-mail: {best.supplier_email}</Text>
+          )}
           <MinOrderBadge meets={best?.meets_minimum_order} minVal={best?.min_order_value} />
           <View style={styles.optTotalRow}>
             <Text style={styles.optTotalLabel}>Propozycja AI</Text>
             <Text style={styles.optTotalValue}>{formatPln(best?.total_pln ?? 0)}</Text>
           </View>
         </View>
-        {renderEditableCart()}
       </>
     );
   };
@@ -2010,8 +2039,11 @@ export function DealHunterModal({
 
     if (result.is_multivariable && v2Scenarios.length >= 2) {
       const sav = result.savings_amount ?? result.savings_pln ?? 0;
+      const activeOpt = effectiveSelectedOption;
       return (
         <>
+          {/* Koszyk edytowalny NA WIERZCHU — bez klikania kafelka scenariusza. */}
+          {renderEditableCart()}
           {sav > 0 && (
             <View style={styles.savingsBadge} testID="deal-hunter-savings">
               <TrendingDown size={14} color={C.success} strokeWidth={2.4} />
@@ -2020,8 +2052,11 @@ export function DealHunterModal({
               </Text>
             </View>
           )}
+          <Text style={[styles.editCartHint, { marginTop: 8, marginBottom: 4 }]}>
+            Inne warianty dostaw (opcjonalnie):
+          </Text>
           {v2Scenarios.filter((s) => (s.suppliers?.length ?? 0) > 0 || (s.missing?.length ?? 0) > 0).map((sc) => {
-            const active = selectedOption === sc.id;
+            const active = activeOpt === sc.id;
             const recommended = result.recommended_scenario_id === sc.id;
             return (
               <TouchableOpacity
@@ -2076,16 +2111,17 @@ export function DealHunterModal({
           {!!result.recommended_reason && (
             <Text style={styles.recommendedReason}>{result.recommended_reason}</Text>
           )}
-          {renderEditableCart()}
         </>
       );
     }
 
     if (!o1 || !o2) return renderEditableCart();
     const cheaperSplit = result.cheaper_variant === 'split';
+    const activeOpt = effectiveSelectedOption;
 
     return (
       <>
+        {renderEditableCart()}
         {result.savings_pln > 0 && (
           <View style={styles.savingsBadge} testID="deal-hunter-savings">
             <TrendingDown size={14} color={C.success} strokeWidth={2.4} />
@@ -2094,13 +2130,16 @@ export function DealHunterModal({
             </Text>
           </View>
         )}
+        <Text style={[styles.editCartHint, { marginTop: 8, marginBottom: 4 }]}>
+          Inne warianty dostaw (opcjonalnie):
+        </Text>
 
         <TouchableOpacity
           activeOpacity={0.85}
           onPress={() => selectOption('all_one')}
           style={[
             styles.optCard,
-            selectedOption === 'all_one' && styles.optCardActive,
+            activeOpt === 'all_one' && styles.optCardActive,
             !cheaperSplit && result.savings_pln > 0 && styles.optCardCheaper,
           ]}
           testID="deal-hunter-option-all-one"
@@ -2110,8 +2149,8 @@ export function DealHunterModal({
               <Store size={13} color={C.accent} strokeWidth={2.2} />
               <Text style={styles.optBadgeText}>Wariant 1 · Wszystko u jednego</Text>
             </View>
-            <View style={[styles.radio, selectedOption === 'all_one' && styles.radioActive]}>
-              {selectedOption === 'all_one' && <Check size={12} color={C.white} strokeWidth={3} />}
+            <View style={[styles.radio, activeOpt === 'all_one' && styles.radioActive]}>
+              {activeOpt === 'all_one' && <Check size={12} color={C.white} strokeWidth={3} />}
             </View>
           </View>
           <Text style={styles.optSupplier}>{o1.supplier_name}</Text>
@@ -2127,7 +2166,7 @@ export function DealHunterModal({
             onPress={() => selectOption('optimized')}
             style={[
               styles.optCard,
-              selectedOption === 'optimized' && styles.optCardActive,
+              activeOpt === 'optimized' && styles.optCardActive,
               cheaperSplit && result.savings_pln > 0 && styles.optCardCheaper,
             ]}
             testID="deal-hunter-option-optimized"
@@ -2139,8 +2178,8 @@ export function DealHunterModal({
                   Wariant 2 · Optymalizacja ceny
                 </Text>
               </View>
-              <View style={[styles.radio, selectedOption === 'optimized' && styles.radioActive]}>
-                {selectedOption === 'optimized' && <Check size={12} color={C.white} strokeWidth={3} />}
+              <View style={[styles.radio, activeOpt === 'optimized' && styles.radioActive]}>
+                {activeOpt === 'optimized' && <Check size={12} color={C.white} strokeWidth={3} />}
               </View>
             </View>
             <Text style={styles.optSupplier}>
@@ -2154,7 +2193,6 @@ export function DealHunterModal({
             </View>
           </TouchableOpacity>
         )}
-        {renderEditableCart()}
       </>
     );
   };
@@ -2261,21 +2299,19 @@ export function DealHunterModal({
           ) : result ? (
             <>
               <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
-                {isBulkMode && Array.isArray(result.items_requested) && result.items_requested.length > 0 ? (
-                  <View style={styles.speechCard} testID="deal-hunter-basket-preview">
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 6 }]}>
-                        Koszyk ({result.items_requested.length})
-                        {bulkContextLabel ? ` · ${bulkContextLabel}` : ''}
-                      </Text>
-                      {result.items_requested.map((it, idx) => (
-                        <Text key={`dh-item-${idx}-${it.product_name}`} style={styles.speechText}>
-                          • {it.product_name}
-                          {it.quantity != null ? ` — ${it.quantity} ${it.unit || ''}`.trimEnd() : ''}
-                          {it.found === false ? ' (brak w ofertach)' : ''}
-                        </Text>
-                      ))}
-                    </View>
+                {bulkContextLabel ? (
+                  <Text style={[styles.editCartHint, { marginBottom: 8 }]} testID="deal-hunter-bulk-label">
+                    {bulkContextLabel}
+                    {Array.isArray(result.items_requested) && result.items_requested.length > 0
+                      ? ` · ${result.items_requested.length} poz.`
+                      : ''}
+                  </Text>
+                ) : null}
+                {/* Najpierw edytowalny koszyk — bez klikania i bez przewijania pod listę AI. */}
+                {(result.is_optimized || result.is_multivariable) ? renderCompareMode() : renderSingleMode()}
+                {creditsNotice ? (
+                  <View style={styles.creditsNotice} testID="deal-hunter-credits-notice">
+                    <Text style={styles.creditsNoticeText}>{creditsNotice}</Text>
                   </View>
                 ) : null}
                 <View style={styles.speechCard} testID="deal-hunter-speech">
@@ -2293,7 +2329,6 @@ export function DealHunterModal({
                     ) : null}
                   </View>
                 </View>
-                {/* Sugestie Łowcy — math/AI hints from Phase 2+ signals */}
                 {Array.isArray(result.suggestions) && result.suggestions.length > 0 ? (
                   <View style={styles.suggestionsCard} testID="deal-hunter-suggestions">
                     <View style={styles.suggestionsHead}>
@@ -2320,7 +2355,6 @@ export function DealHunterModal({
                         </View>
                       );
                     })}
-                    {/* Reliability: pełny formularz ocen dostawy = Phase 4. Score backendowy gdy są dane. */}
                     <Text style={[styles.suggestionMsg, { marginTop: 8, opacity: 0.75 }]}>
                       Niezawodność: brak danych / wstępna — uzupełnij oceny dostaw w kolejnej wersji.
                       Bez historii odbiorów Łowca nie podnosi TCO.
@@ -2333,18 +2367,9 @@ export function DealHunterModal({
                       <Text style={styles.suggestionsTitle}>Sugestie Łowcy</Text>
                     </View>
                     <Text style={styles.suggestionMsg}>{result.smart_tip}</Text>
-                    <Text style={[styles.suggestionMsg, { marginTop: 8, opacity: 0.75 }]}>
-                      Niezawodność: brak danych / wstępna — bez historii odbiorów TCO bez kary.
-                    </Text>
                   </View>
                 ) : null}
-                {creditsNotice ? (
-                  <View style={styles.creditsNotice} testID="deal-hunter-credits-notice">
-                    <Text style={styles.creditsNoticeText}>{creditsNotice}</Text>
-                  </View>
-                ) : null}
-                {(result.is_optimized || result.is_multivariable) ? renderCompareMode() : renderSingleMode()}
-                {!selectedOption && (
+                {!effectiveSelectedOption && (
                   <TouchableOpacity
                     style={[styles.newOrderBtn, { marginTop: 12 }]}
                     onPress={() => { setSelectedOption('single'); setShowNewOrder(true); }}

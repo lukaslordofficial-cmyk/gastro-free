@@ -155,6 +155,15 @@ def _enrich_group(g: dict, suppliers_meta: dict[str, dict]) -> dict:
                     else _min_order_value(suppliers_meta, sid))
     meets = min_val <= 0 or sub >= min_val
     out = dict(g)
+    # Nazwa z meta zawsze wygrywa nad pustą / None / „Dostawca”
+    meta_name = (meta.get("name") or "").strip()
+    cur_name = (out.get("supplier_name") or "").strip()
+    if meta_name and (not cur_name or cur_name == "Dostawca"):
+        out["supplier_name"] = meta_name
+    elif not cur_name:
+        out["supplier_name"] = meta_name or "Dostawca"
+    if meta.get("email") and not out.get("supplier_email"):
+        out["supplier_email"] = meta.get("email")
     out["min_order_value"] = min_val
     out["meets_minimum_order"] = meets
     out["shipping_pln"] = ship

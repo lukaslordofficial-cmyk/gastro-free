@@ -58,6 +58,7 @@ import {
 } from '@/lib/bargainHunter';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -677,72 +678,109 @@ function SupplierCatalogPicker({
   supplierName,
   onClose,
   onPick,
+  onResolvedSupplier,
 }: {
   visible: boolean;
   supplierId: string;
   supplierName: string;
   onClose: () => void;
   onPick: (row: CatalogRow) => void;
+  /** Gdy API zwróci prawdziwą nazwę / e-mail — uaktualnij koszyk. */
+  onResolvedSupplier?: (info: { id: string; name: string; email?: string | null }) => void;
 }) {
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
   const [q, setQ] = useState('');
   const [rows, setRows] = useState<CatalogRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [resolvedName, setResolvedName] = useState(supplierName);
 
   useEffect(() => {
     if (!visible || !supplierId) return;
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('supplier_catalog')
-        .select('id,name,variant,unit,price_pln,is_visible')
-        .eq('supplier_id', supplierId)
-        .order('name')
-        .limit(500);
-      if (cancelled) return;
-      if (!error) {
-        setRows(
-          sortCatalogMenuFirst(
-            (data ?? [])
-              .filter((r: any) => Number(r.price_pln) > 0)
-              .map((r: any) => ({
-                id: r.id,
-                name: r.name,
-                variant: r.variant,
-                unit: r.unit || 'szt',
-                price_pln: Number(r.price_pln),
-                in_menu: r.is_visible !== false,
-              })),
-          ),
-        );
-      } else {
-        const retry = await supabase
+      setLoadError(null);
+      setRows([]);
+      setResolvedName(supplierName);
+      try {
+        // 1) Backend (service role) — pełny katalog, bez problemów zagnieżdżonych Modal/RLS
+        if (BACKEND_URL) {
+          const headers = await apiJsonHeaders();
+          const res = await fetch(
+            `${BACKEND_URL}/api/suppliers/${encodeURIComponent(supplierId)}/catalog`,
+            { headers },
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (cancelled) return;
+            const name = String(data.supplier_name || supplierName || 'Dostawca').trim();
+            setResolvedName(name);
+            onResolvedSupplier?.({
+              id: supplierId,
+              name,
+              email: data.supplier_email ?? null,
+            });
+            const products = Array.isArray(data.products) ? data.products : [];
+            setRows(
+              sortCatalogMenuFirst(
+                products.map((r: any) => ({
+                  id: String(r.id),
+                  name: String(r.name || ''),
+                  variant: r.variant ?? null,
+                  unit: r.unit || 'szt',
+                  price_pln: Number(r.price_pln) || 0,
+                  in_menu: r.in_menu !== false,
+                })).filter((r: CatalogRow) => !!r.name),
+              ),
+            );
+            setLoading(false);
+            return;
+          }
+        }
+        // 2) Fallback: Supabase bezpośrednio
+        const { data, error } = await supabase
           .from('supplier_catalog')
-          .select('id,name,variant,unit,price_pln')
+          .select('id,name,variant,unit,price_pln,is_visible')
           .eq('supplier_id', supplierId)
           .order('name')
-          .limit(500);
-        if (!cancelled && !retry.error) {
-          setRows(
-            sortCatalogMenuFirst(
-              (retry.data ?? []).map((r: any) => ({
-                id: r.id,
-                name: r.name,
-                variant: r.variant,
-                unit: r.unit || 'szt',
-                price_pln: Number(r.price_pln),
-                in_menu: true,
-              })),
-            ),
-          );
+          .limit(2000);
+        if (cancelled) return;
+        if (error) throw error;
+        // Nazwa dostawcy z tabeli suppliers
+        const { data: supRow } = await supabase
+          .from('suppliers')
+          .select('id,name,email')
+          .eq('id', supplierId)
+          .maybeSingle();
+        if (!cancelled && supRow?.name) {
+          const name = String(supRow.name).trim();
+          setResolvedName(name);
+          onResolvedSupplier?.({ id: supplierId, name, email: supRow.email ?? null });
         }
+        setRows(
+          sortCatalogMenuFirst(
+            (data ?? []).map((r: any) => ({
+              id: r.id,
+              name: r.name,
+              variant: r.variant,
+              unit: r.unit || 'szt',
+              price_pln: Number(r.price_pln) || 0,
+              in_menu: r.is_visible !== false,
+            })).filter((r: CatalogRow) => !!r.name),
+          ),
+        );
+      } catch (e: unknown) {
+        if (!cancelled) {
+          setLoadError(e instanceof Error ? e.message : 'Nie udało się wczytać katalogu.');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [visible, supplierId]);
+  }, [visible, supplierId, supplierName, onResolvedSupplier]);
 
   useEffect(() => {
     if (visible) setQ('');
@@ -754,19 +792,27 @@ function SupplierCatalogPicker({
       ? rows
       : rankProductMatches(s, rows, (r) => `${r.name} ${r.variant ?? ''}`, {
           threshold: 52,
-          limit: 120,
+          limit: 200,
         }).map((x) => x.item);
-    return sortCatalogMenuFirst(list).slice(0, 120);
+    return sortCatalogMenuFirst(list).slice(0, 200);
   }, [rows, q]);
 
   const inMenu = filtered.filter((r) => r.in_menu);
   const extra = filtered.filter((r) => !r.in_menu);
 
+  if (!visible) return null;
+
   const renderRow = (r: CatalogRow) => (
     <TouchableOpacity
       key={r.id}
-      style={styles.pickerRow}
-      onPress={() => onPick(r)}
+      style={[styles.pickerRow, r.price_pln <= 0 && { opacity: 0.55 }]}
+      onPress={() => {
+        if (r.price_pln <= 0) {
+          Alert.alert('Brak ceny', 'Ta pozycja nie ma ceny w katalogu — uzupełnij cenę u Dostawców.');
+          return;
+        }
+        onPick(r);
+      }}
       activeOpacity={0.75}
     >
       <View style={{ flex: 1 }}>
@@ -782,59 +828,68 @@ function SupplierCatalogPicker({
           </View>
         )}
       </View>
-      <Text style={styles.pickerPrice}>{formatPln(r.price_pln)}</Text>
+      <Text style={styles.pickerPrice}>
+        {r.price_pln > 0 ? formatPln(r.price_pln) : 'brak ceny'}
+      </Text>
     </TouchableOpacity>
   );
 
+  // Overlay WEWNĄTRZ modala Łowcy (nie drugi Modal — na web/RN zagnieżdżenie nic nie pokazywało)
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.pickerOverlay}>
-        <View style={styles.pickerSheet}>
-          <View style={styles.pickerHeader}>
-            <Text style={styles.pickerTitle} numberOfLines={1}>Katalog: {supplierName}</Text>
-            <TouchableOpacity onPress={onClose}>
-              <X size={22} color={C.textSecondary} />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.pickerSearch}>
-            <Search size={16} color={C.textTertiary} />
-            <TextInput
-              style={styles.pickerSearchInput}
-              value={q}
-              onChangeText={setQ}
-              placeholder="Szukaj produktu…"
-              placeholderTextColor={C.textTertiary}
-              autoFocus
-            />
-          </View>
-          {loading ? (
-            <ActivityIndicator style={{ margin: 24 }} color={C.accent} />
-          ) : (
-            <ScrollView keyboardShouldPersistTaps="handled">
-              {filtered.length === 0 ? (
-                <Text style={styles.pickerEmpty}>Brak produktów w katalogu tego dostawcy.</Text>
-              ) : (
-                <>
-                  {inMenu.length > 0 ? (
-                    <>
-                      <Text style={styles.pickerSection}>W MENU ({inMenu.length})</Text>
-                      {inMenu.map(renderRow)}
-                    </>
-                  ) : null}
-                  {extra.length > 0 ? (
-                    <>
-                      <Text style={styles.pickerSection}>POZA MENU ({extra.length})</Text>
-                      {extra.map(renderRow)}
-                    </>
-                  ) : null}
-                </>
-              )}
-              <View style={{ height: 28 }} />
-            </ScrollView>
-          )}
+    <View style={[styles.pickerOverlay, { zIndex: 50 }]} testID="deal-hunter-catalog-picker">
+      <View style={styles.pickerSheet}>
+        <View style={styles.pickerHeader}>
+          <Text style={styles.pickerTitle} numberOfLines={1}>
+            Katalog: {resolvedName || supplierName || 'Dostawca'}
+          </Text>
+          <TouchableOpacity onPress={onClose} testID="deal-hunter-catalog-close">
+            <X size={22} color={C.textSecondary} />
+          </TouchableOpacity>
         </View>
+        <View style={styles.pickerSearch}>
+          <Search size={16} color={C.textTertiary} />
+          <TextInput
+            style={styles.pickerSearchInput}
+            value={q}
+            onChangeText={setQ}
+            placeholder="Szukaj produktu…"
+            placeholderTextColor={C.textTertiary}
+            autoFocus
+          />
+        </View>
+        {loading ? (
+          <ActivityIndicator style={{ margin: 24 }} color={C.accent} />
+        ) : (
+          <ScrollView keyboardShouldPersistTaps="handled">
+            {loadError ? (
+              <Text style={[styles.pickerEmpty, { color: C.danger }]}>{loadError}</Text>
+            ) : null}
+            {filtered.length === 0 && !loadError ? (
+              <Text style={styles.pickerEmpty}>Brak produktów w katalogu tego dostawcy.</Text>
+            ) : (
+              <>
+                {inMenu.length > 0 ? (
+                  <>
+                    <Text style={styles.pickerSection}>W MENU ({inMenu.length})</Text>
+                    {inMenu.map(renderRow)}
+                  </>
+                ) : null}
+                {extra.length > 0 ? (
+                  <>
+                    <Text style={styles.pickerSection}>POZA MENU / DODATKOWE ({extra.length})</Text>
+                    {extra.map(renderRow)}
+                  </>
+                ) : null}
+                {inMenu.length === 0 && extra.length === 0 && filtered.length > 0 ? (
+                  filtered.map(renderRow)
+                ) : null}
+              </>
+            )}
+            <View style={{ height: 28 }} />
+          </ScrollView>
+        )}
       </View>
-    </Modal>
+    </View>
   );
 }
 
@@ -1192,6 +1247,91 @@ export function DealHunterModal({
 
   const isBulkMode = !!initialCompare;
 
+  const patchSupplierNamesInResult = useCallback(async (normalized: OptimizeResult) => {
+    const ids = new Set<string>();
+    const collect = (groups?: SupplierGroup[] | null) => {
+      (groups ?? []).forEach((g) => {
+        if (g.supplier_id) ids.add(g.supplier_id);
+      });
+    };
+    collect(normalized.scenario_split_max?.suppliers);
+    collect(normalized.scenario_monolith?.suppliers);
+    collect(normalized.scenario_smart_hybrid?.suppliers);
+    (normalized.scenarios ?? []).forEach((sc) => collect(sc.suppliers));
+    collect(normalized.variant_split?.suppliers);
+    if (normalized.variant_monolith?.supplier_id) ids.add(normalized.variant_monolith.supplier_id);
+    if (normalized.best_option?.supplier_id) ids.add(normalized.best_option.supplier_id);
+    (normalized.best_option?.suppliers ?? []).forEach((g) => {
+      if (g.supplier_id) ids.add(g.supplier_id);
+    });
+    if (!ids.size) return normalized;
+
+    const { data } = await supabase
+      .from('suppliers')
+      .select('id,name,email')
+      .in('id', [...ids]);
+    const byId: Record<string, { name: string; email: string | null }> = {};
+    (data ?? []).forEach((r: any) => {
+      const n = String(r.name || '').trim();
+      if (r.id && n) byId[r.id] = { name: n, email: r.email ?? null };
+    });
+    if (!Object.keys(byId).length) return normalized;
+
+    const fixGroup = (g: SupplierGroup): SupplierGroup => {
+      const hit = g.supplier_id ? byId[g.supplier_id] : null;
+      if (!hit) return g;
+      const cur = (g.supplier_name || '').trim();
+      if (cur && cur !== 'Dostawca' && g.supplier_email) return g;
+      return {
+        ...g,
+        supplier_name: hit.name,
+        supplier_email: g.supplier_email || hit.email,
+      };
+    };
+    const fixGroups = (groups?: SupplierGroup[]) => (groups ?? []).map(fixGroup);
+    const fixScenario = <T extends { suppliers?: SupplierGroup[] }>(sc?: T | null): T | null | undefined => {
+      if (!sc) return sc;
+      return { ...sc, suppliers: fixGroups(sc.suppliers) };
+    };
+
+    return {
+      ...normalized,
+      scenario_split_max: fixScenario(normalized.scenario_split_max) ?? normalized.scenario_split_max,
+      scenario_monolith: fixScenario(normalized.scenario_monolith) ?? normalized.scenario_monolith,
+      scenario_smart_hybrid: fixScenario(normalized.scenario_smart_hybrid) ?? normalized.scenario_smart_hybrid,
+      scenarios: (normalized.scenarios ?? []).map((sc) => ({
+        ...sc,
+        suppliers: fixGroups(sc.suppliers),
+      })),
+      variant_split: normalized.variant_split
+        ? { ...normalized.variant_split, suppliers: fixGroups(normalized.variant_split.suppliers) }
+        : normalized.variant_split,
+      variant_monolith: normalized.variant_monolith?.supplier_id && byId[normalized.variant_monolith.supplier_id]
+        ? {
+            ...normalized.variant_monolith,
+            supplier_name: byId[normalized.variant_monolith.supplier_id].name,
+            supplier_email:
+              normalized.variant_monolith.supplier_email
+              || byId[normalized.variant_monolith.supplier_id].email,
+          }
+        : normalized.variant_monolith,
+      best_option: normalized.best_option
+        ? {
+            ...normalized.best_option,
+            ...(normalized.best_option.supplier_id && byId[normalized.best_option.supplier_id]
+              ? {
+                  supplier_name: byId[normalized.best_option.supplier_id].name,
+                  supplier_email:
+                    normalized.best_option.supplier_email
+                    || byId[normalized.best_option.supplier_id].email,
+                }
+              : {}),
+            suppliers: fixGroups(normalized.best_option.suppliers),
+          }
+        : normalized.best_option,
+    };
+  }, []);
+
   const applyCompareResult = useCallback((raw: unknown) => {
     const normalized = normalizeOptimizeResult(raw as OptimizeResult);
     const sel = resolveSelectionFromCompare(normalized);
@@ -1208,8 +1348,12 @@ export function DealHunterModal({
     } else {
       setCreditsNotice(null);
     }
+    // Uzupełnij nazwy dostawców z Supabase (gdy API zwróciło null / „Dostawca”)
+    void patchSupplierNamesInResult(normalized).then((patched) => {
+      if (patched !== normalized) setCompare(patched);
+    });
     return normalized;
-  }, []);
+  }, [patchSupplierNamesInResult]);
 
   useEffect(() => {
     if (visible) {
@@ -1344,12 +1488,47 @@ export function DealHunterModal({
       return cart.map((g) => {
         if (g.supplier_id !== catalogPicker.id) return g;
         const without = g.items.filter((it) => it.product_name !== row.name);
-        return recalcGroup({ ...g, items: [...without, newItem] });
+        return recalcGroup({
+          ...g,
+          supplier_name: catalogPicker.name || g.supplier_name,
+          items: [...without, newItem],
+        });
       });
     });
     setQuantities((prev) => ({ ...prev, [row.name]: 1 }));
     setCatalogPicker(null);
   }, [catalogPicker, baseSelectedSuppliers]);
+
+  const resolveSupplierInCart = useCallback((info: {
+    id: string;
+    name: string;
+    email?: string | null;
+  }) => {
+    const name = (info.name || '').trim();
+    if (!name) return;
+    setCatalogPicker((prev) => (prev && prev.id === info.id ? { ...prev, name } : prev));
+    setManualCart((prev) => {
+      const cart = prev ?? baseSelectedSuppliers().map((g) => recalcGroup({
+        ...g,
+        items: g.items.map((it) => ({ ...it })),
+      }));
+      let changed = false;
+      const next = cart.map((g) => {
+        if (g.supplier_id !== info.id) return g;
+        const cur = (g.supplier_name || '').trim();
+        if (cur && cur !== 'Dostawca' && cur === name && (!info.email || g.supplier_email)) {
+          return g;
+        }
+        changed = true;
+        return {
+          ...g,
+          supplier_name: name,
+          supplier_email: info.email ?? g.supplier_email,
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [baseSelectedSuppliers]);
 
   const selectedSuppliers = useCallback((): SupplierGroup[] => {
     if (manualCart !== null) return manualCart;
@@ -1495,7 +1674,7 @@ export function DealHunterModal({
     try {
       const res = await fetch(`${BACKEND_URL}/api/orders/generate-messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({ restaurant_name: restaurantName ?? 'Nasza restauracja', suppliers }),
       });
       if (!res.ok) throw new Error(`Błąd serwera (${res.status})`);
@@ -1824,7 +2003,9 @@ export function DealHunterModal({
             <View key={`${g.supplier_id}-${gi}`} style={styles.supplierOrderCard}>
               <View style={styles.groupHeader}>
                 <Truck size={14} color={C.accent} strokeWidth={2.2} />
-                <Text style={styles.groupName}>{g.supplier_name}</Text>
+                <Text style={styles.groupName} numberOfLines={2}>
+                  {(g.supplier_name || '').trim() || 'Dostawca'}
+                </Text>
                 <Text style={styles.groupSub}>{formatPln(g.subtotal_pln)}</Text>
               </View>
               {!!g.supplier_email && (
@@ -2634,17 +2815,18 @@ export function DealHunterModal({
             </ScrollView>
           </KeyboardAvoidingView>
         )}
+        {catalogPicker ? (
+          <SupplierCatalogPicker
+            visible
+            supplierId={catalogPicker.id}
+            supplierName={catalogPicker.name}
+            onClose={() => setCatalogPicker(null)}
+            onPick={addCatalogProduct}
+            onResolvedSupplier={resolveSupplierInCart}
+          />
+        ) : null}
       </View>
     </Modal>
-    {catalogPicker ? (
-      <SupplierCatalogPicker
-        visible
-        supplierId={catalogPicker.id}
-        supplierName={catalogPicker.name}
-        onClose={() => setCatalogPicker(null)}
-        onPick={addCatalogProduct}
-      />
-    ) : null}
     <NewOrderBrowser
       visible={showNewOrder}
       onClose={() => setShowNewOrder(false)}

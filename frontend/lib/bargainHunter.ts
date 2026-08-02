@@ -269,7 +269,7 @@ function computeMonolith(items: PerItem[], meta: SuppliersMeta): OptionAllOne | 
     const m = meta[sid] ?? {};
     const cand = {
       supplier_id: sid,
-      supplier_name: m.name ?? 'Dostawca',
+      supplier_name: (m.name || '').trim() || 'Dostawca',
       supplier_email: m.email ?? null,
       covered_count: covered.length,
       subtotal_pln: total,
@@ -370,7 +370,7 @@ function findTiedSuppliers(
     if (Math.abs(minVal - refMin) > PRICE_TOLERANCE) return;
     tied.push({
       supplier_id: sid,
-      supplier_name: b.supplier_name ?? meta[sid]?.name ?? 'Dostawca',
+        supplier_name: (b.supplier_name || meta[sid]?.name || '').trim() || 'Dostawca',
       supplier_email: b.supplier_email ?? meta[sid]?.email ?? null,
       total_pln: total,
       subtotal_pln: total,
@@ -446,7 +446,7 @@ export function matrixToPerItem(
       const lt = recalcLineTotal(q.unit_price_base, qty, row.unit);
       best_by_supplier[q.supplier_id] = {
         supplier_id: q.supplier_id,
-        supplier_name: q.supplier_name ?? 'Dostawca',
+        supplier_name: (q.supplier_name || '').trim() || 'Dostawca',
         supplier_email: q.supplier_email ?? null,
         matched_name: q.matched_name ?? row.product_name,
         unit_price_base: q.unit_price_base,

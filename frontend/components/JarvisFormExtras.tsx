@@ -7,6 +7,7 @@ import {
 } from 'react-native';
 import { Check, Plus, X, Upload } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { getAccountKey } from '@/lib/accountKey';
 import { DS } from '@/constants/premiumTheme';
 
 const GREEN = DS.color.greenEnd;
@@ -642,7 +643,6 @@ export function CriticalOrderEditor({
   const fillToOptimal = async () => {
     setFillingOptimal(true);
     try {
-      const { getAccountKey } = await import('@/lib/accountKey');
       const ak = getAccountKey();
       let rows: any[] = [];
       const sel =

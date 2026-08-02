@@ -13,6 +13,7 @@ import {
 import { Plus, Trash2, Bell, Save } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { supabase } from '@/lib/supabase';
+import { getAccountKey } from '@/lib/accountKey';
 import { ExpiryDateField } from '@/components/ExpiryDateField';
 import { scheduleExpiryReminders } from '@/lib/pushNotifications';
 import { usePremiumAlert } from '@/components/PremiumAlert';
@@ -151,7 +152,6 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
     setSaving(true);
     try {
       await supabase.from('warehouse_inventory').delete().eq('inventory_item_id', inventoryItemId);
-      const { getAccountKey } = await import('@/lib/accountKey');
       const ak = getAccountKey();
       const payload = valid.map((b) => ({
         inventory_item_id: inventoryItemId,

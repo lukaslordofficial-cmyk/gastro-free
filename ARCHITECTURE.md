@@ -32,10 +32,20 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 - **`.env`** — klucze Supabase wyłącznie w `.env` (dekalog §III); plik jest już
   w `.gitignore`.
 
+### 2026-06 — Kęs #2: Dashboard/Finanse + naprawa 2 błędów (czeka na test urządzenia)
+- **Nowy `services/financeService.ts`** — całe IO Supabase modułu Finanse:
+  `fetchFinanceRows` (odczyt miesiąca + historii + snapshot magazynu, z fallbackiem
+  `account_key`), `insertRevenue/insertFixedCost/insertVariableCost`, `updateCost`,
+  `updateNote`, `deleteCost`. Try-catch, typy, JSDoc.
+- **`app/(tabs)/index.tsx`** — 0 bezpośrednich zapytań `supabase` (było 26); tylko UI+stan.
+- **BUGFIX "failed to load split bundle" (panel finansów):** usunięto WSZYSTKIE
+  dynamiczne `await import('@/lib/accountKey')` (index, magazyn, JarvisFormExtras,
+  DealHunterModal, ProductExpiryEditor) -> statyczne importy. Root cause: Metro
+  tworzył kruche split-bundle pobierane runtime na telefonie.
+- **BUGFIX multi-tenant (brak danych po przelogowaniu):** dashboard odświeża się
+  reaktywnie po zmianie `accountKey` (useAuth), z guardem na `default`. Auth gate
+  używa `router.replace` (bez remountu) -> wcześniej `fetchData` nie odpalał ponownie.
+- Weryfikacja: pełny bundle Metro OK (HTTP 200, importy się rozwiązują), tsc bez
+  nowych błędów (projekt 173->166), `index.tsx` = 0 błędów.
+
 **TODO (kolejne kęsy, jeden na raz, po akceptacji):**
-- Kęs #2: `app/(tabs)/index.tsx` (dashboard, 26 zapytań) → `services/statsService`.
-- Kęs #3: `magazyn` → `services/inventoryService`.
-- Kęs #4: `menu` → `services/menuService`.
-- Kęs #5: `dostawcy` → `services/suppliersService`.
-- Testy jednostkowe (dekalog §IX): brak skonfigurowanego Jest — do wdrożenia w
-  osobnym kęsie (config + testy dla logiki biznesowej: parsery, obliczenia).

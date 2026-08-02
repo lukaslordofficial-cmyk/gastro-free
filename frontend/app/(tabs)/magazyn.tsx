@@ -38,6 +38,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { supabase } from '@/lib/supabase';
+import { getAccountKey } from '@/lib/accountKey';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
@@ -1396,7 +1397,6 @@ export default function MagazynScreen() {
         const d = parseInt(form.shelfLifeDays, 10);
         if (!isNaN(d) && d > 0) shelfLifeDays = d;
       }
-      const { getAccountKey } = await import('@/lib/accountKey');
       const ak = getAccountKey();
       const payload: any = {
         name: nameTrim,

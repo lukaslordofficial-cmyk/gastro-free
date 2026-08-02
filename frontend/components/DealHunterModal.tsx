@@ -57,6 +57,7 @@ import {
   toSupplierGroups,
 } from '@/lib/bargainHunter';
 import { supabase } from '@/lib/supabase';
+import { getAccountKey } from '@/lib/accountKey';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -887,8 +888,8 @@ function NewOrderBrowser({
       setExpandedId(null);
       setSelectedProduct(null);
       const [invRes, supRes, catRes] = await Promise.all([
-        supabase.from('inventory_items').select('id,name,quantity,unit,min_quantity').eq('account_key', (await import('@/lib/accountKey')).getAccountKey()).limit(3000),
-        supabase.from('suppliers').select('id,name,email,min_order_value').eq('account_key', (await import('@/lib/accountKey')).getAccountKey()).order('name').limit(500),
+        supabase.from('inventory_items').select('id,name,quantity,unit,min_quantity').eq('account_key', getAccountKey()).limit(3000),
+        supabase.from('suppliers').select('id,name,email,min_order_value').eq('account_key', getAccountKey()).order('name').limit(500),
         supabase.from('supplier_catalog').select('id,supplier_id,name,variant,unit,price_pln,is_visible').limit(5000),
       ]);
       if (cancelled) return;

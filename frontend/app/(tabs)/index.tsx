@@ -29,8 +29,9 @@ import {
   MessageSquare,
   Tag,
 } from 'lucide-react-native';
-import { supabase } from '@/lib/supabase';
 import type { FixedCost, InventoryItem, RevenueEntry, VariableCostEntry } from '@/lib/types';
+import * as financeService from '@/services/financeService';
+import { useAuth } from '@/contexts/AuthContext';
 import { KPICard } from '@/components/KPICard';
 import { AlertBanner } from '@/components/AlertBanner';
 import { RevenueChart } from '@/components/RevenueChart';
@@ -112,19 +113,11 @@ function AddRevenueModal({ visible, onClose, onSaved }: { visible: boolean; onCl
     if (isNaN(val) || val <= 0) { Alert.alert('Błąd', 'Podaj poprawną kwotę.'); return; }
     setSaving(true);
     try {
-      const ak = (await import('@/lib/accountKey')).getAccountKey();
-      const payload: Record<string, unknown> = {
+      await financeService.insertRevenue({
         year_month: CURRENT_MONTH,
         description: desc.trim() || null,
         amount_pln: val,
-        account_key: ak,
-      };
-      let { error } = await supabase.from('revenue_entries').insert(payload);
-      if (error && /account_key/i.test(error.message ?? '')) {
-        delete payload.account_key;
-        ({ error } = await supabase.from('revenue_entries').insert(payload));
-      }
-      if (error) throw error;
+      });
       setDesc(''); setAmount('');
       onSaved(); onClose();
     } catch (e: any) {
@@ -268,16 +261,7 @@ function AddFixedCostModal({ visible, onClose, onSaved }: { visible: boolean; on
 
     setSaving(true);
     try {
-      const ak = (await import('@/lib/accountKey')).getAccountKey();
-      const payload: Record<string, unknown> = {
-        year_month: CURRENT_MONTH, type, name, amount_pln: val, account_key: ak,
-      };
-      let { error } = await supabase.from('fixed_costs').insert(payload);
-      if (error && /account_key/i.test(error.message ?? '')) {
-        delete payload.account_key;
-        ({ error } = await supabase.from('fixed_costs').insert(payload));
-      }
-      if (error) throw error;
+      await financeService.insertFixedCost({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
       setAmount('');
       setNewCatName('');
       newCatValueRef.current = '';
@@ -499,16 +483,7 @@ function AddVariableCostModal({ visible, onClose, onSaved }: { visible: boolean;
 
     setSaving(true);
     try {
-      const ak = (await import('@/lib/accountKey')).getAccountKey();
-      const payload: Record<string, unknown> = {
-        year_month: CURRENT_MONTH, type, name, amount_pln: val, account_key: ak,
-      };
-      let { error } = await supabase.from('variable_cost_entries').insert(payload);
-      if (error && /account_key/i.test(error.message ?? '')) {
-        delete payload.account_key;
-        ({ error } = await supabase.from('variable_cost_entries').insert(payload));
-      }
-      if (error) throw error;
+      await financeService.insertVariableCost({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
       setAmount('');
       setNewCatName('');
       newCatValueRef.current = '';
@@ -729,13 +704,8 @@ function EditCostModal({
 
     setSaving(true);
     try {
-      const ak = (await import('@/lib/accountKey')).getAccountKey();
       const tableName = cost.kind === 'fixed' ? 'fixed_costs' : 'variable_cost_entries';
-      const payload = { name: trimmed, amount_pln: val, year_month: ym };
-      let q = supabase.from(tableName).update(payload).eq('id', cost.id);
-      if (ak && ak !== 'default') q = q.eq('account_key', ak);
-      const { error } = await q;
-      if (error) throw error;
+      await financeService.updateCost(tableName, cost.id, { name: trimmed, amount_pln: val, year_month: ym });
       onSaved();
       onClose();
     } catch (e: any) {
@@ -842,6 +812,7 @@ function EditCostModal({
 
 export default function FinanseScreen() {
   const router = useRouter();
+  const { accountKey } = useAuth();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [view, setView] = useState<'panel' | 'raporty' | 'subskrypcja'>('panel');
@@ -886,69 +857,39 @@ export default function FinanseScreen() {
 
   const fetchData = useCallback(async (): Promise<{ variableCount: number } | null> => {
     try {
-      const { getAccountKey } = await import('@/lib/accountKey');
-      const ak = getAccountKey();
-      const scoped = <T,>(q: T & { eq: (col: string, val: string) => T }, col = 'account_key') =>
-        (ak && ak !== 'default' ? q.eq(col, ak) : q);
+      const rows = await financeService.fetchFinanceRows(accountKey, CURRENT_MONTH);
 
-      let revRes = await scoped(supabase.from('revenue_entries').select('*')).eq('year_month', CURRENT_MONTH).order('created_at');
-      let fixedRes = await scoped(supabase.from('fixed_costs').select('*')).eq('year_month', CURRENT_MONTH).order('type');
-      let varRes = await scoped(supabase.from('variable_cost_entries').select('*')).eq('year_month', CURRENT_MONTH).order('created_at');
-      let revHistRes = await scoped(supabase.from('revenue_entries').select('year_month, amount_pln')).order('year_month').limit(2000);
-      let varHistRes = await scoped(supabase.from('variable_cost_entries').select('year_month, amount_pln')).order('year_month').limit(2000);
-      const inventoryRes = await supabase.from('inventory_items').select('id, name, quantity, min_quantity, unit').eq('account_key', ak);
-      let revAllRes = await scoped(supabase.from('revenue_entries').select('*')).order('created_at', { ascending: false }).limit(1500);
-      let fixedAllRes = await scoped(supabase.from('fixed_costs').select('*')).order('created_at', { ascending: false }).limit(1000);
-      let varAllRes = await scoped(supabase.from('variable_cost_entries').select('*')).order('created_at', { ascending: false }).limit(1500);
-
-      // Fallback gdy brak kolumny account_key (przed migracją FIX_FINANCE_TENANT_RLS.sql)
-      const missingAk = [revRes, fixedRes, varRes].some(
-        (r) => r.error && /account_key/i.test(r.error.message ?? ''),
-      );
-      if (missingAk) {
-        [revRes, fixedRes, varRes, revHistRes, varHistRes, revAllRes, fixedAllRes, varAllRes] = await Promise.all([
-          supabase.from('revenue_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
-          supabase.from('fixed_costs').select('*').eq('year_month', CURRENT_MONTH).order('type'),
-          supabase.from('variable_cost_entries').select('*').eq('year_month', CURRENT_MONTH).order('created_at'),
-          supabase.from('revenue_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-          supabase.from('variable_cost_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-          supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-          supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
-          supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-        ]);
-      }
-      if (revRes.error) throw revRes.error;
-      if (fixedRes.error) throw fixedRes.error;
-      if (varRes.error) throw varRes.error;
-
-      const safeRows = <T extends { year_month?: string | null; created_at?: string | null }>(rows: T[] | null | undefined): T[] =>
-        (rows ?? []).filter((r) => {
+      const safeRows = <T extends { year_month?: string | null; created_at?: string | null }>(list: T[] | null | undefined): T[] =>
+        (list ?? []).filter((r) => {
           const ym = (r.year_month || '').trim();
           return /^\d{4}-\d{2}$/.test(ym);
         });
 
-      const revMerged = safeRows(revAllRes.data as RevenueEntry[] | null);
-      const fixedMerged = safeRows(fixedAllRes.data as FixedCost[] | null);
-      const varMerged = safeRows(varAllRes.data as VariableCostEntry[] | null);
+      const revMerged = safeRows(rows.revenueAll);
+      const fixedMerged = safeRows(rows.fixedAll);
+      const varMerged = safeRows(rows.variableAll);
 
-      setRevenueEntries(safeRows(revRes.data as RevenueEntry[] | null));
-      setRevenueJournal(revMerged.length ? revMerged : safeRows(revRes.data as RevenueEntry[] | null));
-      setFixedCosts(safeRows(fixedRes.data as FixedCost[] | null));
-      setFixedCostsJournal(fixedMerged.length ? fixedMerged : safeRows(fixedRes.data as FixedCost[] | null));
-      const varMonth = safeRows(varRes.data as VariableCostEntry[] | null);
+      setRevenueEntries(safeRows(rows.revenue));
+      setRevenueJournal(revMerged.length ? revMerged : safeRows(rows.revenue));
+      setFixedCosts(safeRows(rows.fixed));
+      setFixedCostsJournal(fixedMerged.length ? fixedMerged : safeRows(rows.fixed));
+      const varMonth = safeRows(rows.variableMonth);
       setVariableEntries(varMonth);
       setVariableCostsJournal(varMerged.length ? varMerged : varMonth);
       hasFinanceDataRef.current = true;
 
-      const revH = revHistRes.data ?? [];
-      const varH = varHistRes.data ?? [];
+      const revH = rows.revenueHist;
+      const varH = rows.variableHist;
+
+      const toMonths = (list: { year_month: string | null }[]): string[] =>
+        list.map((r) => r.year_month).filter((m): m is string => !!m);
 
       const allMonths = new Set<string>([
-        ...revMerged.map((r) => r.year_month).filter(Boolean),
-        ...varMerged.map((r) => r.year_month).filter(Boolean),
-        ...fixedMerged.map((r) => r.year_month).filter(Boolean),
-        ...revH.map((r: any) => r.year_month).filter(Boolean),
-        ...varH.map((r: any) => r.year_month).filter(Boolean),
+        ...toMonths(revMerged),
+        ...toMonths(varMerged),
+        ...toMonths(fixedMerged),
+        ...toMonths(revH),
+        ...toMonths(varH),
         CURRENT_MONTH,
       ]);
       const sortedMonths = Array.from(allMonths).filter((m) => /^\d{4}-\d{2}$/.test(m)).sort();
@@ -959,11 +900,11 @@ export default function FinanseScreen() {
           revenue_pln: revMerged
             .filter((r) => r.year_month === month)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || revH.filter((r: any) => r.year_month === month).reduce((s: number, r: any) => s + Number(r.amount_pln), 0),
+            || revH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
           variable_costs_pln: varMerged
             .filter((r) => r.year_month === month)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || varH.filter((r: any) => r.year_month === month).reduce((s: number, r: any) => s + Number(r.amount_pln), 0),
+            || varH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
           fixed_costs_pln: fixedMerged
             .filter((r) => r.year_month === month)
             .reduce((s, r) => s + Number(r.amount_pln), 0),
@@ -971,8 +912,8 @@ export default function FinanseScreen() {
         }))
       );
 
-      if (!inventoryRes.error) {
-        const invRows = (inventoryRes.data ?? []).map((i: any) => ({
+      if (rows.inventory) {
+        const invRows = rows.inventory.map((i) => ({
           id: String(i.id),
           name: String(i.name || 'Składnik'),
           quantity: Number(i.quantity) || 0,
@@ -1004,9 +945,13 @@ export default function FinanseScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [premiumAlert]);
+  }, [premiumAlert, accountKey]);
 
-  useEffect(() => { void fetchData(); }, [fetchData]);
+  useEffect(() => {
+    // Multi-tenant: nie ładuj współdzielonego „default"; odśwież po zmianie konta.
+    if (!accountKey || accountKey === 'default') return;
+    void fetchData();
+  }, [fetchData, accountKey]);
 
   // Po skanie faktury — auto-odśwież koszty zmienne z retry.
   useEffect(() => {
@@ -1070,12 +1015,8 @@ export default function FinanseScreen() {
   async function saveNote(id: string, table: 'fixed' | 'variable' | 'revenue') {
     setNoteSaving(true);
     try {
-      const ak = (await import('@/lib/accountKey')).getAccountKey();
       const tableName = table === 'fixed' ? 'fixed_costs' : table === 'variable' ? 'variable_cost_entries' : 'revenue_entries';
-      let q = supabase.from(tableName).update({ note: noteText.trim() || null }).eq('id', id);
-      if (ak && ak !== 'default') q = q.eq('account_key', ak);
-      const { error: updateErr } = await q;
-      if (updateErr) throw updateErr;
+      await financeService.updateNote(tableName, id, noteText.trim() || null);
       const saved = noteText.trim() || null;
       if (table === 'fixed') {
         setFixedCosts((prev) => prev.map((c) => (c.id === id ? { ...c, note: saved } : c)));
@@ -1102,12 +1043,13 @@ export default function FinanseScreen() {
         text: 'Usuń',
         style: 'destructive',
         onPress: async () => {
-          const ak = (await import('@/lib/accountKey')).getAccountKey();
           const tableName = table === 'fixed' ? 'fixed_costs' : table === 'variable' ? 'variable_cost_entries' : 'revenue_entries';
-          let q = supabase.from(tableName).delete().eq('id', id);
-          if (ak && ak !== 'default') q = q.eq('account_key', ak);
-          const { error: delErr } = await q;
-          if (delErr) { premiumAlert('Błąd', delErr.message); return; }
+          try {
+            await financeService.deleteCost(tableName, id);
+          } catch (e) {
+            premiumAlert('Błąd', e instanceof Error ? e.message : 'Nie udało się usunąć.');
+            return;
+          }
           if (table === 'fixed') {
             setFixedCosts((prev) => prev.filter((c) => c.id !== id));
             setFixedCostsJournal((prev) => prev.filter((c) => c.id !== id));

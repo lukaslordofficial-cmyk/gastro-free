@@ -27,13 +27,13 @@ refaktor przed nową funkcją, testy jednostkowe, dokumentacja (ARCHITECTURE.md)
 - tsc: parytet z oryginałem (2 istniejące błędy TS2769, brak nowych).
 
 ## Backlog (kolejne kęsy — jeden na raz, po akceptacji + teście urządzenia)
-- P0 Kęs #2: Naprawa typu `Database` (lib/types.ts) → dodać Views/Functions/Enums/
-  Relationships, by supabase-js przestał typować inserty jako `never`. Usuwa ~większość
-  ze 171 błędów tsc naraz (dekalog §VI). Wysoka wartość, ale wymaga ostrożnego testu.
-- P0 Kęs #3: `app/(tabs)/index.tsx` (dashboard, 26 zapytań) → `services/statsService`.
-- P1 Kęs #4: `magazyn.tsx` (2653) → `services/inventoryService` + rozbicie UI.
-- P1 Kęs #5: `menu.tsx` (2866) → `services/menuService` + rozbicie UI.
-- P1 Kęs #6: `dostawcy.tsx` (3185) → `services/suppliersService` + rozbicie UI.
-- P2 Kęs #7: `VoiceReportModal.tsx` (4355) → rozbicie na komponenty.
-- P2 Kęs: konfiguracja Jest + testy jednostkowe logiki biznesowej (dekalog §IX).
-- P2: audyt polityk RLS per tabela (dekalog §IV) + indeksy B-Tree (§VII).
+### 2026-06 — Kęs #2: Dashboard/Finanse + 2 bugfixy (czeka na test urządzenia)
+- Nowy `services/financeService.ts` (całe IO Finanse); `index.tsx` bez `supabase`.
+- FIX split-bundle ("failed to load split bundle") — usunięte wszystkie dynamiczne
+  importy `@/lib/accountKey` (5 plików) -> statyczne. Panel finansów powinien się ładować.
+- FIX multi-tenant — dashboard odświeża dane po zmianie konta (reaktywny accountKey).
+- Weryfikacja: bundle Metro OK, tsc 173->166, 0 błędów w index.tsx.
+
+- P0 Kęs #3: `magazyn.tsx` (2653) -> `services/inventoryService` + rozbicie UI.
+- P0 Kęs #4: `menu.tsx` (2866) -> `services/menuService` + rozbicie UI.
+- P1 Kęs #5: `dostawcy.tsx` (3185) -> `services/suppliersService` + rozbicie UI.

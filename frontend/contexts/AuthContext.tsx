@@ -1,3 +1,12 @@
+/**
+ * AuthContext — warstwa STANU/orkiestracji autoryzacji (dekalog §II).
+ *
+ * DLACZEGO: ten plik nie wykonuje już żadnych zapytań do Supabase. Całe IO żyje
+ * w `@/services/authService`. Tutaj zostaje wyłącznie stan React + orkiestracja
+ * (kolejność kroków, ustawianie account_key, mapowanie błędów na PL dla UI).
+ * Publiczne API hooka `useAuth()` jest identyczne jak wcześniej — ekrany
+ * login/register działają bez zmian.
+ */
 import React, {
   createContext,
   useCallback,
@@ -7,20 +16,13 @@ import React, {
   useState,
 } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
-import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import { setAccountKey, getAccountKey, accountKeyFromUserId } from '@/lib/accountKey';
 import { polishAuthError } from '@/lib/authErrors';
-import { fetchJson } from '@/lib/safeFetch';
-import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
+import * as authService from '@/services/authService';
+import type { UserProfile } from '@/services/authService';
 
-const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
-
-export type UserProfile = {
-  id: string;
-  email: string | null;
-  account_key: string;
-  restaurant_name: string | null;
-};
+export type { UserProfile };
 
 type AuthContextValue = {
   ready: boolean;
@@ -41,109 +43,71 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-async function fetchProfile(userId: string): Promise<UserProfile | null> {
-  if (!isSupabaseConfigured) return null;
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, email, account_key, restaurant_name')
-    .eq('id', userId)
-    .maybeSingle();
-  if (error) {
-    // Tabela jeszcze nie istnieje — fallback do account_key z uid
-    if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
-      return null;
-    }
-    if (__DEV__) console.warn('[Auth] profiles:', error.message);
-    return null;
-  }
-  if (!data) return null;
-  return data as UserProfile;
-}
-
-async function ensureLocalProfile(user: User): Promise<UserProfile> {
-  const existing = await fetchProfile(user.id);
-  if (existing?.account_key) return existing;
-
-  const account_key = accountKeyFromUserId(user.id);
-  // Ustaw od razu — zanim async upsert skończy się, żeby skany/subskrypcja nie trafiły na „default”.
-  setAccountKey(account_key);
-  const restaurant_name =
-    (user.user_metadata?.restaurant_name as string | undefined)?.trim() || null;
-  const row = {
-    id: user.id,
-    email: user.email ?? null,
-    account_key,
-    restaurant_name,
-  };
-
-  const { data, error } = await supabase
-    .from('profiles')
-    .upsert(row, { onConflict: 'id' })
-    .select('id, email, account_key, restaurant_name')
-    .single();
-
-  if (!error && data) {
-    // Portfel — trigger SQL zwykle tworzy wiersz; tu fallback (ignoruj konflikt)
-    // Free + 100 kredytów + 30-dniowy trial Premium (Łowca / dark UI). Po trialu → Free, kredyty zostają.
-    const trialEnds = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { error: subErr } = await supabase.from('subscriptions').insert({
-      account_key,
-      tier_level: 0,
-      credits_balance: 100,
-      status: 'active',
-      free_starter_claimed: true,
-      trial_ends_at: trialEnds,
-    });
-    if (subErr && !String(subErr.message || '').toLowerCase().includes('duplicate')) {
-      if (__DEV__) console.warn('[Auth] subscriptions seed:', subErr.message);
-    }
-    return data as UserProfile;
-  }
-
-  return {
-    id: user.id,
-    email: user.email ?? null,
-    account_key,
-    restaurant_name,
-  };
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
 
-  const applySession = useCallback(async (next: Session | null) => {
-    setSession(next);
-    if (!next?.user) {
-      setProfile(null);
-      setAccountKey('default');
-      return;
+  /**
+   * Zapewnia lokalny profil tenanta. Orkiestracja: fetch → (fallback) upsert +
+   * seed subskrypcji. account_key ustawiany synchronicznie, zanim await się
+   * skończy — by skany/subskrypcja nie trafiły na współdzielone „default".
+   */
+  const ensureLocalProfile = useCallback(async (user: User): Promise<UserProfile> => {
+    const existing = await authService.fetchProfile(user.id);
+    if (existing?.account_key) return existing;
+
+    const account_key = accountKeyFromUserId(user.id);
+    setAccountKey(account_key);
+    const restaurant_name =
+      (user.user_metadata?.restaurant_name as string | undefined)?.trim() || null;
+
+    const { data, error } = await authService.upsertProfile({
+      id: user.id,
+      email: user.email ?? null,
+      account_key,
+      restaurant_name,
+    });
+
+    if (!error && data) {
+      await authService.seedSubscription(account_key);
+      return data;
     }
-    // Synchronicznie — zanim await — żeby SubscriptionContext / skany nie czytały „default”.
-    const immediateKey = accountKeyFromUserId(next.user.id);
-    setAccountKey(immediateKey);
-    try {
-      const p = await ensureLocalProfile(next.user);
-      setProfile(p);
-      setAccountKey(p.account_key);
-      // Seed pustych kategorii magazynowych per tenant (nie nadpisuje własnych).
-      void ensureDefaultWarehouseCategories(supabase, p.account_key).then((r) => {
-        if (r.error && __DEV__) console.warn('[Auth] warehouse category seed', r.error);
-      });
-    } catch (e) {
-      if (__DEV__) console.warn('[Auth] profile bootstrap', e);
-      const fallback = immediateKey;
-      setProfile({
-        id: next.user.id,
-        email: next.user.email ?? null,
-        account_key: fallback,
-        restaurant_name: null,
-      });
-      setAccountKey(fallback);
-      void ensureDefaultWarehouseCategories(supabase, fallback);
-    }
+
+    return { id: user.id, email: user.email ?? null, account_key, restaurant_name };
   }, []);
+
+  const applySession = useCallback(
+    async (next: Session | null) => {
+      setSession(next);
+      if (!next?.user) {
+        setProfile(null);
+        setAccountKey('default');
+        return;
+      }
+      // Synchronicznie — zanim await — żeby SubscriptionContext / skany nie czytały „default".
+      const immediateKey = accountKeyFromUserId(next.user.id);
+      setAccountKey(immediateKey);
+      try {
+        const p = await ensureLocalProfile(next.user);
+        setProfile(p);
+        setAccountKey(p.account_key);
+        void authService.seedWarehouseCategories(p.account_key);
+      } catch (e) {
+        if (__DEV__) console.warn('[Auth] profile bootstrap', e);
+        const fallback = immediateKey;
+        setProfile({
+          id: next.user.id,
+          email: next.user.email ?? null,
+          account_key: fallback,
+          restaurant_name: null,
+        });
+        setAccountKey(fallback);
+        void authService.seedWarehouseCategories(fallback);
+      }
+    },
+    [ensureLocalProfile],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -154,8 +118,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     (async () => {
       try {
-        const { data } = await supabase.auth.getSession();
-        if (!cancelled) await applySession(data.session);
+        const { session: current } = await authService.getSession();
+        if (!cancelled) await applySession(current);
       } catch {
         if (!cancelled) await applySession(null);
       } finally {
@@ -163,13 +127,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+    const unsubscribe = authService.subscribeToAuthState((next) => {
       void applySession(next);
     });
 
     return () => {
       cancelled = true;
-      sub.subscription.unsubscribe();
+      unsubscribe();
     };
   }, [applySession]);
 
@@ -181,7 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!e || !password) {
       return { ok: false as const, message: 'Podaj e-mail i hasło.' };
     }
-    const { error } = await supabase.auth.signInWithPassword({ email: e, password });
+    const { error } = await authService.signInWithPassword(e, password);
     if (error) return { ok: false as const, message: polishAuthError(error) };
     return { ok: true as const };
   }, []);
@@ -198,17 +162,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (password.length < 6) {
         return { ok: false as const, message: 'Hasło musi mieć co najmniej 6 znaków.' };
       }
-      const { data, error } = await supabase.auth.signUp({
-        email: e,
-        password,
-        options: {
-          data: {
-            restaurant_name: (restaurantName ?? '').trim() || null,
-          },
-          // Closed beta: Confirm email OFF w Supabase → sesja od razu.
-          // Nie ustawiamy emailRedirectTo — unikamy przepływu „sprawdź skrzynkę”.
-        },
-      });
+
+      const { data, error } = await authService.signUp(e, password, restaurantName);
       if (error) return { ok: false as const, message: polishAuthError(error) };
 
       if (data.session?.user) {
@@ -217,53 +172,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       // Closed beta: gdy Confirm email jeszcze włączone — Admin API, potem login.
-      if (data.user?.id && BACKEND_URL) {
-        const conf = await fetchJson(`${BACKEND_URL}/api/auth/auto-confirm`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: data.user.id }),
-        });
-        if (conf.ok) {
-          const { error: signErr } = await supabase.auth.signInWithPassword({
-            email: e,
-            password,
-          });
+      if (data.user?.id) {
+        const confirmed = await authService.autoConfirmUser(data.user.id);
+        if (confirmed) {
+          const { error: signErr } = await authService.signInWithPassword(e, password);
           if (!signErr) {
-            const { data: sess } = await supabase.auth.getSession();
-            if (sess.session) await applySession(sess.session);
+            const { session: sess } = await authService.getSession();
+            if (sess) await applySession(sess);
             return { ok: true as const };
           }
         }
       }
 
       // Ostatnia próba: czasem sesja pojawia się po krótkiej chwili bez confirm.
-      const { error: retryErr } = await supabase.auth.signInWithPassword({
-        email: e,
-        password,
-      });
+      const { error: retryErr } = await authService.signInWithPassword(e, password);
       if (!retryErr) {
-        const { data: sess } = await supabase.auth.getSession();
-        if (sess.session) {
-          await applySession(sess.session);
+        const { session: sess } = await authService.getSession();
+        if (sess) {
+          await applySession(sess);
           return { ok: true as const };
         }
       }
 
-      // Tylko gdy Confirm email nadal blokuje logowanie
-      return {
-        ok: true as const,
-        needsEmailConfirm: true,
-      };
+      // Tylko gdy Confirm email nadal blokuje logowanie.
+      return { ok: true as const, needsEmailConfirm: true };
     },
     [applySession],
   );
 
   const signOut = useCallback(async () => {
-    try {
-      await supabase.auth.signOut();
-    } catch {
-      /* ignore */
-    }
+    await authService.signOut();
     setSession(null);
     setProfile(null);
     setAccountKey('default');

@@ -36,59 +36,25 @@ import { useAds } from '@/contexts/AdsProvider';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { extractDishContextTags } from '@/lib/dishImageMatch';
-
-const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
-
-/** Chunk size for /api/menu/suggest-recipe — keeps each Railway request under proxy timeout. */
-const SUGGEST_CHUNK = 4;
-
-const MENU_CATEGORIES = [
-  'Przystawki', 'Zupy', 'Sałatki', 'Burgery', 'Dania główne',
-  'Makarony', 'Pizza', 'Desery', 'Napoje', 'Alkohole', 'Półprodukty', 'Inne',
-];
-
-const WEIGHT_UNITS = ['g', 'ml', 'szt'] as const;
-type WeightUnit = typeof WEIGHT_UNITS[number];
-
-const INGREDIENT_UNITS = ['g', 'ml', 'szt'] as const;
-type IngredientUnit = typeof INGREDIENT_UNITS[number];
-
-interface Ingredient {
-  key: string;
-  name: string;
-  quantity: string;
-  unit: IngredientUnit;
-  /** Wzorcowa waga 1 sztuki w gramach */
-  pieceWeightG: string;
-}
-
-interface DraftDish {
-  key: string;
-  name: string;
-  category: string;
-  priceInput: string;
-  portionWeightInput: string;
-  portionWeightUnit: WeightUnit | null;
-  ingredients: Ingredient[];
-  /** Tagi kontekstu grafiki (białko / typ) — z AI lub heurystyki nazwy */
-  imageContextTags?: string[];
-}
-
-interface Suggestion {
-  suggested_ingredients: { name: string; quantity: number; unit: string }[];
-  suggested_portion_weight_value: number | null;
-  suggested_portion_weight_unit: string | null;
-}
-
-type Stage =
-  | 'choose'
-  | 'scanning'
-  | 'edit'
-  | 'ask_suggest'
-  | 'suggesting'
-  | 'confirming'
-  | 'syncing'
-  | 'done';
+import { MenuScanAskSuggest } from '@/components/menuScan/MenuScanAskSuggest';
+import {
+  MENU_SCAN_BACKEND_URL as BACKEND_URL,
+  friendlyMenuScanApiError as friendlyApiError,
+  parseMenuScanErrorDetail as parseErrorDetail,
+  fetchMenuSuggestionsChunked as fetchSuggestionsChunked,
+} from '@/components/menuScan/menuScanApi';
+import {
+  MENU_CATEGORIES,
+  WEIGHT_UNITS,
+  INGREDIENT_UNITS,
+  newIngredient,
+  newIngredientKey,
+  type DraftDish,
+  type Ingredient,
+  type MenuScanStage,
+  type Suggestion,
+  type WeightUnit,
+} from '@/components/menuScan/menuScanTypes';
 
 const C = {
   bg: '#0A120E',
@@ -110,98 +76,6 @@ const C = {
   inputBg: DS.color.bgTertiary,
 };
 
-function newIngredientKey(): string {
-  return String(Date.now() + Math.random());
-}
-
-function newIngredient(name = '', quantity = '', unit: IngredientUnit = 'g', pieceWeightG = ''): Ingredient {
-  return { key: newIngredientKey(), name, quantity, unit, pieceWeightG };
-}
-
-function friendlyApiError(status: number, detail: string): string {
-  const raw = `${detail || ''}`.toLowerCase();
-  const looksLikeCredits =
-    raw.includes('kredyt') ||
-    raw.includes('credit') ||
-    raw.includes('saldo') ||
-    raw.includes('kosztowa') ||
-    (raw.includes('koszt') && (raw.includes('ai') || raw.includes('skan') || raw.includes('portfel')));
-  if (status === 403 && looksLikeCredits) {
-    return (
-      'Backend odmówił operacji AI (kredyty / portfel). '
-      + 'Zapis potraw bez sugestii AI nadal działa — wybierz „Nie, zapisz jak jest”. '
-      + 'Jeśli w Subskrypcji widać saldo > 0, odśwież aplikację (Metro reload) i spróbuj ponownie.'
-    );
-  }
-  if (
-    status === 502 ||
-    status === 503 ||
-    status === 504 ||
-    raw.includes('application failed to respond') ||
-    raw.includes('failed to respond') ||
-    raw.includes('timeout') ||
-    raw.includes('timed out')
-  ) {
-    return (
-      'Serwer AI nie zdążył odpowiedzieć (timeout / 502). '
-      + 'Spróbuj ponownie za chwilę albo zapisz bez sugestii AI („Nie”).'
-    );
-  }
-  if (!BACKEND_URL) {
-    return 'Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).';
-  }
-  if (typeof detail === 'string' && detail.trim() && !raw.startsWith('<!')) {
-    return detail.trim();
-  }
-  return `Błąd serwera (${status || '?'}). Spróbuj ponownie.`;
-}
-
-async function parseErrorDetail(res: Response): Promise<string> {
-  const txt = await res.text();
-  try {
-    const j = JSON.parse(txt);
-    const d = j?.detail ?? j?.message ?? j?.error ?? txt;
-    return typeof d === 'string' ? d : JSON.stringify(d);
-  } catch {
-    return txt || `HTTP ${res.status}`;
-  }
-}
-
-/** Fetch suggestions in chunks to avoid Railway proxy 502 on large menus. */
-async function fetchSuggestionsChunked(
-  askDishes: {
-    name: string;
-    category: string;
-    ingredients: { name: string; quantity: number | null; unit: string }[];
-    portion_weight_value: number | null;
-    portion_weight_unit: WeightUnit | null;
-  }[],
-): Promise<Record<string, Suggestion>> {
-  if (!BACKEND_URL) {
-    throw new Error('Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).');
-  }
-  const { apiJsonHeaders } = await import('@/lib/apiHeaders');
-  const headers = await apiJsonHeaders();
-  const byName: Record<string, Suggestion> = {};
-  for (let i = 0; i < askDishes.length; i += SUGGEST_CHUNK) {
-    const chunk = askDishes.slice(i, i + SUGGEST_CHUNK);
-    const res = await fetch(`${BACKEND_URL}/api/menu/suggest-recipe`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ dishes: chunk }),
-    });
-    if (!res.ok) {
-      const detail = await parseErrorDetail(res);
-      throw new Error(friendlyApiError(res.status, detail));
-    }
-    const sug = await res.json();
-    for (const s of sug.dishes ?? []) {
-      byName[(s.name ?? '').trim().toLowerCase()] = s;
-    }
-  }
-  return byName;
-}
-
 interface Props {
   visible: boolean;
   onClose: () => void;
@@ -216,7 +90,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
   const { tier, credits, loading: creditsLoading, refresh: refreshCredits, trialActive } =
     useSubscription();
   const [showCreditsGate, setShowCreditsGate] = useState(false);
-  const [stage, setStage] = useState<Stage>('choose');
+  const [stage, setStage] = useState<MenuScanStage>('choose');
   const [error, setError] = useState<string | null>(null);
   const [dishes, setDishes] = useState<DraftDish[]>([]);
   const [categoryPickerFor, setCategoryPickerFor] = useState<string | null>(null);
@@ -716,7 +590,11 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
       const res = await fetch(`${BACKEND_URL}/api/menu/confirm-scan`, {
         method: 'POST',
         headers: await apiJsonHeaders(),
-        body: JSON.stringify({ dishes: finalPayload }),
+        body: JSON.stringify({
+          dishes: finalPayload,
+          // Tylko po TAK — NIE zostawia puste pola bez serwerowego AI.
+          fill_empty_with_ai: useAi,
+        }),
       });
       if (!res.ok) {
         const detail = await parseErrorDetail(res);
@@ -1150,37 +1028,14 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         )}
 
         {stage === 'ask_suggest' && (
-          <View style={[styles.askWrap, { paddingBottom: footerPad }]}>
-            <View style={styles.askIcon}>
-              <Sparkles size={30} color={C.green} strokeWidth={2} />
-            </View>
-            <Text style={styles.askTitle}>Uzupełnić dane AI?</Text>
-            <Text style={styles.askText}>{askMessage}</Text>
-            <Text style={styles.askMeta}>
-              Dotknij TAK, aby AI dopisał brakujące składniki i gramatury (trafią też do magazynu).
-              Dotknij NIE, aby zapisać formularz — serwer i tak spróbuje uzupełnić puste receptury.
-            </Text>
-            <View style={styles.askButtons}>
-              <TouchableOpacity
-                style={[styles.askBtn, styles.askBtnSecondary]}
-                onPress={() => void confirmSave(false)}
-                activeOpacity={0.85}
-                testID="menu-scan-suggest-no"
-              >
-                <Text style={styles.askBtnSecondaryText}>Nie, zapisz jak jest</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.askBtn, styles.askBtnPrimary]}
-                onPress={() => void confirmSave(true)}
-                activeOpacity={0.85}
-                testID="menu-scan-suggest-yes"
-              >
-                <Sparkles size={15} color={C.blackOnGreen} strokeWidth={2.5} />
-                <Text style={styles.askBtnPrimaryText}>Tak, AI dopisz</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.askCount}>Dotyczy {suggestionCount} pól z {dishes.length} potraw.</Text>
-          </View>
+          <MenuScanAskSuggest
+            askMessage={askMessage}
+            suggestionCount={suggestionCount}
+            dishesCount={dishes.length}
+            footerPad={footerPad}
+            onNo={() => void confirmSave(false)}
+            onYes={() => void confirmSave(true)}
+          />
         )}
 
         {(stage === 'suggesting' || stage === 'confirming' || stage === 'syncing') && (
@@ -1545,36 +1400,6 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
   },
   confirmBtnText: { fontSize: 15, fontWeight: '700', color: C.blackOnGreen },
-
-  askWrap: { flex: 1, padding: 24, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  askIcon: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: C.greenSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(0,255,136,0.3)',
-  },
-  askTitle: { fontSize: 20, fontWeight: '800', color: C.text, textAlign: 'center' },
-  askText: { fontSize: 14, color: C.body, textAlign: 'center', lineHeight: 20 },
-  askMeta: { fontSize: 12, color: C.muted, textAlign: 'center', lineHeight: 17 },
-  askButtons: { flexDirection: 'row', gap: 10, marginTop: 12, alignSelf: 'stretch' },
-  askBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 14,
-    borderRadius: 12,
-  },
-  askBtnPrimary: { backgroundColor: C.green },
-  askBtnPrimaryText: { fontSize: 14, fontWeight: '700', color: C.blackOnGreen },
-  askBtnSecondary: { backgroundColor: C.elevated, borderWidth: 1.5, borderColor: C.border },
-  askBtnSecondaryText: { fontSize: 14, fontWeight: '700', color: C.text },
-  askCount: { fontSize: 11, color: C.muted, marginTop: 4 },
 
   resultWrap: { padding: 24, alignItems: 'center', gap: 10 },
   successCircle: {

@@ -53,12 +53,26 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     }
     try {
       const next = await fetchSubscriptionState();
-      setState(next);
+      // Nie nadpisuj realnego salda „zerem awaryjnym” (ok:false / migration),
+      // gdy wcześniej mieliśmy poprawny portfel — inaczej CreditsGate kłamie.
+      setState((prev) => {
+        if (
+          prev &&
+          prev.ok &&
+          (!next.ok || next.load_error) &&
+          Number(prev.credits_balance ?? 0) > 0
+        ) {
+          return prev;
+        }
+        return next;
+      });
       // Closed beta: Free plan też dostaje dark premium chrome.
       // NIE bramkuj wyglądu kredytami / tierem (wipe SQL zerował kredyty → biały UI).
       await setAppearance('premium');
     } catch {
-      setState(null);
+      // Nie kasuj ostatniego znanego salda przy chwilowym błędzie sieci —
+      // inaczej UI pokazuje 0 kredytów mimo że konto ma saldo w backendzie.
+      setState((prev) => prev);
       // Zalogowany mimo błędu subskrypcji — nadal dark premium.
       await setAppearance('premium');
     } finally {

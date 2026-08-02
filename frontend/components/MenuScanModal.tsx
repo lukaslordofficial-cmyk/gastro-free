@@ -120,6 +120,19 @@ function newIngredient(name = '', quantity = '', unit: IngredientUnit = 'g', pie
 
 function friendlyApiError(status: number, detail: string): string {
   const raw = `${detail || ''}`.toLowerCase();
+  const looksLikeCredits =
+    raw.includes('kredyt') ||
+    raw.includes('credit') ||
+    raw.includes('saldo') ||
+    raw.includes('kosztowa') ||
+    (raw.includes('koszt') && (raw.includes('ai') || raw.includes('skan') || raw.includes('portfel')));
+  if (status === 403 && looksLikeCredits) {
+    return (
+      'Backend odmówił operacji AI (kredyty / portfel). '
+      + 'Zapis potraw bez sugestii AI nadal działa — wybierz „Nie, zapisz jak jest”. '
+      + 'Jeśli w Subskrypcji widać saldo > 0, odśwież aplikację (Metro reload) i spróbuj ponownie.'
+    );
+  }
   if (
     status === 502 ||
     status === 503 ||
@@ -131,7 +144,7 @@ function friendlyApiError(status: number, detail: string): string {
   ) {
     return (
       'Serwer AI nie zdążył odpowiedzieć (timeout / 502). '
-      + 'Spróbuj ponownie za chwilę albo użyj „Sugestie AI” przy mniejszej liczbie potraw.'
+      + 'Spróbuj ponownie za chwilę albo zapisz bez sugestii AI („Nie”).'
     );
   }
   if (!BACKEND_URL) {
@@ -200,7 +213,8 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
   const insets = useSafeAreaInsets();
   const { setCameraOverlay } = useUiOverlay();
   const { showInterstitial } = useAds();
-  const { tier, credits } = useSubscription();
+  const { tier, credits, loading: creditsLoading, refresh: refreshCredits, trialActive } =
+    useSubscription();
   const [showCreditsGate, setShowCreditsGate] = useState(false);
   const [stage, setStage] = useState<Stage>('choose');
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +229,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
   const [dishesNeedingIngredients, setDishesNeedingIngredients] = useState<string[]>([]);
   const [dishesNeedingWeight, setDishesNeedingWeight] = useState<string[]>([]);
   const [suggestingInline, setSuggestingInline] = useState(false);
+  const [saveHint, setSaveHint] = useState<string | null>(null);
   const savingRef = useRef(false);
 
   const footerPad = Math.max(insets.bottom, 12) + 8;
@@ -222,6 +237,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
   const reset = useCallback(() => {
     setStage('choose');
     setError(null);
+    setSaveHint(null);
     setDishes([]);
     setCategoryPickerFor(null);
     setResult(null);
@@ -241,13 +257,21 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     return () => setCameraOverlay(false);
   }, [visible, setCameraOverlay]);
 
+  /** Gate tylko dla operacji AI. Nie blokuj gdy portfel jeszcze się ładuje (credits domyślnie 0). */
   const ensureCredits = useCallback((): boolean => {
-    if (tier === 0 && credits <= 0) {
+    if (creditsLoading) return true;
+    if (trialActive || tier > 0) {
+      // Płatny / trial: backend i tak zweryfikuje saldo; nie blokuj UI na stale 0.
+      if (credits > 0) return true;
+      // Saldo 0 przy aktywnym planie — pozwól spróbować; 403 złapie friendlyApiError.
+      return true;
+    }
+    if (credits <= 0) {
       setShowCreditsGate(true);
       return false;
     }
     return true;
-  }, [tier, credits]);
+  }, [tier, credits, creditsLoading, trialActive]);
 
   const handleFinishDone = useCallback(async () => {
     await showInterstitial();
@@ -263,6 +287,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     }
     setStage('scanning');
     setError(null);
+    setSaveHint(null);
     try {
       const form = new FormData();
       form.append('file', { uri, name, type: mimeType } as any);
@@ -277,6 +302,8 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         throw new Error(friendlyApiError(res.status, detail));
       }
       const data = await res.json();
+      // Odśwież portfel po skanie AI — saldo mogło spaść; unikamy stale 0/starych wartości.
+      void refreshCredits();
       const parsedDishes: DraftDish[] = (data.dishes ?? []).map((d: any) => {
         const name = d.name ?? '';
         const fromApi = Array.isArray(d.image_context_tags)
@@ -309,12 +336,21 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         setStage('choose');
         return;
       }
+      const deducted = Number(data.credits_deducted ?? 0);
+      if (deducted > 0) {
+        const rem = data.credits_remaining != null ? Number(data.credits_remaining) : null;
+        setSaveHint(
+          rem != null
+            ? `Skan AI: −${deducted} kredytów (saldo ${rem}). Zapis potraw nie wymaga dodatkowych kredytów.`
+            : `Skan AI: −${deducted} kredytów. Zapis potraw nie wymaga dodatkowych kredytów.`
+        );
+      }
       setStage('edit');
     } catch (e: any) {
       setError(e.message ?? 'Nie udało się przetworzyć menu.');
       setStage('choose');
     }
-  }, [ensureCredits]);
+  }, [ensureCredits, refreshCredits]);
 
   const handlePickFile = useCallback(async () => {
     const r = await DocumentPicker.getDocumentAsync({
@@ -539,26 +575,16 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     }
   }, [dishes, dishesMissingHelp, applySuggestionsToDishes, ensureCredits]);
 
-  const handleConfirmClick = useCallback(() => {
-    const invalid = dishes.some((d) => !d.name.trim());
-    if (invalid) {
-      setError('Każda potrawa musi mieć nazwę.');
-      return;
-    }
-    setError(null);
-
-    const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
-    if (needIng.length === 0 && needQty.length === 0 && needWeight.length === 0) {
-      void confirmSave(false);
-      return;
-    }
-    setDishesNeedingIngredients([...needIng, ...needQty]);
-    setDishesNeedingWeight(needWeight);
-    setStage('ask_suggest');
-  }, [dishes, dishesMissingHelp]);
-
   const confirmSave = useCallback(async (withSuggestions: boolean) => {
-    if (!ensureCredits()) return;
+    // Zapis bez AI NIGDY nie wymaga kredytów — confirm-scan nie woła OpenAI.
+    let useAi = withSuggestions;
+    if (useAi && !ensureCredits()) {
+      useAi = false;
+      setSaveHint(
+        'Brak lokalnego salda kredytów AI — zapisuję bez sugestii AI. '
+          + 'Potrawy i produkty magazynowe i tak trafią do bazy.'
+      );
+    }
     if (savingRef.current) return;
     if (!BACKEND_URL) {
       setError('Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).');
@@ -566,7 +592,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
       return;
     }
     savingRef.current = true;
-    setStage(withSuggestions ? 'suggesting' : 'confirming');
+    setStage(useAi ? 'suggesting' : 'confirming');
     setError(null);
     try {
       let finalPayload = preparePayloadDishes();
@@ -578,9 +604,12 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         seenNames.add(k);
         return true;
       });
+      if (finalPayload.length === 0) {
+        throw new Error('Brak potraw do zapisania (puste nazwy po deduplikacji).');
+      }
       const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
 
-      if (withSuggestions) {
+      if (useAi) {
         const askKeys = new Set([
           ...dishesNeedingIngredients,
           ...dishesNeedingWeight,
@@ -619,50 +648,58 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
           }));
 
         if (askDishes.length > 0) {
-          const byName = await fetchSuggestionsChunked(askDishes);
-          finalPayload = finalPayload.map((d) => {
-            const s = byName[d.name.toLowerCase()];
-            if (!s) return d;
-            const suggested = s.suggested_ingredients ?? [];
+          try {
+            const byName = await fetchSuggestionsChunked(askDishes);
+            finalPayload = finalPayload.map((d) => {
+              const s = byName[d.name.toLowerCase()];
+              if (!s) return d;
+              const suggested = s.suggested_ingredients ?? [];
 
-            let ingredients = d.ingredients;
-            if (ingredients.length === 0 && suggested.length > 0) {
-              ingredients = suggested.map((si) => ({
-                name: si.name,
-                quantity: normalizeRecipeQuantity(Number(si.quantity ?? 1)),
-                unit: si.unit || 'g',
-                piece_weight_g: null as number | null,
-              }));
-            } else if (suggested.length > 0) {
-              const bySugName = new Map(
-                suggested.map((si) => [si.name.trim().toLowerCase(), si]),
-              );
-              ingredients = ingredients.map((ing, idx) => {
-                if (ing.quantity != null && Number(ing.quantity) > 0) return ing;
-                const hit =
-                  bySugName.get((ing.name || '').trim().toLowerCase()) ??
-                  suggested[idx];
-                return {
-                  ...ing,
-                  quantity: normalizeRecipeQuantity(Number(hit?.quantity ?? 1)),
-                  unit: hit?.unit || ing.unit || 'g',
-                };
-              });
-            }
+              let ingredients = d.ingredients;
+              if (ingredients.length === 0 && suggested.length > 0) {
+                ingredients = suggested.map((si) => ({
+                  name: si.name,
+                  quantity: normalizeRecipeQuantity(Number(si.quantity ?? 1)),
+                  unit: si.unit || 'g',
+                  piece_weight_g: null as number | null,
+                }));
+              } else if (suggested.length > 0) {
+                const bySugName = new Map(
+                  suggested.map((si) => [si.name.trim().toLowerCase(), si]),
+                );
+                ingredients = ingredients.map((ing, idx) => {
+                  if (ing.quantity != null && Number(ing.quantity) > 0) return ing;
+                  const hit =
+                    bySugName.get((ing.name || '').trim().toLowerCase()) ??
+                    suggested[idx];
+                  return {
+                    ...ing,
+                    quantity: normalizeRecipeQuantity(Number(hit?.quantity ?? 1)),
+                    unit: hit?.unit || ing.unit || 'g',
+                  };
+                });
+              }
 
-            let portion_weight_value = d.portion_weight_value;
-            let portion_weight_unit = d.portion_weight_unit;
-            if (
-              (portion_weight_value == null || !portion_weight_unit) &&
-              s.suggested_portion_weight_value != null &&
-              s.suggested_portion_weight_unit
-            ) {
-              portion_weight_value = Number(s.suggested_portion_weight_value);
-              portion_weight_unit = s.suggested_portion_weight_unit as WeightUnit;
-            }
+              let portion_weight_value = d.portion_weight_value;
+              let portion_weight_unit = d.portion_weight_unit;
+              if (
+                (portion_weight_value == null || !portion_weight_unit) &&
+                s.suggested_portion_weight_value != null &&
+                s.suggested_portion_weight_unit
+              ) {
+                portion_weight_value = Number(s.suggested_portion_weight_value);
+                portion_weight_unit = s.suggested_portion_weight_unit as WeightUnit;
+              }
 
-            return { ...d, ingredients, portion_weight_value, portion_weight_unit };
-          });
+              return { ...d, ingredients, portion_weight_value, portion_weight_unit };
+            });
+          } catch (suggestErr: any) {
+            const msg = String(suggestErr?.message ?? suggestErr ?? '');
+            setSaveHint(
+              `Sugestie AI pominięte (${msg.slice(0, 120)}). Zapisuję potrawy bez uzupełnień AI.`
+            );
+            setStage('confirming');
+          }
         }
       }
 
@@ -686,9 +723,18 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         throw new Error(friendlyApiError(res.status, detail));
       }
       const data = await res.json();
+      const inserted = Number(data.inserted ?? 0);
+      const skipped = Number(data.skipped_duplicates ?? 0);
+      const warnings: string[] = [...(data.warnings ?? [])];
+      if (inserted === 0 && skipped > 0) {
+        warnings.unshift(
+          `Żadna nowa potrawa nie została dodana — ${skipped} pozycji uznano za duplikaty już w menu. `
+            + 'Składniki i tak mogły trafić do magazynu (onboarding).'
+        );
+      }
       setResult({
-        inserted: Number(data.inserted ?? 0),
-        warnings: data.warnings ?? [],
+        inserted,
+        warnings,
         inventoryCreated: Number(data.inventory_created ?? 0),
         inventoryItems: data.inventory_items ?? [],
       });
@@ -699,6 +745,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
       } catch {
         /* refresh best-effort */
       }
+      void refreshCredits();
       setStage('done');
     } catch (e: any) {
       setError(e.message ?? 'Nie udało się zapisać potraw.');
@@ -706,7 +753,33 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     } finally {
       savingRef.current = false;
     }
-  }, [dishes, dishesNeedingIngredients, dishesNeedingWeight, dishesMissingHelp, ensureCredits, onConfirmed]);
+  }, [
+    dishes,
+    dishesNeedingIngredients,
+    dishesNeedingWeight,
+    dishesMissingHelp,
+    ensureCredits,
+    onConfirmed,
+    refreshCredits,
+  ]);
+
+  const handleConfirmClick = useCallback(() => {
+    const invalid = dishes.some((d) => !d.name.trim());
+    if (invalid) {
+      setError('Każda potrawa musi mieć nazwę.');
+      return;
+    }
+    setError(null);
+
+    const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
+    if (needIng.length === 0 && needQty.length === 0 && needWeight.length === 0) {
+      void confirmSave(false);
+      return;
+    }
+    setDishesNeedingIngredients([...needIng, ...needQty]);
+    setDishesNeedingWeight(needWeight);
+    setStage('ask_suggest');
+  }, [dishes, dishesMissingHelp, confirmSave]);
 
   const suggestionCount =
     dishesNeedingIngredients.length + dishesNeedingWeight.length;
@@ -750,6 +823,11 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
           <View style={styles.errorBox} testID="menu-scan-error">
             <CircleAlert size={15} color={C.danger} strokeWidth={2} />
             <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+        {!!saveHint && !error && (
+          <View style={styles.saveHintBox} testID="menu-scan-save-hint">
+            <Text style={styles.saveHintText}>{saveHint}</Text>
           </View>
         )}
 
@@ -1216,6 +1294,16 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   errorText: { flex: 1, fontSize: 12, color: C.danger, lineHeight: 17 },
+  saveHintBox: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    borderRadius: 10,
+    padding: 12,
+    backgroundColor: C.warningSoft,
+    borderWidth: 1,
+    borderColor: C.warningBorder,
+  },
+  saveHintText: { fontSize: 12, color: C.body, lineHeight: 17 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 32 },
   chooseWrap: { padding: 16, gap: 12 },
   hintCard: {

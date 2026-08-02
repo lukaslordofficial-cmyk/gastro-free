@@ -6676,7 +6676,9 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     (stan 0, min 5, bufor 20%) z kategorią przypisaną przez GPT. Zwraca (count, items, warnings).
 
     - Dedupe: `_food_match_key` / `_find_inventory_duplicate` (pomidor ≡ pomidory).
-    - Soft-deleted (`is_active=false`) NIE blokują — są przywracane zamiast tworzenia duplikatu.
+    - Porównuj tylko aktywne produkty (`is_active=true`) — soft-deleted nie blokują tworzenia.
+    - Przy konflikcie UNIQUE (soft-deleted o tej samej nazwie) → przywróć ten wiersz (bez masowego
+      ładowania inactive na starcie — to było źródło timeoutów).
     - Nazwy kanoniczne: `_normalize_ingredient_name` (singular + dish→SKU).
     - Combo półprodukt: `_is_combo_polprodukt_name` → is_combo_polprodukt=True + domyślne składniki.
     """
@@ -6693,65 +6695,66 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     if not seen:
         return 0, [], warnings
 
-    inv_params_base = {"select": "id,name,is_combo_polprodukt,is_active", "limit": "5000"}
-    inv: list[dict] = []
-    inactive: list[dict] = []
     try:
         inv = await sb_get(client, "inventory_items", params={
-            **inv_params_base, "is_active": "eq.true",
-        }) or []
-        inactive = await sb_get(client, "inventory_items", params={
-            **inv_params_base, "is_active": "eq.false",
+            "select": "id,name,is_combo_polprodukt",
+            "is_active": "eq.true",
+            "limit": "5000",
         }) or []
     except httpx.HTTPStatusError as e:
-        body = e.response.text or ""
-        if "is_active" in body:
+        # Kolumna is_active może nie istnieć — wtedy pełna lista jak wcześniej (afc3302).
+        if "is_active" in (e.response.text or ""):
             inv = await sb_get(client, "inventory_items", params={
                 "select": "id,name,is_combo_polprodukt", "limit": "5000",
             }) or []
-            inactive = []
         else:
             raise
 
     to_create: list[str] = []
-    created: list[dict] = []
     for _norm_key, orig in seen.items():
         dup = _find_inventory_duplicate(orig, inv, threshold=86)
-        if dup:
-            continue
-        # Soft-deleted o tej samej nazwie → przywróć zamiast tworzyć drugi wiersz.
-        dead = _find_inventory_duplicate(orig, inactive, threshold=86)
-        if dead and dead.get("id"):
-            try:
-                await sb_patch(
-                    client, "inventory_items", {"id": f"eq.{dead['id']}"},
-                    {"is_active": True},
-                )
-                dead["is_active"] = True
-                inv.append(dead)
-                inactive = [r for r in inactive if r.get("id") != dead.get("id")]
-                created.append({
-                    "name": dead.get("name") or orig,
-                    "category": "Przywrócony",
-                    "is_combo_polprodukt": bool(dead.get("is_combo_polprodukt")),
-                    "restored": True,
-                })
-                warnings.append(
-                    f"„{dead.get('name') or orig}” było usunięte — przywrócono w magazynie."
-                )
-            except Exception as re:  # noqa: BLE001
-                warnings.append(f"{orig}: nie przywrócono ({re}) — spróbuję utworzyć nowy.")
-                to_create.append(orig)
-            continue
-        to_create.append(orig)
-    if not to_create and not created:
-        return 0, [], warnings
+        if not dup:
+            to_create.append(orig)
     if not to_create:
-        return len(created), created, warnings
+        return 0, [], warnings
 
     await _ensure_warehouse_categories(client)
     cat_map = await _gpt_categorize_ingredients(to_create, client)
     cat_cache: dict = {}
+    created: list[dict] = []
+
+    async def _reactivate_soft_deleted(name: str) -> Optional[dict]:
+        """Best-effort: przywróć soft-deleted o tej nazwie (UNIQUE conflict)."""
+        try:
+            inactive = await sb_get(client, "inventory_items", params={
+                "select": "id,name,is_combo_polprodukt",
+                "is_active": "eq.false",
+                "limit": "5000",
+            }) or []
+        except httpx.HTTPStatusError:
+            return None
+        dead = _find_inventory_duplicate(name, inactive, threshold=86)
+        if not dead or not dead.get("id"):
+            return None
+        try:
+            await sb_patch(
+                client, "inventory_items", {"id": f"eq.{dead['id']}"},
+                {"is_active": True},
+            )
+        except Exception as re:  # noqa: BLE001
+            warnings.append(f"{name}: nie przywrócono soft-deleted ({re}).")
+            return None
+        is_combo = bool(dead.get("is_combo_polprodukt"))
+        info = {
+            "name": dead.get("name") or name,
+            "category": "Przywrócony",
+            "is_combo_polprodukt": is_combo,
+            "restored": True,
+        }
+        inv.append({"id": dead.get("id"), "name": info["name"], "is_combo_polprodukt": is_combo})
+        warnings.append(f"„{info['name']}” było usunięte — przywrócono w magazynie.")
+        return info
+
     for name in to_create:
         is_combo = _is_combo_polprodukt_name(name)
         # Półprodukt combo → zawsze kategoria „Półprodukty” + jednostka „porcja”.
@@ -6764,21 +6767,33 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
             "unit": "porcja" if is_combo else "szt",
             "min_quantity": 5, "safety_buffer_percent": 20,
             "is_combo_polprodukt": is_combo, "unit_cost": 0,
-            "is_active": True,
         }
         try:
             row = await sb_post(client, "inventory_items", payload)
         except httpx.HTTPStatusError as e:
             body = e.response.text or ""
-            if "safety_buffer_percent" in body or "is_active" in body:
+            if "safety_buffer_percent" in body:
                 payload.pop("safety_buffer_percent", None)
-                if "is_active" in body:
-                    payload.pop("is_active", None)
                 try:
                     row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e2:
-                    warnings.append(f"{name}: nie utworzono w magazynie ({e2.response.text[:80]}).")
+                    body2 = e2.response.text or ""
+                    if any(x in body2.lower() for x in ("duplicate", "unique", "already exists")):
+                        restored = await _reactivate_soft_deleted(name)
+                        if restored:
+                            created.append(restored)
+                        else:
+                            warnings.append(f"{name}: nie utworzono w magazynie ({body2[:80]}).")
+                    else:
+                        warnings.append(f"{name}: nie utworzono w magazynie ({body2[:80]}).")
                     continue
+            elif any(x in body.lower() for x in ("duplicate", "unique", "already exists")):
+                restored = await _reactivate_soft_deleted(name)
+                if restored:
+                    created.append(restored)
+                else:
+                    warnings.append(f"{name}: nie utworzono w magazynie ({body[:80]}).")
+                continue
             else:
                 warnings.append(f"{name}: nie utworzono w magazynie ({body[:80]}).")
                 continue
@@ -6808,7 +6823,7 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
                 f"({', '.join(combo_ings) if combo_ings else 'edytuj w Magazynie'})."
             )
         created.append(item_info)
-        inv.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo, "is_active": True})
+        inv.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo})
     return len(created), created, warnings
 
 

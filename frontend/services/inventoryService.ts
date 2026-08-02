@@ -138,19 +138,21 @@ export async function deleteCategory(id: string, accountKey?: string): Promise<{
   return { error: error ? { message: error.message } : null };
 }
 
-/** Soft-delete (is_active=false) z fallbackiem na hard-delete. Rzuca przy błędzie. */
+/**
+ * Usunięcie produktu z magazynu.
+ * HARD DELETE (jak czysty reset przed re-skanem menu): soft-delete zostawia UNIQUE(name)
+ * i blokuje ponowne utworzenie tego samego składnika przy confirm-scan.
+ */
 export async function softDeleteItem(id: string, accountKey?: string): Promise<void> {
+  let hardQ = supabase.from('inventory_items').delete().eq('id', id);
+  if (accountKey && accountKey !== 'default') hardQ = hardQ.eq('account_key', accountKey);
+  const hard = await hardQ;
+  if (!hard.error) return;
+  // Fallback: stare bazy / FK — soft-delete gdy hard nie przejdzie.
   let softQ = supabase.from('inventory_items').update({ is_active: false }).eq('id', id);
   if (accountKey && accountKey !== 'default') softQ = softQ.eq('account_key', accountKey);
   const { error } = await softQ;
-  if (error && /is_active/.test(error.message ?? '')) {
-    let hardQ = supabase.from('inventory_items').delete().eq('id', id);
-    if (accountKey && accountKey !== 'default') hardQ = hardQ.eq('account_key', accountKey);
-    const hard = await hardQ;
-    if (hard.error) throw hard.error;
-    return;
-  }
-  if (error) throw error;
+  if (error) throw hard.error ?? error;
 }
 
 /** Zapis produktu (insert/update) z fallbackiem na starsze schematy. Zwraca zapisany wiersz. */

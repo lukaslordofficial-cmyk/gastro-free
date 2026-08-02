@@ -6672,18 +6672,13 @@ async def _gpt_categorize_ingredients(names: list[str],
 
 
 async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: list[str]):
-    """Dla każdego składnika receptury, którego NIE MA w magazynie, tworzy nowy produkt
-    (stan 0, min 5, bufor 20%) z kategorią przypisaną przez GPT. Zwraca (count, items, warnings).
+    """Dla każdego składnika receptury, którego NIE MA w aktywnym magazynie, tworzy produkt
+    (stan 0, min 5, bufor 20%) z kategorią GPT — jak w gastro-manager-15.
 
-    - Dedupe: `_food_match_key` / `_find_inventory_duplicate` (pomidor ≡ pomidory).
-    - Porównuj tylko aktywne produkty (`is_active=true`) — soft-deleted nie blokują tworzenia.
-    - Przy konflikcie UNIQUE (soft-deleted o tej samej nazwie) → przywróć ten wiersz (bez masowego
-      ładowania inactive na starcie — to było źródło timeoutów).
-    - Nazwy kanoniczne: `_normalize_ingredient_name` (singular + dish→SKU).
-    - Combo półprodukt: `_is_combo_polprodukt_name` → is_combo_polprodukt=True + domyślne składniki.
+    Soft-deleted (`is_active=false`) NIE blokują: najpierw przywracamy po nazwie, potem tworzymy.
+    Soft-deleted wczytywane RAZ na start (bez N×5000 przy każdym UNIQUE).
     """
     warnings: list[str] = []
-    # unikalne, pomijając 'Porcja'/'Wielkość porcji'/'Gramatura' (parametr potrawy, nie produkt).
     seen: dict[str, str] = {}
     for n in ingredient_names:
         nm = _normalize_ingredient_name((n or "").strip())
@@ -6695,36 +6690,23 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     if not seen:
         return 0, [], warnings
 
+    has_active_col = True
     try:
-        inv = await sb_get(client, "inventory_items", params={
+        active = await sb_get(client, "inventory_items", params={
             "select": "id,name,is_combo_polprodukt",
             "is_active": "eq.true",
             "limit": "5000",
         }) or []
     except httpx.HTTPStatusError as e:
-        # Kolumna is_active może nie istnieć — wtedy pełna lista jak wcześniej (afc3302).
-        if "is_active" in (e.response.text or ""):
-            inv = await sb_get(client, "inventory_items", params={
-                "select": "id,name,is_combo_polprodukt", "limit": "5000",
-            }) or []
-        else:
+        if "is_active" not in (e.response.text or ""):
             raise
+        has_active_col = False
+        active = await sb_get(client, "inventory_items", params={
+            "select": "id,name,is_combo_polprodukt", "limit": "5000",
+        }) or []
 
-    to_create: list[str] = []
-    for _norm_key, orig in seen.items():
-        dup = _find_inventory_duplicate(orig, inv, threshold=86)
-        if not dup:
-            to_create.append(orig)
-    if not to_create:
-        return 0, [], warnings
-
-    await _ensure_warehouse_categories(client)
-    cat_map = await _gpt_categorize_ingredients(to_create, client)
-    cat_cache: dict = {}
-    created: list[dict] = []
-
-    async def _reactivate_soft_deleted(name: str) -> Optional[dict]:
-        """Best-effort: przywróć soft-deleted o tej nazwie (UNIQUE conflict)."""
+    inactive: list[dict] = []
+    if has_active_col:
         try:
             inactive = await sb_get(client, "inventory_items", params={
                 "select": "id,name,is_combo_polprodukt",
@@ -6732,32 +6714,50 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
                 "limit": "5000",
             }) or []
         except httpx.HTTPStatusError:
-            return None
-        dead = _find_inventory_duplicate(name, inactive, threshold=86)
-        if not dead or not dead.get("id"):
-            return None
-        try:
-            await sb_patch(
-                client, "inventory_items", {"id": f"eq.{dead['id']}"},
-                {"is_active": True},
-            )
-        except Exception as re:  # noqa: BLE001
-            warnings.append(f"{name}: nie przywrócono soft-deleted ({re}).")
-            return None
-        is_combo = bool(dead.get("is_combo_polprodukt"))
+            inactive = []
+
+    created: list[dict] = []
+    to_create: list[str] = []
+
+    async def _reactivate(row: dict, label: str) -> dict:
+        await sb_patch(
+            client, "inventory_items", {"id": f"eq.{row['id']}"},
+            {"is_active": True},
+        )
         info = {
-            "name": dead.get("name") or name,
+            "name": row.get("name") or label,
             "category": "Przywrócony",
-            "is_combo_polprodukt": is_combo,
+            "is_combo_polprodukt": bool(row.get("is_combo_polprodukt")),
             "restored": True,
         }
-        inv.append({"id": dead.get("id"), "name": info["name"], "is_combo_polprodukt": is_combo})
+        active.append({"id": row.get("id"), "name": info["name"],
+                       "is_combo_polprodukt": info["is_combo_polprodukt"]})
         warnings.append(f"„{info['name']}” było usunięte — przywrócono w magazynie.")
         return info
 
+    for _k, orig in seen.items():
+        if _find_inventory_duplicate(orig, active, threshold=86):
+            continue
+        dead = _find_inventory_duplicate(orig, inactive, threshold=86) if inactive else None
+        if dead and dead.get("id"):
+            try:
+                created.append(await _reactivate(dead, orig))
+                inactive = [r for r in inactive if r.get("id") != dead.get("id")]
+            except Exception as re:  # noqa: BLE001
+                warnings.append(f"{orig}: nie przywrócono ({re}) — spróbuję utworzyć.")
+                to_create.append(orig)
+            continue
+        to_create.append(orig)
+
+    if not to_create:
+        return len(created), created, warnings
+
+    await _ensure_warehouse_categories(client)
+    cat_map = await _gpt_categorize_ingredients(to_create, client)
+    cat_cache: dict = {}
+
     for name in to_create:
         is_combo = _is_combo_polprodukt_name(name)
-        # Półprodukt combo → zawsze kategoria „Półprodukty” + jednostka „porcja”.
         cat_name = "Półprodukty" if is_combo else cat_map.get(name, "Inne")
         if cat_name not in WAREHOUSE_CATEGORIES:
             cat_name = "Inne"
@@ -6771,31 +6771,61 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
         try:
             row = await sb_post(client, "inventory_items", payload)
         except httpx.HTTPStatusError as e:
-            body = e.response.text or ""
+            body = (e.response.text or "")
+            body_l = body.lower()
             if "safety_buffer_percent" in body:
                 payload.pop("safety_buffer_percent", None)
                 try:
                     row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e2:
-                    body2 = e2.response.text or ""
-                    if any(x in body2.lower() for x in ("duplicate", "unique", "already exists")):
-                        restored = await _reactivate_soft_deleted(name)
-                        if restored:
-                            created.append(restored)
-                        else:
-                            warnings.append(f"{name}: nie utworzono w magazynie ({body2[:80]}).")
-                    else:
-                        warnings.append(f"{name}: nie utworzono w magazynie ({body2[:80]}).")
+                    body2 = (e2.response.text or "")
+                    if any(x in body2.lower() for x in ("duplicate", "unique", "23505")):
+                        # Dokładne dopasowanie po nazwie (także soft-deleted).
+                        try:
+                            hit_rows = await sb_get(client, "inventory_items", params={
+                                "select": "id,name,is_combo_polprodukt,is_active",
+                                "name": f"eq.{name}",
+                                "limit": "5",
+                            }) or []
+                        except httpx.HTTPStatusError:
+                            hit_rows = []
+                        restored_ok = False
+                        for hr in hit_rows:
+                            if hr.get("is_active") is False and hr.get("id"):
+                                try:
+                                    created.append(await _reactivate(hr, name))
+                                    restored_ok = True
+                                    break
+                                except Exception:
+                                    pass
+                        if not restored_ok:
+                            warnings.append(f"{name}: nie utworzono w magazynie ({body2[:100]}).")
+                        continue
+                    warnings.append(f"{name}: nie utworzono w magazynie ({body2[:100]}).")
                     continue
-            elif any(x in body.lower() for x in ("duplicate", "unique", "already exists")):
-                restored = await _reactivate_soft_deleted(name)
-                if restored:
-                    created.append(restored)
-                else:
-                    warnings.append(f"{name}: nie utworzono w magazynie ({body[:80]}).")
+            elif any(x in body_l for x in ("duplicate", "unique", "23505")):
+                try:
+                    hit_rows = await sb_get(client, "inventory_items", params={
+                        "select": "id,name,is_combo_polprodukt,is_active",
+                        "name": f"eq.{name}",
+                        "limit": "5",
+                    }) or []
+                except httpx.HTTPStatusError:
+                    hit_rows = []
+                restored_ok = False
+                for hr in hit_rows:
+                    if hr.get("is_active") is False and hr.get("id"):
+                        try:
+                            created.append(await _reactivate(hr, name))
+                            restored_ok = True
+                            break
+                        except Exception:
+                            pass
+                if not restored_ok:
+                    warnings.append(f"{name}: nie utworzono w magazynie ({body[:100]}).")
                 continue
             else:
-                warnings.append(f"{name}: nie utworzono w magazynie ({body[:80]}).")
+                warnings.append(f"{name}: nie utworzono w magazynie ({body[:100]}).")
                 continue
         inv_id = None
         try:
@@ -6823,9 +6853,120 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
                 f"({', '.join(combo_ings) if combo_ings else 'edytuj w Magazynie'})."
             )
         created.append(item_info)
-        inv.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo})
+        active.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo})
     return len(created), created, warnings
 
+
+async def _fill_empty_ingredients_for_confirm(
+    dishes: list,
+    *,
+    warnings: list[str],
+) -> None:
+    """Jak gastro-manager-15: gdy potrawa nie ma składników, AI proponuje recepturę
+    zanim confirm-scan zbierze listę do magazynu. In-place na `dishes`."""
+    need = [
+        d for d in dishes
+        if (d.name or "").strip() and not any(
+            (getattr(i, "name", None) or "").strip() for i in (d.ingredients or [])
+        )
+    ]
+    if not need:
+        return
+    warnings.append(
+        f"Uzupełniam receptury AI dla {len(need)} potraw bez składników "
+        f"(wymagane do zapełnienia magazynu)."
+    )
+    client = _openai()
+    by_lower: dict[str, list] = {}
+    portion_by: dict[str, tuple] = {}
+    for i in range(0, len(need), _MENU_SUGGEST_BATCH_SIZE):
+        batch_dishes = need[i:i + _MENU_SUGGEST_BATCH_SIZE]
+        batch = [
+            {
+                "name": d.name,
+                "category": d.category or "Inne",
+                "has_ingredients": False,
+                "ingredients": [],
+                "has_portion_weight": d.portion_weight_value is not None,
+                "portion_weight_unit_hint": d.portion_weight_unit,
+            }
+            for d in batch_dishes
+        ]
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": _MENU_SUGGEST_SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps({"dishes": batch}, ensure_ascii=False)},
+                    ],
+                    response_format={"type": "json_schema", "json_schema": _MENU_SUGGEST_JSON_SCHEMA},
+                ),
+                timeout=_MENU_SUGGEST_BATCH_TIMEOUT_S,
+            )
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"Sugestie AI (batch) pominięte: {e}")
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
+                await _bill_openai_response(
+                    httpx_c, resp, endpoint="/api/menu/confirm-scan", model=CHAT_MODEL,
+                    extras={"fill_empty_ingredients": len(batch)},
+                )
+        except Exception:
+            pass
+        try:
+            data = json.loads((resp.choices[0].message.content or "").strip() or "{}")
+        except json.JSONDecodeError:
+            warnings.append("Sugestie AI: niepoprawny JSON — pominięto partię.")
+            continue
+        for raw in data.get("dishes") or []:
+            nm = (raw.get("name") or "").strip().lower()
+            if not nm:
+                continue
+            ings = raw.get("suggested_ingredients") or []
+            if ings:
+                by_lower[nm] = ings
+            pw = raw.get("suggested_portion_weight_value")
+            pu = raw.get("suggested_portion_weight_unit")
+            if pw is not None and pu:
+                portion_by[nm] = (pw, pu)
+
+    for d in need:
+        key = (d.name or "").strip().lower()
+        ings = by_lower.get(key)
+        if not ings:
+            continue
+        filled: list[ConfirmMenuIngredient] = []
+        for si in ings:
+            iname = (si.get("name") if isinstance(si, dict) else getattr(si, "name", None)) or ""
+            iname = str(iname).strip()
+            if not iname or _is_porcja_row(iname):
+                continue
+            qty = si.get("quantity") if isinstance(si, dict) else getattr(si, "quantity", None)
+            unit = (si.get("unit") if isinstance(si, dict) else getattr(si, "unit", None)) or "g"
+            try:
+                qf = float(qty) if qty is not None else 1.0
+            except (TypeError, ValueError):
+                qf = 1.0
+            filled.append(ConfirmMenuIngredient(
+                name=_normalize_ingredient_name(iname),
+                quantity=max(1.0, qf),
+                unit=str(unit) or "g",
+            ))
+        if filled:
+            d.ingredients = filled
+        portion = portion_by.get(key)
+        if (
+            portion
+            and (d.portion_weight_value is None or not d.portion_weight_unit)
+        ):
+            try:
+                d.portion_weight_value = float(portion[0])
+                d.portion_weight_unit = str(portion[1])
+            except (TypeError, ValueError):
+                pass
 
 
 @app.post("/api/menu/confirm-scan")
@@ -6850,7 +6991,16 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     all_ingredient_names: list[str] = []
     portion_column_missing = False
 
-    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+    # gastro-manager-15: bez składników nie ma produktów w magazynie — uzupełnij AI.
+    try:
+        await _fill_empty_ingredients_for_confirm(req.dishes, warnings=warnings)
+        _canonicalize_ingredient_units(req.dishes)
+        _apply_whole_product_names_to_dishes(req.dishes)
+        _apply_integer_quantities_to_dishes(req.dishes)
+    except Exception as e:  # noqa: BLE001
+        warnings.append(f"Uzupełnianie receptur AI pominięte: {e}")
+
+    async with httpx.AsyncClient(timeout=180.0, verify=_httpx_verify()) as client:
         try:
             existing_menu = await sb_get(client, "menu_items", params={
                 "select": "id,name,is_active,category,price_pln", "limit": "10000",

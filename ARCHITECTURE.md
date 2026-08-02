@@ -20,6 +20,13 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08 — Kęs #8: Skan menu → pełny magazyn (jak gastro-manager-15)
+
+- Porównano z `lukaslordofficial-cmyk/gastro-manager-15`: onboarding = składniki z receptur.
+- `confirm-scan` **sam uzupełnia puste receptury AI** przed zapisem (bez tego tylko OCR → 1 produkt).
+- Soft-deleted: przywracanie z inactive + hard-delete przy usuwaniu z UI (UNIQUE nie blokuje).
+- FE: brak składników → od razu `confirmSave(true)`.
+
 ### 2026-08 — Kęs #7: Usuwanie w Magazynie + onboarding skanu menu
 
 - **UI Magazyn (premium):** przycisk usuwania produktu zawsze widoczny (Trash) obok edycji —

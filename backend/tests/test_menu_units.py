@@ -3,7 +3,7 @@ import os
 import pytest
 import requests
 
-BASE_URL = os.environ.get('EXPO_BACKEND_URL', 'https://waste-tracking-pro.preview.emergentagent.com').rstrip('/')
+BASE_URL = os.environ.get('EXPO_BACKEND_URL', 'https://gastro-refactor.preview.emergentagent.com').rstrip('/')
 
 
 def test_health_ok():

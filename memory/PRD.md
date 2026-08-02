@@ -35,5 +35,10 @@ refaktor przed nową funkcją, testy jednostkowe, dokumentacja (ARCHITECTURE.md)
 - Weryfikacja: bundle Metro OK, tsc 173->166, 0 błędów w index.tsx.
 
 - P0 Kęs #3: `magazyn.tsx` (2653) -> `services/inventoryService` + rozbicie UI.
+### 2026-06 — Kęs #3: Serwis Magazynu + fix crashu (czeka na test urządzenia)
+- FIX crashu "Rendered more hooks" w ExpandableDateJournal (hook po early-return) —
+  wywalał ekran finansów przy dodaniu 1. kosztu zmiennego. Naprawione.
+- Nowy `services/inventoryService.ts`; `magazyn.tsx` = 0 zapytań `supabase`.
+- Weryfikacja: bundle Metro OK, tsc 173->166.
 - P0 Kęs #4: `menu.tsx` (2866) -> `services/menuService` + rozbicie UI.
 - P1 Kęs #5: `dostawcy.tsx` (3185) -> `services/suppliersService` + rozbicie UI.

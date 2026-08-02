@@ -39,6 +39,7 @@ import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import * as inventoryService from '@/services/inventoryService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
@@ -774,66 +775,12 @@ export default function MagazynScreen() {
     const ak = accountKey;
     const fast = !!opts?.fast;
     try {
-      // Po skanie: najpierw szybkie odczytanie produktów, seed/dedupe w tle.
-      if (!fast) {
-        await ensureDefaultWarehouseCategories(supabase, ak);
-        await dedupeWarehouseCategories(supabase, ak);
-        await ensureDefaultKitchenUtensils(supabase, ak);
-      } else {
-        void ensureDefaultWarehouseCategories(supabase, ak);
-        void ensureDefaultKitchenUtensils(supabase, ak);
-      }
-
-      const [itemsRes, catsRes, wasteRes] = await Promise.all([
-        supabase
-          .from('inventory_items')
-          .select(
-            'id, name, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)',
-          )
-          .eq('account_key', ak)
-          .eq('is_active', true)
-          .order('name')
-          .limit(2000),
-        supabase
-          .from('inventory_categories')
-          .select('id, name, color')
-          .eq('account_key', ak)
-          .order('sort_order')
-          .limit(200),
-        supabase
-          .from('waste_logs')
-          .select('id, item_name, quantity, unit, reason, created_at')
-          .eq('account_key', ak)
-          .order('created_at', { ascending: false })
-          .limit(50),
-      ]);
-
-      let itemsData = itemsRes.data;
-      let itemsErr = itemsRes.error;
-      // Jedna szybka ścieżka awaryjna (bez łańcucha 4× requestów)
-      if (itemsErr && /is_active|optimal_quantity|safety_buffer_percent|shelf_life_days/.test(itemsErr.message ?? '')) {
-        const slim = await supabase
-          .from('inventory_items')
-          .select(
-            'id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)',
-          )
-          .eq('account_key', ak)
-          .order('name')
-          .limit(2000);
-        itemsData = slim.data;
-        itemsErr = slim.error;
-      }
-      if (itemsErr) throw itemsErr;
-      if (catsRes.error) throw catsRes.error;
-      // waste_logs opcjonalne — nie blokuj magazynu
-      if (wasteRes.error && !/account_key|waste_logs/.test(wasteRes.error.message ?? '')) {
-        if (__DEV__) console.warn('[Magazyn] waste_logs:', wasteRes.error.message);
-      }
-
-      setInventory((itemsData ?? []).map(mapDbRow));
-      setDbCategories(catsRes.data ?? []);
-      setWasteLogs(wasteRes.error ? [] : (wasteRes.data ?? []));
-      setExpandedCategories(new Set((catsRes.data ?? []).map((c: CategoryRow) => c.name)));
+      await inventoryService.seedWarehouse(ak, fast);
+      const { items, categories, wasteLogs } = await inventoryService.fetchWarehouseData(ak);
+      setInventory(items.map(mapDbRow));
+      setDbCategories(categories as CategoryRow[]);
+      setWasteLogs(wasteLogs as WasteLogRow[]);
+      setExpandedCategories(new Set((categories as CategoryRow[]).map((c) => c.name)));
       setError(null);
     } catch (e: any) {
       setError(e.message ?? 'Nieznany błąd');
@@ -1006,9 +953,9 @@ export default function MagazynScreen() {
       setSavingCat(false);
       return;
     }
-    const { data: newCat, error } = await supabase.from('inventory_categories').insert({
-      name, color, icon_name: 'box', sort_order: maxOrder + 10, account_key: accountKey,
-    }).select('id, name, color').single();
+    const { data: newCat, error } = await inventoryService.insertCategory({
+      name, color, sortOrder: maxOrder + 10, accountKey,
+    });
     savingCatRef.current = false;
     setSavingCat(false);
     if (error) {
@@ -1047,7 +994,7 @@ export default function MagazynScreen() {
       {
         text: 'Usuń', style: 'destructive',
         onPress: async () => {
-          const { error } = await supabase.from('inventory_categories').delete().eq('id', cat.id);
+          const { error } = await inventoryService.deleteCategory(cat.id);
           if (error) premiumAlert('Błąd', error.message);
           else fetchData();
         },
@@ -1101,16 +1048,11 @@ export default function MagazynScreen() {
         {
           text: 'Usuń', style: 'destructive',
           onPress: async () => {
-            // Soft-delete (is_active=false) — zgodne z ADD_SOFT_DELETE.sql i „przywróć magazyn”
-            const { error } = await supabase
-              .from('inventory_items')
-              .update({ is_active: false })
-              .eq('id', item.id);
-            if (error && /is_active/.test(error.message ?? '')) {
-              const hard = await supabase.from('inventory_items').delete().eq('id', item.id);
-              if (hard.error) { Alert.alert('Błąd', hard.error.message); return; }
-            } else if (error) {
-              Alert.alert('Błąd', error.message);
+            // Soft-delete (is_active=false) z fallbackiem na hard-delete — w serwisie.
+            try {
+              await inventoryService.softDeleteItem(item.id);
+            } catch (e: any) {
+              Alert.alert('Błąd', e?.message ?? 'Nie udało się usunąć.');
               return;
             }
             setInventory((prev) => prev.filter((i) => i.id !== item.id));
@@ -1302,30 +1244,7 @@ export default function MagazynScreen() {
   // ── Auto-unlock offer items ────────────────────────────────────────────────────────────
 
   async function autoUnlockOfferItems(newItemId: string, newItemName: string) {
-    try {
-      // Tylko oferty własnych dostawców — bez wycieku z innych tenantów
-      let sleepingQuery = supabase
-        .from('supplier_offer_items')
-        .select('id, raw_product_name, supplier_id')
-        .is('warehouse_product_id', null);
-      if (accountKey && accountKey !== 'default') {
-        const { data: mySuppliers } = await supabase
-          .from('suppliers')
-          .select('id')
-          .eq('account_key', accountKey);
-        const ids = (mySuppliers ?? []).map((s: any) => s.id as string);
-        if (ids.length === 0) return;
-        sleepingQuery = sleepingQuery.in('supplier_id', ids);
-      }
-      const { data: sleeping } = await sleepingQuery;
-      if (!sleeping || sleeping.length === 0) return;
-      const toUnlock = sleeping
-        .filter((item: any) => namesMatch(newItemName, item.raw_product_name || '', 72))
-        .map((item: any) => item.id);
-      if (toUnlock.length > 0) {
-        await supabase.from('supplier_offer_items').update({ warehouse_product_id: newItemId }).in('id', toUnlock);
-      }
-    } catch { /* non-critical */ }
+    await inventoryService.autoUnlockOfferItems(accountKey, newItemId, newItemName);
   }
 
   // ── Save product ───────────────────────────────────────────────────────────────────────
@@ -1413,72 +1332,35 @@ export default function MagazynScreen() {
         weight_volume_unit: uwv && !isNaN(uwv) ? form.weightVolumeUnit : null,
         account_key: ak,
       };
-      const selectCols = 'id, name, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)';
-      let row: any = null;
-      let saveError: any = null;
-      if (editingId) {
-        const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, shelf_life_days, account_key: _ak, ...core } = payload;
-        let upd = await supabase.from('inventory_items').update(payload).eq('id', editingId).eq('account_key', ak).select(selectCols).single();
-        if (upd.error && /optimal_quantity|shelf_life_days/.test(upd.error.message ?? '')) {
-          const soft = { ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit };
-          if (!/shelf_life/.test(upd.error.message ?? '')) {
-            (soft as any).shelf_life_days = shelf_life_days;
-          }
-          if (!/optimal_quantity/.test(upd.error.message ?? '')) {
-            (soft as any).optimal_quantity = optimal_quantity;
-          }
-          upd = await supabase.from('inventory_items').update(soft).eq('id', editingId).eq('account_key', ak).select('id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, inventory_categories(name), suppliers(name)').single();
-        }
-        row = upd.data;
-        saveError = upd.error;
-      } else {
-        let insertRes = await supabase.from('inventory_items').insert(payload).select(selectCols).single();
-        if (insertRes.error && /optimal_quantity|safety_buffer_percent|unit_weight_volume|weight_volume_unit|shelf_life_days/.test(insertRes.error.message ?? '')) {
-          const { optimal_quantity, safety_buffer_percent, unit_weight_volume, weight_volume_unit, shelf_life_days, ...fallback } = payload;
-          insertRes = await supabase
-            .from('inventory_items')
-            .insert(fallback)
-            .select('id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-            .single();
-        }
-        row = insertRes.data;
-        saveError = insertRes.error;
-      }
-      if (saveError) throw saveError;
+      const row = await inventoryService.saveInventoryItem({ payload, editingId, ak });
 
       // Persist combo recipe (best-effort if tabela jeszcze nie zmigrowana)
       const itemId = row.id as string;
       try {
-        await supabase.from('inventory_combo_ingredients').delete().eq('inventory_item_id', itemId);
-        if (form.isCombo) {
-          const rows = comboIngredients
-            .filter((i) => i.name.trim())
-            .map((ing, idx) => {
-              const matchId =
-                ing.warehouse_product_id ||
-                inventory.find(
-                  (p) =>
-                    p.id !== itemId &&
-                    normCategoryName(p.product_name) === normCategoryName(ing.name),
-                )?.id ||
-                null;
-              return {
-                inventory_item_id: itemId,
-                ingredient_name: ing.name.trim(),
-                quantity: parseFloat(ing.quantity) || 0,
-                unit: ing.unit || 'g',
-                warehouse_product_id: matchId,
-                sort_order: idx,
-                account_key: ak,
-              };
-            });
-          if (rows.length) {
-            const { error: comboErr } = await supabase.from('inventory_combo_ingredients').insert(rows);
-            if (comboErr && !/does not exist|schema cache|relation/i.test(comboErr.message ?? '')) {
-              throw comboErr;
-            }
-          }
-        }
+        const rows = form.isCombo
+          ? comboIngredients
+              .filter((i) => i.name.trim())
+              .map((ing, idx) => {
+                const matchId =
+                  ing.warehouse_product_id ||
+                  inventory.find(
+                    (p) =>
+                      p.id !== itemId &&
+                      normCategoryName(p.product_name) === normCategoryName(ing.name),
+                  )?.id ||
+                  null;
+                return {
+                  inventory_item_id: itemId,
+                  ingredient_name: ing.name.trim(),
+                  quantity: parseFloat(ing.quantity) || 0,
+                  unit: ing.unit || 'g',
+                  warehouse_product_id: matchId,
+                  sort_order: idx,
+                  account_key: ak,
+                };
+              })
+          : [];
+        await inventoryService.replaceComboIngredients(itemId, rows);
       } catch (comboEx: any) {
         if (!/does not exist|schema cache|relation/i.test(comboEx?.message ?? '')) {
           throw comboEx;
@@ -1531,12 +1413,8 @@ export default function MagazynScreen() {
     setShowAddModal(true);
     if (item.is_combo_półprodukt) {
       try {
-        const { data } = await supabase
-          .from('inventory_combo_ingredients')
-          .select('id, ingredient_name, quantity, unit, warehouse_product_id, sort_order')
-          .eq('inventory_item_id', item.id)
-          .order('sort_order');
-        if (data?.length) {
+        const data = await inventoryService.fetchComboIngredients(item.id);
+        if (data.length) {
           setComboIngredients(
             data.map((r: any) => ({
               key: r.id,

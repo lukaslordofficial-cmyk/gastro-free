@@ -1,0 +1,206 @@
+/**
+ * inventoryService — całe IO Supabase modułu Magazyn (dekalog §II/§V).
+ * Zachowanie 1:1 z poprzednią wersją ekranu (te same kolumny, fallbacki, seedy).
+ */
+import { supabase } from '@/lib/supabase';
+import {
+  dedupeWarehouseCategories,
+  ensureDefaultWarehouseCategories,
+} from '@/lib/warehouseCategories';
+import { ensureDefaultKitchenUtensils } from '@/lib/kitchenUtensils';
+import { namesMatch } from '@/lib/fuzzyProductMatch';
+
+const ITEM_COLS_FULL =
+  'id, name, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)';
+const ITEM_COLS_SLIM =
+  'id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = any;
+
+export type WarehouseData = {
+  items: Row[];
+  categories: Row[];
+  wasteLogs: Row[];
+};
+
+/** Seed kategorii/utensyliów. fast=true -> w tle (po skanie faktury). */
+export async function seedWarehouse(ak: string, fast: boolean): Promise<void> {
+  if (!fast) {
+    await ensureDefaultWarehouseCategories(supabase, ak);
+    await dedupeWarehouseCategories(supabase, ak);
+    await ensureDefaultKitchenUtensils(supabase, ak);
+  } else {
+    void ensureDefaultWarehouseCategories(supabase, ak);
+    void ensureDefaultKitchenUtensils(supabase, ak);
+  }
+}
+
+/** Odczyt produktów + kategorii + strat (ze slim-fallbackiem). Rzuca przy błędzie items/cats. */
+export async function fetchWarehouseData(ak: string): Promise<WarehouseData> {
+  const [itemsRes, catsRes, wasteRes] = await Promise.all([
+    supabase
+      .from('inventory_items')
+      .select(ITEM_COLS_FULL)
+      .eq('account_key', ak)
+      .eq('is_active', true)
+      .order('name')
+      .limit(2000),
+    supabase
+      .from('inventory_categories')
+      .select('id, name, color')
+      .eq('account_key', ak)
+      .order('sort_order')
+      .limit(200),
+    supabase
+      .from('waste_logs')
+      .select('id, item_name, quantity, unit, reason, created_at')
+      .eq('account_key', ak)
+      .order('created_at', { ascending: false })
+      .limit(50),
+  ]);
+
+  let itemsData = itemsRes.data;
+  let itemsErr = itemsRes.error;
+  // Jedna szybka ścieżka awaryjna (bez łańcucha 4× requestów).
+  if (itemsErr && /is_active|optimal_quantity|safety_buffer_percent|shelf_life_days/.test(itemsErr.message ?? '')) {
+    const slim = await supabase
+      .from('inventory_items')
+      .select(ITEM_COLS_SLIM)
+      .eq('account_key', ak)
+      .order('name')
+      .limit(2000);
+    itemsData = slim.data;
+    itemsErr = slim.error;
+  }
+  if (itemsErr) throw itemsErr;
+  if (catsRes.error) throw catsRes.error;
+  if (wasteRes.error && !/account_key|waste_logs/.test(wasteRes.error.message ?? '')) {
+    if (__DEV__) console.warn('[inventoryService] waste_logs:', wasteRes.error.message);
+  }
+
+  return {
+    items: itemsData ?? [],
+    categories: catsRes.data ?? [],
+    wasteLogs: wasteRes.error ? [] : (wasteRes.data ?? []),
+  };
+}
+
+/** Insert nowej kategorii. Zwraca zapisany wiersz + surowy błąd (mapowany w UI). */
+export async function insertCategory(input: {
+  name: string;
+  color: string;
+  sortOrder: number;
+  accountKey: string;
+}): Promise<{ data: Row | null; error: { message: string } | null }> {
+  const { data, error } = await supabase
+    .from('inventory_categories')
+    .insert({
+      name: input.name,
+      color: input.color,
+      icon_name: 'box',
+      sort_order: input.sortOrder,
+      account_key: input.accountKey,
+    })
+    .select('id, name, color')
+    .single();
+  return { data: data ?? null, error: error ? { message: error.message } : null };
+}
+
+/** Usunięcie kategorii. Zwraca surowy błąd. */
+export async function deleteCategory(id: string): Promise<{ error: { message: string } | null }> {
+  const { error } = await supabase.from('inventory_categories').delete().eq('id', id);
+  return { error: error ? { message: error.message } : null };
+}
+
+/** Soft-delete (is_active=false) z fallbackiem na hard-delete. Rzuca przy błędzie. */
+export async function softDeleteItem(id: string): Promise<void> {
+  const { error } = await supabase.from('inventory_items').update({ is_active: false }).eq('id', id);
+  if (error && /is_active/.test(error.message ?? '')) {
+    const hard = await supabase.from('inventory_items').delete().eq('id', id);
+    if (hard.error) throw hard.error;
+    return;
+  }
+  if (error) throw error;
+}
+
+/** Zapis produktu (insert/update) z fallbackiem na starsze schematy. Zwraca zapisany wiersz. */
+export async function saveInventoryItem(input: {
+  payload: Row;
+  editingId: string | null;
+  ak: string;
+}): Promise<Row> {
+  const { payload, editingId, ak } = input;
+  const selectCols = ITEM_COLS_FULL;
+  let row: Row = null;
+  let saveError: Row = null;
+
+  if (editingId) {
+    const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, shelf_life_days, account_key: _ak, ...core } = payload;
+    let upd = await supabase.from('inventory_items').update(payload).eq('id', editingId).eq('account_key', ak).select(selectCols).single();
+    if (upd.error && /optimal_quantity|shelf_life_days/.test(upd.error.message ?? '')) {
+      const soft: Row = { ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit };
+      if (!/shelf_life/.test(upd.error.message ?? '')) soft.shelf_life_days = shelf_life_days;
+      if (!/optimal_quantity/.test(upd.error.message ?? '')) soft.optimal_quantity = optimal_quantity;
+      upd = await supabase.from('inventory_items').update(soft).eq('id', editingId).eq('account_key', ak).select(ITEM_COLS_SLIM).single();
+    }
+    row = upd.data;
+    saveError = upd.error;
+  } else {
+    let insertRes = await supabase.from('inventory_items').insert(payload).select(selectCols).single();
+    if (insertRes.error && /optimal_quantity|safety_buffer_percent|unit_weight_volume|weight_volume_unit|shelf_life_days/.test(insertRes.error.message ?? '')) {
+      const { optimal_quantity, safety_buffer_percent, unit_weight_volume, weight_volume_unit, shelf_life_days, ...fallback } = payload;
+      insertRes = await supabase.from('inventory_items').insert(fallback).select(ITEM_COLS_SLIM).single();
+    }
+    row = insertRes.data;
+    saveError = insertRes.error;
+  }
+  if (saveError) throw saveError;
+  return row;
+}
+
+/** Zastąp składniki combo (best-effort, gdy tabela jeszcze nie zmigrowana). */
+export async function replaceComboIngredients(itemId: string, rows: Row[]): Promise<void> {
+  await supabase.from('inventory_combo_ingredients').delete().eq('inventory_item_id', itemId);
+  if (!rows.length) return;
+  const { error } = await supabase.from('inventory_combo_ingredients').insert(rows);
+  if (error && !/does not exist|schema cache|relation/i.test(error.message ?? '')) {
+    throw error;
+  }
+}
+
+/** Odczyt składników combo produktu. */
+export async function fetchComboIngredients(itemId: string): Promise<Row[]> {
+  const { data } = await supabase
+    .from('inventory_combo_ingredients')
+    .select('id, ingredient_name, quantity, unit, warehouse_product_id, sort_order')
+    .eq('inventory_item_id', itemId)
+    .order('sort_order');
+  return data ?? [];
+}
+
+/** Auto-odblokowanie pozycji ofert dostawcy po nazwie nowego produktu (tylko własni dostawcy). */
+export async function autoUnlockOfferItems(accountKey: string, newItemId: string, newItemName: string): Promise<void> {
+  try {
+    let sleepingQuery = supabase
+      .from('supplier_offer_items')
+      .select('id, raw_product_name, supplier_id')
+      .is('warehouse_product_id', null);
+    if (accountKey && accountKey !== 'default') {
+      const { data: mySuppliers } = await supabase.from('suppliers').select('id').eq('account_key', accountKey);
+      const ids = (mySuppliers ?? []).map((s: Row) => s.id as string);
+      if (ids.length === 0) return;
+      sleepingQuery = sleepingQuery.in('supplier_id', ids);
+    }
+    const { data: sleeping } = await sleepingQuery;
+    if (!sleeping || sleeping.length === 0) return;
+    const toUnlock = sleeping
+      .filter((item: Row) => namesMatch(newItemName, item.raw_product_name || '', 72))
+      .map((item: Row) => item.id);
+    if (toUnlock.length > 0) {
+      await supabase.from('supplier_offer_items').update({ warehouse_product_id: newItemId }).in('id', toUnlock);
+    }
+  } catch {
+    /* non-critical */
+  }
+}

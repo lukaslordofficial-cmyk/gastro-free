@@ -49,3 +49,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
   nowych błędów (projekt 173->166), `index.tsx` = 0 błędów.
 
 **TODO (kolejne kęsy, jeden na raz, po akceptacji):**
+### 2026-06 — Kęs #3: Serwis Magazynu + fix crashu (czeka na test urządzenia)
+- **BUGFIX krytyczny "Rendered more hooks / change in order of Hooks" (ExpandableDateJournal):**
+  `useMemo(leafById)` był wołany PO wczesnym `return` przy pustej liście → dodanie
+  pierwszego kosztu zmiennego (pusta→niepusta) łamało Rules of Hooks i wywalało
+  ekran finansów. Hook przeniesiony przed early-return.
+- **Nowy `services/inventoryService.ts`** — całe IO Magazynu (fetch+seed, insert/delete
+  kategorii, soft-delete produktu, save z fallbackami, combo, auto-unlock ofert).
+  `app/(tabs)/magazyn.tsx` ma teraz 0 bezpośrednich zapytań `supabase`.
+- Próba naprawy typu `Database` (never przy insertach) — nieudana bez `supabase gen
+  types` (wymaga CLI+bazy); cofnięta, bo nie pomagała. Typy nie wpływają na runtime.
+- Weryfikacja: bundle Metro OK, tsc bez nowych błędów (173→166).

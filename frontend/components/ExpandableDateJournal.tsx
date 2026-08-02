@@ -74,6 +74,14 @@ export function ExpandableDateJournal({
     if (years.length && openYear === null) setOpenYear(years[0]);
   }, [years, openYear]);
 
+  // Hook MUSI być wołany bezwarunkowo (przed early-return) — inaczej „rendered
+  // more hooks" gdy lista przechodzi z pustej na niepustą (dekalog §V).
+  const leafById = useMemo(() => {
+    const m = new Map<string, JournalLeaf>();
+    items.forEach((i) => m.set(i.id, i));
+    return m;
+  }, [items]);
+
   if (!items.length) {
     return (
       <View style={styles.empty}>
@@ -81,12 +89,6 @@ export function ExpandableDateJournal({
       </View>
     );
   }
-
-  const leafById = useMemo(() => {
-    const m = new Map<string, JournalLeaf>();
-    items.forEach((i) => m.set(i.id, i));
-    return m;
-  }, [items]);
 
   return (
     <View>

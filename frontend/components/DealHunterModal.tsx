@@ -367,7 +367,11 @@ function themedStyles(C: DealColors) {
     },
     addBarBtnText: { color: C.white, fontWeight: '800', fontSize: 13 },
     pickerOverlay: {
-      flex: 1, backgroundColor: C.overlay, justifyContent: 'flex-end',
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: C.overlay,
+      justifyContent: 'flex-end',
+      zIndex: 50,
+      elevation: 50,
     },
     pickerSheet: {
       backgroundColor: C.background, borderTopLeftRadius: 20, borderTopRightRadius: 20,

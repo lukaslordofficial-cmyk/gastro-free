@@ -49,6 +49,13 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
   nowych błędów (projekt 173->166), `index.tsx` = 0 błędów.
 
 **TODO (kolejne kęsy, jeden na raz, po akceptacji):**
+### 2026-06 — Kęs #4: Serwis Dostawców (czeka na test urządzenia)
+- **Nowe `services/suppliersService.ts` + `services/supplierOrdersService.ts`** —
+  całe IO Dostawców: fetch z 4-poziomowym fallbackiem schematu, katalog, oferty AI,
+  edge function `process-offer`, zamówienia/drafty. `app/(tabs)/dostawcy.tsx` = 0
+  bezpośrednich zapytań `supabase` (było 36).
+- Weryfikacja: bundle Metro OK, tsc 166->154 (usunięte surowe inserty `never`).
+- Pozostałe ekrany z `supabase` w UI: `menu.tsx` (7), `ustawienia.tsx` (2) — kolejne kęsy.
 ### 2026-06 — Kęs #3: Serwis Magazynu + fix crashu (czeka na test urządzenia)
 - **BUGFIX krytyczny "Rendered more hooks / change in order of Hooks" (ExpandableDateJournal):**
   `useMemo(leafById)` był wołany PO wczesnym `return` przy pustej liście → dodanie

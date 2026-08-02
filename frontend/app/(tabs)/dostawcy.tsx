@@ -44,7 +44,8 @@ import {
   TrendingUp,
 } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { supabase } from '@/lib/supabase';
+import * as suppliersService from '@/services/suppliersService';
+import * as supplierOrdersService from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { OrderModal } from '@/components/OrderModal';
 import {
@@ -367,22 +368,9 @@ function SupplierCard({
   const loadData = useCallback(async () => {
     setLoadingData(true);
     try {
-      const [{ data: offerData }, { data: itemData }] = await Promise.all([
-        supabase
-          .from('supplier_offers')
-          .select('*')
-          .eq('supplier_id', supplier.id)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-        supabase
-          .from('supplier_offer_items')
-          .select('*')
-          .eq('supplier_id', supplier.id)
-          .order('raw_product_name'),
-      ]);
-      if (offerData) setOffer(offerData as SupplierOffer);
-      setOfferItems((itemData ?? []) as SupplierOfferItem[]);
+      const { offer: offerData, items: itemData } = await suppliersService.fetchSupplierOfferData(supplier.id);
+      if (offerData) setOffer(offerData);
+      setOfferItems(itemData);
     } finally {
       setLoadingData(false);
     }
@@ -395,20 +383,11 @@ function SupplierCard({
   useEffect(() => {
     if (offer?.status === 'pending' || offer?.status === 'processing') {
       pollRef.current = setInterval(async () => {
-        const { data } = await supabase
-          .from('supplier_offers')
-          .select('*')
-          .eq('id', offer.id)
-          .maybeSingle();
+        const data = await suppliersService.fetchOfferById(offer.id);
         if (data) {
           setOffer(data as SupplierOffer);
           if (data.status === 'done') {
-            const { data: items } = await supabase
-              .from('supplier_offer_items')
-              .select('*')
-              .eq('supplier_id', supplier.id)
-              .order('raw_product_name');
-            setOfferItems((items ?? []) as SupplierOfferItem[]);
+            setOfferItems(await suppliersService.fetchOfferItems(supplier.id));
           }
           if (data.status === 'done' || data.status === 'error') {
             if (pollRef.current) clearInterval(pollRef.current);
@@ -494,14 +473,8 @@ function SupplierCard({
         sort_order: 999,
         is_visible: true,
       };
-      let { error } = await supabase
-        .from('supplier_catalog')
-        .insert({ ...basePayload, kg_total: kgTotal });
-      // Fallback: starszy schemat bez kolumny kg_total → zapisz bez niej (waga zostaje w etykiecie).
-      if (error && /kg_total/i.test(error.message ?? '')) {
-        ({ error } = await supabase.from('supplier_catalog').insert(basePayload));
-      }
-      if (error) throw error;
+      const { error } = await suppliersService.insertCatalogProduct(basePayload, kgTotal);
+      if (error) throw new Error(error.message);
       setShowManualModal(false);
       setManualName('');
       setManualPrice('');
@@ -532,7 +505,7 @@ function SupplierCard({
   }, [supplier.category]);
 
   const deleteCatalogProduct = async (id: string) => {
-    const { error } = await supabase.from('supplier_catalog').delete().eq('id', id);
+    const { error } = await suppliersService.deleteCatalogProduct(id);
     if (error) {
       Alert.alert('Błąd', error.message);
       return;
@@ -1614,12 +1587,7 @@ function DraftCartEditor({
   useEffect(() => {
     if (!catalogOpen || !draft.supplier_id) return;
     void (async () => {
-      const { data } = await supabase
-        .from('supplier_catalog')
-        .select('id, name, price_pln, unit')
-        .eq('supplier_id', draft.supplier_id!)
-        .order('name')
-        .limit(400);
+      const data = await suppliersService.fetchSupplierCatalog(draft.supplier_id!);
       setCatalog((data ?? []).map((r: any) => ({
         id: r.id,
         name: r.name,
@@ -1679,8 +1647,7 @@ function DraftCartEditor({
   const save = async () => {
     setSaving(true);
     try {
-      // Usuń stare pozycje i wstaw aktualne
-      await supabase.from('supplier_order_items').delete().eq('order_id', draft.id);
+      // Usuń stare pozycje, wstaw aktualne, zapisz notatki (w serwisie).
       const rows = items
         .filter((it) => it.qty > 0 && it.name.trim())
         .map((it) => ({
@@ -1691,14 +1658,7 @@ function DraftCartEditor({
           quantity_ordered: it.qty,
           warehouse_product_id: null,
         }));
-      if (rows.length) {
-        const { error } = await supabase.from('supplier_order_items').insert(rows);
-        if (error) throw error;
-      }
-      await supabase
-        .from('supplier_orders')
-        .update({ notes: draft.notes?.trim() || null })
-        .eq('id', draft.id);
+      await supplierOrdersService.saveOrderItems(draft.id, rows, draft.notes?.trim() || null);
       onSaved();
       onClose();
     } catch (e: any) {
@@ -1934,17 +1894,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
     if (!visible) return;
     setLoading(true);
     void (async () => {
-      const [{ data: offerData }, { data: drafts }] = await Promise.all([
-        supabase
-          .from('supplier_offer_items')
-          .select('id, supplier_id, raw_product_name, price_net, unit, suppliers(name, icon_color)')
-          .order('raw_product_name'),
-        supabase
-          .from('supplier_orders')
-          .select('id, supplier_id, notes, status, suppliers(name, email), supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net)')
-          .eq('status', 'draft')
-          .order('created_at', { ascending: false }),
-      ]);
+      const { offerItems: offerData, drafts } = await supplierOrdersService.fetchGlobalBasket();
 
       const map = new Map<string, GlobalBasketGroup>();
       for (const row of offerData ?? []) {
@@ -2021,7 +1971,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
 
   const markDraftSent = async (orderId: string) => {
     try {
-      await supabase.from('supplier_orders').update({ status: 'sent' }).eq('id', orderId);
+      await supplierOrdersService.markDraftSent(orderId);
       setDraftOrders((prev) => prev.filter((x) => x.id !== orderId));
       setReloadKey((k) => k + 1);
     } catch {
@@ -2113,10 +2063,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
             void (async () => {
               try {
                 const draftIds = draftOrders.map((d) => d.id);
-                if (draftIds.length) {
-                  await supabase.from('supplier_order_items').delete().in('order_id', draftIds);
-                  await supabase.from('supplier_orders').delete().in('id', draftIds);
-                }
+                await supplierOrdersService.deleteDrafts(draftIds);
                 setGroups([]);
                 setDraftOrders([]);
                 setReloadKey((k) => k + 1);
@@ -2142,8 +2089,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           onPress: () => {
             void (async () => {
               try {
-                await supabase.from('supplier_order_items').delete().eq('order_id', d.id);
-                await supabase.from('supplier_orders').delete().eq('id', d.id);
+                await supplierOrdersService.deleteOneDraft(d.id);
                 setDraftOrders((prev) => prev.filter((x) => x.id !== d.id));
                 setReloadKey((k) => k + 1);
               } catch (e: any) {
@@ -2399,93 +2345,13 @@ export default function DostawcyScreen() {
 
   const fetchSuppliers = useCallback(async () => {
     if (!authReady || !isAuthenticated || !accountKey || accountKey === 'default') return;
-    const EXTRA =
-      'min_order_value, shipping_cost, free_shipping_threshold, lead_time_days';
-    const SEL_VISIBLE =
-      `id, name, nip, category, contact_person, phone, email, notes, icon_color, ${EXTRA}, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order, is_visible)`;
-    const SEL_BASE =
-      `id, name, nip, category, contact_person, phone, email, notes, icon_color, ${EXTRA}, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order)`;
-    const SEL_NO_LEAD =
-      'id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, shipping_cost, free_shipping_threshold, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order)';
-    const SEL_LEGACY =
-      'id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order)';
     try {
       const ak = accountKey;
-      const [suppliersRes, countRes, recipeRes] = await Promise.all([
-        supabase.from('suppliers').select(SEL_VISIBLE).eq('account_key', ak).order('name'),
-        supabase
-          .from('supplier_offers')
-          .select('*', { count: 'exact', head: true })
-          .eq('account_key', ak)
-          .eq('status', 'done'),
-        supabase
-          .from('recipe_ingredients')
-          .select('ingredient_name')
-          .limit(5000),
-      ]);
-      let data = suppliersRes.data;
-      if (suppliersRes.error) {
-        const msg = suppliersRes.error.message ?? '';
-        if (/lead_time_days/.test(msg)) {
-          const retry = await supabase.from('suppliers').select(SEL_NO_LEAD).eq('account_key', ak).order('name');
-          if (retry.error) {
-            if (/shipping_cost|free_shipping_threshold/.test(retry.error.message ?? '')) {
-              const legacy = await supabase.from('suppliers').select(SEL_LEGACY).eq('account_key', ak).order('name');
-              if (legacy.error) throw legacy.error;
-              data = legacy.data;
-            } else {
-              throw retry.error;
-            }
-          } else {
-            data = retry.data;
-          }
-        } else if (/shipping_cost|free_shipping_threshold/.test(msg)) {
-          const retry = await supabase.from('suppliers').select(SEL_LEGACY).eq('account_key', ak).order('name');
-          if (retry.error) throw retry.error;
-          data = retry.data;
-        } else if (/is_visible/.test(msg)) {
-          const retry = await supabase.from('suppliers').select(SEL_BASE).eq('account_key', ak).order('name');
-          if (retry.error) throw retry.error;
-          data = retry.data;
-        } else {
-          throw suppliersRes.error;
-        }
-      }
-      const menuIngredients = [
-        ...new Set(
-          (recipeRes.data ?? [])
-            .map((r: any) => (r.ingredient_name || '').trim())
-            .filter(Boolean),
-        ),
-      ];
-      // Opcjonalnie: podnieś is_visible w DB dla fuzzy-match (bez blokowania UI)
-      const toReveal: string[] = [];
-      for (const s of data ?? []) {
-        for (const c of (s as any).supplier_catalog ?? []) {
-          if (c.is_visible === false && matchesAnyMenuIngredient(c.name, menuIngredients, 72)) {
-            toReveal.push(c.id);
-          }
-        }
-      }
-      if (toReveal.length > 0) {
-        void supabase.from('supplier_catalog').update({ is_visible: true }).in('id', toReveal);
-      }
-      setSuppliers((data ?? []).map((row) => mapDbRow(row, menuIngredients)));
-      setTotalAnalyses(countRes.count ?? 0);
+      const { rows, menuIngredients, totalAnalyses, orderTotals } = await suppliersService.fetchSuppliersData(ak);
+      setSuppliers(rows.map((row) => mapDbRow(row, menuIngredients)));
+      setTotalAnalyses(totalAnalyses);
       setError(null);
-
-      // Suma zamówień (faktury) per dostawca — z variable_cost_entries (note: supplier:<id>)
-      const { data: costs } = await supabase
-        .from('variable_cost_entries')
-        .select('amount_pln, note')
-        .eq('account_key', ak)
-        .eq('type', 'materials');
-      const totals: Record<string, number> = {};
-      (costs ?? []).forEach((c: any) => {
-        const m = /supplier:([0-9a-fA-F-]{36})/.exec(c.note ?? '');
-        if (m) totals[m[1]] = (totals[m[1]] ?? 0) + Number(c.amount_pln ?? 0);
-      });
-      setOrderTotals(totals);
+      setOrderTotals(orderTotals);
     } catch (e: any) {
       setError(e.message ?? 'Błąd ładowania dostawców');
     } finally {
@@ -2532,21 +2398,16 @@ export default function DostawcyScreen() {
       encoding: FileSystem.EncodingType.Base64,
     });
 
-    const { data: inventoryItems } = await supabase
-      .from('inventory_items')
-      .select('id, name, unit')
-      .order('name');
+    const inventoryItems = await suppliersService.fetchInventoryBrief();
 
     onStage('analyzing');
 
-    const { data: fnData, error: fnError } = await supabase.functions.invoke('process-offer', {
-      body: {
-        supplier_id: supplierId,
-        file_base64: base64Data,
-        mime_type: asset.mimeType ?? 'application/pdf',
-        file_name: asset.name,
-        inventory_items: inventoryItems ?? [],
-      },
+    const { data: fnData, error: fnError } = await suppliersService.invokeProcessOffer({
+      supplier_id: supplierId,
+      file_base64: base64Data,
+      mime_type: asset.mimeType ?? 'application/pdf',
+      file_name: asset.name,
+      inventory_items: inventoryItems ?? [],
     });
 
     if (fnError) {
@@ -2574,8 +2435,7 @@ export default function DostawcyScreen() {
 
   const handleDeleteSupplier = useCallback(async (supplierId: string) => {
     try {
-      const { error: err } = await supabase.from('suppliers').delete().eq('id', supplierId);
-      if (err) throw err;
+      await suppliersService.deleteSupplier(supplierId);
       setSuppliers((prev) => prev.filter((s) => s.id !== supplierId));
     } catch (e: any) {
       Alert.alert('Błąd', e.message ?? 'Nie udało się usunąć dostawcy.');
@@ -2645,49 +2505,13 @@ export default function DostawcyScreen() {
         lead_time_days: isFinite(leadVal) && leadVal > 0 ? leadVal : null,
         account_key: ak,
       };
-      let err: any = null;
-      if (editingId) {
-        ({ error: err } = await supabase.from('suppliers').update(payload).eq('id', editingId).eq('account_key', ak));
-      } else {
-        const iconColor = ICON_COLORS[Math.floor(Math.random() * ICON_COLORS.length)];
-        ({ error: err } = await supabase.from('suppliers').insert({ ...payload, icon_color: iconColor }));
+      const { partials } = await suppliersService.saveSupplier({ payload, editingId, ak });
+      if (partials.includes('lead')) {
+        Alert.alert('Częściowy zapis', 'Zapisano bez lead time. Uruchom ADD_SUPPLIER_LEAD_TIME.sql w Supabase.');
       }
-      if (err && /lead_time_days/.test(err.message ?? '')) {
-        const noLead = { ...payload };
-        delete noLead.lead_time_days;
-        if (editingId) {
-          ({ error: err } = await supabase.from('suppliers').update(noLead).eq('id', editingId));
-        } else {
-          const iconColor = ICON_COLORS[Math.floor(Math.random() * ICON_COLORS.length)];
-          ({ error: err } = await supabase.from('suppliers').insert({ ...noLead, icon_color: iconColor }));
-        }
-        if (!err) {
-          Alert.alert(
-            'Częściowy zapis',
-            'Zapisano bez lead time. Uruchom ADD_SUPPLIER_LEAD_TIME.sql w Supabase.',
-          );
-        }
+      if (partials.includes('shipping')) {
+        Alert.alert('Częściowy zapis', 'Zapisano dane podstawowe. Uruchom ADD_SUPPLIER_SHIPPING.sql w Supabase, aby włączyć koszty dostawy.');
       }
-      if (err && /shipping_cost|free_shipping_threshold/.test(err.message ?? '')) {
-        // Migracja ADD_SUPPLIER_SHIPPING.sql jeszcze nie uruchomiona
-        const legacy = { ...payload };
-        delete legacy.shipping_cost;
-        delete legacy.free_shipping_threshold;
-        delete legacy.lead_time_days;
-        if (editingId) {
-          ({ error: err } = await supabase.from('suppliers').update(legacy).eq('id', editingId));
-        } else {
-          const iconColor = ICON_COLORS[Math.floor(Math.random() * ICON_COLORS.length)];
-          ({ error: err } = await supabase.from('suppliers').insert({ ...legacy, icon_color: iconColor }));
-        }
-        if (!err) {
-          Alert.alert(
-            'Częściowy zapis',
-            'Zapisano dane podstawowe. Uruchom ADD_SUPPLIER_SHIPPING.sql w Supabase, aby włączyć koszty dostawy.',
-          );
-        }
-      }
-      if (err) throw err;
       setShowAddModal(false);
       resetForm();
       await fetchSuppliers();

@@ -42,3 +42,10 @@ refaktor przed nową funkcją, testy jednostkowe, dokumentacja (ARCHITECTURE.md)
 - Weryfikacja: bundle Metro OK, tsc 173->166.
 - P0 Kęs #4: `menu.tsx` (2866) -> `services/menuService` + rozbicie UI.
 - P1 Kęs #5: `dostawcy.tsx` (3185) -> `services/suppliersService` + rozbicie UI.
+### 2026-06 — Kęs #4: Serwis Dostawców ✅ (czeka na test urządzenia)
+- `services/suppliersService.ts` + `services/supplierOrdersService.ts`; dostawcy = 0 zapytań supabase (było 36).
+- Bundle Metro OK, tsc 166->154.
+- Pozostało w UI: menu.tsx (7 zapytań), ustawienia.tsx (2).
+- BACKLOG SKALOWALNOŚĆ (P0 przed skalą 10k+): audyt RLS + indeksy B-Tree na account_key/created_at (§VII),
+  paginacja/limity zamiast limit(1500-5000), filtr account_key na recipe_ingredients (obecnie bez filtra).
+- BACKLOG: rozbicie monolitów UI (<250 linii) — index/magazyn/menu/dostawcy/VoiceReportModal — kęs po kęsie z testem urządzenia.

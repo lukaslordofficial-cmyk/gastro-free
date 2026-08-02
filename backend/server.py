@@ -7960,21 +7960,12 @@ class InterpretOrderRequest(BaseModel):
 # --- Algorytm porównywania ---------------------------------------------------
 
 async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
-    # `kg_total` bywa nieobecne w starszym schemacie — próbujemy z nim, a przy
-    # błędzie „column does not exist” pobieramy bez niego (base-price użyje 0).
-    try:
-        catalog = await sb_get(client, "supplier_catalog", params={
-            "select": "id,supplier_id,name,variant,unit,price_pln,liters_total,kg_total,unit_count,is_visible",
-            "limit": "2000",
-        })
-    except httpx.HTTPStatusError as e:
-        if "kg_total" in (e.response.text or ""):
-            catalog = await sb_get(client, "supplier_catalog", params={
-                "select": "id,supplier_id,name,variant,unit,price_pln,liters_total,unit_count,is_visible",
-                "limit": "2000",
-            })
-        else:
-            raise
+    """Katalog + dostawcy TYLKO bieżącego tenanta.
+
+    `supplier_catalog` często nie ma kolumny account_key (tenant przez supplier_id).
+    Service role omija RLS — bez filtra `in.(supplier_ids)` matchowałoby obce
+    katalogi → puste nazwy dostawców i pusty picker w FE.
+    """
     supplier_select = (
         "id,name,email,contact_person,phone,min_order_value,"
         "shipping_cost,free_shipping_threshold,lead_time_days"
@@ -8002,8 +7993,42 @@ async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
                 supplier_select = "id,name,email,contact_person,phone"
     suppliers = await sb_get(client, "suppliers", params={
         "select": supplier_select, "limit": "500",
-    })
-    return catalog or [], suppliers or []
+    }) or []
+    allowed_ids = [str(s["id"]) for s in suppliers if s.get("id")]
+    if not allowed_ids:
+        return [], suppliers
+
+    select_full = (
+        "id,supplier_id,name,variant,unit,price_pln,liters_total,kg_total,unit_count,is_visible"
+    )
+    select_no_kg = (
+        "id,supplier_id,name,variant,unit,price_pln,liters_total,unit_count,is_visible"
+    )
+    catalog: list = []
+    # Chunk — limity długości URL PostgREST
+    for i in range(0, len(allowed_ids), 40):
+        chunk = allowed_ids[i : i + 40]
+        id_filter = f"in.({','.join(chunk)})"
+        try:
+            rows = await sb_get(client, "supplier_catalog", params={
+                "select": select_full,
+                "supplier_id": id_filter,
+                "limit": "2000",
+            }) or []
+        except httpx.HTTPStatusError as e:
+            if "kg_total" in (e.response.text or ""):
+                rows = await sb_get(client, "supplier_catalog", params={
+                    "select": select_no_kg,
+                    "supplier_id": id_filter,
+                    "limit": "2000",
+                }) or []
+            else:
+                raise
+        catalog.extend(rows)
+
+    allowed_set = set(allowed_ids)
+    catalog = [r for r in catalog if str(r.get("supplier_id") or "") in allowed_set]
+    return catalog, suppliers
 
 
 async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[str, float]:

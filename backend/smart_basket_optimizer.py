@@ -1931,15 +1931,42 @@ def build_smart_optimize_response(
             is_multivariable = True
 
     pricing_matrix = to_pricing_matrix(items, suppliers_meta)
-    items_requested = [
-        {
+    items_requested = []
+    for pi in items:
+        bbs = pi.get("best_by_supplier") or {}
+        offers_sorted = sorted(
+            bbs.values(),
+            key=lambda q: float(q.get("line_total") or 1e18),
+        )
+        best_q = offers_sorted[0] if offers_sorted else None
+        meta_best = _supplier_meta(suppliers_meta, best_q["supplier_id"]) if best_q else {}
+        best_name = (
+            ((best_q or {}).get("supplier_name") or meta_best.get("name") or "").strip()
+            or None
+        )
+        items_requested.append({
             "product_name": pi["product_name"],
             "quantity": pi["quantity"],
             "unit": pi["unit"],
-            "found": bool(pi.get("best_by_supplier")),
-        }
-        for pi in items
-    ]
+            "found": bool(bbs),
+            "supplier_id": (best_q or {}).get("supplier_id"),
+            "supplier_name": best_name,
+            "matched_name": (best_q or {}).get("matched_name"),
+            "offers": [
+                {
+                    "supplier_id": q.get("supplier_id"),
+                    "supplier_name": (
+                        (q.get("supplier_name")
+                         or (_supplier_meta(suppliers_meta, q.get("supplier_id") or {}).get("name"))
+                         or "").strip()
+                        or "Dostawca"
+                    ),
+                    "line_total": q.get("line_total"),
+                    "matched_name": q.get("matched_name"),
+                }
+                for q in offers_sorted[:6]
+            ],
+        })
 
     # Kompatybilność z DealHunterModal v1
     variant_monolith = None

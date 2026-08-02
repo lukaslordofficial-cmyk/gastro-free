@@ -206,11 +206,14 @@ def to_pricing_matrix(items: list[dict], suppliers_meta: dict[str, dict]) -> lis
         quotes = []
         for sid, b in (pi.get("best_by_supplier") or {}).items():
             min_val = _min_order_value(suppliers_meta, sid)
+            meta = suppliers_meta.get(sid) or {}
+            sname = (b.get("supplier_name") or meta.get("name") or "").strip() or "Dostawca"
+            semail = b.get("supplier_email") if b.get("supplier_email") is not None else meta.get("email")
             quotes.append(
                 {
                     "supplier_id": sid,
-                    "supplier_name": b.get("supplier_name"),
-                    "supplier_email": b.get("supplier_email"),
+                    "supplier_name": sname,
+                    "supplier_email": semail,
                     "unit_price_base": b["unit_price_base"],
                     "matched_name": b.get("matched_name"),
                     "min_order_value": min_val,

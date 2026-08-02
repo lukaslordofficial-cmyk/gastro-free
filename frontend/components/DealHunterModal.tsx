@@ -1059,13 +1059,15 @@ function NewOrderBrowser({
     ? findWarehouseStock(inventory, selectedProduct.product.name)
     : null;
 
+  if (!visible) return null;
+
+  // Overlay wewnątrz Łowcy — nie osobny Modal (zagnieżdżenie z Jarvisem nic nie pokazywało)
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.pickerOverlay}>
+      <View style={styles.pickerOverlay} testID="deal-hunter-new-order">
         <View style={[styles.pickerSheet, { maxHeight: '92%' }]}>
           <View style={styles.pickerHeader}>
             <Text style={styles.pickerTitle}>Nowe zamówienie</Text>
-            <TouchableOpacity onPress={onClose}>
+            <TouchableOpacity onPress={onClose} testID="deal-hunter-new-order-close">
               <X size={22} color={C.textSecondary} />
             </TouchableOpacity>
           </View>
@@ -1208,7 +1210,6 @@ function NewOrderBrowser({
           )}
         </View>
       </View>
-    </Modal>
   );
 }
 
@@ -1993,12 +1994,26 @@ export function DealHunterModal({
     return (
       <View style={styles.editCart} testID="deal-hunter-edit-cart">
         <Text style={styles.editCartTitle}>Zamówienia u dostawców</Text>
+        {groups.length > 0 ? (
+          <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 4 }]} testID="deal-hunter-suppliers-summary">
+            Od: {groups.map((g) => (g.supplier_name || '').trim() || 'Dostawca').join(' · ')}
+          </Text>
+        ) : null}
         <Text style={styles.editCartHint}>
-          Edytuj pozycje. Koszyki poniżej minimum logistycznego nie da się wysłać — dorzuć produkty albo wybierz inny wariant.
+          Edytuj pozycje. Dorzuć z katalogu tego dostawcy albo „Nowe zamówienie” (inni dostawcy).
         </Text>
+        <TouchableOpacity
+          style={[styles.newOrderBtn, { marginBottom: 8 }]}
+          onPress={() => setShowNewOrder(true)}
+          activeOpacity={0.85}
+          testID="deal-hunter-new-order-btn-top"
+        >
+          <Package size={16} color={C.accent} strokeWidth={2.2} />
+          <Text style={styles.newOrderBtnText}>Dodaj produkt z katalogów (wszyscy dostawcy)</Text>
+        </TouchableOpacity>
         {groups.length === 0 ? (
           <Text style={styles.newOrderHint}>
-            Brak pozycji w koszyku. Skorzystaj z „Nowe zamówienie”, aby dodać produkty.
+            Brak pozycji w koszyku. Skorzystaj z przycisku powyżej, aby dodać produkty.
           </Text>
         ) : (
           groups.map((g, gi) => {
@@ -2006,17 +2021,20 @@ export function DealHunterModal({
             return (
             <View key={`${g.supplier_id}-${gi}`} style={styles.supplierOrderCard}>
               <View style={styles.groupHeader}>
-                <Truck size={14} color={C.accent} strokeWidth={2.2} />
-                <Text style={styles.groupName} numberOfLines={2}>
-                  {(g.supplier_name || '').trim() || 'Dostawca'}
-                </Text>
+                <Truck size={16} color={C.accent} strokeWidth={2.2} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={[styles.editCartHint, { marginBottom: 0 }]}>Zamówienie od</Text>
+                  <Text style={styles.groupName} numberOfLines={2}>
+                    {(g.supplier_name || '').trim() || 'Dostawca (uzupełnij nazwę)'}
+                  </Text>
+                </View>
                 <Text style={styles.groupSub}>{formatPln(g.subtotal_pln)}</Text>
               </View>
-              {!!g.supplier_email && (
-                <Text style={[styles.editCartHint, { marginBottom: 6 }]}>
-                  E-mail: {g.supplier_email}
-                </Text>
-              )}
+              <Text style={[styles.editCartHint, { marginBottom: 6 }]}>
+                {g.supplier_email
+                  ? `E-mail: ${g.supplier_email}`
+                  : 'Brak e-maila dostawcy — uzupełnij w module Dostawcy.'}
+              </Text>
               <MinOrderBadge meets={g.meets_minimum_order} minVal={g.min_order_value} />
               {g.items.map((it, idx) => (
                 <OfferLine
@@ -2028,17 +2046,28 @@ export function DealHunterModal({
                   onRemove={() => removeCartItem(g.supplier_id, it.product_name)}
                 />
               ))}
-              {!!g.supplier_id && (
-                <TouchableOpacity
-                  style={styles.addFromCatalogBtn}
-                  onPress={() => setCatalogPicker({ id: g.supplier_id!, name: g.supplier_name })}
-                  activeOpacity={0.8}
-                  testID={`deal-hunter-add-catalog-${g.supplier_id}`}
-                >
-                  <Plus size={14} color={C.accent} strokeWidth={2.5} />
-                  <Text style={styles.addFromCatalogText}>Dodaj z katalogu tego dostawcy</Text>
-                </TouchableOpacity>
-              )}
+              <TouchableOpacity
+                style={styles.addFromCatalogBtn}
+                onPress={() => {
+                  if (g.supplier_id) {
+                    setCatalogPicker({
+                      id: g.supplier_id,
+                      name: (g.supplier_name || '').trim() || 'Dostawca',
+                    });
+                  } else {
+                    setShowNewOrder(true);
+                  }
+                }}
+                activeOpacity={0.8}
+                testID={`deal-hunter-add-catalog-${g.supplier_id ?? gi}`}
+              >
+                <Plus size={14} color={C.accent} strokeWidth={2.5} />
+                <Text style={styles.addFromCatalogText}>
+                  {g.supplier_id
+                    ? 'Dodaj z katalogu tego dostawcy'
+                    : 'Dodaj produkt z katalogów dostawców'}
+                </Text>
+              </TouchableOpacity>
               <TouchableOpacity
                 style={[
                   styles.prepareSupplierBtn,
@@ -2522,6 +2551,13 @@ export function DealHunterModal({
                         );
                         const ok = found ? found.found !== false : true;
                         const cat = row?.category ? ` · ${row.category}` : '';
+                        const fromSup = (found?.supplier_name || '').trim();
+                        const offerNames = (found?.offers ?? [])
+                          .map((o) => (o.supplier_name || '').trim())
+                          .filter(Boolean)
+                          .slice(0, 3);
+                        const who = fromSup
+                          || (offerNames.length ? offerNames.join(', ') : '');
                         return (
                           <Text
                             key={`scope-${idx}-${name}`}
@@ -2530,6 +2566,7 @@ export function DealHunterModal({
                             {ok ? '✓' : '✗'} {name}
                             {qty != null ? ` — ${qty} ${unit}`.trimEnd() : ''}
                             {cat}
+                            {ok && who ? ` · od: ${who}` : ''}
                             {!ok ? ' (brak w ofertach)' : ''}
                           </Text>
                         );
@@ -2829,13 +2866,15 @@ export function DealHunterModal({
             onResolvedSupplier={resolveSupplierInCart}
           />
         ) : null}
+        {showNewOrder ? (
+          <NewOrderBrowser
+            visible
+            onClose={() => setShowNewOrder(false)}
+            onAdd={addProductToOrder}
+          />
+        ) : null}
       </View>
     </Modal>
-    <NewOrderBrowser
-      visible={showNewOrder}
-      onClose={() => setShowNewOrder(false)}
-      onAdd={addProductToOrder}
-    />
     <Modal
       visible={!!draftSavedInfo}
       transparent

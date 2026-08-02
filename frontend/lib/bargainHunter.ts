@@ -133,7 +133,21 @@ export interface OptimizeResult {
   /** v2: true gdy warto pokazać kilka scenariuszy (różnica ≥ 5%) */
   is_multivariable?: boolean;
   optimizer_version?: number;
-  items_requested: { product_name: string; quantity: number; unit: string; found: boolean }[];
+  items_requested: {
+    product_name: string;
+    quantity: number;
+    unit: string;
+    found: boolean;
+    supplier_id?: string | null;
+    supplier_name?: string | null;
+    matched_name?: string | null;
+    offers?: Array<{
+      supplier_id?: string;
+      supplier_name?: string;
+      line_total?: number;
+      matched_name?: string;
+    }>;
+  }[];
   /** Zakres z critical-by-category — rozpiska w Łowcy (nie w panelu Jarvisa). */
   scope_categories?: string[];
   scope_products?: {

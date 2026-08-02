@@ -32,8 +32,8 @@ export function DocumentScanHost() {
 
   const onScanConfirmed = useCallback(() => {
     // Odśwież Magazyn / Dostawców — NIE zamykaj modala (użytkownik widzi wynik).
-    notifyDocumentScanComplete();
-  }, [notifyDocumentScanComplete]);
+    notifyDocumentScanComplete(documentScanKind === 'offer' ? 'offer' : 'invoice');
+  }, [notifyDocumentScanComplete, documentScanKind]);
 
   return (
     <>
@@ -49,7 +49,7 @@ export function DocumentScanHost() {
         visible={menuScanVisible}
         onClose={closeMenuScan}
         onConfirmed={async () => {
-          notifyDocumentScanComplete();
+          notifyDocumentScanComplete('menu');
           // Daj Reactowi czas na odpalenie listenerów fetchData w Menu/Magazynie.
           await new Promise((r) => setTimeout(r, 80));
           try {

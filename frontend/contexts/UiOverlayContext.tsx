@@ -52,11 +52,12 @@ type UiOverlayContextValue = {
   openDocumentScan: (kind?: DocumentScanKind) => void;
   closeDocumentScan: () => void;
   /**
-   * Bump po zakończeniu skanu dokumentu (oferta/faktura) —
-   * Magazyn / Dostawcy nasłuchują i odświeżają listy.
+   * Bump po zakończeniu skanu — Magazyn/Dostawcy/Menu odświeżają listy.
+   * `kind` pozwala Finansom reagować tylko na fakturę (nie na skan menu).
    */
   documentScanRevision: number;
-  notifyDocumentScanComplete: () => void;
+  lastDocumentScanKind: DocumentScanKind | null;
+  notifyDocumentScanComplete: (kind?: DocumentScanKind) => void;
   /** Skaner karty dań (MenuScanModal). */
   menuScanVisible: boolean;
   openMenuScan: () => void;
@@ -89,6 +90,7 @@ const UiOverlayContext = createContext<UiOverlayContextValue>({
   openDocumentScan: () => {},
   closeDocumentScan: () => {},
   documentScanRevision: 0,
+  lastDocumentScanKind: null,
   notifyDocumentScanComplete: () => {},
   menuScanVisible: false,
   openMenuScan: () => {},
@@ -107,6 +109,7 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
   const [documentScanVisible, setDocumentScanVisible] = useState(false);
   const [documentScanKind, setDocumentScanKind] = useState<DocumentScanKind>('invoice');
   const [documentScanRevision, setDocumentScanRevision] = useState(0);
+  const [lastDocumentScanKind, setLastDocumentScanKind] = useState<DocumentScanKind | null>(null);
   const [menuScanVisible, setMenuScanVisible] = useState(false);
 
   const openProductCascade = useCallback(
@@ -161,7 +164,8 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
     setDocumentScanVisible(false);
   }, []);
 
-  const notifyDocumentScanComplete = useCallback(() => {
+  const notifyDocumentScanComplete = useCallback((kind: DocumentScanKind = 'document') => {
+    setLastDocumentScanKind(kind);
     setDocumentScanRevision((n) => n + 1);
   }, []);
 
@@ -193,6 +197,7 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
       openDocumentScan,
       closeDocumentScan,
       documentScanRevision,
+      lastDocumentScanKind,
       notifyDocumentScanComplete,
       menuScanVisible,
       openMenuScan,
@@ -206,6 +211,7 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
       documentScanVisible,
       documentScanKind,
       documentScanRevision,
+      lastDocumentScanKind,
       menuScanVisible,
       wakeListenEnabled,
       voiceOpts,

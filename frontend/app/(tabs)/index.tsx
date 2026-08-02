@@ -855,7 +855,7 @@ export default function FinanseScreen() {
     }[]
   >([]);
   const { isPremiumUi } = useThemeMode();
-  const { openProductCascade, documentScanRevision } = useUiOverlay();
+  const { openProductCascade, documentScanRevision, lastDocumentScanKind } = useUiOverlay();
   const theme = useAppTheme();
   const [revenueJournal, setRevenueJournal] = useState<RevenueEntry[]>([]);
   const [fixedCostsJournal, setFixedCostsJournal] = useState<FixedCost[]>([]);
@@ -992,9 +992,11 @@ export default function FinanseScreen() {
     }, [accountKey, fetchData]),
   );
 
-  // Po skanie faktury — auto-odśwież koszty zmienne z retry.
+  // Po skanie FAKTURY — auto-odśwież koszty zmienne z retry.
+  // Skan menu NIE powinien tu wchodzić (wcześniej mylny alert „Koszty z faktury”).
   useEffect(() => {
     if (documentScanRevision <= 0) return;
+    if (lastDocumentScanKind === 'menu' || lastDocumentScanKind === 'offer') return;
     let cancelled = false;
     varCountBeforeScanRef.current = variableEntries.length;
     scanRetryRef.current = 0;
@@ -1024,7 +1026,7 @@ export default function FinanseScreen() {
     void run();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentScanRevision]);
+  }, [documentScanRevision, lastDocumentScanKind]);
 
   function toggleNote(id: string, currentNote: string | null | undefined) {
     if (expandedNoteId === id) {

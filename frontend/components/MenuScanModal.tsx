@@ -772,17 +772,11 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     setError(null);
 
     const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
-    // Jak gastro-manager-15: brak składników = pusty magazyn — od razu AI + zapis.
-    if (needIng.length > 0) {
-      setDishesNeedingIngredients([...needIng, ...needQty]);
-      setDishesNeedingWeight(needWeight);
-      void confirmSave(true);
-      return;
-    }
-    if (needQty.length === 0 && needWeight.length === 0) {
+    if (needIng.length === 0 && needQty.length === 0 && needWeight.length === 0) {
       void confirmSave(false);
       return;
     }
+    // Przywrócony dialog jak w gastro-manager-15 — użytkownik świadomie wybiera AI.
     setDishesNeedingIngredients([...needIng, ...needQty]);
     setDishesNeedingWeight(needWeight);
     setStage('ask_suggest');
@@ -1163,8 +1157,8 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
             <Text style={styles.askTitle}>Uzupełnić dane AI?</Text>
             <Text style={styles.askText}>{askMessage}</Text>
             <Text style={styles.askMeta}>
-              Bez składników magazyn się nie zapełni. Wybierz TAK (jak w gastro-manager-15). Przy NIE
-              serwer i tak spróbuje uzupełnić puste receptury AI przed zapisem.
+              Dotknij TAK, aby AI dopisał brakujące składniki i gramatury (trafią też do magazynu).
+              Dotknij NIE, aby zapisać formularz — serwer i tak spróbuje uzupełnić puste receptury.
             </Text>
             <View style={styles.askButtons}>
               <TouchableOpacity

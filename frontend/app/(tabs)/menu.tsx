@@ -2533,7 +2533,7 @@ export default function MenuScreen() {
         visible={showScanModal}
         onClose={() => setShowScanModal(false)}
         onConfirmed={async () => {
-          notifyDocumentScanComplete();
+          notifyDocumentScanComplete('menu');
           setRefreshing(true);
           await fetchData();
         }}

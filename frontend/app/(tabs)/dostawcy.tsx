@@ -1318,7 +1318,7 @@ function SupplierCard({
         onClose={() => setShowScanModal(false)}
         onConfirmed={async () => {
           await onRefresh();
-          notifyDocumentScanComplete();
+          notifyDocumentScanComplete('offer');
         }}
         scanContext="supplier"
       />
@@ -2961,7 +2961,7 @@ export default function DostawcyScreen() {
         onClose={() => setShowTopScan(false)}
         onConfirmed={() => {
           void fetchSuppliers();
-          notifyDocumentScanComplete();
+          notifyDocumentScanComplete('offer');
         }}
         scanContext="supplier"
       />

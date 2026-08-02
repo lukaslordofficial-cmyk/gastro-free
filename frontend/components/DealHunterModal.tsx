@@ -2322,9 +2322,10 @@ export function DealHunterModal({
                       )}
                       {Array.isArray(result.items_requested) && result.items_requested.length > 0 ? (
                         <Text style={styles.foundInOffers}>
-                          W ofertach dostawców:{' '}
+                          Dopasowano w katalogach dostawców:{' '}
                           {result.items_requested.filter((i) => i.found).length} /{' '}
                           {result.items_requested.length} pozycji
+                          {' '}(tylko realne oferty — bez zgadywania)
                         </Text>
                       ) : null}
                       {(result.scope_products ?? result.items_requested ?? []).slice(0, 40).map((row: any, idx: number) => {

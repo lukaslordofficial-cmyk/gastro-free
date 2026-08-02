@@ -518,10 +518,12 @@ export function CatalogScanModal({
 
   const confirmInvoice = useCallback(async (productsOverride?: Array<InvoiceProduct | CommitProduct>) => {
     if (!ensureCredits()) return;
+    // Ref-lock: chroni przed podwójnym tapnięciem przy wolnym internecie.
+    if (processingRef.current) return;
+    processingRef.current = true;
     setIsSavingProducts(true);
     setStage('processing');
     setError(null);
-    processingRef.current = true;
     setScanBusy(true);
     try {
       const products = productsOverride ?? invProducts;

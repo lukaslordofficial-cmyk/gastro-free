@@ -18,6 +18,8 @@ type InventorySnapshotRow = {
   name: string;
   quantity: number;
   min_quantity: number;
+  optimal_quantity?: number | null;
+  is_combo_polprodukt?: boolean | null;
   unit: string;
 };
 
@@ -48,9 +50,9 @@ async function insertWithAccountKeyFallback(
   payload: Record<string, unknown>,
 ): Promise<void> {
   const ak = getAccountKey();
-  let { error } = await supabase.from(table).insert({ ...payload, account_key: ak });
+  let { error } = await supabase.from(table).insert({ ...payload, account_key: ak } as never);
   if (error && /account_key/i.test(error.message ?? '')) {
-    ({ error } = await supabase.from(table).insert(payload));
+    ({ error } = await supabase.from(table).insert(payload as never));
   }
   if (error) throw error;
 }
@@ -109,7 +111,39 @@ export async function fetchFinanceRows(accountKey: string, currentMonth: string)
   let varRes = await scoped(supabase.from('variable_cost_entries').select('*')).eq('year_month', currentMonth).order('created_at');
   let revHistRes = await scoped(supabase.from('revenue_entries').select('year_month, amount_pln')).order('year_month').limit(2000);
   let varHistRes = await scoped(supabase.from('variable_cost_entries').select('year_month, amount_pln')).order('year_month').limit(2000);
-  const inventoryRes = await supabase.from('inventory_items').select('id, name, quantity, min_quantity, unit').eq('account_key', ak);
+  // Soft-delete (is_active=false) MUSI być odfiltrowany — inaczej Finanse pokazuje
+  // „250 wymaga uzupełnienia” po wyczyszczeniu magazynu. Kolumny opcjonalne
+  // (optimal / is_combo) zdejmujemy stopniowo, nie wyrzucając filtra is_active.
+  const invSelects = [
+    'id, name, quantity, min_quantity, optimal_quantity, unit, is_combo_polprodukt',
+    'id, name, quantity, min_quantity, optimal_quantity, unit',
+    'id, name, quantity, min_quantity, unit',
+  ];
+  let inventoryData: InventorySnapshotRow[] | null = null;
+  let skipActive = false;
+  for (const sel of invSelects) {
+    let q = supabase.from('inventory_items').select(sel).eq('account_key', ak);
+    if (!skipActive) q = q.eq('is_active', true);
+    const { data, error } = await q;
+    if (!error) {
+      inventoryData = (data ?? []) as unknown as InventorySnapshotRow[];
+      break;
+    }
+    if (/is_active/i.test(error.message ?? '')) {
+      skipActive = true;
+      const retry = await supabase.from('inventory_items').select(sel).eq('account_key', ak);
+      if (!retry.error) {
+        inventoryData = (retry.data ?? []) as unknown as InventorySnapshotRow[];
+        break;
+      }
+      if (/optimal_quantity|is_combo/i.test(retry.error.message ?? '')) continue;
+      inventoryData = null;
+      break;
+    }
+    if (/optimal_quantity|is_combo/i.test(error.message ?? '')) continue;
+    inventoryData = null;
+    break;
+  }
   let revAllRes = await scoped(supabase.from('revenue_entries').select('*')).order('created_at', { ascending: false }).limit(1500);
   let fixedAllRes = await scoped(supabase.from('fixed_costs').select('*')).order('created_at', { ascending: false }).limit(1000);
   let varAllRes = await scoped(supabase.from('variable_cost_entries').select('*')).order('created_at', { ascending: false }).limit(1500);
@@ -143,6 +177,6 @@ export async function fetchFinanceRows(accountKey: string, currentMonth: string)
     revenueAll: (revAllRes.data ?? []) as RevenueEntry[],
     fixedAll: (fixedAllRes.data ?? []) as FixedCost[],
     variableAll: (varAllRes.data ?? []) as VariableCostEntry[],
-    inventory: inventoryRes.error ? null : ((inventoryRes.data ?? []) as InventorySnapshotRow[]),
+    inventory: inventoryData == null ? null : (inventoryData as InventorySnapshotRow[]),
   };
 }

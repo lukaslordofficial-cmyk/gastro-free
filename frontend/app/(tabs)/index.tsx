@@ -14,7 +14,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import {
   Building2,
   Zap,
@@ -831,10 +831,28 @@ export default function FinanseScreen() {
   }[]>([]);
   const [criticalCount, setCriticalCount] = useState(0);
   const [criticalItems, setCriticalItems] = useState<
-    { id: string; name: string; quantity: number; minQuantity: number; unit: string }[]
+    {
+      id: string;
+      name: string;
+      quantity: number;
+      minQuantity: number;
+      unit: string;
+      isCritical?: boolean;
+      isLow?: boolean;
+      isCombo?: boolean;
+    }[]
   >([]);
   const [inventorySnapshot, setInventorySnapshot] = useState<
-    { id: string; name: string; quantity: number; minQuantity: number; unit: string }[]
+    {
+      id: string;
+      name: string;
+      quantity: number;
+      minQuantity: number;
+      unit: string;
+      isCritical?: boolean;
+      isLow?: boolean;
+      isCombo?: boolean;
+    }[]
   >([]);
   const { isPremiumUi } = useThemeMode();
   const { openProductCascade, documentScanRevision } = useUiOverlay();
@@ -913,17 +931,30 @@ export default function FinanseScreen() {
       );
 
       if (rows.inventory) {
-        const invRows = rows.inventory.map((i) => ({
-          id: String(i.id),
-          name: String(i.name || 'Składnik'),
-          quantity: Number(i.quantity) || 0,
-          minQuantity: Number(i.min_quantity) || 0,
-          unit: String(i.unit || 'szt'),
-        }));
+        const invRows = rows.inventory.map((i) => {
+          const quantity = Number(i.quantity) || 0;
+          const minQuantity = Number(i.min_quantity) || 0;
+          const optimal = Number(i.optimal_quantity) || 0;
+          const isCombo = Boolean(i.is_combo_polprodukt);
+          // Jak w magazynie: krytyczny = qty ≤ min; niski = poniżej optymalnego (jeśli ustawiony).
+          const isCritical = minQuantity > 0 && quantity <= minQuantity;
+          const isLow = !isCritical && optimal > 0 && quantity < optimal;
+          return {
+            id: String(i.id),
+            name: String(i.name || 'Składnik'),
+            quantity,
+            minQuantity,
+            optimal,
+            isCombo,
+            isCritical,
+            isLow,
+            unit: String(i.unit || 'szt'),
+          };
+        });
         setInventorySnapshot(invRows);
-        const critical = invRows.filter((i) => i.quantity <= i.minQuantity);
-        setCriticalCount(critical.length);
-        setCriticalItems(critical);
+        const needing = invRows.filter((i) => i.isCritical || i.isLow);
+        setCriticalCount(needing.length);
+        setCriticalItems(needing);
       }
       setError(null);
       setFinanceSyncHint(false);
@@ -952,6 +983,14 @@ export default function FinanseScreen() {
     if (!accountKey || accountKey === 'default') return;
     void fetchData();
   }, [fetchData, accountKey]);
+
+  // Po powrocie z Magazynu — zsynchronizuj licznik „wymaga uzupełnienia".
+  useFocusEffect(
+    useCallback(() => {
+      if (!accountKey || accountKey === 'default') return;
+      void fetchData();
+    }, [accountKey, fetchData]),
+  );
 
   // Po skanie faktury — auto-odśwież koszty zmienne z retry.
   useEffect(() => {

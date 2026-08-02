@@ -20,7 +20,43 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
-### 2026-06 — Kęs #1: Moduł autoryzacji (separacja IO od stanu)
+### 2026-08 — Kęs #7: Usuwanie w Magazynie + onboarding skanu menu
+
+- **UI Magazyn (premium):** przycisk usuwania produktu zawsze widoczny (Trash) obok edycji —
+  wcześniej ternary `onOrder`/`onEdit` ukrywał delete.
+- **Usuwanie kategorii:** Trash poza zagnieżdżonym `TouchableOpacity` (Android gubił tap);
+  `deleteCategory` z `account_key`.
+- **Skan menu → magazyn:** soft-deleted produkty są przywracane zamiast blokować tworzenie;
+  składniki z pominiętych (już w menu) dań też idą do onboardingu.
+
+### 2026-08 — Kęs #6: Dedup skanów + sync finansów + półprodukty / dark product-suppliers
+
+- **Finanse:** snapshot magazynu filtruje `is_active=true` (bez wypadania filtra przy fallbacku
+  kolumn); licznik „wymaga uzupełnienia” = krytyczny + poniżej optymalnego; `useFocusEffect`
+  odświeża po Magazynie.
+- **Skan menu/faktura:** blokada double-submit (`savingRef` / `processingRef`); dedup potraw
+  w payloadzie; wzajemne wykluczenie skanu oferty vs menu w `UiOverlayContext`.
+- **Menu → magazyn:** `ensureWarehouseLinks` czyta świeży DB + race-retry; zapis produktu
+  z menu aktualizuje istniejący wiersz zamiast dublować.
+- **Półprodukty:** CTA „Dorób” zamiast zamówienia u dostawcy (`magazyn.tsx`).
+- **product-suppliers:** wymuszony dark premium (bez białego skina).
+- **SQL:** `SCALE_INDEXES_AND_RLS.sql` — indeksy `status`/`created_at` warunkowe (`information_schema`).
+
+### 2026-08 — Kęs #5: Typy Database + skala DB (P0)
+- **`frontend/lib/types.ts`** — naprawiony kształt `Database` pod `@supabase/supabase-js` 2.58:
+  `Relationships: []`, Views/Functions/Enums/CompositeTypes, domenowe `type` (nie
+  `interface` — inaczej Row nie spełnia `Record<string, unknown>` i Insert → `never`).
+  Dodane `account_key` tam, gdzie migracje tenantowe je wymagają. Stuby tabel
+  używanych w kodzie (`warehouse_inventory`, `scrape_targets`, …).
+- **tsc:** ~154 błędów (`never`) → ~100 (reszta: brakujące pola UI, bargainHunter,
+  AdsProvider — nie blokują IO).
+- **`services/suppliersService.ts`** — `recipe_ingredients` filtr przez
+  `menu_items!inner(account_key)` (szczelność tenanta + limit 2000). Usunięte `any`.
+- **Nowa migracja `supabase_migrations/SCALE_INDEXES_AND_RLS.sql`** — indeksy B-Tree
+  + RLS audyt (account_key / join parent). **Do uruchomienia w SQL Editor.**
+- Docelowo: `npx supabase gen types typescript --project-id … > lib/types.generated.ts`.
+
+
 - **Nowy plik `services/authService.ts`** — całe IO auth: `getSession`,
   `subscribeToAuthState`, `signInWithPassword`, `signUp`, `signOut`,
   `autoConfirmUser`, `fetchProfile`, `upsertProfile`, `seedSubscription`,

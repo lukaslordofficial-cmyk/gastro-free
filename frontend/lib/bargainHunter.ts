@@ -249,7 +249,7 @@ function computeMonolith(items: PerItem[], meta: SuppliersMeta): OptionAllOne | 
     min_order_value: number;
   } | null = null;
 
-  allIds.forEach((sid) => {
+  for (const sid of allIds) {
     const covered = items.filter((pi) => pi.best_by_supplier[sid]);
     const total = Math.round(
       covered.reduce((s, pi) => s + pi.best_by_supplier[sid].line_total, 0) * 100,
@@ -270,7 +270,7 @@ function computeMonolith(items: PerItem[], meta: SuppliersMeta): OptionAllOne | 
     ) {
       best = cand;
     }
-  });
+  }
 
   if (!best) return null;
 

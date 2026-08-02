@@ -23,11 +23,21 @@ plugins.push([
   },
 ]);
 
-module.exports = {
-  expo: {
-    ...appJson.expo,
-    // Explicit: Hermes is default on Expo 54 / RN 0.81; keep it on for smaller JS + smoother UI.
-    jsEngine: 'hermes',
-    plugins,
-  },
+const expo = {
+  ...appJson.expo,
+  // Explicit: Hermes is default on Expo 54 / RN 0.81; keep it on for smaller JS + smoother UI.
+  jsEngine: 'hermes',
+  plugins,
 };
+
+// Expo Go + niezalogowane CLI: owner/EAS projectId wymuszają login (niebieski ekran).
+// Start lokalny: EXPO_GO_ANON=1 npx expo start --tunnel --port 8081
+if (process.env.EXPO_GO_ANON === '1') {
+  delete expo.owner;
+  if (expo.extra) {
+    const { eas, ...restExtra } = expo.extra;
+    expo.extra = restExtra;
+  }
+}
+
+module.exports = { expo };

@@ -93,7 +93,8 @@ type TabKey = 'suppliers' | 'edit';
 export default function ProductSuppliersScreen() {
   const router = useRouter();
   const theme = useAppTheme();
-  const prem = theme.isPremium;
+  // Ekran produktu dostawców — zawsze dark premium (nie wracamy do białego skina).
+  const prem = true;
   const { accountKey } = useAuth();
   const { alert: premiumAlert } = usePremiumAlert();
   const { productId, productName } = useLocalSearchParams<{ productId: string; productName: string }>();
@@ -282,28 +283,28 @@ export default function ProductSuppliersScreen() {
           .order('sort_order'),
       ]);
       // Retry select without optional columns if migrations not applied
-      let prodData = prodRes.data;
-      if (prodRes.error && /safety_buffer_percent|unit_weight_volume|weight_volume_unit/.test(prodRes.error.message ?? '')) {
+      let prodData: Record<string, unknown> | null = prodRes.data as Record<string, unknown> | null;
+      if (prodRes.error && /safety_buffer_percent|unit_weight_volume|weight_volume_unit|optimal_quantity/.test(prodRes.error.message ?? '')) {
         const retry = await supabase
           .from('inventory_items')
           .select('id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt')
           .eq('id', productId)
           .single();
-        prodData = retry.data;
+        prodData = retry.data as Record<string, unknown> | null;
       }
       if (prodData) {
-        setProduct(prodData as any);
+        setProduct(prodData as unknown as ProductRow);
         setForm({
-          name: prodData.name ?? '',
-          categoryId: prodData.category_id ?? '',
+          name: String(prodData.name ?? ''),
+          categoryId: String(prodData.category_id ?? ''),
           quantity: prodData.quantity != null ? String(prodData.quantity) : '',
-          unit: prodData.unit ?? 'kg',
+          unit: String(prodData.unit ?? 'kg'),
           minQuantity: prodData.min_quantity != null ? String(prodData.min_quantity) : '',
-          optimalQuantity: (prodData as any).optimal_quantity != null ? String((prodData as any).optimal_quantity) : '',
+          optimalQuantity: prodData.optimal_quantity != null ? String(prodData.optimal_quantity) : '',
           portionSize: prodData.portion_size != null ? String(prodData.portion_size) : '',
-          safetyBuffer: (prodData as any).safety_buffer_percent != null ? String((prodData as any).safety_buffer_percent) : '20',
-          unitWeightVolume: (prodData as any).unit_weight_volume != null ? String((prodData as any).unit_weight_volume) : '',
-          weightVolumeUnit: ((prodData as any).weight_volume_unit === 'ml' ? 'ml' : 'g'),
+          safetyBuffer: prodData.safety_buffer_percent != null ? String(prodData.safety_buffer_percent) : '20',
+          unitWeightVolume: prodData.unit_weight_volume != null ? String(prodData.unit_weight_volume) : '',
+          weightVolumeUnit: (prodData.weight_volume_unit === 'ml' ? 'ml' : 'g'),
         });
       }
       if (catsRes.data) setCategories(catsRes.data as any);
@@ -457,28 +458,28 @@ export default function ProductSuppliersScreen() {
         <>
           {loading ? (
             <View style={s.center}>
-              <ActivityIndicator size="large" color={Colors.accent} />
-              <Text style={s.loadingText}>Szukam ofert dostawców...</Text>
+              <ActivityIndicator size="large" color={accent} />
+              <Text style={[s.loadingText, { color: muted }]}>Szukam ofert dostawców...</Text>
             </View>
           ) : offers.length === 0 ? (
             <View style={s.center}>
-              <AlertCircle size={48} color={Colors.textTertiary} strokeWidth={1.5} />
-              <Text style={s.emptyTitle}>Brak ofert dla tego produktu</Text>
-              <Text style={s.emptySub}>
+              <AlertCircle size={48} color={muted} strokeWidth={1.5} />
+              <Text style={[s.emptyTitle, { color: text }]}>Brak ofert dla tego produktu</Text>
+              <Text style={[s.emptySub, { color: muted }]}>
                 {'Żaden z Twoich dostawców nie ma tego produktu w swojej ofercie AI. Wgraj cennik PDF w zakładce Dostawcy.'}
               </Text>
             </View>
           ) : (
             <ScrollView style={s.scroll} contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
               {bestPrice != null && (
-                <View style={s.bestBanner}>
-                  <TrendingDown size={14} color={Colors.success} strokeWidth={2} />
-                  <Text style={s.bestBannerText}>
-                    Najlepsza cena: <Text style={s.bestBannerPrice}>{formatPlnNumber(bestPrice)} zł/{pricedOffers[0].unit}</Text>
+                <View style={[s.bestBanner, prem && { backgroundColor: soft, borderColor: border }]}>
+                  <TrendingDown size={14} color={prem ? DS.color.greenEnd : Colors.success} strokeWidth={2} />
+                  <Text style={[s.bestBannerText, prem && { color: DS.color.greenEnd }]}>
+                    Najlepsza cena: <Text style={[s.bestBannerPrice, prem && { color: DS.color.heading }]}>{formatPlnNumber(bestPrice)} zł/{pricedOffers[0].unit}</Text>
                   </Text>
                 </View>
               )}
-              <Text style={s.sectionLabel}>Oferty dostawców — od najtańszej</Text>
+              <Text style={[s.sectionLabel, { color: muted }]}>Oferty dostawców — od najtańszej</Text>
               {offers.map((offer, idx) => {
                 const isBest = offer.price_net != null && offer.price_net === bestPrice && idx === 0;
                 const priceDiff = bestPrice != null && offer.price_net != null && idx > 0
@@ -486,11 +487,19 @@ export default function ProductSuppliersScreen() {
                   : null;
                 const iconBg = offer.supplier_color + '18';
                 return (
-                  <View key={offer.id} style={[s.card, isBest && s.cardBest]}>
+                  <View
+                    key={offer.id}
+                    style={[
+                      s.card,
+                      prem && { backgroundColor: cardBg, borderColor: border },
+                      isBest && s.cardBest,
+                      isBest && prem && { borderColor: DS.color.greenEnd },
+                    ]}
+                  >
                     {isBest && (
-                      <View style={s.bestBadge}>
-                        <Star size={10} color={Colors.success} strokeWidth={2.5} />
-                        <Text style={s.bestBadgeText}>Najlepsza cena</Text>
+                      <View style={[s.bestBadge, prem && { backgroundColor: soft, borderBottomColor: border }]}>
+                        <Star size={10} color={prem ? DS.color.greenEnd : Colors.success} strokeWidth={2.5} />
+                        <Text style={[s.bestBadgeText, prem && { color: DS.color.greenEnd }]}>Najlepsza cena</Text>
                       </View>
                     )}
                     <View style={s.cardTop}>
@@ -498,29 +507,33 @@ export default function ProductSuppliersScreen() {
                         <Truck size={18} color={offer.supplier_color} strokeWidth={2} />
                       </View>
                       <View style={s.cardInfo}>
-                        <Text style={s.supplierName}>{offer.supplier_name}</Text>
+                        <Text style={[s.supplierName, { color: text }]}>{offer.supplier_name}</Text>
                         <View style={s.productRow}>
-                          <Package size={11} color={Colors.textTertiary} strokeWidth={2} />
-                          <Text style={s.productRowText} numberOfLines={1}>{offer.raw_product_name}</Text>
+                          <Package size={11} color={muted} strokeWidth={2} />
+                          <Text style={[s.productRowText, { color: muted }]} numberOfLines={1}>{offer.raw_product_name}</Text>
                         </View>
                       </View>
                       <View style={s.priceWrap}>
                         {offer.price_net != null ? (
                           <>
-                            <Text style={[s.price, isBest && s.priceBest]}>{formatPlnNumber(offer.price_net)} zł</Text>
-                            <Text style={s.priceUnit}>za {offer.unit}</Text>
+                            <Text style={[s.price, { color: text }, isBest && s.priceBest, isBest && prem && { color: DS.color.greenEnd }]}>{formatPlnNumber(offer.price_net)} zł</Text>
+                            <Text style={[s.priceUnit, { color: muted }]}>za {offer.unit}</Text>
                             {priceDiff != null && priceDiff > 0 && (
                               <Text style={s.priceDiff}>+{priceDiff.toFixed(0)}%</Text>
                             )}
                           </>
                         ) : (
-                          <Text style={s.noPrice}>Brak ceny</Text>
+                          <Text style={[s.noPrice, { color: muted }]}>Brak ceny</Text>
                         )}
                       </View>
                     </View>
-                    <TouchableOpacity style={s.orderBtn} onPress={() => openOrder(offer)} activeOpacity={0.8}>
-                      <ShoppingCart size={14} color={Colors.accent} strokeWidth={2} />
-                      <Text style={s.orderBtnText}>Złóż zamówienie</Text>
+                    <TouchableOpacity
+                      style={[s.orderBtn, prem && { backgroundColor: soft, borderTopColor: border }]}
+                      onPress={() => openOrder(offer)}
+                      activeOpacity={0.8}
+                    >
+                      <ShoppingCart size={14} color={accent} strokeWidth={2} />
+                      <Text style={[s.orderBtnText, { color: accent }]}>Złóż zamówienie</Text>
                     </TouchableOpacity>
                   </View>
                 );
@@ -536,13 +549,13 @@ export default function ProductSuppliersScreen() {
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           {loadingEdit ? (
             <View style={s.center}>
-              <ActivityIndicator size="large" color={Colors.accent} />
-              <Text style={s.loadingText}>Ładuję dane produktu...</Text>
+              <ActivityIndicator size="large" color={accent} />
+              <Text style={[s.loadingText, { color: muted }]}>Ładuję dane produktu...</Text>
             </View>
           ) : !product ? (
             <View style={s.center}>
-              <AlertCircle size={40} color={Colors.textTertiary} strokeWidth={1.5} />
-              <Text style={s.emptyTitle}>Nie znaleziono produktu</Text>
+              <AlertCircle size={40} color={muted} strokeWidth={1.5} />
+              <Text style={[s.emptyTitle, { color: text }]}>Nie znaleziono produktu</Text>
             </View>
           ) : (
               <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">

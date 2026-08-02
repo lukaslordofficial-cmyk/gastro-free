@@ -4,10 +4,12 @@
  */
 import { supabase } from '@/lib/supabase';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
-import type { SupplierOffer, SupplierOfferItem } from '@/lib/types';
+import type { Database, SupplierOffer, SupplierOfferItem } from '@/lib/types';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Row = any;
+type SupplierRow = Database['public']['Tables']['suppliers']['Row'] & {
+  supplier_catalog?: Array<Database['public']['Tables']['supplier_catalog']['Row'] & { is_visible?: boolean | null }>;
+};
+type RecipeIngredientRow = Database['public']['Tables']['recipe_ingredients']['Row'];
 
 const ICON_COLORS = ['#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2', '#475569'];
 const randomIconColor = () => ICON_COLORS[Math.floor(Math.random() * ICON_COLORS.length)];
@@ -20,21 +22,28 @@ const SEL_NO_LEAD = `id, name, nip, category, contact_person, phone, email, note
 const SEL_LEGACY = `id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, ${CAT})`;
 
 export type SuppliersData = {
-  rows: Row[];
+  rows: SupplierRow[];
   menuIngredients: string[];
   totalAnalyses: number;
   orderTotals: Record<string, number>;
 };
 
-/** Fetch dostawców z 4-poziomowym fallbackiem schematu + reveal katalogu + sumy zamówień. */
+/**
+ * Fetch dostawców z 4-poziomowym fallbackiem schematu + reveal katalogu + sumy zamówień.
+ * recipe_ingredients filtrujemy przez menu_items tenanta (brak kolumny account_key).
+ */
 export async function fetchSuppliersData(ak: string): Promise<SuppliersData> {
   const [suppliersRes, countRes, recipeRes] = await Promise.all([
     supabase.from('suppliers').select(SEL_VISIBLE).eq('account_key', ak).order('name'),
     supabase.from('supplier_offers').select('*', { count: 'exact', head: true }).eq('account_key', ak).eq('status', 'done'),
-    supabase.from('recipe_ingredients').select('ingredient_name').limit(5000),
+    supabase
+      .from('recipe_ingredients')
+      .select('ingredient_name, menu_items!inner(account_key)')
+      .eq('menu_items.account_key', ak)
+      .limit(2000),
   ]);
 
-  let data = suppliersRes.data;
+  let data: unknown = suppliersRes.data;
   if (suppliersRes.error) {
     const msg = suppliersRes.error.message ?? '';
     if (/lead_time_days/.test(msg)) {
@@ -58,13 +67,19 @@ export async function fetchSuppliersData(ak: string): Promise<SuppliersData> {
   }
 
   const menuIngredients = [
-    ...new Set((recipeRes.data ?? []).map((r: Row) => (r.ingredient_name || '').trim()).filter(Boolean)),
-  ] as string[];
+    ...new Set(
+      ((recipeRes.data ?? []) as Pick<RecipeIngredientRow, 'ingredient_name'>[])
+        .map((r) => (r.ingredient_name || '').trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  const rows = (data ?? []) as unknown as SupplierRow[];
 
   // Opcjonalnie: podnieś is_visible w DB dla fuzzy-match (bez blokowania UI).
   const toReveal: string[] = [];
-  for (const s of data ?? []) {
-    for (const c of (s as Row).supplier_catalog ?? []) {
+  for (const s of rows) {
+    for (const c of s.supplier_catalog ?? []) {
       if (c.is_visible === false && matchesAnyMenuIngredient(c.name, menuIngredients, 72)) toReveal.push(c.id);
     }
   }
@@ -78,12 +93,17 @@ export async function fetchSuppliersData(ak: string): Promise<SuppliersData> {
     .eq('account_key', ak)
     .eq('type', 'materials');
   const orderTotals: Record<string, number> = {};
-  (costs ?? []).forEach((c: Row) => {
+  (costs ?? []).forEach((c) => {
     const m = /supplier:([0-9a-fA-F-]{36})/.exec(c.note ?? '');
     if (m) orderTotals[m[1]] = (orderTotals[m[1]] ?? 0) + Number(c.amount_pln ?? 0);
   });
 
-  return { rows: data ?? [], menuIngredients, totalAnalyses: countRes.count ?? 0, orderTotals };
+  return {
+    rows,
+    menuIngredients,
+    totalAnalyses: countRes.count ?? 0,
+    orderTotals,
+  };
 }
 
 /** Zapis dostawcy (insert/update) z fallbackiem lead_time/shipping. Zwraca listę częściowych zapisów. */
@@ -96,8 +116,18 @@ export async function saveSupplier(input: {
   const partials: Array<'lead' | 'shipping'> = [];
   const run = async (body: Record<string, unknown>) =>
     editingId
-      ? (await supabase.from('suppliers').update(body).eq('id', editingId).eq('account_key', ak)).error
-      : (await supabase.from('suppliers').insert({ ...body, icon_color: randomIconColor() })).error;
+      ? (
+          await supabase
+            .from('suppliers')
+            .update(body as Database['public']['Tables']['suppliers']['Update'])
+            .eq('id', editingId)
+            .eq('account_key', ak)
+        ).error
+      : (
+          await supabase
+            .from('suppliers')
+            .insert({ ...body, icon_color: randomIconColor() } as Database['public']['Tables']['suppliers']['Insert'])
+        ).error;
 
   let err = await run(payload);
   if (err && /lead_time_days/.test(err.message ?? '')) {
@@ -125,9 +155,13 @@ export async function insertCatalogProduct(
   basePayload: Record<string, unknown>,
   kgTotal: number,
 ): Promise<{ error: { message: string } | null }> {
-  let { error } = await supabase.from('supplier_catalog').insert({ ...basePayload, kg_total: kgTotal });
+  let { error } = await supabase
+    .from('supplier_catalog')
+    .insert({ ...basePayload, kg_total: kgTotal } as Database['public']['Tables']['supplier_catalog']['Insert']);
   if (error && /kg_total/i.test(error.message ?? '')) {
-    ({ error } = await supabase.from('supplier_catalog').insert(basePayload));
+    ({ error } = await supabase
+      .from('supplier_catalog')
+      .insert(basePayload as Database['public']['Tables']['supplier_catalog']['Insert']));
   }
   return { error: error ? { message: error.message } : null };
 }
@@ -139,14 +173,16 @@ export async function deleteCatalogProduct(id: string): Promise<{ error: { messa
 }
 
 /** Katalog dostawcy do okna zamówienia. */
-export async function fetchSupplierCatalog(supplierId: string): Promise<Row[]> {
+export async function fetchSupplierCatalog(
+  supplierId: string,
+): Promise<Pick<Database['public']['Tables']['supplier_catalog']['Row'], 'id' | 'name' | 'price_pln'>[]> {
   const { data } = await supabase
     .from('supplier_catalog')
     .select('id, name, price_pln, unit')
     .eq('supplier_id', supplierId)
     .order('name')
     .limit(400);
-  return data ?? [];
+  return (data ?? []) as Pick<Database['public']['Tables']['supplier_catalog']['Row'], 'id' | 'name' | 'price_pln'>[];
 }
 
 /** Ostatnia oferta + pozycje dla karty dostawcy. */
@@ -161,9 +197,9 @@ export async function fetchSupplierOfferData(
 }
 
 /** Poll pojedynczej oferty (status). */
-export async function fetchOfferById(offerId: string): Promise<Row | null> {
+export async function fetchOfferById(offerId: string): Promise<SupplierOffer | null> {
   const { data } = await supabase.from('supplier_offers').select('*').eq('id', offerId).maybeSingle();
-  return data ?? null;
+  return (data as SupplierOffer) ?? null;
 }
 
 /** Pozycje oferty (po zakończeniu przetwarzania). */
@@ -173,13 +209,17 @@ export async function fetchOfferItems(supplierId: string): Promise<SupplierOffer
 }
 
 /** Skrócona lista magazynu (kontekst dla process-offer). */
-export async function fetchInventoryBrief(): Promise<Row[]> {
-  const { data } = await supabase.from('inventory_items').select('id, name, unit').order('name');
-  return data ?? [];
+export async function fetchInventoryBrief(): Promise<
+  Pick<Database['public']['Tables']['inventory_items']['Row'], 'id' | 'name' | 'unit'>[]
+> {
+  const { data } = await supabase.from('inventory_items').select('id, name, unit').order('name').limit(2000);
+  return (data ?? []) as Pick<Database['public']['Tables']['inventory_items']['Row'], 'id' | 'name' | 'unit'>[];
 }
 
 /** Wywołanie edge function process-offer (analiza faktury AI). */
-export async function invokeProcessOffer(body: Record<string, unknown>): Promise<{ data: Row; error: Row }> {
+export async function invokeProcessOffer(
+  body: Record<string, unknown>,
+): Promise<{ data: unknown; error: { message?: string } | null }> {
   const { data, error } = await supabase.functions.invoke('process-offer', { body });
   return { data, error };
 }

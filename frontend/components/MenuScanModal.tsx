@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -215,6 +215,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
   const [dishesNeedingIngredients, setDishesNeedingIngredients] = useState<string[]>([]);
   const [dishesNeedingWeight, setDishesNeedingWeight] = useState<string[]>([]);
   const [suggestingInline, setSuggestingInline] = useState(false);
+  const savingRef = useRef(false);
 
   const footerPad = Math.max(insets.bottom, 12) + 8;
 
@@ -227,6 +228,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     setDishesNeedingIngredients([]);
     setDishesNeedingWeight([]);
     setSuggestingInline(false);
+    savingRef.current = false;
   }, []);
 
   const handleClose = useCallback(() => {
@@ -557,15 +559,25 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
 
   const confirmSave = useCallback(async (withSuggestions: boolean) => {
     if (!ensureCredits()) return;
+    if (savingRef.current) return;
     if (!BACKEND_URL) {
       setError('Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).');
       setStage('edit');
       return;
     }
+    savingRef.current = true;
     setStage(withSuggestions ? 'suggesting' : 'confirming');
     setError(null);
     try {
       let finalPayload = preparePayloadDishes();
+      // Dedup w payloadzie — ta sama potrawa 2× w skanie nie tworzy 2 wierszy.
+      const seenNames = new Set<string>();
+      finalPayload = finalPayload.filter((d) => {
+        const k = (d.name || '').trim().toLowerCase();
+        if (!k || seenNames.has(k)) return false;
+        seenNames.add(k);
+        return true;
+      });
       const { needIng, needQty, needWeight } = dishesMissingHelp(dishes);
 
       if (withSuggestions) {
@@ -691,6 +703,8 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     } catch (e: any) {
       setError(e.message ?? 'Nie udało się zapisać potraw.');
       setStage('edit');
+    } finally {
+      savingRef.current = false;
     }
   }, [dishes, dishesNeedingIngredients, dishesNeedingWeight, dishesMissingHelp, ensureCredits, onConfirmed]);
 

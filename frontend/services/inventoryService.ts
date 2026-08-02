@@ -62,8 +62,31 @@ export async function fetchWarehouseData(ak: string): Promise<WarehouseData> {
 
   let itemsData = itemsRes.data;
   let itemsErr = itemsRes.error;
-  // Jedna szybka ścieżka awaryjna (bez łańcucha 4× requestów).
-  if (itemsErr && /is_active|optimal_quantity|safety_buffer_percent|shelf_life_days/.test(itemsErr.message ?? '')) {
+  // Jedna szybka ścieżka awaryjna — zachowaj filtr is_active, gdy kolumna istnieje.
+  if (itemsErr && /optimal_quantity|safety_buffer_percent|shelf_life_days/.test(itemsErr.message ?? '')) {
+    const slimActive = await supabase
+      .from('inventory_items')
+      .select(ITEM_COLS_SLIM)
+      .eq('account_key', ak)
+      .eq('is_active', true)
+      .order('name')
+      .limit(2000);
+    if (!slimActive.error) {
+      itemsData = slimActive.data;
+      itemsErr = null;
+    } else if (/is_active/.test(slimActive.error.message ?? '')) {
+      const slim = await supabase
+        .from('inventory_items')
+        .select(ITEM_COLS_SLIM)
+        .eq('account_key', ak)
+        .order('name')
+        .limit(2000);
+      itemsData = slim.data;
+      itemsErr = slim.error;
+    } else {
+      itemsErr = slimActive.error;
+    }
+  } else if (itemsErr && /is_active/.test(itemsErr.message ?? '')) {
     const slim = await supabase
       .from('inventory_items')
       .select(ITEM_COLS_SLIM)
@@ -107,17 +130,23 @@ export async function insertCategory(input: {
   return { data: data ?? null, error: error ? { message: error.message } : null };
 }
 
-/** Usunięcie kategorii. Zwraca surowy błąd. */
-export async function deleteCategory(id: string): Promise<{ error: { message: string } | null }> {
-  const { error } = await supabase.from('inventory_categories').delete().eq('id', id);
+/** Usunięcie kategorii (scope tenant). Zwraca surowy błąd. */
+export async function deleteCategory(id: string, accountKey?: string): Promise<{ error: { message: string } | null }> {
+  let q = supabase.from('inventory_categories').delete().eq('id', id);
+  if (accountKey && accountKey !== 'default') q = q.eq('account_key', accountKey);
+  const { error } = await q;
   return { error: error ? { message: error.message } : null };
 }
 
 /** Soft-delete (is_active=false) z fallbackiem na hard-delete. Rzuca przy błędzie. */
-export async function softDeleteItem(id: string): Promise<void> {
-  const { error } = await supabase.from('inventory_items').update({ is_active: false }).eq('id', id);
+export async function softDeleteItem(id: string, accountKey?: string): Promise<void> {
+  let softQ = supabase.from('inventory_items').update({ is_active: false }).eq('id', id);
+  if (accountKey && accountKey !== 'default') softQ = softQ.eq('account_key', accountKey);
+  const { error } = await softQ;
   if (error && /is_active/.test(error.message ?? '')) {
-    const hard = await supabase.from('inventory_items').delete().eq('id', id);
+    let hardQ = supabase.from('inventory_items').delete().eq('id', id);
+    if (accountKey && accountKey !== 'default') hardQ = hardQ.eq('account_key', accountKey);
+    const hard = await hardQ;
     if (hard.error) throw hard.error;
     return;
   }

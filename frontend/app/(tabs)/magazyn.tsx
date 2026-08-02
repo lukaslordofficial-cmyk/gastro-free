@@ -203,6 +203,15 @@ function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }: { item
   const ratio = item.current_qty / Math.max(item.critical_threshold, 0.001);
   const fillPercent = Math.min(100, Math.round(ratio * 100));
   const thumbSrc = useMemo(() => imageSourceForProduct(item.product_name), [item.product_name]);
+  const isComboLow = item.is_combo_półprodukt && status !== 'ok';
+  const lowStockActionLabel = isComboLow
+    ? 'Dorób półprodukt'
+    : 'Zamów u dostawcy';
+  const lowStockHint = isComboLow
+    ? (status === 'critical'
+      ? 'Ilość półproduktu spadła poniżej poziomu krytycznego — trzeba dorobić'
+      : 'Niski stan półproduktu — zaplanuj doróbkę')
+    : (status === 'critical' ? 'Stan krytyczny — uzupełnij zapas' : 'Niski stan magazynowy');
 
   if (theme.isPremium) {
     const edge =
@@ -258,32 +267,44 @@ function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }: { item
                 <View style={[itemStyles.premProgressFill, { width: `${fillPercent}%` as any, backgroundColor: edge }]} />
               </View>
             </View>
-            {onEdit ? (
-              <TouchableOpacity onPress={onEdit} hitSlop={10} style={{ padding: 4 }} testID={`edit-inv-${item.id}`}>
-                <PenLine size={14} color={DS.color.greenEnd} strokeWidth={2.4} />
-              </TouchableOpacity>
-            ) : null}
-            {onOrder ? (
-              <TouchableOpacity
-                onPress={onOrder}
-                activeOpacity={0.85}
-                style={[itemStyles.premOrderFabWrap, DS.shadow.greenGlow]}
-                hitSlop={8}
-              >
-                <LinearGradient
-                  colors={status === 'critical' || status === 'warning' ? [...DS.gradient.red] : [...DS.gradient.green]}
-                  start={{ x: 0, y: 0.2 }}
-                  end={{ x: 1, y: 0.8 }}
-                  style={itemStyles.premOrderFab}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, marginLeft: 4 }}>
+              {onEdit ? (
+                <TouchableOpacity onPress={onEdit} hitSlop={10} style={{ padding: 4 }} testID={`edit-inv-${item.id}`}>
+                  <PenLine size={14} color={DS.color.greenEnd} strokeWidth={2.4} />
+                </TouchableOpacity>
+              ) : null}
+              {onDelete ? (
+                <TouchableOpacity
+                  onPress={onDelete}
+                  hitSlop={10}
+                  style={{ padding: 4 }}
+                  testID={`delete-inv-${item.id}`}
                 >
-                  <Plus size={18} color="#0A0A0A" strokeWidth={2.5} />
-                </LinearGradient>
-              </TouchableOpacity>
-            ) : onDelete ? (
-              <TouchableOpacity onPress={onDelete} hitSlop={10} style={{ padding: 4 }}>
-                <X size={14} color={DS.color.muted} strokeWidth={2} />
-              </TouchableOpacity>
-            ) : null}
+                  <Trash2 size={14} color={DS.color.danger} strokeWidth={2.2} />
+                </TouchableOpacity>
+              ) : null}
+              {onOrder && !item.is_combo_półprodukt ? (
+                <TouchableOpacity
+                  onPress={onOrder}
+                  activeOpacity={0.85}
+                  style={[itemStyles.premOrderFabWrap, DS.shadow.greenGlow]}
+                  hitSlop={8}
+                >
+                  <LinearGradient
+                    colors={status === 'critical' || status === 'warning' ? [...DS.gradient.red] : [...DS.gradient.green]}
+                    start={{ x: 0, y: 0.2 }}
+                    end={{ x: 1, y: 0.8 }}
+                    style={itemStyles.premOrderFab}
+                  >
+                    <Plus size={18} color="#0A0A0A" strokeWidth={2.5} />
+                  </LinearGradient>
+                </TouchableOpacity>
+              ) : isComboLow && onEdit ? (
+                <TouchableOpacity onPress={onEdit} hitSlop={10} style={{ padding: 4 }} testID={`remake-inv-${item.id}`}>
+                  <FlaskConical size={16} color={DS.color.warning} strokeWidth={2.4} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
           </View>
         </View>
       </TouchableOpacity>
@@ -336,8 +357,9 @@ function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }: { item
                 onPress={onDelete}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 style={itemStyles.deleteBtn}
+                testID={`delete-inv-${item.id}`}
               >
-                <X size={12} color={Colors.textTertiary} strokeWidth={2.5} />
+                <Trash2 size={13} color={Colors.danger} strokeWidth={2.2} />
               </TouchableOpacity>
             )}
           </View>
@@ -350,7 +372,7 @@ function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }: { item
 
         {status !== 'ok' && (
           <Text style={[itemStyles.portionAlert, { color: palette.badgeText }]}>
-            {status === 'critical' ? 'Stan krytyczny — uzupełnij zapas' : 'Niski stan magazynowy'}
+            {lowStockHint}
           </Text>
         )}
 
@@ -358,15 +380,17 @@ function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }: { item
           <View style={[itemStyles.progressFill, { width: `${fillPercent}%` as any, backgroundColor: palette.bar }]} />
         </View>
 
-        {status !== 'ok' && onOrder && (
+        {status !== 'ok' && (isComboLow ? onEdit : onOrder) && (
           <TouchableOpacity
             style={[itemStyles.orderBtn, { backgroundColor: palette.badgeText }]}
-            onPress={onOrder}
+            onPress={isComboLow ? onEdit : onOrder}
             activeOpacity={0.85}
             testID={`order-btn-${item.id}`}
           >
-            <ShoppingCart size={13} color={Colors.white} strokeWidth={2.5} />
-            <Text style={itemStyles.orderBtnText}>Zamów u dostawcy</Text>
+            {isComboLow
+              ? <FlaskConical size={13} color={Colors.white} strokeWidth={2.5} />
+              : <ShoppingCart size={13} color={Colors.white} strokeWidth={2.5} />}
+            <Text style={itemStyles.orderBtnText}>{lowStockActionLabel}</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -475,41 +499,50 @@ function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDe
   if (theme.isPremium) {
     return (
       <View style={catStyles.premSection}>
-        <TouchableOpacity style={catStyles.premHeader} onPress={onToggle} activeOpacity={0.75}>
-          <View style={[catStyles.premDot, { backgroundColor: category.color || DS.color.greenEnd }]} />
-          <View style={{ flex: 1, gap: 2 }}>
-            <Text style={catStyles.premCatName} allowFontScaling={false}>
-              {category.name}
-            </Text>
-            <View style={catStyles.countRow}>
-              <Text style={catStyles.premCount} allowFontScaling={false}>
-                {items.length} prod.
+        <View style={catStyles.premHeader}>
+          <TouchableOpacity
+            style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 0 }}
+            onPress={onToggle}
+            activeOpacity={0.75}
+          >
+            <View style={[catStyles.premDot, { backgroundColor: category.color || DS.color.greenEnd }]} />
+            <View style={{ flex: 1, gap: 2, minWidth: 0 }}>
+              <Text style={catStyles.premCatName} allowFontScaling={false}>
+                {category.name}
               </Text>
-              {criticalCount > 0 && (
-                <View style={[catStyles.alertBadge, catStyles.premAlertBadge]}>
-                  <Text style={[catStyles.alertBadgeText, catStyles.premAlertText]}>{criticalCount} kryty.</Text>
-                </View>
-              )}
-              {warningCount > 0 && (
-                <View style={[catStyles.alertBadge, catStyles.warnBadge, catStyles.premWarnBadge]}>
-                  <Text style={[catStyles.alertBadgeText, catStyles.warnBadgeText, catStyles.premWarnText]}>
-                    {warningCount} niski
-                  </Text>
-                </View>
-              )}
+              <View style={catStyles.countRow}>
+                <Text style={catStyles.premCount} allowFontScaling={false}>
+                  {items.length} prod.
+                </Text>
+                {criticalCount > 0 && (
+                  <View style={[catStyles.alertBadge, catStyles.premAlertBadge]}>
+                    <Text style={[catStyles.alertBadgeText, catStyles.premAlertText]}>{criticalCount} kryty.</Text>
+                  </View>
+                )}
+                {warningCount > 0 && (
+                  <View style={[catStyles.alertBadge, catStyles.warnBadge, catStyles.premWarnBadge]}>
+                    <Text style={[catStyles.alertBadgeText, catStyles.warnBadgeText, catStyles.premWarnText]}>
+                      {warningCount} niski
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
-          </View>
+          </TouchableOpacity>
           <TouchableOpacity
             onPress={onDelete}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             style={catStyles.deleteBtn}
+            testID={`delete-cat-${category.id}`}
           >
-            <Trash2 size={12} color={DS.color.muted} strokeWidth={2} />
+            <Trash2 size={14} color={DS.color.danger} strokeWidth={2.2} />
           </TouchableOpacity>
-          {isExpanded
-            ? <ChevronDown size={16} color={DS.color.muted} strokeWidth={2} />
-            : <ChevronRight size={16} color={DS.color.muted} strokeWidth={2} />}
-        </TouchableOpacity>
+          <TouchableOpacity onPress={onToggle} hitSlop={10} style={{ padding: 4 }}>
+            {isExpanded
+              ? <ChevronDown size={16} color={DS.color.muted} strokeWidth={2} />
+              : <ChevronRight size={16} color={DS.color.muted} strokeWidth={2} />}
+          </TouchableOpacity>
+        </View>
 
         {isExpanded && (
           <View style={catStyles.premBody}>
@@ -544,39 +577,48 @@ function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDe
 
   return (
     <View style={catStyles.section}>
-      <TouchableOpacity style={catStyles.header} onPress={onToggle} activeOpacity={0.75}>
-        <View style={[catStyles.colorBar, { backgroundColor: category.color }]} />
-        <View style={catStyles.headerContent}>
-          <View style={catStyles.headerLeft}>
-            <Text style={catStyles.catName}>{category.name}</Text>
-            <View style={catStyles.countRow}>
-              <Text style={catStyles.totalCount}>{items.length} produktów</Text>
-              {criticalCount > 0 && (
-                <View style={catStyles.alertBadge}>
-                  <Text style={catStyles.alertBadgeText}>{criticalCount} kryty.</Text>
-                </View>
-              )}
-              {warningCount > 0 && (
-                <View style={[catStyles.alertBadge, catStyles.warnBadge]}>
-                  <Text style={[catStyles.alertBadgeText, catStyles.warnBadgeText]}>{warningCount} niski</Text>
-                </View>
-              )}
+      <View style={catStyles.header}>
+        <TouchableOpacity
+          style={{ flex: 1, flexDirection: 'row', alignItems: 'stretch', minWidth: 0 }}
+          onPress={onToggle}
+          activeOpacity={0.75}
+        >
+          <View style={[catStyles.colorBar, { backgroundColor: category.color }]} />
+          <View style={[catStyles.headerContent, { flex: 1 }]}>
+            <View style={catStyles.headerLeft}>
+              <Text style={catStyles.catName}>{category.name}</Text>
+              <View style={catStyles.countRow}>
+                <Text style={catStyles.totalCount}>{items.length} produktów</Text>
+                {criticalCount > 0 && (
+                  <View style={catStyles.alertBadge}>
+                    <Text style={catStyles.alertBadgeText}>{criticalCount} kryty.</Text>
+                  </View>
+                )}
+                {warningCount > 0 && (
+                  <View style={[catStyles.alertBadge, catStyles.warnBadge]}>
+                    <Text style={[catStyles.alertBadgeText, catStyles.warnBadgeText]}>{warningCount} niski</Text>
+                  </View>
+                )}
+              </View>
             </View>
           </View>
-          <View style={catStyles.headerRight}>
-            <TouchableOpacity
-              onPress={onDelete}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              style={catStyles.deleteBtn}
-            >
-              <Trash2 size={13} color={Colors.danger} strokeWidth={2} />
-            </TouchableOpacity>
+        </TouchableOpacity>
+        <View style={[catStyles.headerRight, { paddingRight: 12 }]}>
+          <TouchableOpacity
+            onPress={onDelete}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={catStyles.deleteBtn}
+            testID={`delete-cat-${category.id}`}
+          >
+            <Trash2 size={13} color={Colors.danger} strokeWidth={2} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={onToggle} hitSlop={10}>
             {isExpanded
               ? <ChevronDown size={18} color={Colors.textSecondary} strokeWidth={2} />
               : <ChevronRight size={18} color={Colors.textSecondary} strokeWidth={2} />}
-          </View>
+          </TouchableOpacity>
         </View>
-      </TouchableOpacity>
+      </View>
 
       {isExpanded && (
         <View style={catStyles.body}>
@@ -994,9 +1036,18 @@ export default function MagazynScreen() {
       {
         text: 'Usuń', style: 'destructive',
         onPress: async () => {
-          const { error } = await inventoryService.deleteCategory(cat.id);
+          const { error } = await inventoryService.deleteCategory(cat.id, accountKey || undefined);
           if (error) premiumAlert('Błąd', error.message);
-          else fetchData();
+          else {
+            setDbCategories((prev) => prev.filter((c) => c.id !== cat.id));
+            setExpandedCategories((prev) => {
+              const next = new Set(prev);
+              next.delete(cat.name);
+              return next;
+            });
+            // Produkty zostają — odśwież listę (mogą wpaść do „Bez kategorii”).
+            void fetchData();
+          }
         },
       },
     ]);
@@ -1031,6 +1082,11 @@ export default function MagazynScreen() {
   }, [focusParams.focusProductId, focusParams.focusProductName, loading, inventory]);
 
   const handleOrderItem = (item: MockInventoryItem) => {
+    // Półprodukty nie zamawiamy u dostawcy — otwieramy edycję/recepturę doróbki.
+    if (item.is_combo_półprodukt) {
+      openEditItem(item);
+      return;
+    }
     // Free / tier 1 bez trialu → tylko PremiumAlert, bez flow Łowcy
     if (!dealHunterUnlocked) {
       premiumAlert(DEAL_HUNTER_GATE_TITLE, DEAL_HUNTER_GATE_MESSAGE);
@@ -1040,7 +1096,7 @@ export default function MagazynScreen() {
   };
 
   const handleDeleteItem = (item: MockInventoryItem) => {
-    Alert.alert(
+    premiumAlert(
       'Usuń produkt',
       `Czy na pewno chcesz usunąć "${item.product_name}"?`,
       [
@@ -1048,17 +1104,16 @@ export default function MagazynScreen() {
         {
           text: 'Usuń', style: 'destructive',
           onPress: async () => {
-            // Soft-delete (is_active=false) z fallbackiem na hard-delete — w serwisie.
             try {
-              await inventoryService.softDeleteItem(item.id);
+              await inventoryService.softDeleteItem(item.id, accountKey || undefined);
             } catch (e: any) {
-              Alert.alert('Błąd', e?.message ?? 'Nie udało się usunąć.');
+              premiumAlert('Błąd', e?.message ?? 'Nie udało się usunąć.');
               return;
             }
             setInventory((prev) => prev.filter((i) => i.id !== item.id));
           },
         },
-      ]
+      ],
     );
   };
 

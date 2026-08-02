@@ -147,9 +147,12 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
 
   const openDocumentScan = useCallback((kind?: DocumentScanKind) => {
     if (kind === 'menu') {
+      setDocumentScanVisible(false);
       setMenuScanVisible(true);
       return;
     }
+    // Wzajemne wykluczenie: oferta/faktura nie może lecieć równolegle ze skanem menu.
+    setMenuScanVisible(false);
     setDocumentScanKind(kind ?? 'invoice');
     setDocumentScanVisible(true);
   }, []);

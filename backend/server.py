@@ -6676,6 +6676,7 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     (stan 0, min 5, bufor 20%) z kategorią przypisaną przez GPT. Zwraca (count, items, warnings).
 
     - Dedupe: `_food_match_key` / `_find_inventory_duplicate` (pomidor ≡ pomidory).
+    - Soft-deleted (`is_active=false`) NIE blokują — są przywracane zamiast tworzenia duplikatu.
     - Nazwy kanoniczne: `_normalize_ingredient_name` (singular + dish→SKU).
     - Combo półprodukt: `_is_combo_polprodukt_name` → is_combo_polprodukt=True + domyślne składniki.
     """
@@ -6692,21 +6693,65 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
     if not seen:
         return 0, [], warnings
 
-    inv = await sb_get(client, "inventory_items", params={
-        "select": "id,name,is_combo_polprodukt", "limit": "5000",
-    }) or []
+    inv_params_base = {"select": "id,name,is_combo_polprodukt,is_active", "limit": "5000"}
+    inv: list[dict] = []
+    inactive: list[dict] = []
+    try:
+        inv = await sb_get(client, "inventory_items", params={
+            **inv_params_base, "is_active": "eq.true",
+        }) or []
+        inactive = await sb_get(client, "inventory_items", params={
+            **inv_params_base, "is_active": "eq.false",
+        }) or []
+    except httpx.HTTPStatusError as e:
+        body = e.response.text or ""
+        if "is_active" in body:
+            inv = await sb_get(client, "inventory_items", params={
+                "select": "id,name,is_combo_polprodukt", "limit": "5000",
+            }) or []
+            inactive = []
+        else:
+            raise
+
     to_create: list[str] = []
+    created: list[dict] = []
     for _norm_key, orig in seen.items():
         dup = _find_inventory_duplicate(orig, inv, threshold=86)
-        if not dup:
-            to_create.append(orig)
-    if not to_create:
+        if dup:
+            continue
+        # Soft-deleted o tej samej nazwie → przywróć zamiast tworzyć drugi wiersz.
+        dead = _find_inventory_duplicate(orig, inactive, threshold=86)
+        if dead and dead.get("id"):
+            try:
+                await sb_patch(
+                    client, "inventory_items", {"id": f"eq.{dead['id']}"},
+                    {"is_active": True},
+                )
+                dead["is_active"] = True
+                inv.append(dead)
+                inactive = [r for r in inactive if r.get("id") != dead.get("id")]
+                created.append({
+                    "name": dead.get("name") or orig,
+                    "category": "Przywrócony",
+                    "is_combo_polprodukt": bool(dead.get("is_combo_polprodukt")),
+                    "restored": True,
+                })
+                warnings.append(
+                    f"„{dead.get('name') or orig}” było usunięte — przywrócono w magazynie."
+                )
+            except Exception as re:  # noqa: BLE001
+                warnings.append(f"{orig}: nie przywrócono ({re}) — spróbuję utworzyć nowy.")
+                to_create.append(orig)
+            continue
+        to_create.append(orig)
+    if not to_create and not created:
         return 0, [], warnings
+    if not to_create:
+        return len(created), created, warnings
 
     await _ensure_warehouse_categories(client)
     cat_map = await _gpt_categorize_ingredients(to_create, client)
     cat_cache: dict = {}
-    created: list[dict] = []
     for name in to_create:
         is_combo = _is_combo_polprodukt_name(name)
         # Półprodukt combo → zawsze kategoria „Półprodukty” + jednostka „porcja”.
@@ -6719,19 +6764,23 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
             "unit": "porcja" if is_combo else "szt",
             "min_quantity": 5, "safety_buffer_percent": 20,
             "is_combo_polprodukt": is_combo, "unit_cost": 0,
+            "is_active": True,
         }
         try:
             row = await sb_post(client, "inventory_items", payload)
         except httpx.HTTPStatusError as e:
-            if "safety_buffer_percent" in (e.response.text or ""):
+            body = e.response.text or ""
+            if "safety_buffer_percent" in body or "is_active" in body:
                 payload.pop("safety_buffer_percent", None)
+                if "is_active" in body:
+                    payload.pop("is_active", None)
                 try:
                     row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e2:
                     warnings.append(f"{name}: nie utworzono w magazynie ({e2.response.text[:80]}).")
                     continue
             else:
-                warnings.append(f"{name}: nie utworzono w magazynie ({e.response.text[:80]}).")
+                warnings.append(f"{name}: nie utworzono w magazynie ({body[:80]}).")
                 continue
         inv_id = None
         try:
@@ -6759,7 +6808,7 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
                 f"({', '.join(combo_ings) if combo_ings else 'edytuj w Magazynie'})."
             )
         created.append(item_info)
-        inv.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo})
+        inv.append({"id": inv_id, "name": name, "is_combo_polprodukt": is_combo, "is_active": True})
     return len(created), created, warnings
 
 
@@ -6810,11 +6859,17 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
                 category = "Półprodukty"
             price = float(dish.price_pln or 0)
 
-            # Deduplikacja: ta sama AKTYWNA potrawa już w menu → pomiń (bez restore)
+            # Deduplikacja: ta sama AKTYWNA potrawa już w menu → nie twórz drugiego dania,
+            # ALE zbierz składniki do onboarding magazynu (brakujące produkty / przywrócenie).
             hit, _sc = _resolve_by_fuzzy(name, active_menu, threshold=88)
             if hit:
                 skipped += 1
                 warnings.append(f"„{hit.get('name') or name}” już jest w menu — pominięto duplikat.")
+                for ing in (dish.ingredients or []):
+                    iname = (getattr(ing, "name", None) or "").strip()
+                    if not iname or _is_porcja_row(iname):
+                        continue
+                    all_ingredient_names.append(_normalize_ingredient_name(iname))
                 continue
 
             pos_id = _make_pos_id_for_category(category, base_offset + idx + 1)

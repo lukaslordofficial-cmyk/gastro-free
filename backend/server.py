@@ -7712,7 +7712,11 @@ def _local_catalog_match_score(req_name: str, cand_name: str) -> float:
     combined = max(token_cov, fuzz_sc * 0.92)
     if token_cov >= 0.8 and fuzz_sc >= 0.78:
         combined = max(combined, 0.9)
-    if not _food_names_compatible(req_name, cand_name):
+    food_ok = _food_names_compatible(req_name, cand_name)
+    if food_ok and fuzz_sc >= 0.78:
+        # batat↔bataty / pomidor↔pomidory — podnieś do auto-accept
+        combined = max(combined, 0.9)
+    if not food_ok:
         # Bez wspólnego rdzenia — mocno obetnij (AI może jeszcze potwierdzić)
         combined = min(combined, 0.45)
     return combined

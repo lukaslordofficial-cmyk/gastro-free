@@ -67,3 +67,14 @@ def test_bad_synonym_cannot_force_auto_accept():
 def test_partial_letter_overlap_capped_without_food_stem():
     score = _local_catalog_match_score("grzanek", "granulat czosnkowy")
     assert score <= 0.45
+
+
+def test_is_visible_false_is_not_unavailability():
+    """Dokumentacja kontraktu: is_visible=False = poza recepturami, nie brak oferty.
+
+    Matching compare-offers musi brać takie wiersze (sprawdzane integracyjnie);
+    tu tylko utrwalenie semantyki w teście jednostkowym helperów nazw.
+    """
+    # Produkt spoza menu nadal jest „tym samym” towarem po nazwie
+    assert _food_names_compatible("marchew", "marchewka")
+    assert _strict_local_catalog_accept(["batat"], "bataty luz")

@@ -8211,7 +8211,10 @@ async def _ai_catalog_agent_match(
         sup = str(c.get("supplier_name") or "Dostawca").strip()
         variant = str(c.get("variant") or "").strip()
         vbit = f" | wariant={variant}" if variant else ""
-        lines.append(f"- id={cid} | dostawca={sup} | nazwa={name}{vbit}")
+        # Tag informacyjny: czy produkt występuje też w recepturach menu użytkownika.
+        # NIE oznacza dostępności — obie grupy są pełnoprawnymi ofertami dostawcy.
+        tag = "w_recepturach_menu" if c.get("in_menu") else "dodatkowa_oferta"
+        lines.append(f"- id={cid} | dostawca={sup} | nazwa={name}{vbit} | tag={tag}")
         id_by_norm[_norm_pl(name)] = cid
     if not lines:
         return set(), 0.0, {"credits_deducted": 0}
@@ -8219,21 +8222,27 @@ async def _ai_catalog_agent_match(
     catalog_block = "\n".join(lines)
     prompt = (
         "Jesteś agentem zakupowym restauracji (Łowca Okazji). "
-        "Masz dostęp TYLKO do poniższej listy ofert z katalogów dostawców wgranych przez użytkownika. "
-        "Twoje zadanie: znaleźć oferty, które są TYM SAMYM towarem co zamówienie z magazynu kuchni.\n\n"
+        "Masz dostęp do ofert z katalogów dostawców wgranych przez użytkownika. "
+        "Zadanie: znaleźć oferty, które są TYM SAMYM towarem co zamówienie z magazynu.\n\n"
         f"ZAMÓWIENIE Z MAGAZYNU: \"{warehouse_name}\"\n\n"
-        "OFERTY Z KATALOGÓW DOSTAWCÓW (wyłącznie te — nic spoza listy):\n"
+        "OFERTY Z KATALOGÓW (wyłącznie te — nic spoza listy):\n"
         f"{catalog_block}\n\n"
+        "ZNACZENIE TAGÓW:\n"
+        "• w_recepturach_menu = produkt pojawia się też w recepturach menu użytkownika.\n"
+        "• dodatkowa_oferta = produkt w katalogu dostawcy, ale niepowiązany z recepturami.\n"
+        "OBA tagi to REALNE oferty do zamówienia. Tag NIE oznacza braku towaru.\n"
+        "Jeśli zamówienie z magazynu pasuje do oferty z tagiem dodatkowa_oferta — DOPASUJ ją.\n\n"
         "ZASADY:\n"
-        "1. Dopasuj gdy to TEN SAM towar spożywczy — także przy:\n"
+        "1. Dopasuj gdy to TEN SAM towar — także przy:\n"
         "   • liczbie mnogiej/pojedynczej (batat = bataty, pomidor = pomidory),\n"
         "   • innej kolejności słów (filet z kurczaka = kurczak filet),\n"
         "   • synonimie / wariancie opakowania / marce / gramaturze.\n"
-        "2. NIE dopasowuj tylko podobieństwa literowego "
+        "2. NIE odrzucaj oferty tylko dlatego, że ma tag dodatkowa_oferta.\n"
+        "3. NIE dopasowuj tylko podobieństwa literowego "
         "(np. „grzanek” ≠ „granulat czosnkowy”).\n"
-        "3. Jeśli ŻADNA oferta nie jest tym towarem — matched_ids = [].\n"
-        "4. Nie wymyślaj produktów spoza listy. Zwracaj wyłącznie id z listy.\n"
-        "5. Możesz zwrócić wiele id (różni dostawcy / warianty tego samego towaru).\n\n"
+        "4. Jeśli ŻADNA oferta nie jest tym towarem — matched_ids = [].\n"
+        "5. Nie wymyślaj produktów spoza listy. Zwracaj wyłącznie id z listy.\n"
+        "6. Możesz zwrócić wiele id (różni dostawcy / warianty).\n\n"
         "Odpowiedz WYŁĄCZNIE JSON:\n"
         '{"matched_ids": ["..."], "confidence": 0.0, "reason": "krótko"}'
     )
@@ -9059,8 +9068,8 @@ async def compare_offers(req: CompareOffersRequest):
             accepted_catalog_ids: set[str] = set()
 
             for row in catalog:
-                if row.get("is_visible") is False:
-                    continue
+                # is_visible = „występuje w recepturach menu” — NIE „dostępny u dostawcy”.
+                # Zamówienia braków muszą szukać w CAŁYM katalogu (W menu + poza menu).
                 row_name = row.get("name", "")
                 bp = _catalog_base_price(row)
                 if bp is None:
@@ -9140,9 +9149,19 @@ async def compare_offers(req: CompareOffersRequest):
                         (score, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, sim)
                     )
 
-            # Agent OpenAI: przeszukaj REALNE oferty z katalogów dostawców.
-            # Preferuj false-negative (brak w ofertach) niż wrzucenie przypadkowego SKU.
-            ai_pool.sort(key=lambda t: (t[0], t[8]), reverse=True)
+            # Agent OpenAI: przeszukaj REALNE oferty z katalogów dostawców
+            # (W menu + poza menu). Preferuj zgodność stemów, potem score.
+            ai_pool.sort(
+                key=lambda t: (
+                    1 if any(
+                        _food_names_compatible(n, (t[1].get("name") or ""))
+                        for n in primary_names
+                    ) else 0,
+                    t[0],
+                    t[8],
+                ),
+                reverse=True,
+            )
             # Gdy już mamy pewne lokalne trafienia — agent może dociągnąć innych dostawców
             # (synonimy). Gdy brak — agent decyduje, czy cokolwiek pasuje.
             run_agent = bool(ai_pool and ai_item_budget > 0)
@@ -9165,6 +9184,8 @@ async def compare_offers(req: CompareOffersRequest):
                         "supplier_name": sup.get("name") or "Dostawca",
                         "variant": row.get("variant") or "",
                         "sim": sim,
+                        # Tag UI — nie filtr dostępności
+                        "in_menu": row.get("is_visible") is not False,
                     })
                     if len(agent_candidates) >= AI_CATALOG_MAX_CANDIDATES:
                         break
@@ -9195,8 +9216,6 @@ async def compare_offers(req: CompareOffersRequest):
             if not best_by_supplier and ai_item_budget > 0:
                 wide: list[tuple] = []
                 for row in catalog:
-                    if row.get("is_visible") is False:
-                        continue
                     cid = str(row.get("id") or "")
                     if not cid or cid in accepted_catalog_ids:
                         continue
@@ -9251,6 +9270,7 @@ async def compare_offers(req: CompareOffersRequest):
                             "supplier_name": sup.get("name") or "Dostawca",
                             "variant": row.get("variant") or "",
                             "sim": sim,
+                            "in_menu": row.get("is_visible") is not False,
                         })
                         if len(agent_candidates) >= AI_CATALOG_MAX_CANDIDATES:
                             break

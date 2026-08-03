@@ -824,11 +824,11 @@ function SupplierCatalogPicker({
         {!!r.variant && <Text style={styles.pickerVariant}>{r.variant}</Text>}
         {r.in_menu ? (
           <View style={styles.menuTag}>
-            <Text style={styles.menuTagText}>W menu</Text>
+            <Text style={styles.menuTagText}>W recepturach menu</Text>
           </View>
         ) : (
           <View style={styles.extraTag}>
-            <Text style={styles.extraTagText}>Poza menu</Text>
+            <Text style={styles.extraTagText}>Dodatkowa oferta (też do zamówienia)</Text>
           </View>
         )}
       </View>
@@ -874,13 +874,15 @@ function SupplierCatalogPicker({
               <>
                 {inMenu.length > 0 ? (
                   <>
-                    <Text style={styles.pickerSection}>W MENU ({inMenu.length})</Text>
+                    <Text style={styles.pickerSection}>W RECEPTURACH MENU ({inMenu.length})</Text>
                     {inMenu.map(renderRow)}
                   </>
                 ) : null}
                 {extra.length > 0 ? (
                   <>
-                    <Text style={styles.pickerSection}>POZA MENU / DODATKOWE ({extra.length})</Text>
+                    <Text style={styles.pickerSection}>
+                      DODATKOWA OFERTA — TEŻ DO ZAMÓWIENIA ({extra.length})
+                    </Text>
                     {extra.map(renderRow)}
                   </>
                 ) : null}
@@ -1072,7 +1074,7 @@ function NewOrderBrowser({
             </TouchableOpacity>
           </View>
           <Text style={styles.newOrderIntro}>
-            Wybierz dostawcę i produkt. Produkty z menu są na górze, poza menu — poniżej.
+            Wybierz dostawcę i produkt. Pozycje z receptur menu są na górze; dodatkowa oferta też jest do zamówienia.
           </Text>
           <View style={styles.pickerSearch}>
             <Search size={16} color={C.textTertiary} />
@@ -1119,11 +1121,11 @@ function NewOrderBrowser({
                         </Text>
                         {p.in_menu ? (
                           <View style={styles.menuTag}>
-                            <Text style={styles.menuTagText}>W menu</Text>
+                            <Text style={styles.menuTagText}>W recepturach menu</Text>
                           </View>
                         ) : (
                           <View style={styles.extraTag}>
-                            <Text style={styles.extraTagText}>Poza menu</Text>
+                            <Text style={styles.extraTagText}>Dodatkowa oferta (też do zamówienia)</Text>
                           </View>
                         )}
                       </View>
@@ -1148,11 +1150,11 @@ function NewOrderBrowser({
                         : <ChevronRight size={18} color={C.textTertiary} />}
                     </TouchableOpacity>
                     {open && inMenu.length > 0 ? (
-                      <Text style={styles.pickerSection}>W MENU</Text>
+                      <Text style={styles.pickerSection}>W RECEPTURACH MENU</Text>
                     ) : null}
                     {inMenu.map(renderProduct)}
                     {open && extra.length > 0 ? (
-                      <Text style={styles.pickerSection}>POZA MENU</Text>
+                      <Text style={styles.pickerSection}>DODATKOWA OFERTA (też do zamówienia)</Text>
                     ) : null}
                     {extra.map(renderProduct)}
                   </View>

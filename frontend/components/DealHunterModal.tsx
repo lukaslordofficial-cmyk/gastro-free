@@ -264,9 +264,10 @@ function themedStyles(C: DealColors) {
     tiedChipTextActive: { color: C.accentDark },
     tiedChipSub: { fontSize: 11, color: C.textSecondary, marginTop: 2 },
     optLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-    optLineLeft: { flex: 1, gap: 4 },
+    optLineLeft: { flex: 1, gap: 4, minWidth: 0 },
     optLineRight: { alignItems: 'flex-end', gap: 6 },
     optLineName: { fontSize: 13, color: C.textSecondary },
+    optLineMeta: { fontSize: 11, fontWeight: '600', color: C.textTertiary },
     optLinePrice: { fontSize: 13, fontWeight: '600', color: C.textPrimary, marginTop: 2 },
     editCart: {
       backgroundColor: C.card, borderWidth: 1.5, borderColor: C.accent + '40',
@@ -674,8 +675,12 @@ function OfferLine({
   return (
     <View style={styles.optLine}>
       <View style={styles.optLineLeft}>
-        <Text style={styles.optLineName} numberOfLines={1}>
+        <Text style={styles.optLineName} numberOfLines={2}>
           {item.matched_name}
+        </Text>
+        <Text style={styles.optLineMeta} numberOfLines={1}>
+          {formatPln(item.unit_price_base)} / {item.unit}
+          {item.base_dim && item.base_dim !== item.unit ? ` · baza: ${item.base_dim}` : ''}
         </Text>
         <QtyStepper
           value={item.quantity}
@@ -1291,6 +1296,7 @@ export function DealHunterModal({
   const { alert: premiumAlert } = usePremiumAlert();
   const { dealHunterUnlocked } = useSubscription();
   const lastDraftFpRef = useRef<string | null>(null);
+  const compareScrollRef = useRef<ScrollView>(null);
   const [draftSavedInfo, setDraftSavedInfo] = useState<string | null>(null);
   const [step, setStep] = useState<Step>('qty');
   const [qty, setQty] = useState('1');
@@ -1692,11 +1698,24 @@ export function DealHunterModal({
     }
   }, [selectedSuppliers, draftFingerprint, premiumAlert]);
 
-  // When user taps another scenario — drop edits
+  // When user taps another scenario — drop edits and show that full cart at top
   const selectOption = useCallback((opt: SelectedOption) => {
     setSelectedOption(opt);
-    setManualCart(null);
-  }, []);
+    if (liveResult) {
+      const groups = toSupplierGroups(liveResult, opt, tiedSupplierId)
+        .filter((g) => (g.items?.length ?? 0) > 0)
+        .map((g) => recalcGroup({
+          ...g,
+          items: g.items.map((it) => ({ ...it })),
+        }));
+      setManualCart(groups.length ? groups : null);
+    } else {
+      setManualCart(null);
+    }
+    requestAnimationFrame(() => {
+      compareScrollRef.current?.scrollTo({ y: 0, animated: true });
+    });
+  }, [liveResult, tiedSupplierId]);
 
   const runCompare = useCallback(async () => {
     if (!product) return;
@@ -2058,7 +2077,13 @@ export function DealHunterModal({
 
     return (
       <View style={styles.editCart} testID="deal-hunter-edit-cart">
-        <Text style={styles.editCartTitle}>Zamówienia u dostawców</Text>
+        <Text style={styles.editCartTitle}>
+          {effectiveSelectedOption === 'split_max' || effectiveSelectedOption === 'optimized'
+            ? 'Zamówienie · Najniższa cena'
+            : effectiveSelectedOption === 'monolith' || effectiveSelectedOption === 'all_one'
+              ? 'Zamówienie · Wygoda (mało dostaw)'
+              : 'Zamówienia u dostawców'}
+        </Text>
         {groups.length > 0 ? (
           <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 4 }]} testID="deal-hunter-suppliers-summary">
             Od: {groups.map((g) => (g.supplier_name || '').trim() || 'Dostawca').join(' · ')}
@@ -2336,66 +2361,41 @@ export function DealHunterModal({
           {altScenarios.length > 0 ? (
             <>
               <Text style={[styles.editCartHint, { marginTop: 8, marginBottom: 4 }]}>
-                Inny wariant dostawy (porównaj):
+                Inny wariant dostawy:
               </Text>
-              {altScenarios.slice(0, 1).map((sc) => {
-                const supplierNames = (sc.suppliers || [])
-                  .map((g) => (g.supplier_name || '').trim())
-                  .filter(Boolean);
-                const itemPreview = (sc.suppliers || [])
-                  .flatMap((g) => g.items.map((it) => it.matched_name || it.product_name))
-                  .filter(Boolean)
-                  .slice(0, 4);
-                return (
-                  <TouchableOpacity
-                    key={sc.id}
-                    activeOpacity={0.85}
-                    onPress={() => selectOption(sc.id as SelectedOption)}
-                    style={styles.optCard}
-                    testID={`deal-hunter-scenario-${sc.id}`}
-                  >
-                    <View style={styles.optHeader}>
-                      <View style={[styles.optBadge, sc.id === 'split_max' && styles.optBadgeGreen]}>
-                        {sc.id === 'split_max'
-                          ? <TrendingDown size={13} color={C.success} strokeWidth={2.2} />
-                          : <Store size={13} color={C.accent} strokeWidth={2.2} />}
-                        <Text
-                          style={[styles.optBadgeText, sc.id === 'split_max' && { color: C.success }]}
-                          numberOfLines={2}
-                        >
-                          {scenarioShortLabel(sc.id, sc.label)}
-                        </Text>
-                      </View>
-                      <View style={styles.radio} />
-                    </View>
-                    {!!sc.description && (
-                      <Text style={styles.scenarioDesc} numberOfLines={3}>{sc.description}</Text>
-                    )}
-                    <Text style={styles.optSupplier} numberOfLines={2}>
-                      {sc.supplier_count} {sc.supplier_count === 1 ? 'dostawca' : 'dostawców'}
-                      {supplierNames.length ? `: ${supplierNames.join(' · ')}` : ''}
-                    </Text>
-                    {itemPreview.length > 0 ? (
-                      <Text style={styles.altScenarioPreview} numberOfLines={3}>
-                        {itemPreview.join(' · ')}
-                        {(sc.suppliers || []).reduce((n, g) => n + g.items.length, 0) > itemPreview.length
-                          ? '…'
-                          : ''}
+              {altScenarios.slice(0, 1).map((sc) => (
+                <TouchableOpacity
+                  key={sc.id}
+                  activeOpacity={0.85}
+                  onPress={() => selectOption(sc.id as SelectedOption)}
+                  style={styles.optCard}
+                  testID={`deal-hunter-scenario-${sc.id}`}
+                >
+                  <View style={styles.optHeader}>
+                    <View style={[styles.optBadge, sc.id === 'split_max' && styles.optBadgeGreen]}>
+                      {sc.id === 'split_max'
+                        ? <TrendingDown size={13} color={C.success} strokeWidth={2.2} />
+                        : <Store size={13} color={C.accent} strokeWidth={2.2} />}
+                      <Text
+                        style={[styles.optBadgeText, sc.id === 'split_max' && { color: C.success }]}
+                        numberOfLines={2}
+                      >
+                        {scenarioShortLabel(sc.id, sc.label)}
                       </Text>
-                    ) : null}
-                    <View style={styles.optTotalRow}>
-                      <Text style={styles.optTotalLabel} numberOfLines={2}>
-                        Produkty {formatPln(sc.products_pln)}
-                        {sc.shipping_pln > 0 ? ` + dostawa ${formatPln(sc.shipping_pln)}` : ''}
-                      </Text>
-                      <Text style={styles.optTotalValue}>{formatPln(sc.total_pln)}</Text>
                     </View>
-                    <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
-                      Kliknij, aby zobaczyć pełne szczegóły tego wariantu.
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+                    <Text style={styles.optTotalValue}>{formatPln(sc.total_pln)}</Text>
+                  </View>
+                  <Text style={styles.altScenarioPreview} numberOfLines={2}>
+                    {sc.supplier_count} {sc.supplier_count === 1 ? 'dostawca' : 'dostawców'}
+                    {(sc.suppliers || []).length
+                      ? ` · ${(sc.suppliers || []).map((g) => g.supplier_name).filter(Boolean).join(', ')}`
+                      : ''}
+                  </Text>
+                  <Text style={[styles.editCartHint, { marginBottom: 0, fontWeight: '700', color: C.accent }]}>
+                    Pokaż pełny koszyk (jak powyżej)
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </>
           ) : null}
         </>
@@ -2412,7 +2412,7 @@ export function DealHunterModal({
         {renderEditableCart()}
         {(showAllOne || showOptimized) ? (
           <Text style={[styles.editCartHint, { marginTop: 8, marginBottom: 4 }]}>
-            Inny wariant dostawy (porównaj):
+            Inny wariant dostawy:
           </Text>
         ) : null}
 
@@ -2426,17 +2426,13 @@ export function DealHunterModal({
             <View style={styles.optHeader}>
               <View style={styles.optBadge}>
                 <Store size={13} color={C.accent} strokeWidth={2.2} />
-                <Text style={styles.optBadgeText} numberOfLines={2}>Wygoda · wszystko u jednego</Text>
+                <Text style={styles.optBadgeText} numberOfLines={2}>Wygoda (mało dostaw)</Text>
               </View>
-              <View style={styles.radio} />
-            </View>
-            <Text style={styles.optSupplier} numberOfLines={2}>{o1.supplier_name}</Text>
-            <View style={styles.optTotalRow}>
-              <Text style={styles.optTotalLabel}>Razem</Text>
               <Text style={styles.optTotalValue}>{formatPln(o1.total_pln)}</Text>
             </View>
-            <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
-              Kliknij, aby zobaczyć pełne szczegóły tego wariantu.
+            <Text style={styles.altScenarioPreview} numberOfLines={2}>{o1.supplier_name}</Text>
+            <Text style={[styles.editCartHint, { marginBottom: 0, fontWeight: '700', color: C.accent }]}>
+              Pokaż pełny koszyk (jak powyżej)
             </Text>
           </TouchableOpacity>
         ) : null}
@@ -2452,20 +2448,16 @@ export function DealHunterModal({
               <View style={[styles.optBadge, styles.optBadgeGreen]}>
                 <TrendingDown size={13} color={C.success} strokeWidth={2.2} />
                 <Text style={[styles.optBadgeText, { color: C.success }]} numberOfLines={2}>
-                  Najniższa cena · rozbicie
+                  Najniższa cena
                 </Text>
               </View>
-              <View style={styles.radio} />
-            </View>
-            <Text style={styles.optSupplier} numberOfLines={2}>
-              {o2.suppliers.length} {o2.suppliers.length === 1 ? 'dostawca' : 'dostawców'}
-            </Text>
-            <View style={styles.optTotalRow}>
-              <Text style={styles.optTotalLabel}>Razem</Text>
               <Text style={styles.optTotalValue}>{formatPln(o2.total_pln)}</Text>
             </View>
-            <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
-              Kliknij, aby zobaczyć pełne szczegóły tego wariantu.
+            <Text style={styles.altScenarioPreview} numberOfLines={2}>
+              {o2.suppliers.length} {o2.suppliers.length === 1 ? 'dostawca' : 'dostawców'}
+            </Text>
+            <Text style={[styles.editCartHint, { marginBottom: 0, fontWeight: '700', color: C.accent }]}>
+              Pokaż pełny koszyk (jak powyżej)
             </Text>
           </TouchableOpacity>
         ) : null}
@@ -2574,7 +2566,11 @@ export function DealHunterModal({
             </View>
           ) : result ? (
             <>
-              <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+              <ScrollView
+                ref={compareScrollRef}
+                contentContainerStyle={styles.body}
+                showsVerticalScrollIndicator={false}
+              >
                 {bulkContextLabel ? (
                   <Text style={[styles.editCartHint, { marginBottom: 8 }]} testID="deal-hunter-bulk-label">
                     {bulkContextLabel}

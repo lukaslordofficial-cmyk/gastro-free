@@ -1696,20 +1696,6 @@ export function VoiceReportModal({
                   </TouchableOpacity>
                 </View>
 
-                <TouchableOpacity
-                  style={[styles.wakeListenBtn, { marginTop: 10 }]}
-                  onPress={startFollowUpRecording}
-                  activeOpacity={0.85}
-                  testID="voice-review-followup"
-                >
-                  <Mic size={14} color="#0A0A0A" strokeWidth={2.5} />
-                  <Text style={[styles.wakeListenText, { color: '#0A0A0A' }]} numberOfLines={2}>
-                    Mów dalej — uzupełnij lub zatwierdź głosem
-                  </Text>
-                </TouchableOpacity>
-                <Text style={[styles.editHint, { marginTop: 6 }]}>
-                  Np. „zatwierdź”, „anuluj”, „na 30 porcji”, albo popraw nazwę dania głosem.
-                </Text>
               </View>
             )}
 

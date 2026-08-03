@@ -7738,10 +7738,12 @@ def _strict_local_catalog_accept(primary_names: list[str], cand_name: str) -> bo
         return False
     if not _food_names_compatible(primary, cand_name):
         return False
-    # Wysoki token cover ALBO exact/near-exact
+    # Wysoki token cover ALBO exact/near-exact ALBO odmiana PL (batat↔bataty)
     if _norm_pl(primary) == _norm_pl(cand_name):
         return True
     if _match_score(primary, cand_name) >= 0.8:
+        return True
+    if _food_match_key(primary) == _food_match_key(cand_name):
         return True
     return score >= 0.95
 

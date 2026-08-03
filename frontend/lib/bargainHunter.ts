@@ -553,13 +553,58 @@ export function suppliersMetaFromMatrix(matrix: PricingMatrixItem[]): SuppliersM
   return meta;
 }
 
+function patchGroupQuantities(
+  g: SupplierGroup,
+  quantities: Record<string, number>,
+): SupplierGroup {
+  const items = g.items.map((it) => {
+    const qty = quantities[it.product_name] ?? it.quantity;
+    return {
+      ...it,
+      quantity: qty,
+      line_total: recalcLineTotal(it.unit_price_base, qty, it.unit),
+    };
+  });
+  const subtotal = Math.round(items.reduce((s, it) => s + it.line_total, 0) * 100) / 100;
+  const minVal = g.min_order_value ?? 0;
+  return {
+    ...g,
+    items,
+    subtotal_pln: subtotal,
+    meets_minimum_order: !minVal || minVal <= 0 || subtotal >= minVal,
+    total_pln: Math.round((subtotal + (g.shipping_pln ?? 0)) * 100) / 100,
+  };
+}
+
+function patchScenarioQuantities(
+  sc: BasketScenario | null | undefined,
+  quantities: Record<string, number>,
+): BasketScenario | null | undefined {
+  if (!sc) return sc;
+  const suppliers = (sc.suppliers || []).map((g) => patchGroupQuantities(g, quantities));
+  const products_pln = Math.round(
+    suppliers.reduce((s, g) => s + g.subtotal_pln, 0) * 100,
+  ) / 100;
+  return {
+    ...sc,
+    suppliers,
+    products_pln,
+    total_pln: Math.round((products_pln + (sc.shipping_pln || 0)) * 100) / 100,
+    supplier_count: suppliers.filter((g) => g.items.length > 0).length,
+  };
+}
+
+/**
+ * Przelicz ilości w wyniku compare.
+ * Dla v2 (scenariusze / wielu dostawców) NIE przebudowuj koszyków od zera —
+ * inaczej giną grupy dostawców i UI pokazuje tylko jeden koszyk (lub żaden).
+ */
 export function recalcFromMatrix(
   base: OptimizeResult,
   quantities: Record<string, number>,
 ): OptimizeResult {
   if (!base.pricing_matrix?.length) return base;
-  const meta = suppliersMetaFromMatrix(base.pricing_matrix);
-  const items = matrixToPerItem(base.pricing_matrix, quantities);
+
   const itemsRequested = base.items_requested.map((ir) => {
     const qty = quantities[ir.product_name] ?? ir.quantity;
     const row = base.pricing_matrix.find((m) => m.product_key === ir.product_name);
@@ -569,10 +614,112 @@ export function recalcFromMatrix(
       found: Boolean(row?.quotes?.length),
     };
   });
+
+  const pricing_matrix = base.pricing_matrix.map((row) => ({
+    ...row,
+    quantity: quantities[row.product_key] ?? row.quantity,
+  }));
+
+  const keepV2 =
+    Boolean(base.is_multivariable)
+    || base.optimizer_version === 2
+    || Boolean(base.scenarios?.length)
+    || Boolean(base.scenario_split_max)
+    || Boolean(base.scenario_monolith);
+
+  if (keepV2) {
+    const scenarios = (base.scenarios ?? [])
+      .map((sc) => patchScenarioQuantities(sc, quantities))
+      .filter((sc): sc is BasketScenario => !!sc);
+    const scenario_split_max = patchScenarioQuantities(base.scenario_split_max, quantities) ?? undefined;
+    const scenario_monolith = patchScenarioQuantities(base.scenario_monolith, quantities) ?? undefined;
+    const scenario_smart_hybrid = patchScenarioQuantities(base.scenario_smart_hybrid, quantities) ?? undefined;
+
+    const variant_split_suppliers = (
+      base.variant_split?.suppliers
+      ?? base.option_optimized?.suppliers
+      ?? []
+    ).map((g) => patchGroupQuantities(g, quantities));
+    const variant_split: OptionOptimized = {
+      type: base.variant_split?.type ?? 'optimized',
+      suppliers: variant_split_suppliers,
+      total_pln: Math.round(
+        variant_split_suppliers.reduce((s, g) => s + g.subtotal_pln, 0) * 100,
+      ) / 100,
+      missing: base.variant_split?.missing ?? base.option_optimized?.missing ?? [],
+    };
+
+    let variant_monolith = base.variant_monolith ?? base.option_all_one ?? null;
+    if (variant_monolith) {
+      const items = variant_monolith.items.map((it) => {
+        const qty = quantities[it.product_name] ?? it.quantity;
+        return {
+          ...it,
+          quantity: qty,
+          line_total: recalcLineTotal(it.unit_price_base, qty, it.unit),
+        };
+      });
+      const subtotal = Math.round(items.reduce((s, it) => s + it.line_total, 0) * 100) / 100;
+      variant_monolith = {
+        ...variant_monolith,
+        items,
+        subtotal_pln: subtotal,
+        total_pln: subtotal,
+        meets_minimum_order: meetsMinimum(subtotal, variant_monolith.min_order_value ?? 0),
+      };
+    }
+
+    let best_option = base.best_option;
+    if (best_option?.suppliers?.length) {
+      best_option = {
+        ...best_option,
+        suppliers: best_option.suppliers.map((g) => patchGroupQuantities(g, quantities)),
+      };
+      const sum = Math.round(
+        (best_option.suppliers ?? []).reduce((s, g) => s + g.subtotal_pln, 0) * 100,
+      ) / 100;
+      best_option = { ...best_option, subtotal_pln: sum, total_pln: sum };
+    } else if (best_option?.items?.length) {
+      const items = best_option.items.map((it) => {
+        const qty = quantities[it.product_name] ?? it.quantity;
+        return {
+          ...it,
+          quantity: qty,
+          line_total: recalcLineTotal(it.unit_price_base, qty, it.unit),
+        };
+      });
+      const subtotal = Math.round(items.reduce((s, it) => s + it.line_total, 0) * 100) / 100;
+      best_option = {
+        ...best_option,
+        items,
+        subtotal_pln: subtotal,
+        total_pln: subtotal,
+        meets_minimum_order: meetsMinimum(subtotal, best_option.min_order_value ?? 0),
+      };
+    }
+
+    return {
+      ...base,
+      items_requested: itemsRequested,
+      pricing_matrix,
+      scenarios,
+      scenario_split_max,
+      scenario_monolith,
+      scenario_smart_hybrid,
+      variant_split,
+      option_optimized: variant_split,
+      variant_monolith,
+      option_all_one: variant_monolith,
+      best_option,
+    };
+  }
+
+  const meta = suppliersMetaFromMatrix(pricing_matrix);
+  const items = matrixToPerItem(pricing_matrix, quantities);
   return buildFromPerItem(items, meta, {
     currency: base.currency,
     items_requested: itemsRequested,
-    pricing_matrix: base.pricing_matrix,
+    pricing_matrix,
     assistant_speech: base.assistant_speech,
   });
 }
@@ -597,14 +744,38 @@ export function toSupplierGroups(
   selected: SelectedVariant,
   tiedSupplierId?: string | null,
 ): SupplierGroup[] {
-  // v2: wybór po id scenariusza
+  // v2: wybór po id scenariusza — zwróć WSZYSTKIE koszyki dostawców ze scenariusza
   if (selected === 'split_max' || selected === 'monolith' || selected === 'smart_hybrid') {
     const sc =
       (result.scenarios ?? []).find((s) => s.id === selected)
       ?? (selected === 'split_max' ? result.scenario_split_max : null)
       ?? (selected === 'monolith' ? result.scenario_monolith : null)
       ?? (selected === 'smart_hybrid' ? result.scenario_smart_hybrid : null);
-    if (sc?.suppliers?.length) return sc.suppliers;
+    if (sc?.suppliers?.length) {
+      return sc.suppliers.filter((g) => (g.items?.length ?? 0) > 0);
+    }
+    // Awaryjnie: nie gub rozbicia na dostawców gdy kafle scenariuszy zniknęły z payloadu
+    if (selected === 'split_max' || selected === 'smart_hybrid') {
+      const splitGroups = result.variant_split?.suppliers ?? result.option_optimized?.suppliers ?? [];
+      if (splitGroups.length) return splitGroups.filter((g) => (g.items?.length ?? 0) > 0);
+      if (result.best_option?.suppliers?.length) {
+        return result.best_option.suppliers.filter((g) => (g.items?.length ?? 0) > 0);
+      }
+    }
+    if (selected === 'monolith' && result.variant_monolith) {
+      const o = result.variant_monolith;
+      return o.items?.length
+        ? [{
+            supplier_id: o.supplier_id,
+            supplier_name: o.supplier_name,
+            supplier_email: o.supplier_email,
+            items: o.items,
+            subtotal_pln: o.total_pln,
+            min_order_value: o.min_order_value,
+            meets_minimum_order: o.meets_minimum_order,
+          }]
+        : [];
+    }
   }
 
   if (!result.is_optimized && !result.is_multivariable) {
@@ -625,6 +796,10 @@ export function toSupplierGroups(
     }
     const best = result.best_option;
     if (!best) return [];
+    // Rozbicie na wielu dostawców — zawsze wszystkie grupy
+    if (best.suppliers && best.suppliers.length > 0) {
+      return best.suppliers.filter((g) => (g.items?.length ?? 0) > 0);
+    }
     if (best.type === 'single' && best.supplier_id && best.items) {
       return [
         {
@@ -636,7 +811,6 @@ export function toSupplierGroups(
         },
       ];
     }
-    if (best.suppliers) return best.suppliers;
     return [];
   }
 
@@ -654,8 +828,14 @@ export function toSupplierGroups(
       },
     ];
   }
-  if (selected === 'optimized') return result.variant_split?.suppliers ?? [];
-  return [];
+  if (selected === 'optimized') {
+    return (result.variant_split?.suppliers ?? []).filter((g) => (g.items?.length ?? 0) > 0);
+  }
+  // Ostatnia deska: pokaż rozbicie z best_option / variant_split zamiast pustego koszyka
+  if (result.best_option?.suppliers?.length) {
+    return result.best_option.suppliers.filter((g) => (g.items?.length ?? 0) > 0);
+  }
+  return (result.variant_split?.suppliers ?? []).filter((g) => (g.items?.length ?? 0) > 0);
 }
 
 /** Normalize API payload that may predate is_optimized field */

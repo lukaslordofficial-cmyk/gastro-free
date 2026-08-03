@@ -416,7 +416,17 @@ function themedStyles(C: DealColors) {
       width: 28, height: 28, borderRadius: 8, backgroundColor: C.borderLight,
       alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.border,
     },
-    qtyStepVal: { fontSize: 12, fontWeight: '700', color: C.textPrimary, minWidth: 56 },
+    qtyStepInputWrap: {
+      flexDirection: 'row', alignItems: 'center', gap: 4,
+      minWidth: 72, borderWidth: 1, borderColor: C.border, borderRadius: 8,
+      backgroundColor: C.borderLight, paddingHorizontal: 6, paddingVertical: 2,
+    },
+    qtyStepInput: {
+      minWidth: 36, maxWidth: 64, fontSize: 12, fontWeight: '700',
+      color: C.textPrimary, paddingVertical: 2, paddingHorizontal: 2,
+      textAlign: 'center',
+    },
+    qtyStepUnit: { fontSize: 11, fontWeight: '600', color: C.textSecondary },
     minOrderBadge: {
       backgroundColor: C.warningLight, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
       alignSelf: 'flex-start',
@@ -516,20 +526,38 @@ function resolveSelectionFromCompare(compare: OptimizeResult): {
 } {
   const rec = String(compare.recommended_scenario_id || '').trim();
   if (compare.is_multivariable) {
-    if (rec === 'split_max' || rec === 'monolith' || rec === 'smart_hybrid') {
-      return { option: rec, tiedId: null };
-    }
-    if (rec) return { option: rec as SelectedOption, tiedId: null };
     const scenarios = (compare.scenarios?.length
       ? compare.scenarios
       : [compare.scenario_split_max, compare.scenario_monolith, compare.scenario_smart_hybrid].filter(Boolean)
     ) as NonNullable<OptimizeResult['scenarios']>;
+    const withBaskets = (id: string) => {
+      const sc = scenarios.find((s) => s.id === id)
+        ?? (id === 'split_max' ? compare.scenario_split_max : null)
+        ?? (id === 'monolith' ? compare.scenario_monolith : null)
+        ?? (id === 'smart_hybrid' ? compare.scenario_smart_hybrid : null);
+      return (sc?.suppliers ?? []).filter((g) => (g.items?.length ?? 0) > 0).length;
+    };
+    // Gdy rekomendacja to 1 dostawca, a split ma realne koszyki u wielu — pokaż rozbicie
+    if (
+      (rec === 'monolith' || rec === 'smart_hybrid')
+      && withBaskets('split_max') > withBaskets(rec)
+      && withBaskets('split_max') >= 2
+    ) {
+      return { option: 'split_max', tiedId: null };
+    }
+    if (rec === 'split_max' || rec === 'monolith' || rec === 'smart_hybrid') {
+      return { option: rec, tiedId: null };
+    }
+    if (rec) return { option: rec as SelectedOption, tiedId: null };
     const first =
       scenarios.find((s) => (s.suppliers?.length ?? 0) > 0 || (s.missing?.length ?? 0) > 0)
       ?? scenarios[0];
     if (first?.id) return { option: first.id as SelectedOption, tiedId: null };
   }
   if (compare.is_optimized) {
+    // Preferuj rozbicie gdy ma ≥2 koszyki — inaczej giną zamówienia u drugiego dostawcy
+    const splitN = (compare.variant_split?.suppliers ?? []).filter((g) => g.items?.length).length;
+    if (splitN >= 2) return { option: 'optimized', tiedId: null };
     return {
       option: compare.cheaper_variant === 'split' ? 'optimized' : 'all_one',
       tiedId: null,
@@ -574,18 +602,44 @@ function QtyStepper({
 }) {
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
   const step = value >= 10 ? 1 : value >= 1 ? 0.5 : 0.1;
   const dec = () => onChange(Math.max(step, Math.round((value - step) * 100) / 100));
   const inc = () => onChange(Math.round((value + step) * 100) / 100);
+
+  const commitDraft = () => {
+    const n = Number(String(draft).replace(',', '.'));
+    if (!Number.isFinite(n) || n <= 0) {
+      setDraft(String(value));
+      return;
+    }
+    const rounded = Math.round(n * 100) / 100;
+    onChange(rounded);
+    setDraft(String(rounded));
+  };
 
   return (
     <View style={styles.qtyStepper} testID={testID}>
       <TouchableOpacity onPress={dec} style={styles.qtyStepBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
         <Minus size={14} color={C.textSecondary} strokeWidth={2.5} />
       </TouchableOpacity>
-      <Text style={styles.qtyStepVal}>
-        {value} {unit}
-      </Text>
+      <View style={styles.qtyStepInputWrap}>
+        <TextInput
+          style={styles.qtyStepInput}
+          value={draft}
+          onChangeText={setDraft}
+          onBlur={commitDraft}
+          onSubmitEditing={commitDraft}
+          keyboardType="decimal-pad"
+          selectTextOnFocus
+          testID={testID ? `${testID}-input` : undefined}
+        />
+        <Text style={styles.qtyStepUnit}>{unit}</Text>
+      </View>
       <TouchableOpacity onPress={inc} style={styles.qtyStepBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
         <Plus size={14} color={C.accent} strokeWidth={2.5} />
       </TouchableOpacity>
@@ -2109,16 +2163,9 @@ export function DealHunterModal({
         ) : null}
         {missingNotes.length > 0 ? (
           <View style={styles.missingBox} testID="deal-hunter-missing-notes">
-            <Text style={styles.missingTitle}>Brak w ofercie dostawców</Text>
-            <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
-              Tych produktów nie ma w katalogach Twoich dostawców — nie trafią do zamówienia.
+            <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 0 }]}>
+              Tych produktów nie ma w kategoriach twoich dostawców.
             </Text>
-            {missingNotes.map((name) => (
-              <View key={name} style={styles.missingRow}>
-                <Text style={styles.missingName} numberOfLines={2}>{name}</Text>
-                <Text style={styles.missingBadge}>brak</Text>
-              </View>
-            ))}
           </View>
         ) : null}
 
@@ -2324,9 +2371,6 @@ export function DealHunterModal({
               </TouchableOpacity>
             );
           })}
-          {!!result.recommended_reason && (
-            <Text style={styles.recommendedReason}>{result.recommended_reason}</Text>
-          )}
         </>
       );
     }
@@ -2520,124 +2564,83 @@ export function DealHunterModal({
                     {bulkContextLabel}
                   </Text>
                 ) : null}
-                {/* Rozpiska zakresu — w Łowcy, nie w panelu komendy głosowej. */}
-                {(Array.isArray(result.scope_products) && result.scope_products.length > 0)
-                  || (Array.isArray(result.items_requested) && result.items_requested.length > 0) ? (
-                  <View style={styles.speechCard} testID="deal-hunter-scope">
-                    <View style={{ flex: 1, gap: 6 }}>
-                      <Text style={[styles.speechText, { fontWeight: '800' }]}>
-                        Zakres zamówienia
-                      </Text>
-                      {Array.isArray(result.scope_categories) && result.scope_categories.length > 0 ? (
-                        <Text style={styles.editCartHint}>
-                          Kategorie: {result.scope_categories.join(', ')}
-                        </Text>
-                      ) : null}
-                      {!!result.scope_summary && (
-                        <Text style={styles.foundInOffers}>{result.scope_summary}</Text>
-                      )}
-                      {Array.isArray(result.items_requested) && result.items_requested.length > 0 ? (
-                        <Text style={styles.foundInOffers}>
-                          Dopasowano w katalogach dostawców:{' '}
-                          {result.items_requested.filter((i) => i.found).length} /{' '}
-                          {result.items_requested.length} pozycji
-                          {' '}(tylko realne oferty — bez zgadywania)
-                        </Text>
-                      ) : null}
-                      {(result.scope_products ?? result.items_requested ?? []).slice(0, 40).map((row: any, idx: number) => {
-                        const name = String(row?.name || row?.product_name || '—');
-                        const qty = row?.quantity ?? row?.deficit;
-                        const unit = row?.unit || '';
-                        const found = result.items_requested?.find(
-                          (ir) => String(ir.product_name || '').toLowerCase() === name.toLowerCase(),
-                        );
-                        const ok = found ? found.found !== false : true;
-                        const cat = row?.category ? ` · ${row.category}` : '';
-                        const fromSup = (found?.supplier_name || '').trim();
-                        const offerNames = (found?.offers ?? [])
-                          .map((o) => (o.supplier_name || '').trim())
-                          .filter(Boolean)
-                          .slice(0, 3);
-                        const who = fromSup
-                          || (offerNames.length ? offerNames.join(', ') : '');
-                        return (
-                          <Text
-                            key={`scope-${idx}-${name}`}
-                            style={[styles.speechText, !ok && { color: C.danger }]}
-                          >
-                            {ok ? '✓' : '✗'} {name}
-                            {qty != null ? ` — ${qty} ${unit}`.trimEnd() : ''}
-                            {cat}
-                            {ok && who ? ` · od: ${who}` : ''}
-                            {!ok ? ' (brak w ofertach)' : ''}
-                          </Text>
-                        );
-                      })}
-                      {Array.isArray(result.not_found_products) && result.not_found_products.length > 0 ? (
-                        <Text style={[styles.editCartHint, { color: C.danger, marginTop: 4 }]}>
-                          Nie znaleziono u dostawców ({result.not_found_products.length}):{' '}
-                          {result.not_found_products.slice(0, 12).join(', ')}
-                          {result.not_found_products.length > 12 ? '…' : ''}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </View>
-                ) : null}
-                {/* Edytowalny koszyk dostawców — tylko pozycje z zakresu. */}
+                {/* Edytowalny koszyk dostawców — zakres widać w „Zamówienia u dostawców”. */}
                 {(result.is_optimized || result.is_multivariable) ? renderCompareMode() : renderSingleMode()}
                 {creditsNotice ? (
                   <View style={styles.creditsNotice} testID="deal-hunter-credits-notice">
                     <Text style={styles.creditsNoticeText}>{creditsNotice}</Text>
                   </View>
                 ) : null}
-                <View style={styles.speechCard} testID="deal-hunter-speech">
-                  <Volume2 size={15} color={C.accent} strokeWidth={2.2} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.speechText}>
-                      {result.analysis_summary || result.assistant_speech}
-                    </Text>
-                  </View>
-                </View>
-                {Array.isArray(result.suggestions) && result.suggestions.length > 0 ? (
-                  <View style={styles.suggestionsCard} testID="deal-hunter-suggestions">
-                    <View style={styles.suggestionsHead}>
-                      <Lightbulb size={15} color={C.accent} strokeWidth={2.2} />
-                      <Text style={styles.suggestionsTitle}>Sugestie Łowcy</Text>
+                {(() => {
+                  const speech = String(result.analysis_summary || result.assistant_speech || '').trim();
+                  // Bez długich „Zalecane jest skorzystanie z opcji…” — koszyki mówią same za siebie.
+                  if (!speech) return null;
+                  if (/zalecane jest skorzystanie/i.test(speech)) return null;
+                  if (/skorzystanie z opcji/i.test(speech)) return null;
+                  return (
+                    <View style={styles.speechCard} testID="deal-hunter-speech">
+                      <Volume2 size={15} color={C.accent} strokeWidth={2.2} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.speechText}>{speech}</Text>
+                      </View>
                     </View>
-                    {result.suggestions.slice(0, 8).map((sg, idx) => {
-                      const typeLabel =
-                        ({
-                          soft_gap_filler: 'Dopnij koszyk',
-                          waste_qty_reduce: 'Straty',
-                          lead_time_note: 'Czas dostawy',
-                          reliability_note: 'Niezawodność',
-                          decision_note: 'Decyzja',
-                        } as Record<string, string>)[sg.type || ''] ||
-                        (sg.type || 'hint').replace(/_/g, ' ');
-                      return (
-                        <View key={`${sg.type}-${idx}`} style={styles.suggestionRow}>
-                          <Text style={styles.suggestionType}>
-                            {typeLabel}
-                            {sg.product_name ? ` · ${sg.product_name}` : ''}
-                          </Text>
-                          <Text style={styles.suggestionMsg}>{sg.message}</Text>
+                  );
+                })()}
+                {(() => {
+                  const tips = (result.suggestions ?? [])
+                    .filter((sg) => {
+                      const msg = String(sg.message || '');
+                      return !/zalecane jest skorzystanie/i.test(msg)
+                        && !/skorzystanie z opcji/i.test(msg);
+                    })
+                    .slice(0, 8);
+                  if (tips.length > 0) {
+                    return (
+                      <View style={styles.suggestionsCard} testID="deal-hunter-suggestions">
+                        <View style={styles.suggestionsHead}>
+                          <Lightbulb size={15} color={C.accent} strokeWidth={2.2} />
+                          <Text style={styles.suggestionsTitle}>Sugestie Łowcy</Text>
                         </View>
-                      );
-                    })}
-                    <Text style={[styles.suggestionMsg, { marginTop: 8, opacity: 0.75 }]}>
-                      Niezawodność: brak danych / wstępna — uzupełnij oceny dostaw w kolejnej wersji.
-                      Bez historii odbiorów Łowca nie podnosi TCO.
-                    </Text>
-                  </View>
-                ) : result.smart_tip ? (
-                  <View style={styles.suggestionsCard} testID="deal-hunter-smart-tip">
-                    <View style={styles.suggestionsHead}>
-                      <Lightbulb size={15} color={C.accent} strokeWidth={2.2} />
-                      <Text style={styles.suggestionsTitle}>Sugestie Łowcy</Text>
-                    </View>
-                    <Text style={styles.suggestionMsg}>{result.smart_tip}</Text>
-                  </View>
-                ) : null}
+                        {tips.map((sg, idx) => {
+                          const typeLabel =
+                            ({
+                              soft_gap_filler: 'Dopnij koszyk',
+                              waste_qty_reduce: 'Straty',
+                              lead_time_note: 'Czas dostawy',
+                              reliability_note: 'Niezawodność',
+                              decision_note: 'Decyzja',
+                            } as Record<string, string>)[sg.type || ''] ||
+                            (sg.type || 'hint').replace(/_/g, ' ');
+                          return (
+                            <View key={`${sg.type}-${idx}`} style={styles.suggestionRow}>
+                              <Text style={styles.suggestionType}>
+                                {typeLabel}
+                                {sg.product_name ? ` · ${sg.product_name}` : ''}
+                              </Text>
+                              <Text style={styles.suggestionMsg}>{sg.message}</Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    );
+                  }
+                  if (
+                    result.smart_tip
+                    && !/zalecane jest skorzystanie/i.test(result.smart_tip)
+                    && !/skorzystanie z opcji/i.test(result.smart_tip)
+                  ) {
+                    return (
+                      <View style={styles.suggestionsCard} testID="deal-hunter-smart-tip">
+                        <View style={styles.suggestionsHead}>
+                          <Lightbulb size={15} color={C.accent} strokeWidth={2.2} />
+                          <Text style={styles.suggestionsTitle}>Sugestie Łowcy</Text>
+                        </View>
+                        <Text style={styles.suggestionMsg}>{result.smart_tip}</Text>
+                      </View>
+                    );
+                  }
+                  return null;
+                })()}
                 {!effectiveSelectedOption && (
                   <TouchableOpacity
                     style={[styles.newOrderBtn, { marginTop: 12 }]}

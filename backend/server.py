@@ -4111,7 +4111,11 @@ _CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
 
 def _food_match_key(text: str) -> str:
     """Klucz do deduplikacji: pomidor / pomidory / Pomidor świeży → ten sam stem.
-    Zachowuje liczby (np. śmietana 18% ≠ 30%)."""
+
+    Zachowuje liczby (np. śmietana 18% ≠ 30%).
+    UWAGA: krótkich słów nie obcinamy o pojedyncze „a/e/i/y”
+    (batat ≠ bata — inaczej batat ↛ bataty).
+    """
     s = _norm_pl(text)
     # dołóż gołe liczby z oryginału (procenty tłuszczu itd.), bo _norm_pl bywa je gubi
     raw = _strip_accents(str(text or "")).lower()
@@ -4119,16 +4123,27 @@ def _food_match_key(text: str) -> str:
         num = m.replace(",", ".")
         if num and num not in s:
             s = f"{s} {num}".strip()
+    # Stopwords jednostek / łączników — nie wchodzą do klucza
+    stop = {"z", "ze", "do", "w", "we", "na", "i", "oraz", "bez", "typ", "luz"}
     out: list[str] = []
     for t in s.split():
+        if t in stop:
+            continue
         if t.isdigit() or re.match(r"^\d+[.]?\d*$", t):
             out.append(t)
             continue
         base = t
-        for suf in ("ami", "ach", "owie", "owi", "ow", "om", "y", "i", "e", "a"):
+        # Dłuższe końcówki fleksyjne (bezpieczne)
+        for suf in ("ami", "ach", "owie", "owi", "ow", "om"):
             if len(t) >= 5 and t.endswith(suf):
                 base = t[: -len(suf)]
                 break
+        else:
+            # Pojedyncze a/e/i/y tylko gdy słowo ≥6 znaków (bataty→batat, nie batat→bata)
+            for suf in ("y", "i", "e", "a"):
+                if len(t) >= 6 and t.endswith(suf):
+                    base = t[: -len(suf)]
+                    break
         if len(base) >= 3:
             out.append(base)
     return " ".join(sorted(set(out)))
@@ -7631,16 +7646,16 @@ def _match_score(req_name: str, cand_name: str) -> float:
 # Auto-accept bez AI — tylko bardzo pewne (np. ser kozi ⊂ ser kozi rolka)
 LOCAL_CATALOG_MATCH_MIN = 0.88
 # Prefilter kandydatów dla agenta AI (luźniej — AI odrzuci śmieci)
-AI_CATALOG_CANDIDATE_MIN = 0.30
-AI_CATALOG_MAX_CANDIDATES = 28
-AI_CATALOG_MAX_ITEM_CALLS = 16  # ile pozycji zamówienia max. przez agenta na 1 compare
+AI_CATALOG_CANDIDATE_MIN = 0.22
+AI_CATALOG_MAX_CANDIDATES = 45
+AI_CATALOG_MAX_ITEM_CALLS = 24  # ile pozycji zamówienia max. przez agenta na 1 compare
 
 
 def _food_names_compatible(req_name: str, cand_name: str) -> bool:
-    """Czy nazwy mogą być tym samym towarem (stem / wspólny token ≥4 znaków).
+    """Czy nazwy mogą być tym samym towarem (stem / kolejność słów / prefiks).
 
-    Blokuje fałszywe trafienia typu „grzanek” ↔ przypadkowy produkt
-    o podobnych literach bez wspólnego rdzenia spożywczego.
+    Przykłady OK: batat↔bataty, filet z kurczaka↔kurczak filet, pomidor↔pomidory.
+    Blokuje luźne literówki bez wspólnego rdzenia (grzanek ↛ granulat).
     """
     ka = _food_match_key(req_name or "")
     kb = _food_match_key(cand_name or "")
@@ -7649,9 +7664,20 @@ def _food_names_compatible(req_name: str, cand_name: str) -> bool:
     if ka == kb:
         return True
     ta, tb = set(ka.split()), set(kb.split())
-    if ta & tb and any(len(t) >= 4 for t in (ta & tb)):
+    if not ta or not tb:
+        return False
+    # Wspólny stem ≥4 LUB pełne pokrycie tokenów zapytania w ofercie
+    shared = ta & tb
+    if shared and any(len(t) >= 4 for t in shared):
         return True
-    # Jednoznaczne zawieranie stemów (ser kozi ⊂ ser kozi dojrzewajacy)
+    if ta.issubset(tb) or tb.issubset(ta):
+        return True
+    # Prefiks stemów: batat ⊂ bataty / cukin ⊂ cukinia (po key)
+    for a in ta:
+        for b in tb:
+            if len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a)):
+                return True
+    # Jednoznaczne zawieranie całych kluczy
     if len(ka) >= 5 and len(kb) >= 5 and (ka in kb or kb in ka):
         return True
     return False
@@ -8104,8 +8130,8 @@ async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[s
 
 
 # ── AI Catalog Agent (świadome wyszukiwanie w katalogach dostawców) ────────────
-AI_SYNONYM_SIM_MIN = 55      # legacy prefilter (token_set) dla puli kandydatek
-AI_SYNONYM_CONF_MIN = 0.78   # min. pewność AI, by uznać dopasowanie / zapisać synonim
+AI_SYNONYM_SIM_MIN = 40      # token_set do puli AI (plurale / inna kolejność słów)
+AI_SYNONYM_CONF_MIN = 0.72   # min. pewność AI, by uznać dopasowanie / zapisać synonim
 AI_MAX_PER_ITEM = 3          # legacy pairwise (fallback)
 AI_MAX_CHECKS = 12           # legacy global cap (fallback pairwise)
 
@@ -8193,11 +8219,13 @@ async def _ai_catalog_agent_match(
         "OFERTY Z KATALOGÓW DOSTAWCÓW (wyłącznie te — nic spoza listy):\n"
         f"{catalog_block}\n\n"
         "ZASADY:\n"
-        "1. Dopasuj wyłącznie gdy to ten sam produkt spożywczy/towar "
-        "(synonim PL, wariant opakowania, gramatura, marka — OK).\n"
-        "2. NIE dopasowuj podobieństwa tylko literowego ani luźnego fuzzy "
-        "(np. „grzanek” ≠ przypadkowy produkt o podobnych literach).\n"
-        "3. Jeśli ŻADNA oferta nie jest tym towarem — matched_ids musi być [].\n"
+        "1. Dopasuj gdy to TEN SAM towar spożywczy — także przy:\n"
+        "   • liczbie mnogiej/pojedynczej (batat = bataty, pomidor = pomidory),\n"
+        "   • innej kolejności słów (filet z kurczaka = kurczak filet),\n"
+        "   • synonimie / wariancie opakowania / marce / gramaturze.\n"
+        "2. NIE dopasowuj tylko podobieństwa literowego "
+        "(np. „grzanek” ≠ „granulat czosnkowy”).\n"
+        "3. Jeśli ŻADNA oferta nie jest tym towarem — matched_ids = [].\n"
         "4. Nie wymyślaj produktów spoza listy. Zwracaj wyłącznie id z listy.\n"
         "5. Możesz zwrócić wiele id (różni dostawcy / warianty tego samego towaru).\n\n"
         "Odpowiedz WYŁĄCZNIE JSON:\n"
@@ -8212,9 +8240,11 @@ async def _ai_catalog_agent_match(
                 {
                     "role": "system",
                     "content": (
-                        "Jesteś precyzyjnym agentem matchingu katalogów B2B gastronomii. "
-                        "Wolisz false negative (brak dopasowania) niż false positive "
-                        "(wrzucenie złego produktu do koszyka)."
+                        "Jesteś precyzyjnym agentem matchingu katalogów B2B gastronomii PL. "
+                        "Rozpoznajesz synonimy, odmiany i kolejność słów. "
+                        "False positive (zły produkt w koszyku) jest gorszy niż false negative, "
+                        "ale typowe pary jak batat/bataty albo filet z kurczaka/kurczak filet "
+                        "MUSISZ uznać za match z wysoką pewnością."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -9034,8 +9064,11 @@ async def compare_offers(req: CompareOffersRequest):
                 target_in_dim = _convert_req_to_catalog_dim(
                     req_base_qty, req_dim, base_dim, uwv, wvu,
                 )
+                # Brak przeliczenia jednostek NIE blokuje matchingu nazw
+                # (warzywa kg↔szt bez gramatury i tak muszą trafić do agenta AI).
+                unit_fallback = target_in_dim is None
                 if target_in_dim is None:
-                    continue
+                    target_in_dim = float(req_base_qty)
                 lo_in_dim = _convert_req_to_catalog_dim(
                     qty_lo_base, req_dim, base_dim, uwv, wvu,
                 )
@@ -9049,9 +9082,13 @@ async def compare_offers(req: CompareOffersRequest):
                 if hi_in_dim < lo_in_dim:
                     lo_in_dim, hi_in_dim = hi_in_dim, lo_in_dim
                 pack = _catalog_pack_base_qty(row, base_dim)
-                order_base, adjusted = _qty_in_band(
-                    target_in_dim, lo_in_dim, hi_in_dim, pack,
-                )
+                if unit_fallback:
+                    order_base = max(float(pack or 0), float(target_in_dim), 1.0)
+                    adjusted = True
+                else:
+                    order_base, adjusted = _qty_in_band(
+                        target_in_dim, lo_in_dim, hi_in_dim, pack,
+                    )
                 if order_base <= 0:
                     continue
                 if adjusted:
@@ -9062,6 +9099,7 @@ async def compare_offers(req: CompareOffersRequest):
                     (_local_catalog_match_score(n, row_name) for n in known_names),
                     default=0.0,
                 )
+                food_ok = any(_food_names_compatible(n, row_name) for n in primary_names)
                 # Auto-accept TYLKO prawie pewne + kompatybilne z primary (anty-FP)
                 if _strict_local_catalog_accept(primary_names, row_name):
                     _consider(best_by_supplier, row, price_base, base_dim,
@@ -9074,14 +9112,24 @@ async def compare_offers(req: CompareOffersRequest):
                 rn = _norm_pl(row_name)
                 try:
                     sim = max(
-                        (float(fuzz.token_set_ratio(kn, rn)) for kn in known_norm),
+                        (
+                            max(
+                                float(fuzz.token_set_ratio(kn, rn)),
+                                float(fuzz.token_sort_ratio(kn, rn)),
+                            )
+                            for kn in known_norm
+                        ),
                         default=0.0,
                     )
                 except Exception:
                     sim = 0.0
                 sim = max(sim, score * 100.0)
-                # Do agenta: lokalny score LUB token_set — AI świadomie wybierze / odrzuci
-                if score >= AI_CATALOG_CANDIDATE_MIN or sim >= AI_SYNONYM_SIM_MIN:
+                # Do agenta: score / token_set / zgodność stemów (batat↔bataty)
+                if (
+                    score >= AI_CATALOG_CANDIDATE_MIN
+                    or sim >= AI_SYNONYM_SIM_MIN
+                    or food_ok
+                ):
                     ai_pool.append(
                         (score, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, sim)
                     )
@@ -9124,13 +9172,9 @@ async def compare_offers(req: CompareOffersRequest):
                         if not slot:
                             continue
                         row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim = slot
-                        # Dodatkowy twardy guard: primary ↔ oferta muszą mieć sens spożywczy
-                        # ALBO AI jest bardzo pewne (synonim bez wspólnego stemu, np. cukinia/zucchini)
+                        # Agent AI już potwierdził (conf ≥ AI_SYNONYM_CONF_MIN) —
+                        # nie odrzucaj batat/bataty ani filet↔kurczak filet drugim filtrem.
                         row_name = row.get("name") or ""
-                        if conf < 0.92 and not any(
-                            _food_names_compatible(pn, row_name) for pn in primary_names
-                        ):
-                            continue
                         _consider(best_by_supplier, row, price_base, base_dim,
                                   order_base, target_in_dim, "ai",
                                   pack_base_qty=pack, band_hi_base=hi_in_dim)
@@ -9139,6 +9183,87 @@ async def compare_offers(req: CompareOffersRequest):
                             syn_slot = synonym_additions.setdefault(
                                 inv_id, {"existing": existing_syn, "new": set()})
                             syn_slot["new"].add(row_name)
+
+            # II pass: gdy nadal brak oferty — szersza pula z całego katalogu tenanta
+            # (token_sort + stem), żeby AI zobaczył bataty / kurczak filet mimo luźnego fuzzy.
+            if not best_by_supplier and ai_item_budget > 0:
+                wide: list[tuple] = []
+                for row in catalog:
+                    if row.get("is_visible") is False:
+                        continue
+                    cid = str(row.get("id") or "")
+                    if not cid or cid in accepted_catalog_ids:
+                        continue
+                    bp = _catalog_base_price(row)
+                    if bp is None:
+                        continue
+                    base_dim, price_base = bp
+                    row_name = row.get("name") or ""
+                    if not row_name:
+                        continue
+                    rn = _norm_pl(row_name)
+                    try:
+                        sim = max(
+                            (
+                                max(
+                                    float(fuzz.token_set_ratio(kn, rn)),
+                                    float(fuzz.token_sort_ratio(kn, rn)),
+                                )
+                                for kn in known_norm
+                            ),
+                            default=0.0,
+                        )
+                    except Exception:
+                        sim = 0.0
+                    food_ok = any(_food_names_compatible(n, row_name) for n in primary_names)
+                    if sim < 35 and not food_ok:
+                        continue
+                    target_in_dim = _convert_req_to_catalog_dim(
+                        req_base_qty, req_dim, base_dim, uwv, wvu,
+                    )
+                    if target_in_dim is None:
+                        target_in_dim = float(req_base_qty)
+                    pack = _catalog_pack_base_qty(row, base_dim)
+                    order_base = max(float(pack or 0), float(target_in_dim), 1.0)
+                    wide.append(
+                        (sim, row, base_dim, price_base, order_base, pack, target_in_dim, target_in_dim * 1.1, sim)
+                    )
+                wide.sort(key=lambda t: t[0], reverse=True)
+                if wide:
+                    ai_item_budget -= 1
+                    agent_candidates = []
+                    by_id = {}
+                    for sim, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, _s in wide:
+                        cid = str(row.get("id") or "")
+                        if cid in by_id:
+                            continue
+                        by_id[cid] = (row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim)
+                        sup = sup_by_id.get(row.get("supplier_id"), {})
+                        agent_candidates.append({
+                            "id": cid,
+                            "name": row.get("name") or "",
+                            "supplier_name": sup.get("name") or "Dostawca",
+                            "variant": row.get("variant") or "",
+                            "sim": sim,
+                        })
+                        if len(agent_candidates) >= AI_CATALOG_MAX_CANDIDATES:
+                            break
+                    matched_ids, conf, bill = await _ai_catalog_agent_match(
+                        client, warehouse_name, agent_candidates, request_id=request_id,
+                    )
+                    billing_events.append(bill)
+                    for cid in matched_ids:
+                        slot = by_id.get(cid)
+                        if not slot:
+                            continue
+                        row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim = slot
+                        _consider(best_by_supplier, row, price_base, base_dim,
+                                  order_base, target_in_dim, "ai",
+                                  pack_base_qty=pack, band_hi_base=hi_in_dim)
+                        if inv_id and conf >= AI_SYNONYM_CONF_MIN:
+                            syn_slot = synonym_additions.setdefault(
+                                inv_id, {"existing": existing_syn, "new": set()})
+                            syn_slot["new"].add(row.get("name") or "")
 
             # Ilość zamówienia: mediana order_base z dopasowań (albo target)
             ordered_bases = [

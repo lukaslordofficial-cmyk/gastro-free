@@ -1483,42 +1483,6 @@ export function VoiceReportModal({
                   </Text>
                 )}
 
-                <View style={styles.wakeBox}>
-                  <Text style={styles.wakeTitle}>Ustaw hasło do wywoływania sterowania głosowego</Text>
-                  <Text style={styles.wakeHint}>
-                    Ustaw słowo wywołujące, np. Gastro, a aplikacja zacznie czekać na twoją komendę głosową.
-                    Wypowiedzenie hasła od razu otwiera nagrywanie (bez dodatkowych przycisków na ekranie).
-                  </Text>
-                  <View style={styles.wakeRow}>
-                    <TextInput
-                      style={styles.wakeInput}
-                      value={wakeDraft}
-                      onChangeText={setWakeDraft}
-                      placeholder="Gastro"
-                      placeholderTextColor={Colors.textTertiary}
-                      autoCapitalize="words"
-                      maxLength={32}
-                    />
-                    <TouchableOpacity style={[styles.wakeSave, { backgroundColor: jarvisAccent }]} onPress={() => void saveWakeWord()}>
-                      <Text style={styles.wakeSaveText}>Zapisz</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <TouchableOpacity
-                    style={[
-                      styles.wakeListenBtn,
-                      wakeListening && { borderColor: jarvisAccent, backgroundColor: `${jarvisAccent}22` },
-                    ]}
-                    onPress={() => (wakeListening ? stopWakeListen() : startWakeListen())}
-                    activeOpacity={0.85}
-                  >
-                    <Mic size={14} color={wakeListening ? jarvisAccent : Colors.textSecondary} strokeWidth={2.5} />
-                    <Text style={[styles.wakeListenText, wakeListening && { color: jarvisAccent }]}>
-                      {wakeListening ? 'Zatrzymaj nasłuch' : `Włącz nasłuch „${wakeWord}”`}
-                    </Text>
-                  </TouchableOpacity>
-                  {wakeStatus ? <Text style={styles.wakeStatus}>{wakeStatus}</Text> : null}
-                </View>
-
                 <TouchableOpacity
                   style={[styles.recBtn, styles.recBtnStart, { backgroundColor: jarvisAccent, shadowColor: jarvisAccent }]}
                   onPress={startRecording}

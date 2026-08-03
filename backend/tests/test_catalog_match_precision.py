@@ -44,6 +44,17 @@ def test_unrelated_spice_vs_meat_not_compatible():
     assert _food_names_compatible("pomidor", "pomidory pelati")
 
 
+def test_plural_and_word_order_compatible():
+    """batat↔bataty, filet z kurczaka↔kurczak filet — ten sam towar."""
+    assert _food_names_compatible("batat", "bataty")
+    assert _food_names_compatible("bataty", "batat")
+    assert _food_names_compatible("filet z kurczaka", "kurczak filet")
+    assert _food_names_compatible("pomidor", "pomidory")
+    # Auto-accept lokalny dla bliskiej odmiany
+    assert _strict_local_catalog_accept(["batat"], "bataty")
+    assert _local_catalog_match_score("batat", "bataty") >= 0.7
+
+
 def test_bad_synonym_cannot_force_auto_accept():
     """Even if a bad synonym looks like a catalog row, primary must still match."""
     # Primary = grzanek; decoy catalog equals a polluted synonym string

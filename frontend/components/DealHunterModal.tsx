@@ -17,7 +17,6 @@ import * as Linking from 'expo-linking';
 import {
   X,
   Sparkles,
-  TrendingDown,
   Truck,
   Mail,
   Copy,
@@ -1311,6 +1310,7 @@ export function DealHunterModal({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [sendStatus, setSendStatus] = useState<Record<string, 'sending' | 'sent' | 'error'>>({});
   const [bodyText, setBodyText] = useState<Record<string, string>>({});
+  const [subjectText, setSubjectText] = useState<Record<string, string>>({});
   const [fromEmails, setFromEmails] = useState<Record<string, string>>({});
   const [toEmails, setToEmails] = useState<Record<string, string>>({});
   const [contactEmail, setContactEmail] = useState('');
@@ -1448,6 +1448,7 @@ export function DealHunterModal({
       setCopiedId(null);
       setSendStatus({});
       setBodyText({});
+      setSubjectText({});
       setFromEmails({});
       setToEmails({});
       setDraftSavedInfo(null);
@@ -1771,15 +1772,18 @@ export function DealHunterModal({
       const msgs: MessageCard[] = data.messages ?? [];
       setMessages(msgs);
       const initial: Record<string, string> = {};
+      const subjectInit: Record<string, string> = {};
       const fromInit: Record<string, string> = {};
       const toInit: Record<string, string> = {};
       msgs.forEach((m) => {
         const key = m.supplier_id ?? m.supplier_name;
         initial[key] = m.email_body_text ?? m.email_text ?? '';
+        subjectInit[key] = m.email_subject ?? '';
         fromInit[key] = ASSISTANT_FROM_EMAIL;
         toInit[key] = m.supplier_email ?? '';
       });
       setBodyText(initial);
+      setSubjectText(subjectInit);
       setFromEmails(fromInit);
       setToEmails(toInit);
       setPendingGroups(null);
@@ -1946,7 +1950,7 @@ export function DealHunterModal({
     const key = m.supplier_id ?? m.supplier_name;
     const to = (toEmails[key] ?? m.supplier_email ?? '').trim();
     const from = (fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
-    const subject = m.email_subject;
+    const subject = (subjectText[key] ?? m.email_subject ?? '').trim() || m.email_subject;
     const body = bodyText[key] ?? m.email_body_text;
     if (!to) {
       Alert.alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy.');
@@ -2000,7 +2004,7 @@ export function DealHunterModal({
     } catch {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
     }
-  }, [toEmails, fromEmails, bodyText]);
+  }, [toEmails, fromEmails, bodyText, subjectText]);
 
   const sendAllEmails = useCallback(async () => {
     if (!messages.length) return;
@@ -2031,8 +2035,6 @@ export function DealHunterModal({
   }, [messages, sendStatus, fromEmails, sendEmail]);
 
   const result = liveResult;
-  const o1 = result?.variant_monolith ?? result?.option_all_one ?? null;
-  const o2 = result?.variant_split ?? result?.option_optimized ?? null;
   const stepIndex = step === 'qty' ? 0 : step === 'compare' ? 1 : 2;
   const stepLabels = isBulkMode ? ['Oferty', 'Kontakt', 'Wyślij'] : ['Ilość', 'Oferty', 'Wyślij'];
   const bulkStepIndex = isBulkMode
@@ -2334,135 +2336,8 @@ export function DealHunterModal({
   };
 
   const renderCompareMode = () => {
-    if (!result) return null;
-
-    const scenarioShortLabel = (id: string, fallback?: string) => {
-      if (id === 'split_max') return 'Najniższa cena';
-      if (id === 'monolith') return 'Wygoda (mało dostaw)';
-      return fallback || id;
-    };
-
-    const v2Scenarios = (result.scenarios?.length
-      ? result.scenarios
-      : [result.scenario_split_max, result.scenario_monolith].filter(Boolean)
-    ) as NonNullable<OptimizeResult['scenarios']>;
-
-    // Bez „Optymalizacja progów”; tylko niewybrany wariant jako alternatywa.
-    const altScenarios = v2Scenarios.filter((s) => {
-      if (s.id === 'smart_hybrid') return false;
-      if (s.id === effectiveSelectedOption) return false;
-      return (s.suppliers?.length ?? 0) > 0 || (s.missing?.length ?? 0) > 0;
-    });
-
-    if (result.is_multivariable && v2Scenarios.length >= 1) {
-      return (
-        <>
-          {renderEditableCart()}
-          {altScenarios.length > 0 ? (
-            <>
-              <Text style={[styles.editCartHint, { marginTop: 8, marginBottom: 4 }]}>
-                Inny wariant dostawy:
-              </Text>
-              {altScenarios.slice(0, 1).map((sc) => (
-                <TouchableOpacity
-                  key={sc.id}
-                  activeOpacity={0.85}
-                  onPress={() => selectOption(sc.id as SelectedOption)}
-                  style={styles.optCard}
-                  testID={`deal-hunter-scenario-${sc.id}`}
-                >
-                  <View style={styles.optHeader}>
-                    <View style={[styles.optBadge, sc.id === 'split_max' && styles.optBadgeGreen]}>
-                      {sc.id === 'split_max'
-                        ? <TrendingDown size={13} color={C.success} strokeWidth={2.2} />
-                        : <Store size={13} color={C.accent} strokeWidth={2.2} />}
-                      <Text
-                        style={[styles.optBadgeText, sc.id === 'split_max' && { color: C.success }]}
-                        numberOfLines={2}
-                      >
-                        {scenarioShortLabel(sc.id, sc.label)}
-                      </Text>
-                    </View>
-                    <Text style={styles.optTotalValue}>{formatPln(sc.total_pln)}</Text>
-                  </View>
-                  <Text style={styles.altScenarioPreview} numberOfLines={2}>
-                    {sc.supplier_count} {sc.supplier_count === 1 ? 'dostawca' : 'dostawców'}
-                    {(sc.suppliers || []).length
-                      ? ` · ${(sc.suppliers || []).map((g) => g.supplier_name).filter(Boolean).join(', ')}`
-                      : ''}
-                  </Text>
-                  <Text style={[styles.editCartHint, { marginBottom: 0, fontWeight: '700', color: C.accent }]}>
-                    Pokaż pełny koszyk (jak powyżej)
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </>
-          ) : null}
-        </>
-      );
-    }
-
-    if (!o1 || !o2) return renderEditableCart();
-    const activeOpt = effectiveSelectedOption;
-    const showAllOne = activeOpt !== 'all_one';
-    const showOptimized = activeOpt !== 'optimized' && o2.suppliers.length > 0;
-
-    return (
-      <>
-        {renderEditableCart()}
-        {(showAllOne || showOptimized) ? (
-          <Text style={[styles.editCartHint, { marginTop: 8, marginBottom: 4 }]}>
-            Inny wariant dostawy:
-          </Text>
-        ) : null}
-
-        {showAllOne ? (
-          <TouchableOpacity
-            activeOpacity={0.85}
-            onPress={() => selectOption('all_one')}
-            style={styles.optCard}
-            testID="deal-hunter-option-all-one"
-          >
-            <View style={styles.optHeader}>
-              <View style={styles.optBadge}>
-                <Store size={13} color={C.accent} strokeWidth={2.2} />
-                <Text style={styles.optBadgeText} numberOfLines={2}>Wygoda (mało dostaw)</Text>
-              </View>
-              <Text style={styles.optTotalValue}>{formatPln(o1.total_pln)}</Text>
-            </View>
-            <Text style={styles.altScenarioPreview} numberOfLines={2}>{o1.supplier_name}</Text>
-            <Text style={[styles.editCartHint, { marginBottom: 0, fontWeight: '700', color: C.accent }]}>
-              Pokaż pełny koszyk (jak powyżej)
-            </Text>
-          </TouchableOpacity>
-        ) : null}
-
-        {showOptimized ? (
-          <TouchableOpacity
-            activeOpacity={0.85}
-            onPress={() => selectOption('optimized')}
-            style={styles.optCard}
-            testID="deal-hunter-option-optimized"
-          >
-            <View style={styles.optHeader}>
-              <View style={[styles.optBadge, styles.optBadgeGreen]}>
-                <TrendingDown size={13} color={C.success} strokeWidth={2.2} />
-                <Text style={[styles.optBadgeText, { color: C.success }]} numberOfLines={2}>
-                  Najniższa cena
-                </Text>
-              </View>
-              <Text style={styles.optTotalValue}>{formatPln(o2.total_pln)}</Text>
-            </View>
-            <Text style={styles.altScenarioPreview} numberOfLines={2}>
-              {o2.suppliers.length} {o2.suppliers.length === 1 ? 'dostawca' : 'dostawców'}
-            </Text>
-            <Text style={[styles.editCartHint, { marginBottom: 0, fontWeight: '700', color: C.accent }]}>
-              Pokaż pełny koszyk (jak powyżej)
-            </Text>
-          </TouchableOpacity>
-        ) : null}
-      </>
-    );
+    // Tylko wybrany koszyk — bez alternatywnych wariantów (oszczędność kredytów / mniej szumu).
+    return renderEditableCart();
   };
 
   return (
@@ -2726,8 +2601,15 @@ export function DealHunterModal({
                     />
                     <View style={styles.metaRow}>
                       <Text style={styles.metaLabel}>Temat:</Text>
-                      <Text style={styles.metaValue} numberOfLines={2}>{m.email_subject}</Text>
                     </View>
+                    <TextInput
+                      style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}
+                      value={subjectText[key] ?? m.email_subject ?? ''}
+                      onChangeText={(t) => setSubjectText((b) => ({ ...b, [key]: t }))}
+                      placeholder="Temat wiadomości"
+                      placeholderTextColor={C.textTertiary}
+                      testID={`deal-hunter-subject-${m.supplier_name}`}
+                    />
                     <Text style={styles.msgSectionLabel}>Treść wiadomości (edytowalna)</Text>
                     <TextInput
                       style={styles.bodyInput}

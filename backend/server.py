@@ -4500,17 +4500,11 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
         except asyncio.TimeoutError:
             logger.warning("_classify_offer_vs_menu_ai timed out — fuzzy fallback")
             ai_map = {}
-            warnings.append(
-                "Klasyfikacja AI przekroczyła limit czasu — użyto dopasowania do składników receptur."
-            )
+            # Bez ostrzeżenia UI — fallback na receptury jest domyślną ścieżką.
         except Exception as e:
             logger.warning(f"_classify_offer_vs_menu_ai error: {e}")
             ai_map = {}
-    if not ai_map and products and recipe_keys:
-        warnings.append(
-            "Klasyfikacja AI niedostępna — użyto ścisłego dopasowania do składników receptur "
-            "(bez magazynu)."
-        )
+            # Bez ostrzeżenia UI — użytkownik i tak widzi wynik segregacji katalogu.
 
     # Fallback + weryfikacja AI: TYLKO składniki receptur (bez magazynu)
     RECIPE_VERIFY_THRESHOLD = 74
@@ -6749,7 +6743,7 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
         }
         active.append({"id": row.get("id"), "name": info["name"],
                        "is_combo_polprodukt": info["is_combo_polprodukt"]})
-        warnings.append(f"„{info['name']}” było usunięte — przywrócono w magazynie.")
+        # Bez żółtych komunikatów „było usunięte / przywrócono” — to szum dla użytkownika.
         return info
 
     for _k, orig in seen.items():
@@ -6761,7 +6755,7 @@ async def _auto_onboard_inventory(client: httpx.AsyncClient, ingredient_names: l
                 created.append(await _reactivate(dead, orig))
                 inactive = [r for r in inactive if r.get("id") != dead.get("id")]
             except Exception as re:  # noqa: BLE001
-                warnings.append(f"{orig}: nie przywrócono ({re}) — spróbuję utworzyć.")
+                logger.warning("%s: nie przywrócono (%s) — spróbuję utworzyć.", orig, re)
                 to_create.append(orig)
             continue
         to_create.append(orig)

@@ -1720,16 +1720,29 @@ export function VoiceReportModal({
                   onExtrasChange={(next) => setApplyResult((prev) => prev ? { ...prev, extras: next } : prev)}
                 />
 
-                {applyResult.warnings.length > 0 && (
-                  <View style={styles.warnBox}>
-                    <AlertTriangle size={13} color={Colors.warning} strokeWidth={2.5} />
-                    <View style={{ flex: 1 }}>
-                      {applyResult.warnings.map((w, i) => (
-                        <Text key={i} style={styles.warnText}>• {w}</Text>
-                      ))}
+                {(() => {
+                  const visibleWarnings = (applyResult.warnings ?? []).filter((w) => {
+                    const t = String(w || '').toLowerCase();
+                    if (/było usunięte|bylo usuniete|przywrócono w magazynie|przywrocono w magazynie/.test(t)) {
+                      return false;
+                    }
+                    if (/klasyfikacja ai|przekroczyła limit czasu|przekroczyla limit czasu|niedostępna — użyto|niedostepna - uzyto/.test(t)) {
+                      return false;
+                    }
+                    return true;
+                  });
+                  if (!visibleWarnings.length) return null;
+                  return (
+                    <View style={styles.warnBox}>
+                      <AlertTriangle size={13} color={Colors.warning} strokeWidth={2.5} />
+                      <View style={{ flex: 1 }}>
+                        {visibleWarnings.map((w, i) => (
+                          <Text key={i} style={styles.warnText}>• {w}</Text>
+                        ))}
+                      </View>
                     </View>
-                  </View>
-                )}
+                  );
+                })()}
 
                 <View style={styles.actionsRow}>
                   <TouchableOpacity style={styles.secondaryBtn} onPress={resetAll} activeOpacity={0.85} testID="voice-done-again">

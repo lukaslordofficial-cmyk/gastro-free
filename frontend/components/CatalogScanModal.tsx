@@ -962,13 +962,26 @@ export function CatalogScanModal({
                 </Text>
               </>
             )}
-            {!!result.warnings?.length && (
-              <View style={[styles.warnBox, { backgroundColor: C.warningSoft, borderColor: C.warningBorder }]}>
-                {result.warnings.map((w, i) => (
-                  <Text key={i} style={[styles.warnText, { color: C.warning }]}>• {w}</Text>
-                ))}
-              </View>
-            )}
+            {(() => {
+              const visibleWarnings = (result.warnings ?? []).filter((w) => {
+                const t = String(w || '').toLowerCase();
+                if (/klasyfikacja ai|przekroczyła limit czasu|przekroczyla limit czasu|niedostępna — użyto|niedostepna - uzyto|użyto dopasowania|uzyto dopasowania|użyto ścisłego|uzyto scislego/.test(t)) {
+                  return false;
+                }
+                if (/było usunięte|bylo usuniete|przywrócono w magazynie|przywrocono w magazynie/.test(t)) {
+                  return false;
+                }
+                return true;
+              });
+              if (!visibleWarnings.length) return null;
+              return (
+                <View style={[styles.warnBox, { backgroundColor: C.warningSoft, borderColor: C.warningBorder }]}>
+                  {visibleWarnings.map((w, i) => (
+                    <Text key={i} style={[styles.warnText, { color: C.warning }]}>• {w}</Text>
+                  ))}
+                </View>
+              );
+            })()}
             <TouchableOpacity
               style={[styles.primaryBtn, { backgroundColor: C.green }]}
               onPress={() => void handleDoneClose()}

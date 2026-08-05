@@ -63,6 +63,17 @@ SUPABASE_KEY = (
 STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "whisper-1")
 CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
+# Wielostronicowe PDF-y (katalogi dostawców): render + Vision w batchach.
+try:
+    PDF_MAX_PAGES = max(1, min(80, int(os.environ.get("PDF_MAX_PAGES", "40") or "40")))
+except ValueError:
+    PDF_MAX_PAGES = 40
+try:
+    PDF_VISION_BATCH_SIZE = max(1, min(8, int(os.environ.get("PDF_VISION_BATCH_SIZE", "4") or "4")))
+except ValueError:
+    PDF_VISION_BATCH_SIZE = 4
+# Kredyty = wyłącznie koszt tokenów OpenAI (usage). Brak sztucznej dopłaty za stronę.
+PDF_INCLUDED_PAGES = 4  # informacyjnie (UI); nie wpływa na billing
 INSPIRATIONS_MODEL = (
     os.environ.get("OPENAI_INSPIRATIONS_MODEL", "gpt-4o").strip() or "gpt-4o"
 )
@@ -3097,11 +3108,22 @@ _CATALOG_SYSTEM_PROMPT = (
 )
 
 
-def _images_from_upload(contents: bytes, mime: str, filename: str) -> list[str]:
-    """Return a list of base64 data-URIs (JPEG/PNG) to feed GPT-4o Vision.
+def _images_from_upload(
+    contents: bytes,
+    mime: str,
+    filename: str,
+    *,
+    max_pages: Optional[int] = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Render upload to base64 data-URIs for GPT-4o Vision.
 
-    PDFs are rendered page-by-page with PyMuPDF (max 4 pages, JPEG ~110 dpi)
-    — keeps Railway/proxy under timeout and Vision latency ~<20–40s."""
+    Returns ``(uris, meta)`` where meta contains:
+    ``pages_total``, ``pages_rendered``, ``truncated``.
+
+    PDFs: PyMuPDF JPEG ~108 dpi, up to ``PDF_MAX_PAGES`` (default 40).
+    Short docs (etykiety) can pass a lower ``max_pages``.
+    """
+    limit = PDF_MAX_PAGES if max_pages is None else max(1, int(max_pages))
     name = (filename or "").lower()
     is_pdf = "pdf" in (mime or "").lower() or name.endswith(".pdf")
     if is_pdf:
@@ -3114,10 +3136,9 @@ def _images_from_upload(contents: bytes, mime: str, filename: str) -> list[str]:
             doc = fitz.open(stream=contents, filetype="pdf")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Nie udało się otworzyć PDF: {e}") from e
-        # ~108 dpi — wystarczy do OCR, dużo szybsze niż 2.0 / PNG
+        pages_total = int(doc.page_count or 0)
         zoom = fitz.Matrix(1.5, 1.5)
-        max_pages = 4
-        for page in doc[:max_pages]:
+        for page in doc[:limit]:
             pix = page.get_pixmap(matrix=zoom)
             try:
                 img_bytes = pix.tobytes("jpeg")
@@ -3128,10 +3149,244 @@ def _images_from_upload(contents: bytes, mime: str, filename: str) -> list[str]:
         doc.close()
         if not uris:
             raise HTTPException(status_code=400, detail="PDF nie zawiera stron.")
-        return uris
+        meta = {
+            "pages_total": pages_total,
+            "pages_rendered": len(uris),
+            "truncated": pages_total > len(uris),
+        }
+        return uris, meta
     # image
     img_mime = mime if (mime or "").startswith("image/") else "image/jpeg"
-    return [f"data:{img_mime};base64," + base64.b64encode(contents).decode()]
+    return (
+        [f"data:{img_mime};base64," + base64.b64encode(contents).decode()],
+        {"pages_total": 1, "pages_rendered": 1, "truncated": False},
+    )
+
+
+def _page_surcharge_credits(pages_rendered: int) -> int:
+    """Deprecated: billing jest wyłącznie z OpenAI usage (tokeny). Zawsze 0."""
+    return 0
+
+
+def _norm_product_key(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def _merge_supplier_meta_dicts(*parts: Any) -> dict:
+    out: dict = {}
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        for k, v in p.items():
+            if v is None or v == "" or v == []:
+                continue
+            if out.get(k) in (None, "", []):
+                out[k] = v
+    return out
+
+
+def _merge_document_vision_batches(parts: list[dict]) -> dict:
+    """Scala wyniki Vision z kolejnych partii stron PDF."""
+    if not parts:
+        return {
+            "document_type": "OFERTA_HANDLOWA",
+            "supplier_name": None,
+            "total_amount": 0,
+            "supplier": {},
+            "products": [],
+        }
+    types = [str(p.get("document_type") or "") for p in parts]
+    if "FAKTURA_ZAKUPOWA" in types:
+        doc_type = "FAKTURA_ZAKUPOWA"
+    elif "MENU_RESTAURACYJNE" in types:
+        doc_type = "MENU_RESTAURACYJNE"
+    else:
+        doc_type = types[0] or "OFERTA_HANDLOWA"
+
+    supplier_name = None
+    for p in parts:
+        sn = (p.get("supplier_name") or "").strip() if isinstance(p.get("supplier_name"), str) else None
+        if sn:
+            supplier_name = sn
+            break
+
+    total_amount = 0.0
+    for p in parts:
+        try:
+            total_amount = max(total_amount, float(p.get("total_amount") or 0))
+        except (TypeError, ValueError):
+            pass
+
+    supplier = _merge_supplier_meta_dicts(*[p.get("supplier") for p in parts])
+
+    products: list[dict] = []
+    seen: set[str] = set()
+    for p in parts:
+        for row in p.get("products") or []:
+            if not isinstance(row, dict):
+                continue
+            key = _norm_product_key(str(row.get("product_name") or ""))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            products.append(row)
+
+    return {
+        "document_type": doc_type,
+        "supplier_name": supplier_name,
+        "total_amount": total_amount,
+        "supplier": supplier,
+        "products": products,
+    }
+
+
+def _merge_catalog_vision_batches(parts: list[dict]) -> dict:
+    products: list[dict] = []
+    seen: set[str] = set()
+    supplier_name = None
+    for p in parts:
+        if not supplier_name:
+            sn = p.get("supplier_name")
+            if isinstance(sn, str) and sn.strip():
+                supplier_name = sn.strip()
+        for row in p.get("products") or []:
+            if not isinstance(row, dict):
+                continue
+            key = _norm_product_key(str(row.get("product_name") or ""))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            products.append(row)
+    return {"supplier_name": supplier_name, "products": products}
+
+
+def _merge_menu_vision_batches(parts: list[dict]) -> dict:
+    dishes: list[dict] = []
+    seen: set[str] = set()
+    for p in parts:
+        for row in p.get("dishes") or []:
+            if not isinstance(row, dict):
+                continue
+            key = _norm_product_key(str(row.get("name") or row.get("product_name") or ""))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            dishes.append(row)
+    return {"dishes": dishes}
+
+
+def _merge_recipe_ocr_batches(parts: list[dict]) -> dict:
+    chunks = []
+    for p in parts:
+        t = (p.get("text") or "").strip()
+        if t:
+            chunks.append(t)
+    return {"text": "\n\n".join(chunks)}
+
+
+async def _openai_vision_json_batches(
+    client: Any,
+    *,
+    image_uris: list[str],
+    system_prompt: str,
+    json_schema: dict,
+    endpoint: str,
+    user_text: str,
+    cont_text: Optional[str] = None,
+    batch_size: Optional[int] = None,
+    pages_meta: Optional[dict] = None,
+    merge_fn: Any = None,
+) -> tuple[dict, dict]:
+    """Wywołuje Vision w partiach stron; zwraca (merged_json, billing)."""
+    if not image_uris:
+        raise HTTPException(status_code=400, detail="Brak stron dokumentu do analizy.")
+
+    bs = max(1, int(batch_size or PDF_VISION_BATCH_SIZE))
+    batches = [image_uris[i : i + bs] for i in range(0, len(image_uris), bs)]
+    n = len(batches)
+    parsed_parts: list[dict] = []
+    billing_events: list[dict] = []
+    pages_rendered = int((pages_meta or {}).get("pages_rendered") or len(image_uris))
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
+        for bi, batch in enumerate(batches):
+            start_page = bi * bs + 1
+            end_page = bi * bs + len(batch)
+            if bi == 0:
+                text = user_text
+            else:
+                text = cont_text or (
+                    f"To KONTYNUACJA tego samego dokumentu — partia {bi + 1}/{n} "
+                    f"(strony {start_page}–{end_page} z {pages_rendered}). "
+                    "Zachowaj ten sam typ dokumentu. Wyodrębnij pozycje widoczne na TYCH stronach. "
+                    "Uzupełnij dane dostawcy / kwoty tylko jeśli widać je na tych stronach."
+                )
+                if n > 1:
+                    text = (
+                        f"Partia {bi + 1}/{n}, strony {start_page}–{end_page} z {pages_rendered}. "
+                        + text
+                    )
+
+            user_content: list[dict] = [{"type": "text", "text": text}]
+            for uri in batch:
+                user_content.append({"type": "image_url", "image_url": {"url": uri}})
+
+            try:
+                resp = await client.chat.completions.create(
+                    model=VISION_MODEL,
+                    temperature=0.0,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    response_format={"type": "json_schema", "json_schema": json_schema},
+                )
+            except APIError as e:
+                raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
+            except OpenAIError as e:  # pragma: no cover
+                raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
+
+            raw = (resp.choices[0].message.content or "").strip()
+            try:
+                part = json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Model zwrócił nie-JSON (partia {bi + 1}/{n}): {e}: {raw[:200]}",
+                ) from e
+            if isinstance(part, dict):
+                parsed_parts.append(part)
+
+            # Kredyty = wyłącznie tokeny z resp.usage (to, co OpenAI faktycznie pobiera).
+            usage = getattr(resp, "usage", None)
+            pt, ct, cached, audio = tokens_from_usage(usage) if usage is not None else (0, 0, 0, 0.0)
+            billing_events.append(
+                await _bill_openai_response(
+                    httpx_c,
+                    resp,
+                    endpoint=endpoint,
+                    model=VISION_MODEL,
+                    extra_credits=0,
+                    extras={
+                        "vision_batch": bi + 1,
+                        "vision_batches": n,
+                        "pages_in_batch": len(batch),
+                        "pages_rendered": pages_rendered,
+                        "page_from": start_page,
+                        "page_to": end_page,
+                        "prompt_tokens": pt,
+                        "completion_tokens": ct,
+                        "cached_tokens": cached,
+                    },
+                )
+            )
+
+    merge = merge_fn or (lambda parts: parts[0] if parts else {})
+    merged = merge(parsed_parts) if parsed_parts else {}
+    if not isinstance(merged, dict):
+        merged = {}
+    billing = merge_billing_events(billing_events)
+    return merged, billing
 
 
 @app.post("/api/suppliers/{supplier_id}/upload-catalog", response_model=CatalogExtractionResponse)
@@ -3152,48 +3407,31 @@ async def upload_catalog(supplier_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
     supplier_name = rows[0]["name"]
 
-    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    contents = b""
 
-    user_content: list[dict] = [
-        {"type": "text", "text": "Oto cennik/oferta dostawcy. Wyodrębnij wszystkie produkty."}
-    ]
-    for uri in image_uris:
-        user_content.append({"type": "image_url", "image_url": {"url": uri}})
-
-    try:
-        resp = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": _CATALOG_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_schema", "json_schema": _CATALOG_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp,
-            endpoint=f"/api/suppliers/{supplier_id}/upload-catalog",
-            model=VISION_MODEL,
-            extras={"supplier_id": supplier_id},
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+    data, billing = await _openai_vision_json_batches(
+        client,
+        image_uris=image_uris,
+        system_prompt=_CATALOG_SYSTEM_PROMPT,
+        json_schema=_CATALOG_JSON_SCHEMA,
+        endpoint=f"/api/suppliers/{supplier_id}/upload-catalog",
+        user_text=(
+            "Oto cennik/oferta dostawcy. Wyodrębnij wszystkie produkty z tych stron. "
+            f"(Dokument ma {pages_meta.get('pages_total')} stron; "
+            f"analizuję {pages_meta.get('pages_rendered')}.)"
+        ),
+        pages_meta=pages_meta,
+        merge_fn=_merge_catalog_vision_batches,
+    )
+    image_uris = []
 
     products = [CatalogProduct(**p) for p in (data.get("products") or [])]
     return CatalogExtractionResponse(
-        supplier_id=supplier_id, supplier_name=supplier_name,
-        product_count=len(products), products=products,
+        supplier_id=supplier_id,
+        supplier_name=data.get("supplier_name") or supplier_name,
+        product_count=len(products),
+        products=products,
         credits_deducted=int(billing.get("credits_deducted") or 0),
         credits_remaining=billing.get("credits_remaining"),
     )
@@ -5086,47 +5324,33 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
             if not sup:
                 raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
 
-    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
     contents = b""  # zwolnij bajty pliku
 
-    user_content: list[dict] = [
-        {"type": "text", "text": "Rozpoznaj typ tego dokumentu i wyodrębnij dane zgodnie ze schematem."}
-    ]
-    for uri in image_uris:
-        user_content.append({"type": "image_url", "image_url": {"url": uri}})
-
-    try:
-        resp = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": _DOCUMENT_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_schema", "json_schema": _DOCUMENT_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-    finally:
-        image_uris = []
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/documents/process", model=VISION_MODEL,
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+    data, billing = await _openai_vision_json_batches(
+        client,
+        image_uris=image_uris,
+        system_prompt=_DOCUMENT_SYSTEM_PROMPT,
+        json_schema=_DOCUMENT_JSON_SCHEMA,
+        endpoint="/api/documents/process",
+        user_text=(
+            "Rozpoznaj typ tego dokumentu i wyodrębnij dane zgodnie ze schematem. "
+            f"Dokument PDF/zdjęcie: {pages_meta.get('pages_rendered')} stron"
+            f"{' (z ' + str(pages_meta.get('pages_total')) + ')' if pages_meta.get('truncated') else ''}."
+        ),
+        pages_meta=pages_meta,
+        merge_fn=_merge_document_vision_batches,
+    )
+    image_uris = []
 
     doc_type = data.get("document_type") or "OFERTA_HANDLOWA"
     supplier_name = data.get("supplier_name")
     supplier_meta = _normalize_supplier_scan_meta(data.get("supplier"))
+    pages_info = {
+        "pages_total": pages_meta.get("pages_total"),
+        "pages_processed": pages_meta.get("pages_rendered"),
+        "pages_truncated": bool(pages_meta.get("truncated")),
+    }
 
     if doc_type == "MENU_RESTAURACYJNE":
         # Menu restauracji → NIE twórz dostawcy / katalogu. FE otworzy skaner menu.
@@ -5144,6 +5368,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
             "document_type": "MENU_RESTAURACYJNE",
             "open_menu_scan": True,
             "dishes_preview": dishes_preview,
+            **pages_info,
             "message": (
                 "Rozpoznano kartę dań (menu restauracji). "
                 "Otwórz „Skanuj menu”, aby wgrać potrawy — nie dodano dostawcy ani katalogu."
@@ -5192,6 +5417,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
             "total_amount": float(data.get("total_amount") or 0),
             "products": enriched or raw_products,
             "user_categories": user_cat_names,
+            **pages_info,
         }, billing)
 
     # OFERTA → rozpoznaj/utwórz dostawcę, uzupełnij panel Dostawcy, zapisz katalog
@@ -5210,6 +5436,7 @@ async def process_document(supplier_id: Optional[str] = Form(None), file: Upload
             "supplier_name": resolved_name or supplier_name,
             "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
             "supplier_fields_updated": meta_result.get("updated_fields") or [],
+            **pages_info,
             **result,
         }, billing)
 
@@ -5619,7 +5846,9 @@ async def scan_expiration(
     if not contents:
         raise HTTPException(status_code=400, detail="Pusty plik.")
 
-    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    image_uris, _pages_meta = _images_from_upload(
+        contents, file.content_type or "", file.filename or "", max_pages=2,
+    )
     contents = b""
 
     user_content: list[dict] = [
@@ -5962,43 +6191,24 @@ async def menu_scan(file: UploadFile = File(...)):
     if not contents:
         raise HTTPException(status_code=400, detail="Pusty plik.")
 
-    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
     contents = b""
 
-    user_content: list[dict] = [
-        {"type": "text", "text": "Wyodrębnij WSZYSTKIE potrawy z tego menu zgodnie ze schematem."}
-    ]
-    for uri in image_uris:
-        user_content.append({"type": "image_url", "image_url": {"url": uri}})
-
-    try:
-        resp = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": _MENU_SCAN_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_schema", "json_schema": _MENU_SCAN_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-    finally:
-        image_uris = []
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/menu/scan", model=VISION_MODEL,
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+    data, billing = await _openai_vision_json_batches(
+        client,
+        image_uris=image_uris,
+        system_prompt=_MENU_SCAN_SYSTEM_PROMPT,
+        json_schema=_MENU_SCAN_JSON_SCHEMA,
+        endpoint="/api/menu/scan",
+        user_text=(
+            "Wyodrębnij WSZYSTKIE potrawy z tego menu zgodnie ze schematem. "
+            f"Strony {pages_meta.get('pages_rendered')}"
+            f"{'/' + str(pages_meta.get('pages_total')) if pages_meta.get('truncated') else ''}."
+        ),
+        pages_meta=pages_meta,
+        merge_fn=_merge_menu_vision_batches,
+    )
+    image_uris = []
 
     dishes_raw = data.get("dishes") or []
     dishes: list[MenuScanDish] = []
@@ -6011,6 +6221,11 @@ async def menu_scan(file: UploadFile = File(...)):
     warnings: list[str] = []
     if not dishes:
         warnings.append("Nie udało się rozpoznać żadnej potrawy na wgranym menu.")
+    if pages_meta.get("truncated"):
+        warnings.append(
+            f"PDF ma {pages_meta.get('pages_total')} stron — przeanalizowano pierwsze "
+            f"{pages_meta.get('pages_rendered')} (limit {PDF_MAX_PAGES})."
+        )
     # Ujednolić jednostki: ten sam składnik = ta sama jednostka we wszystkich potrawach.
     _canonicalize_ingredient_units(dishes)
     _attach_image_context_tags(dishes)
@@ -6055,56 +6270,33 @@ async def recipe_ocr_text(file: UploadFile = File(...)):
     if not contents:
         raise HTTPException(status_code=400, detail="Pusty plik.")
 
-    image_uris = _images_from_upload(contents, file.content_type or "", file.filename or "")
+    image_uris, pages_meta = _images_from_upload(
+        contents, file.content_type or "", file.filename or "", max_pages=12,
+    )
     contents = b""
 
-    user_content: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                "Przeczytaj CAŁY tekst przepisu / receptury z tego zdjęcia notatek. "
-                "Zachowaj kolejność kroków i ilości. Zwróć wyłącznie treść przepisu po polsku, "
-                "bez komentarzy ani wstępów. Jeśli tekst jest nieczytelny — oddaj to, co da się odczytać."
-            ),
-        }
-    ]
-    for uri in image_uris:
-        user_content.append({"type": "image_url", "image_url": {"url": uri}})
-
-    try:
-        resp = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0.0,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Jesteś asystentem kuchennym. Odczytujesz przepisy z notatek i zdjęć. "
-                        "Zwracasz wyłącznie JSON ze schematem."
-                    ),
-                },
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_schema", "json_schema": _RECIPE_OCR_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-    finally:
-        image_uris = []
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/recipes/ocr-text", model=VISION_MODEL,
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
+    data, billing = await _openai_vision_json_batches(
+        client,
+        image_uris=image_uris,
+        system_prompt=(
+            "Jesteś asystentem kuchennym. Odczytujesz przepisy z notatek i zdjęć. "
+            "Zwracasz wyłącznie JSON ze schematem."
+        ),
+        json_schema=_RECIPE_OCR_JSON_SCHEMA,
+        endpoint="/api/recipes/ocr-text",
+        user_text=(
+            "Przeczytaj CAŁY tekst przepisu / receptury z tych stron notatek. "
+            "Zachowaj kolejność kroków i ilości. Zwróć wyłącznie treść przepisu po polsku, "
+            "bez komentarzy ani wstępów. Jeśli tekst jest nieczytelny — oddaj to, co da się odczytać."
+        ),
+        cont_text=(
+            "Kontynuacja przepisu z kolejnych stron. Dopisz wyłącznie tekst z TYCH stron "
+            "(kolejne kroki / składniki), bez powtarzania wcześniejszych."
+        ),
+        pages_meta=pages_meta,
+        merge_fn=_merge_recipe_ocr_batches,
+    )
+    image_uris = []
 
     text = (data.get("text") or "").strip()
     if not text:

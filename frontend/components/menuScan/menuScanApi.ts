@@ -37,7 +37,8 @@ export function friendlyMenuScanApiError(status: number, detail: string): string
   ) {
     return (
       'Serwer AI nie zdążył odpowiedzieć (timeout / 502). '
-      + 'Spróbuj ponownie za chwilę albo zapisz bez sugestii AI („Nie”).'
+      + 'Przy długim menu PDF spróbuj ponownie albo podziel plik (limit ok. 40 stron). '
+      + 'Możesz też zapisać bez sugestii AI („Nie”).'
     );
   }
   if (!MENU_SCAN_BACKEND_URL) {

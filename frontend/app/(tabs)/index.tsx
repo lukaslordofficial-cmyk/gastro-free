@@ -28,6 +28,7 @@ import {
   Check,
   MessageSquare,
   Tag,
+  FileDown,
 } from 'lucide-react-native';
 import type { FixedCost, InventoryItem, RevenueEntry, VariableCostEntry } from '@/lib/types';
 import * as financeService from '@/services/financeService';
@@ -48,6 +49,7 @@ import { useAppTheme } from '@/hooks/useAppTheme';
 import { AppScreenHeader } from '@/components/premium/AppScreenHeader';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { PremiumFinanceScreen } from '@/components/premium/PremiumFinanceScreen';
+import { FinancePdfExportModal } from '@/components/FinancePdfExportModal';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
@@ -816,6 +818,7 @@ export default function FinanseScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [view, setView] = useState<'panel' | 'raporty' | 'subskrypcja'>('panel');
+  const [pdfOpen, setPdfOpen] = useState(false);
   const [showUsageHistory, setShowUsageHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revenueEntries, setRevenueEntries] = useState<RevenueEntry[]>([]);
@@ -1291,7 +1294,37 @@ export default function FinanseScreen() {
           </TouchableOpacity>
         </View>
 
-        {view === 'raporty' && <ReportsArchive onClosedDay={fetchData} />}
+        {view === 'raporty' && (
+          <>
+            <TouchableOpacity
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+                backgroundColor: theme.card,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: theme.border,
+                padding: 14,
+                marginBottom: 12,
+              }}
+              onPress={() => setPdfOpen(true)}
+              activeOpacity={0.85}
+              testID="finance-pdf-export-open-free"
+            >
+              <FileDown size={18} color={Colors.accent} strokeWidth={2.4} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: theme.text, fontWeight: '700', fontSize: 14 }}>
+                  Pobierz raport PDF
+                </Text>
+                <Text style={{ color: theme.textMuted, fontSize: 12, marginTop: 2 }}>
+                  Zyski albo dostawy/zakupy · zakres dat
+                </Text>
+              </View>
+            </TouchableOpacity>
+            <ReportsArchive onClosedDay={fetchData} />
+          </>
+        )}
 
         {view === 'subskrypcja' && <SubscriptionPanel />}
 
@@ -1718,6 +1751,11 @@ export default function FinanseScreen() {
         onSaved={fetchData}
       />
       <CreditsUsageHistoryModal visible={showUsageHistory} onClose={() => setShowUsageHistory(false)} />
+      <FinancePdfExportModal
+        visible={pdfOpen}
+        onClose={() => setPdfOpen(false)}
+        defaultMonth={CURRENT_MONTH}
+      />
     </SafeAreaView>
   );
 }

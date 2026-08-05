@@ -162,6 +162,8 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     setStage('scanning');
     setError(null);
     setSaveHint(null);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 720_000);
     try {
       const form = new FormData();
       form.append('file', { uri, name, type: mimeType } as any);
@@ -170,6 +172,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         method: 'POST',
         headers: await apiMultipartHeaders(),
         body: form,
+        signal: ctrl.signal,
       });
       if (!res.ok) {
         const detail = await parseErrorDetail(res);
@@ -211,18 +214,30 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
         return;
       }
       const deducted = Number(data.credits_deducted ?? 0);
+      const warn =
+        Array.isArray(data.warnings) && data.warnings.length
+          ? ` ${data.warnings.filter((w: any) => typeof w === 'string').join(' ')}`
+          : '';
       if (deducted > 0) {
         const rem = data.credits_remaining != null ? Number(data.credits_remaining) : null;
         setSaveHint(
           rem != null
-            ? `Skan AI: −${deducted} kredytów (saldo ${rem}). Zapis potraw nie wymaga dodatkowych kredytów.`
-            : `Skan AI: −${deducted} kredytów. Zapis potraw nie wymaga dodatkowych kredytów.`
+            ? `Skan AI: −${deducted} kredytów (saldo ${rem}). Zapis potraw nie wymaga dodatkowych kredytów.${warn}`
+            : `Skan AI: −${deducted} kredytów. Zapis potraw nie wymaga dodatkowych kredytów.${warn}`
         );
+      } else if (warn) {
+        setSaveHint(warn.trim());
       }
       setStage('edit');
     } catch (e: any) {
-      setError(e.message ?? 'Nie udało się przetworzyć menu.');
+      const msg =
+        e?.name === 'AbortError'
+          ? 'Skan menu przekroczył limit czasu. Przy bardzo długim PDF spróbuj podzielić plik.'
+          : e.message ?? 'Nie udało się przetworzyć menu.';
+      setError(msg);
       setStage('choose');
+    } finally {
+      clearTimeout(timer);
     }
   }, [ensureCredits, refreshCredits]);
 

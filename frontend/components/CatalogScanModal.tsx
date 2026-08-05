@@ -48,7 +48,7 @@ import { DOC_WAREHOUSE_CATEGORIES } from '@/lib/warehouseCategories';
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
 /** Client abort — Railway/proxy often dies ~100s; fail with clear message sooner. */
-const PROCESS_TIMEOUT_MS = 95_000;
+const PROCESS_TIMEOUT_MS = 720_000; // do ~12 min — katalogi 30–40 stron (batch Vision)
 
 const C = {
   bg: '#0A120E',
@@ -107,6 +107,9 @@ interface DocResult {
   visible_count?: number;
   hidden_count?: number;
   warnings?: string[];
+  pages_total?: number | null;
+  pages_processed?: number | null;
+  pages_truncated?: boolean;
 }
 
 interface Props {
@@ -127,9 +130,11 @@ interface Props {
 
 const PROCESSING_MESSAGES = [
   'Agent AI analizuje wgrany dokument…',
+  'Czytam kolejne strony PDF (katalogi mogą mieć ich wiele)…',
   'Rozpoznaję typ dokumentu i pozycje…',
   'Segreguję produkty do właściwych zakładek…',
   'Szukam danych dostawcy (NIP, telefon, dostawa)…',
+  'Duży plik = więcej tokenów OpenAI (rozliczenie 1:1 z usage)…',
   'Po zakończeniu zapiszę dane i Cię powiadomię.',
 ];
 
@@ -181,7 +186,8 @@ function friendlyApiError(status: number, detail: string): string {
   ) {
     return (
       'Serwer AI nie zdążył odpowiedzieć (timeout). '
-      + 'Spróbuj ponownie z krótszym plikiem (max ~4 strony) albo zdjęciem.'
+      + 'Przy bardzo dużym PDF spróbuj ponownie albo podziel katalog na części '
+      + '(limit ok. 40 stron na jeden skan).'
     );
   }
   if (!BACKEND_URL) return 'Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).';
@@ -346,11 +352,22 @@ export function CatalogScanModal({
         const isInvoice = data.document_type === 'FAKTURA_ZAKUPOWA';
         const refreshHint =
           ' Jeśli produkty nie pojawią się od razu, odśwież aplikację (przeciągnij listę w dół lub otwórz zakładkę ponownie).';
+        const pagesHint =
+          data.pages_processed != null
+            ? ` Przeanalizowano ${data.pages_processed}${
+                data.pages_total != null && data.pages_total !== data.pages_processed
+                  ? ` z ${data.pages_total}`
+                  : ''
+              } stron.`
+            : '';
+        const truncHint = data.pages_truncated
+          ? ' Część stron powyżej limitu została pominięta.'
+          : '';
         const message = isOffer
-          ? `AI zapisało ofertę${data.supplier_name ? ` dla „${data.supplier_name}”` : ''} w zakładce Dostawcy. Listy odświeżono.${refreshHint}`
+          ? `AI zapisało ofertę${data.supplier_name ? ` dla „${data.supplier_name}”` : ''} w zakładce Dostawcy.${pagesHint}${truncHint} Listy odświeżono.${refreshHint}`
           : isInvoice
-            ? `AI zaksięgowało fakturę${data.supplier_name ? ` od „${data.supplier_name}”` : ''} w Magazynie. Listy odświeżono.${refreshHint}`
-            : `AI zapisało dane w odpowiednich zakładkach. Listy odświeżono.${refreshHint}`;
+            ? `AI zaksięgowało fakturę${data.supplier_name ? ` od „${data.supplier_name}”` : ''} w Magazynie.${pagesHint}${truncHint} Listy odświeżono.${refreshHint}`
+            : `AI zapisało dane w odpowiednich zakładkach.${pagesHint}${truncHint} Listy odświeżono.${refreshHint}`;
         premiumAlert(
           isOffer ? 'Oferta handlowa gotowa' : isInvoice ? 'Faktura gotowa' : 'Dokument gotowy',
           message,
@@ -664,7 +681,9 @@ export function CatalogScanModal({
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={[styles.sourceTitle, { color: C.text }]}>Wgraj plik</Text>
-                <Text style={[styles.sourceSub, { color: C.muted }]}>PDF, JPG lub PNG</Text>
+                <Text style={[styles.sourceSub, { color: C.muted }]}>
+                  PDF (także wielostronicowy, do ~40 stron), JPG lub PNG
+                </Text>
               </View>
             </TouchableOpacity>
           </ScrollView>
@@ -687,7 +706,7 @@ export function CatalogScanModal({
               <Text style={[styles.processingCardText, { color: C.muted }]}>
                 {isSavingProducts
                   ? 'Zapisuję produkty w magazynie i koszt zmienny. Listy odświeżą się automatycznie.'
-                  : 'Po zakończeniu agent przygotuje podgląd pozycji. Możesz zostawić ten ekran otwarty albo wrócić do pulpitu — po rozpoznaniu faktury otworzymy zatwierdzenie automatycznie.'}
+                  : 'Wielostronicowe katalogi PDF są czytane partiami — kredyty = realny koszt tokenów OpenAI. Możesz zostawić ekran otwarty albo wrócić — po fakturze otworzymy zatwierdzenie automatycznie.'}
               </Text>
               <Text style={[styles.elapsed, { color: C.green }]}>
                 {elapsedSec < 60

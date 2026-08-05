@@ -28,7 +28,9 @@ import {
   ChevronRight,
   X,
   TriangleAlert,
+  FileDown,
 } from 'lucide-react-native';
+import { FinancePdfExportModal } from '@/components/FinancePdfExportModal';
 import { PremiumColors, PremiumTokens } from '@/constants/premiumTheme';
 import { PremiumScreenBackground } from '@/components/premium/PremiumScreenBackground';
 import {
@@ -302,6 +304,7 @@ function CollapsibleTile({
 }
 
 export function PremiumFinanceScreen(props: Props) {
+  const [pdfOpen, setPdfOpen] = useState(false);
   const [view, setView] = useState<'panel' | 'raporty' | 'subskrypcja'>('panel');
   const [openRevenue, setOpenRevenue] = useState(true);
   const [openFixed, setOpenFixed] = useState(false);
@@ -616,6 +619,22 @@ export function PremiumFinanceScreen(props: Props) {
 
         {view === 'raporty' && (
           <>
+            <TouchableOpacity
+              style={styles.pdfExportBtn}
+              onPress={() => setPdfOpen(true)}
+              activeOpacity={0.85}
+              testID="finance-pdf-export-open"
+            >
+              <FileDown size={16} color={PremiumColors.neon} strokeWidth={2.4} />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.pdfExportTitle}>Pobierz raport PDF</Text>
+                <Text style={styles.pdfExportSub}>
+                  Zyski albo dostawy/zakupy · wybór zakresu dat
+                </Text>
+              </View>
+              <ChevronRight size={16} color={PremiumColors.textMuted} />
+            </TouchableOpacity>
+
             <CollapsibleTile
               title="Dziennik przychodów"
               summary={`${props.revenueJournal.length} wpisów · ${formatPLN(totalRevenue)}`}
@@ -1030,6 +1049,11 @@ export function PremiumFinanceScreen(props: Props) {
           </View>
         </View>
       </Modal>
+      <FinancePdfExportModal
+        visible={pdfOpen}
+        onClose={() => setPdfOpen(false)}
+        defaultMonth={props.currentMonth}
+      />
       </PremiumScreenBackground>
     </SafeAreaView>
   );
@@ -1076,6 +1100,20 @@ const styles = StyleSheet.create({
   voiceStatus: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   voiceStatusText: { color: PremiumColors.neon, fontSize: 12, fontWeight: '600' },
   reportBtnWrap: { alignItems: 'center', marginBottom: PremiumTokens.space.lg },
+  pdfExportBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: PremiumTokens.color.card,
+    borderRadius: PremiumTokens.radius.lg,
+    borderWidth: 1,
+    borderColor: PremiumTokens.color.neonLine,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    marginBottom: PremiumTokens.space.md,
+  },
+  pdfExportTitle: { color: PremiumColors.text, fontSize: 14, fontWeight: '700' },
+  pdfExportSub: { color: PremiumColors.textMuted, fontSize: 11, marginTop: 2 },
   collapseHead: { flexDirection: 'row', alignItems: 'center', gap: PremiumTokens.icon.gap },
   segment: {
     flexDirection: 'row',

@@ -2552,7 +2552,7 @@ export default function DostawcyScreen() {
   const premSwitch = prem ? DS.color.greenEnd : Colors.accent;
 
   return (
-    <SafeAreaView style={[mainStyles.container, { backgroundColor: theme.bg }]} edges={['top']}>
+    <SafeAreaView style={[mainStyles.container, { backgroundColor: theme.bg }]} edges={[]}>
       {theme.isPremium ? (
         <PremiumTabChrome
           title="Dostawcy"

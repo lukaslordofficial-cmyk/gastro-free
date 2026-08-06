@@ -12,6 +12,15 @@ import {
   loadImageLibrary,
   type ImageLibraryEntry,
 } from '@/lib/imageLibrary';
+import {
+  detectTaxonomyFamily,
+  expandDishQuery,
+  imageFamilyConflictsQuery,
+  taxonomyContextTags,
+  taxonomyPlaceholderSlugs,
+  taxonomyToLegacyFamily,
+  type TaxonomyFamily,
+} from '@/lib/dishTaxonomy';
 
 const STOP = new Set([
   'a', 'i', 'z', 'ze', 'w', 'na', 'do', 'od', 'po', 'dla',
@@ -100,6 +109,8 @@ export function significantTokens(normalized: string): string[] {
 }
 
 export function detectDishFamily(name: string): DishFamily {
+  const tax = detectTaxonomyFamily(name);
+  if (tax !== 'other') return taxonomyToLegacyFamily(tax);
   const n = normalizeDishName(name);
   if (/\b(sos|sauce|aioli|gravy|bbq|demi glace|bearnaise|holendersk|bernensk|fondue|satay|bolognese|carbonara)\b/.test(n) || n.startsWith('sos ')) {
     return 'sauces';
@@ -266,7 +277,12 @@ export function extractDishContextTags(name: string, extraTags: string[] = []): 
     { re: /\bpizza/, tags: ['pizza'] },
     { re: /\b(makaron|pasta|spaghetti)/, tags: ['makaron'] },
     { re: /\bsalatk|salad/, tags: ['sałatka'] },
-    { re: /\b(pierog|kluski|kopytk)/, tags: ['pierogi'] },
+    { re: /\b(pierog|uszka|pielmieni|wareniki)/, tags: ['pierogi'] },
+    { re: /\b(kopytk|kluski|leniwe|pampuch|kartacz|cepelin)/, tags: ['kluski'] },
+    { re: /\b(kebab|doner|shawarma|gyro)/, tags: ['kebab'] },
+    { re: /\b(curry|tikka|butter chicken|naan)/, tags: ['curry', 'indyjskie'] },
+    { re: /\b(taco|burrito|nachos|quesadilla)/, tags: ['meksykańskie'] },
+    { re: /\b(śniadanie|breakfast|jajecznica|omlet)/, tags: ['śniadanie'] },
     { re: /\bsos |sauce/, tags: ['sos'] },
     { re: /\b(deser|ciasto|lody|tiramisu)/, tags: ['deser'] },
     { re: /\b(udko|udo)\b/, tags: ['udo', 'pieczeń'] },
@@ -285,6 +301,9 @@ export function extractDishContextTags(name: string, extraTags: string[] = []): 
   for (const t of extraTags) {
     const nt = normalizeDishName(t);
     if (nt) tags.add(nt);
+  }
+  for (const t of taxonomyContextTags(name)) {
+    tags.add(t);
   }
   return [...tags];
 }
@@ -456,8 +475,8 @@ const TAG_THRESHOLD = 1;
 function mainProteinTags(tags: string[]): string[] {
   const priority = [
     'kaczka', 'kurczak', 'indyk', 'wołowina', 'wieprzowina', 'ryba', 'owoce morza',
-    'wege', 'burger', 'pizza', 'makaron', 'zupa', 'sos', 'sałatka', 'sushi', 'pierogi', 'deser',
-    'frytki', 'ziemniak',
+    'wege', 'burger', 'pizza', 'makaron', 'zupa', 'sos', 'sałatka', 'sushi', 'pierogi', 'kluski',
+    'kebab', 'deser', 'frytki', 'ziemniak', 'curry', 'śniadanie', 'meksykańskie',
   ];
   const norm = tags.map(normalizeDishName);
   // Nie używaj samego „pieczeń” jako głównego tagu — zbyt szeroki
@@ -469,6 +488,7 @@ function tagsConflict(
   dishContextTags: string[],
   dietaryGuards: string[],
   entry?: DishImageEntry,
+  queryFamily?: TaxonomyFamily,
 ): boolean {
   const dishNorm = dishContextTags.map(normalizeDishName);
   const forbid = new Set((lib.forbiddenTags || []).map(normalizeDishName));
@@ -498,6 +518,11 @@ function tagsConflict(
       return true;
     }
   }
+  // Taksonomia: pizza≠focaccia, pierogi≠kluski, stek≠burger…
+  if (queryFamily && queryFamily !== 'other') {
+    const blob = `${lib.primaryName} ${lib.slug} ${(lib.aliases || []).join(' ')} ${entry?.storagePath || ''} ${entry?.labelPl || ''}`;
+    if (imageFamilyConflictsQuery(queryFamily, blob)) return true;
+  }
   return false;
 }
 
@@ -520,6 +545,13 @@ function imageHasTag(lib: ImageLibraryEntry, tag: string, entry?: DishImageEntry
 /**
  * Waterfall match. Zwraca undefined tylko gdy brak katalogu —
  * UI powinno użyć categoryPlaceholderSlug jako ostateczność.
+ *
+ * Kolejność (z nazwy produktow.md):
+ *  1) exact name / alias
+ *  2) synonimy (expandDishQuery)
+ *  3) near-exact token overlap
+ *  4) fallbackTags + forbiddenTags
+ *  5) category placeholder (caller)
  */
 export function findDishImageMatch(
   name: string,
@@ -528,8 +560,10 @@ export function findDishImageMatch(
 ): DishMatchResult | undefined {
   const q = normalizeDishName(name);
   if (!q || !catalog.length) return undefined;
+  const queryVariants = expandDishQuery(name);
   const qTokens = significantTokens(q);
   const wantFamily = detectDishFamily(name);
+  const taxFamily = detectTaxonomyFamily(name);
   const contextTags = extractDishContextTags(name, opts?.extraTags || []);
   const guards = dishDietaryGuards(name, contextTags);
   const catalogBySlug = new Map(catalog.map((e) => [e.slug, e]));
@@ -542,28 +576,42 @@ export function findDishImageMatch(
         : new Set(opts.excludeSlugs);
   const allowed = (slug: string) => !excluded || !excluded.has(slug);
 
-  // Exact label equality → 100 (Step 1a)
+  const conflicts = (lib: ImageLibraryEntry | undefined, entry: DishImageEntry) =>
+    !!(lib && tagsConflict(lib, contextTags, guards, entry, taxFamily));
+
+  // Exact label equality on original OR synonym variants → 100
   for (const entry of catalog) {
     if (!allowed(entry.slug) || isPackagingPath(entry.storagePath)) continue;
     const lib = getLibraryEntryBySlug(entry.slug);
-    if (lib && tagsConflict(lib, contextTags, guards, entry)) continue;
-    const labels = [entry.labelPl, ...entry.aliases, lib?.primaryName]
+    if (conflicts(lib, entry)) continue;
+    const labels = [entry.labelPl, ...entry.aliases, lib?.primaryName, ...(lib?.aliases || [])]
       .filter(Boolean)
       .map((x) => normalizeDishName(String(x)));
-    if (labels.includes(q)) {
+    if (labels.some((l) => queryVariants.includes(l))) {
       return { slug: entry.slug, score: 100, entry, tier: 'exact' };
     }
   }
 
-  // ── Step 1b: Near-exact / strong token overlap ─────────────────────────
+  // ── Step 1b: Near-exact / strong token overlap (po wszystkich wariantach) ─
   const exactRanked: DishMatchResult[] = [];
   for (const entry of catalog) {
     if (!allowed(entry.slug) || isPackagingPath(entry.storagePath)) continue;
     const lib = getLibraryEntryBySlug(entry.slug);
-    if (lib && tagsConflict(lib, contextTags, guards, entry)) continue;
-    let score = bestCandidateScore(q, qTokens, entry, lib);
+    if (conflicts(lib, entry)) continue;
+    let score = 0;
+    for (const variant of queryVariants) {
+      const vTokens = significantTokens(variant);
+      score = Math.max(score, bestCandidateScore(variant, vTokens.length ? vTokens : qTokens, entry, lib));
+    }
     score = applyFamilyAdjustments(name, score, entry, wantFamily, lib);
-    if (score >= 85) {
+    // Kara za konflikt taksonomii (np. pizza vs focaccia w score borderline)
+    if (taxFamily !== 'other') {
+      const blob = `${entry.labelPl} ${entry.slug} ${entry.aliases.join(' ')} ${entry.storagePath}`;
+      if (imageFamilyConflictsQuery(taxFamily, blob)) {
+        score = Math.max(0, score - 70);
+      }
+    }
+    if (score >= 82) {
       exactRanked.push({
         slug: entry.slug,
         score,
@@ -583,7 +631,7 @@ export function findDishImageMatch(
       if (!allowed(lib.slug) || isPackagingPath(lib.storagePath)) continue;
       const entry = catalogBySlug.get(lib.slug);
       if (!entry) continue;
-      if (tagsConflict(lib, contextTags, guards, entry)) continue;
+      if (conflicts(lib, entry)) continue;
       let hitCount = 0;
       for (const p of proteins) {
         if (imageHasTag(lib, p, entry)) hitCount += 1;
@@ -601,6 +649,11 @@ export function findDishImageMatch(
       const secondary = contextTags.filter((t) => !proteins.includes(t) && !WEAK_COOK_TAGS.has(normalizeDishName(t)));
       for (const t of secondary) {
         if (imageHasTag(lib, t, entry)) score = Math.min(84, score + 4);
+      }
+      // Bonus za zgodność synonimu w primaryName
+      const imgNorm = normalizeDishName(`${lib.primaryName} ${(lib.aliases || []).join(' ')}`);
+      if (queryVariants.some((v) => v.length >= 4 && imgNorm.includes(v))) {
+        score = Math.min(84, score + 8);
       }
       tagRanked.push({ slug: lib.slug, score, entry, hitCount });
     }
@@ -631,12 +684,17 @@ export function findSlugForDishName(
 /** Placeholder slug z katalogu dań wg rodziny (gdy brak mocnego matcha). */
 export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[]): string | undefined {
   const fam = detectDishFamily(name);
+  const tax = detectTaxonomyFamily(name);
   const pick = (...slugs: string[]) => {
     for (const s of slugs) {
       if (catalog.some((e) => e.slug === s)) return s;
     }
     return undefined;
   };
+  // Najpierw placeholdery z taksonomii (kebab, sushi, pierogi, indyjskie…)
+  const taxHit = pick(...taxonomyPlaceholderSlugs(tax));
+  if (taxHit) return taxHit;
+
   if (isRedTomatoFamily(name)) {
     if (fam === 'sauces') {
       return pick('sos_bolognese', 'sos_buffalo', 'zupa_pomidorowa', 'gazpacho');
@@ -662,8 +720,8 @@ export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[])
   if (tags.includes('wieprzowina')) {
     return pick('kotlet_schabowy', 'schab_ze_sliwka', 'golonka_pieczona', 'crispy_pork_belly');
   }
-  if (tags.includes('ryba')) {
-    return pick('dorsz_pieczony', 'losos_maslo_ziolowe', 'dorsz_fish_and_chips', 'fish_and_chips', 'tuna_tataki');
+  if (tags.includes('ryba') || tags.includes('sushi')) {
+    return pick('dorsz_pieczony', 'losos_maslo_ziolowe', 'dorsz_fish_and_chips', 'fish_and_chips', 'tuna_tataki', 'california_roll');
   }
   switch (fam) {
     case 'sauces':
@@ -681,7 +739,7 @@ export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[])
       return pick('garden_salad');
     case 'meat':
       return pick('kotlet_schabowy', 'stek_ribeye', 'kotlet_de_volaille', 'golonka_pieczona')
-        ?? catalog.find((e) => /steak|kotlet|grill|mieso|roast|dinner/.test(e.storagePath) && !/soup|side|fries/.test(e.storagePath))?.slug;
+        ?? catalog.find((e) => /steak|kotlet|grill|mieso|roast|dinner|kebab/.test(e.storagePath) && !/soup|side|fries/.test(e.storagePath))?.slug;
     case 'sides':
       return pick('warzywa_grillowane', 'french_fries', 'coleslaw', 'mlode_ziemniaki');
     case 'drink':
@@ -706,19 +764,28 @@ export function resolveDishMatchWithFallback(
         ? opts.excludeSlugs
         : new Set(opts.excludeSlugs);
   const fam = detectDishFamily(name);
+  const tax = detectTaxonomyFamily(name);
   const tags = extractDishContextTags(name, opts?.extraTags || []);
+  const guards = dishDietaryGuards(name, tags);
   const phCandidates = [
+    ...taxonomyPlaceholderSlugs(tax),
     categoryPlaceholderSlug(name, catalog),
   ].filter(Boolean) as string[];
-  // Rodzinne fallbacki — bez mieszania mięsa z frytkami / zupą
+  // Rodzinne fallbacki — bez mieszania mięsa z frytkami / zupą / pierogów z kluskami
   if (tags.includes('kaczka')) {
     phCandidates.push('pieczona_kaczka', 'kaczka_porcja', 'udo_kaczki', 'kaczka_pekinska');
+  } else if (tax === 'pierogi' || tags.includes('pierogi')) {
+    phCandidates.push('pierogi_ruskie', 'pierogi_z_miesem', 'pierogi_kapusta_grzyby');
+  } else if (tax === 'kluski' || tags.includes('kluski')) {
+    phCandidates.push('kopytka', 'kluski_slaskie', 'kluski_leniwe');
   } else if (fam === 'soups') {
     phCandidates.push('rosol', 'zupa_pomidorowa', 'gazpacho');
-  } else if (fam === 'meat') {
+  } else if (fam === 'meat' || tax === 'kebab' || tax === 'steak' || tax === 'bbq') {
     phCandidates.push('kotlet_schabowy', 'stek_ribeye', 'kotlet_de_volaille');
   } else if (fam === 'sides') {
     phCandidates.push('french_fries', 'warzywa_grillowane', 'mlode_ziemniaki');
+  } else if (tax === 'sushi') {
+    phCandidates.push('california_roll', 'sake_nigiri', 'futomaki_losos');
   } else {
     phCandidates.push('garden_salad');
   }
@@ -727,7 +794,7 @@ export function resolveDishMatchWithFallback(
     const entry = catalog.find((e) => e.slug === phSlug);
     if (!entry || isPackagingPath(entry.storagePath)) continue;
     const lib = getLibraryEntryBySlug(phSlug);
-    if (lib && tagsConflict(lib, tags, dishDietaryGuards(name, tags), entry)) continue;
+    if (lib && tagsConflict(lib, tags, guards, entry, tax)) continue;
     return {
       slug: entry.slug,
       score: 45,

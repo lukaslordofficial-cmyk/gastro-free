@@ -87,6 +87,16 @@ export type Database = {
       daily_reports: DbTable<Record<string, unknown>>;
       token_usage: DbTable<Record<string, unknown>>;
       sales_log: DbTable<Record<string, unknown>>;
+      /** Marketplace B2B — Lokalni Przetwórcy (niezależne od suppliers). */
+      local_producers: DbTable<Record<string, unknown>>;
+      producer_categories: DbTable<Record<string, unknown>>;
+      producer_products: DbTable<Record<string, unknown>>;
+      producer_product_gallery: DbTable<Record<string, unknown>>;
+      producer_orders: DbTable<Record<string, unknown>>;
+      producer_order_items: DbTable<Record<string, unknown>>;
+      producer_reviews: DbTable<Record<string, unknown>>;
+      producer_documents: DbTable<Record<string, unknown>>;
+      producer_notifications: DbTable<Record<string, unknown>>;
     };
     Views: {
       [_ in never]: never;

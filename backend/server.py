@@ -14831,6 +14831,211 @@ async def billing_status():
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lokalni Przetwórcy — Checkout Stripe (BLIK+karta) + InPost ShipX
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LpCheckoutRequest(BaseModel):
+    order_id: str
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+class LpConfirmRequest(BaseModel):
+    session_id: Optional[str] = None
+    order_id: Optional[str] = None
+
+
+class LpShipmentRequest(BaseModel):
+    order_id: str
+    receiver_name: Optional[str] = None
+    receiver_email: Optional[str] = None
+    receiver_phone: Optional[str] = None
+    street: Optional[str] = None
+    building_number: Optional[str] = None
+    city: Optional[str] = None
+    post_code: Optional[str] = None
+
+
+@app.get("/api/local-producers/commerce-status")
+async def local_producers_commerce_status():
+    from billing_stripe import stripe_configured
+    from local_producers_commerce import inpost_configured
+    return {
+        "ok": True,
+        "stripe_configured": stripe_configured(),
+        "inpost_configured": inpost_configured(),
+        "payment_methods": ["card", "blik"],
+    }
+
+
+@app.post("/api/local-producers/checkout")
+async def local_producers_checkout(req: LpCheckoutRequest):
+    """Tworzy Stripe Checkout dla zamówienia LP (card + BLIK)."""
+    from billing_stripe import stripe_configured
+    from local_producers_commerce import create_producer_order_checkout
+
+    if not stripe_configured():
+        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env / Railway")
+    order_id = (req.order_id or "").strip()
+    if not order_id:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+
+    account_key = get_account_key()
+    success = (req.success_url or os.getenv("LP_BILLING_SUCCESS_URL") or os.getenv("BILLING_SUCCESS_URL") or "myapp://lp/success").strip()
+    cancel = (req.cancel_url or os.getenv("LP_BILLING_CANCEL_URL") or os.getenv("BILLING_CANCEL_URL") or "myapp://lp/cancel").strip()
+    if success.startswith("myapp://"):
+        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
+        success = f"{public}/lp-billing-success?session_id={{CHECKOUT_SESSION_ID}}"
+    if cancel.startswith("myapp://"):
+        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
+        cancel = f"{public}/lp-billing-cancel"
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        orders = await sb_get(client, "producer_orders", params={
+            "select": "*",
+            "id": f"eq.{order_id}",
+            "limit": "1",
+        })
+        if not orders:
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+        order = orders[0]
+        # service_role omija RLS — twarda izolacja tenantowa
+        if order.get("restaurant_account_key") and order.get("restaurant_account_key") != account_key:
+            raise HTTPException(status_code=403, detail="To zamówienie należy do innego konta")
+        if str(order.get("payment_status") or "").lower() == "paid":
+            raise HTTPException(status_code=400, detail="Zamówienie jest już opłacone")
+
+        producers = await sb_get(client, "local_producers", params={
+            "select": "*",
+            "id": f"eq.{order.get('producer_id')}",
+            "limit": "1",
+        })
+        if not producers:
+            raise HTTPException(status_code=404, detail="Producent nie istnieje")
+        producer = producers[0]
+
+        email = None
+        try:
+            profiles = await sb_get(client, "profiles", params={
+                "select": "email",
+                "account_key": f"eq.{account_key}",
+                "limit": "1",
+            })
+            if profiles and profiles[0].get("email"):
+                email = profiles[0]["email"]
+        except Exception:
+            pass
+
+        try:
+            session = await create_producer_order_checkout(
+                order=order,
+                producer=producer,
+                account_key=account_key,
+                customer_email=email,
+                success_url=success,
+                cancel_url=cancel,
+                idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.exception("LP checkout failed")
+            raise HTTPException(status_code=502, detail=str(e)[:300])
+
+        # Zapisz session id w notes (best-effort) — kolumna payment_intent po opłaceniu
+        try:
+            note = (order.get("notes") or "")
+            tag = f"stripe_cs:{session['id']}"
+            if tag not in note:
+                await sb_patch(client, "producer_orders", {"id": f"eq.{order_id}"}, {
+                    "notes": f"{note} | {tag}".strip(" |"),
+                })
+        except Exception:
+            pass
+
+    return {"ok": True, **session}
+
+
+@app.post("/api/local-producers/confirm-payment")
+async def local_producers_confirm_payment(req: LpConfirmRequest):
+    """Potwierdzenie płatności LP bez webhooka (odpytanie Stripe)."""
+    from billing_stripe import retrieve_checkout_session, stripe_configured
+    from local_producers_commerce import apply_paid_producer_checkout_session
+
+    if not stripe_configured():
+        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
+    sid = (req.session_id or "").strip()
+    if not sid.startswith("cs_"):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy session_id")
+    try:
+        session = await retrieve_checkout_session(sid)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)[:300])
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        result = await apply_paid_producer_checkout_session(
+            session,
+            client=client,
+            sb_get=sb_get,
+            sb_patch=sb_patch,
+        )
+    return result
+
+
+@app.post("/api/local-producers/create-shipment")
+async def local_producers_create_shipment(req: LpShipmentRequest):
+    """Ręczne utworzenie przesyłki InPost (po paid) — np. retry."""
+    from local_producers_commerce import create_inpost_shipment
+
+    order_id = (req.order_id or "").strip()
+    if not order_id:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+    account_key = get_account_key()
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        orders = await sb_get(client, "producer_orders", params={
+            "select": "*", "id": f"eq.{order_id}", "limit": "1",
+        })
+        if not orders:
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+        order = orders[0]
+        if order.get("restaurant_account_key") and order.get("restaurant_account_key") != account_key:
+            raise HTTPException(status_code=403, detail="To zamówienie należy do innego konta")
+        if str(order.get("payment_status") or "").lower() != "paid":
+            raise HTTPException(status_code=400, detail="Najpierw opłać zamówienie")
+
+        producers = await sb_get(client, "local_producers", params={
+            "select": "*", "id": f"eq.{order.get('producer_id')}", "limit": "1",
+        })
+        producer = (producers or [{}])[0]
+        receiver = {
+            "name": req.receiver_name or "Restauracja",
+            "email": req.receiver_email or "orders@gastromanager.app",
+            "phone": req.receiver_phone or "500600700",
+            "address": {
+                "street": req.street or "ul. Restauracyjna",
+                "building_number": req.building_number or "1",
+                "city": req.city or "Warszawa",
+                "post_code": req.post_code or "00-001",
+            },
+        }
+        try:
+            result = await create_inpost_shipment(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                order=order,
+                producer=producer,
+                receiver=receiver,
+            )
+        except Exception as e:
+            logger.exception("LP create-shipment failed")
+            raise HTTPException(status_code=502, detail=str(e)[:300])
+    return result
+
+
 @app.post("/api/subscription/resign")
 async def subscription_resign():
     """Rezygnacja z subskrypcji — natychmiast Tier 0 Free, bez ponownego pakietu 100 kredytów."""

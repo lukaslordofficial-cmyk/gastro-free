@@ -20,6 +20,7 @@
         "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
         "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
         "NSPhotoLibraryUsageDescription": "Wgraj zdjęcie cennika dostawcy z galerii.",
+        "NSLocationWhenInUseUsageDescription": "Lokalizacja restauracji służy do wyliczania odległości od lokalnych producentów żywności.",
         "NSUserTrackingUsageDescription": "Identyfikator służy do wyświetlania spersonalizowanych reklam w planie darmowym."
       },
       "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
@@ -34,6 +35,8 @@
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.VIBRATE",

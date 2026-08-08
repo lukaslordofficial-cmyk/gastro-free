@@ -361,7 +361,17 @@ async def handle_stripe_event(
         customer_id = data_obj.get("customer")
         subscription_id = data_obj.get("subscription")
 
-        if kind == "topup":
+        if kind == "local_producer_order":
+            from local_producers_commerce import apply_paid_producer_checkout_session
+            lp = await apply_paid_producer_checkout_session(
+                data_obj,
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+            )
+            result["action"] = "local_producer_order_paid"
+            result["local_producer"] = lp
+        elif kind == "topup":
             credits = int(meta.get("credits") or 0)
             if credits <= 0:
                 pkg = meta.get("package")

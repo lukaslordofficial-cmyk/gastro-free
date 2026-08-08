@@ -1,8 +1,7 @@
 /**
- * Ekran modułu „Lokalni Przetwórcy”.
- * Lista aktywnych + zweryfikowanych producentów (Realtime).
+ * Lista marketplace — klik → szczegóły (produkty, km, zamówienie).
  */
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -10,23 +9,35 @@ import {
   ActivityIndicator,
   RefreshControl,
   ScrollView,
+  TouchableOpacity,
+  TextInput,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { MapPin } from 'lucide-react-native';
+import { useRouter } from 'expo-router';
+import { ChevronRight, MapPin, Search } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import { LocalProducersEmptyState } from '@/components/localProducers';
 import { useLocalProducers } from '@/hooks/localProducers';
-import { LOCAL_PRODUCERS_MODULE, type LocalProducer } from '@/types/localProducers';
+import {
+  LOCAL_PRODUCERS_MODULE,
+  type LocalProducerWithDistance,
+} from '@/types/localProducers';
 import { formatPlnNumber } from '@/lib/format';
+import { formatDistanceKm } from '@/lib/localProducers/haversine';
+
+const DS_NEON = '#00FF88';
 
 function ProducerCard({
   item,
   isPremium,
+  onPress,
 }: {
-  item: LocalProducer;
+  item: LocalProducerWithDistance;
   isPremium: boolean;
+  onPress: () => void;
 }) {
   const titleColor = isPremium ? '#F5F5F5' : Colors.textPrimary;
   const muted = isPremium ? 'rgba(255,255,255,0.55)' : Colors.textSecondary;
@@ -35,33 +46,60 @@ function ProducerCard({
   const place = [item.city, item.voivodeship].filter(Boolean).join(', ');
 
   return (
-    <View style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}>
-      <Text style={[styles.cardTitle, { color: titleColor }]} numberOfLines={2}>
-        {item.company_name}
-      </Text>
-      {place ? (
-        <Text style={[styles.cardMeta, { color: muted }]} numberOfLines={1}>
-          {place}
-        </Text>
-      ) : null}
-      {item.description ? (
-        <Text style={[styles.cardDesc, { color: muted }]} numberOfLines={3}>
-          {item.description}
-        </Text>
-      ) : null}
-      <Text style={[styles.cardMeta, { color: muted }]}>
-        Min. zamówienie: {formatPlnNumber(Number(item.min_order_value) || 0)} zł
-        {item.pickup_available ? ' · odbiór' : ''}
-        {item.courier_available ? ' · kurier' : ''}
-      </Text>
-    </View>
+    <TouchableOpacity
+      activeOpacity={0.85}
+      onPress={onPress}
+      style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}
+    >
+      <View style={styles.cardTop}>
+        {item.logo_url ? (
+          <Image source={{ uri: item.logo_url }} style={styles.logo} />
+        ) : (
+          <View style={[styles.logo, styles.logoFallback]}>
+            <MapPin size={18} color={muted} />
+          </View>
+        )}
+        <View style={styles.cardBody}>
+          <Text style={[styles.cardTitle, { color: titleColor }]} numberOfLines={2}>
+            {item.company_name}
+          </Text>
+          {place ? (
+            <Text style={[styles.cardMeta, { color: muted }]} numberOfLines={1}>
+              {place}
+            </Text>
+          ) : null}
+          <Text style={[styles.cardMeta, { color: muted }]}>
+            {formatDistanceKm(item.distanceKm)}
+            {' · '}
+            Min. {formatPlnNumber(Number(item.min_order_value) || 0)} zł
+            {item.courier_available ? ' · kurier' : ''}
+          </Text>
+        </View>
+        <ChevronRight size={18} color={muted} />
+      </View>
+    </TouchableOpacity>
   );
 }
 
 export function LocalProducersScreen() {
   const theme = useAppTheme();
-  const { items, loading, error, refreshing, refresh, backendReady } = useLocalProducers();
+  const router = useRouter();
+  const [query, setQuery] = useState('');
+  const {
+    items,
+    loading,
+    error,
+    refreshing,
+    refresh,
+    backendReady,
+    permissionDenied,
+  } = useLocalProducers({ query: query.trim() || undefined });
+
   const bg = theme.isPremium ? '#0A0A0A' : Colors.background;
+  const muted = theme.isPremium ? 'rgba(255,255,255,0.55)' : Colors.textSecondary;
+  const inputBg = theme.isPremium ? 'rgba(255,255,255,0.06)' : Colors.card;
+  const border = theme.isPremium ? 'rgba(255,255,255,0.12)' : Colors.border;
+  const textColor = theme.isPremium ? '#F5F5F5' : Colors.textPrimary;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: bg }]} edges={[]}>
@@ -70,27 +108,28 @@ export function LocalProducersScreen() {
         subtitle="Marketplace lokalnych producentów"
         meta={
           backendReady
-            ? `${items.length} zweryfikowanych`
+            ? `${items.length} zatwierdzonych`
             : 'Skonfiguruj Supabase (.env)'
         }
         floatNames={['chleb', 'ser', 'miód', 'warzywa']}
       >
         <View style={styles.body}>
-          <View style={styles.badgeRow}>
-            <MapPin
-              size={14}
-              color={theme.isPremium ? DS_NEON : Colors.accent}
-              strokeWidth={2}
+          <View style={[styles.searchWrap, { backgroundColor: inputBg, borderColor: border }]}>
+            <Search size={16} color={muted} />
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Szukaj producenta, miasta…"
+              placeholderTextColor={muted}
+              style={[styles.searchInput, { color: textColor }]}
+              autoCorrect={false}
             />
-            <Text
-              style={[
-                styles.badgeText,
-                { color: theme.isPremium ? 'rgba(255,255,255,0.7)' : Colors.textSecondary },
-              ]}
-            >
-              Aktualizacja na żywo · tylko verified + active · bez dostawców Resto
-            </Text>
           </View>
+
+          <Text style={[styles.badgeText, { color: muted }]}>
+            Tylko approved + verified + active
+            {permissionDenied ? ' · włącz GPS, by sortować po km' : ' · sortowanie po dystansie'}
+          </Text>
 
           {loading && !refreshing ? (
             <View style={styles.center}>
@@ -113,12 +152,22 @@ export function LocalProducersScreen() {
 
               {items.length === 0 ? (
                 <LocalProducersEmptyState
-                  title="Brak zweryfikowanych producentów"
-                  message="Gdy rolnik doda ofertę na stronie i admin oznaczy profil jako verified, pojawi się tutaj u wszystkich restauratorów (Realtime)."
+                  title="Brak zatwierdzonych producentów"
+                  message="Widoczni są tylko producenci z verification_status = approved (po akceptacji w panelu admina WWW)."
                 />
               ) : (
                 items.map((item) => (
-                  <ProducerCard key={item.id} item={item} isPremium={!!theme.isPremium} />
+                  <ProducerCard
+                    key={item.id}
+                    item={item}
+                    isPremium={!!theme.isPremium}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/(tabs)/dostawcy/producent/[id]',
+                        params: { id: item.id },
+                      })
+                    }
+                  />
                 ))
               )}
             </ScrollView>
@@ -129,23 +178,29 @@ export function LocalProducersScreen() {
   );
 }
 
-const DS_NEON = '#00FF88';
+export default LocalProducersScreen;
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
   body: { flex: 1 },
-  badgeRow: {
+  searchWrap: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
   },
+  searchInput: { flex: 1, fontSize: 14, padding: 0 },
   badgeText: {
-    flex: 1,
     fontSize: 11,
     lineHeight: 15,
     fontWeight: '500',
+    paddingHorizontal: 16,
+    paddingBottom: 8,
   },
   center: {
     flex: 1,
@@ -162,29 +217,18 @@ const styles = StyleSheet.create({
   error: {
     textAlign: 'center',
     paddingHorizontal: 8,
-    paddingTop: 4,
     paddingBottom: 8,
     fontSize: 13,
   },
   card: {
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 14,
-    padding: 14,
-    gap: 4,
+    padding: 12,
   },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  cardMeta: {
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  cardDesc: {
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 2,
-  },
+  cardTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  logo: { width: 48, height: 48, borderRadius: 10, backgroundColor: '#1a1a1a' },
+  logoFallback: { alignItems: 'center', justifyContent: 'center' },
+  cardBody: { flex: 1, gap: 2 },
+  cardTitle: { fontSize: 15, fontWeight: '700' },
+  cardMeta: { fontSize: 12, fontWeight: '500' },
 });
-
-export default LocalProducersScreen;

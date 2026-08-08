@@ -25,7 +25,10 @@ export function DostawcySubTabs() {
   const theme = useAppTheme();
   const isPremium = theme.isPremium;
 
-  const activeKey = pathname.includes('lokalni-przetworcy') ? 'lokalni' : 'index';
+  const activeKey =
+    pathname.includes('lokalni-przetworcy') || pathname.includes('/producent/')
+      ? 'lokalni'
+      : 'index';
 
   return (
     <View

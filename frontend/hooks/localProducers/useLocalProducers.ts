@@ -1,12 +1,15 @@
 /**
- * Hook listy „Lokalni Przetwórcy” + Realtime (produkty / producenci / opinie).
+ * Hook listy marketplace + GPS sort + Realtime.
  */
 import { useCallback, useEffect, useState } from 'react';
 import * as localProducersService from '@/services/localProducers';
-import type { LocalProducer, LocalProducerListFilters } from '@/types/localProducers';
+import type { LocalProducerListFilters, LocalProducerWithDistance } from '@/types/localProducers';
+import { useRestaurantLocation } from './useRestaurantLocation';
 
-export function useLocalProducers(filters?: LocalProducerListFilters) {
-  const [items, setItems] = useState<LocalProducer[]>([]);
+export function useLocalProducers(filters?: Omit<LocalProducerListFilters, 'restaurantLat' | 'restaurantLng'>) {
+  const { coords, loading: locLoading, permissionDenied, refresh: refreshLocation } =
+    useRestaurantLocation();
+  const [items, setItems] = useState<LocalProducerWithDistance[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -14,6 +17,7 @@ export function useLocalProducers(filters?: LocalProducerListFilters) {
   const query = filters?.query;
   const voivodeship = filters?.voivodeship;
   const city = filters?.city;
+  const maxDistanceKm = filters?.maxDistanceKm;
 
   const load = useCallback(
     async (opts?: { soft?: boolean }) => {
@@ -25,6 +29,9 @@ export function useLocalProducers(filters?: LocalProducerListFilters) {
           query,
           voivodeship,
           city,
+          maxDistanceKm,
+          restaurantLat: coords?.latitude ?? null,
+          restaurantLng: coords?.longitude ?? null,
         });
         setItems(rows);
       } catch (e) {
@@ -34,7 +41,7 @@ export function useLocalProducers(filters?: LocalProducerListFilters) {
         setRefreshing(false);
       }
     },
-    [query, voivodeship, city],
+    [query, voivodeship, city, maxDistanceKm, coords?.latitude, coords?.longitude],
   );
 
   useEffect(() => {
@@ -49,11 +56,14 @@ export function useLocalProducers(filters?: LocalProducerListFilters) {
 
   return {
     items,
-    loading,
+    loading: loading || locLoading,
     error,
     refreshing,
     refresh: () => load({ soft: true }),
     reload: () => load(),
     backendReady: localProducersService.isLocalProducersBackendReady(),
+    coords,
+    permissionDenied,
+    refreshLocation,
   };
 }

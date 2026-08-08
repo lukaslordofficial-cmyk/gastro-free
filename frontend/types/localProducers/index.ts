@@ -1,7 +1,14 @@
 /**
- * Typy modułu „Lokalni Przetwórcy” — zgodne z migracją
- * `supabase_migrations/ADD_LOCAL_PRODUCERS_MARKETPLACE.sql`.
+ * Typy marketplace B2B „Lokalni Przetwórcy”
+ * (schemat WWW: ETAP 2 → billing → admin).
  */
+
+export type ProducerVerificationStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'blocked'
+  | 'archived';
 
 export type ProducerPaymentStatus =
   | 'pending'
@@ -17,6 +24,17 @@ export type ProducerShipmentStatus =
   | 'shipped'
   | 'delivered'
   | 'cancelled';
+
+export type ProducerOrderStatus =
+  | 'pending_payment'
+  | 'paid'
+  | 'processing'
+  | 'shipped'
+  | 'delivered'
+  | 'cancelled';
+
+/** Dni wysyłki — jsonb z profilu WWW (np. ["pon","wt","sr"]). */
+export type ProducerShippingDays = string[] | Record<string, boolean> | null;
 
 export type LocalProducer = {
   id: string;
@@ -35,13 +53,25 @@ export type LocalProducer = {
   longitude: number | null;
   logo_url: string | null;
   banner_url: string | null;
+  farm_photo_url?: string | null;
   verified: boolean;
+  verification_status: ProducerVerificationStatus | string | null;
   active: boolean;
+  archived_at: string | null;
+  verified_at?: string | null;
   min_order_value: number;
   pickup_available: boolean;
   courier_available: boolean;
+  shipping_days?: ProducerShippingDays;
+  next_ship_note?: string | null;
+  free_delivery_from?: number | null;
   created_at: string;
   updated_at: string;
+};
+
+/** Producent na liście z wyliczonym dystansem (km). */
+export type LocalProducerWithDistance = LocalProducer & {
+  distanceKm: number | null;
 };
 
 export type ProducerCategory = {
@@ -83,12 +113,15 @@ export type ProducerOrder = {
   restaurant_account_key: string;
   total_price: number;
   shipping_cost: number;
+  delivery_cost?: number;
   platform_fee: number;
-  payment_status: ProducerPaymentStatus;
-  shipment_status: ProducerShipmentStatus;
+  producer_amount?: number;
+  payment_status: ProducerPaymentStatus | string;
+  shipment_status: ProducerShipmentStatus | string;
+  order_status?: ProducerOrderStatus | string | null;
   notes: string | null;
   created_at: string;
-  updated_at: string;
+  updated_at?: string;
 };
 
 export type ProducerOrderItem = {
@@ -98,6 +131,19 @@ export type ProducerOrderItem = {
   quantity: number;
   unit_price: number;
   created_at: string;
+};
+
+export type ProducerCartLine = {
+  product: ProducerProduct;
+  quantity: number;
+};
+
+export type CreateProducerOrderInput = {
+  producerId: string;
+  items: { productId: string; quantity: number; unitPrice: number }[];
+  /** true = zamówienie z dostawą kurierską (InPost później) */
+  withCourier: boolean;
+  notes?: string | null;
 };
 
 export type ProducerReview = {
@@ -112,32 +158,14 @@ export type ProducerReview = {
   created_at: string;
 };
 
-export type ProducerDocument = {
-  id: string;
-  producer_id: string;
-  document_type: string;
-  file_url: string;
-  verified: boolean;
-  uploaded_at: string;
-};
-
-export type ProducerNotification = {
-  id: string;
-  producer_id: string;
-  title: string;
-  message: string;
-  read: boolean;
-  created_at: string;
-};
-
-/** @deprecated alias — używaj LocalProducer */
-export type LocalProducerStatus = 'draft' | 'active' | 'archived';
-
 export type LocalProducerListFilters = {
   query?: string;
   voivodeship?: string;
   city?: string;
-  categorySlug?: string;
+  /** Sortuj po dystansie gdy dostępna lokalizacja restauracji */
+  restaurantLat?: number | null;
+  restaurantLng?: number | null;
+  maxDistanceKm?: number | null;
 };
 
 export type LocalProducerProduct = ProducerProduct;
@@ -165,6 +193,7 @@ export type UpdateLocalProducerInput = Partial<CreateLocalProducerInput> & {
   banner_url?: string | null;
   verified?: boolean;
   active?: boolean;
+  verification_status?: ProducerVerificationStatus;
 };
 
 export const LOCAL_PRODUCERS_MODULE = {
@@ -182,3 +211,8 @@ export const LOCAL_PRODUCERS_STORAGE_BUCKETS = {
   products: 'producer-products',
   documents: 'producer-documents',
 } as const;
+
+/** Stub opłaty platformy (5%) — Edge/Stripe w kolejnym etapie. */
+export const PLATFORM_FEE_RATE = 0.05;
+/** Stub kosztu kuriera PLN — InPost ShipX później. */
+export const COURIER_DELIVERY_STUB_PLN = 15;

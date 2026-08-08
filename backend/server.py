@@ -8177,6 +8177,132 @@ class InterpretOrderRequest(BaseModel):
 
 # --- Algorytm porównywania ---------------------------------------------------
 
+async def _fetch_local_producers_as_catalog(
+    client: httpx.AsyncClient,
+) -> tuple[list[dict], list[dict]]:
+    """Marketplace „Lokalni Przetwórcy” → wiersze kompatybilne z supplier_catalog + meta.
+
+    Fail-soft: brak tabel / migracji → puste listy (Łowca działa jak wcześniej).
+    """
+    try:
+        producers = await sb_get(client, "local_producers", params={
+            "select": (
+                "id,company_name,email,phone,min_order_value,city,voivodeship,"
+                "pickup_available,courier_available,verified,active"
+            ),
+            "active": "eq.true",
+            "verified": "eq.true",
+            "limit": "500",
+        }) or []
+    except Exception as e:
+        logger.info("local_producers unavailable for Deal Hunter: %s", e)
+        return [], []
+
+    producers = [p for p in producers if p.get("id")]
+    if not producers:
+        return [], []
+
+    producer_ids = [str(p["id"]) for p in producers]
+    products: list[dict] = []
+    for i in range(0, len(producer_ids), 40):
+        chunk = producer_ids[i : i + 40]
+        id_filter = f"in.({','.join(chunk)})"
+        try:
+            rows = await sb_get(client, "producer_products", params={
+                "select": "id,producer_id,title,price,unit,stock,weight_g,available",
+                "producer_id": id_filter,
+                "available": "eq.true",
+                "limit": "2000",
+            }) or []
+        except Exception as e:
+            logger.info("producer_products unavailable for Deal Hunter: %s", e)
+            return [], []
+        products.extend(rows)
+
+    suppliers: list[dict] = []
+    for p in producers:
+        # Lokalni: odbiór osobisty ≈ natychmiast; kurier ≈ 1 dzień
+        if p.get("pickup_available"):
+            lead = 0.0
+        elif p.get("courier_available"):
+            lead = 1.0
+        else:
+            lead = 1.0
+        name = (p.get("company_name") or "").strip() or "Lokalny przetwórca"
+        city = (p.get("city") or "").strip()
+        if city and city.lower() not in name.lower():
+            display = f"{name} (lokalny · {city})"
+        else:
+            display = f"{name} (lokalny)"
+        suppliers.append({
+            "id": str(p["id"]),
+            "name": display,
+            "email": p.get("email"),
+            "contact_person": p.get("phone"),
+            "phone": p.get("phone"),
+            "min_order_value": float(p.get("min_order_value") or 0),
+            "shipping_cost": 0.0,
+            "free_shipping_threshold": 0.0,
+            "lead_time_days": lead,
+            "is_local_producer": True,
+            "city": city or None,
+            "voivodeship": (p.get("voivodeship") or None),
+        })
+
+    by_producer = {str(p["id"]) for p in producers}
+    catalog: list[dict] = []
+    for row in products:
+        pid = str(row.get("producer_id") or "")
+        if pid not in by_producer:
+            continue
+        try:
+            stock = float(row.get("stock") or 0)
+        except (TypeError, ValueError):
+            stock = 0.0
+        if stock <= 0:
+            continue
+        try:
+            price = float(row.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            continue
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+        kg_total = None
+        try:
+            wg = float(row.get("weight_g") or 0)
+            if wg > 0:
+                kg_total = round(wg / 1000.0, 6)
+        except (TypeError, ValueError):
+            kg_total = None
+        unit = (row.get("unit") or "szt").strip() or "szt"
+        entry = {
+            "id": str(row.get("id")),
+            "supplier_id": pid,
+            "name": title,
+            "variant": None,
+            "unit": unit,
+            "price_pln": price,
+            "liters_total": None,
+            "unit_count": 1,
+            "is_visible": True,
+            "is_local_producer": True,
+            "producer_product_id": str(row.get("id")),
+        }
+        if kg_total:
+            entry["kg_total"] = kg_total
+        catalog.append(entry)
+
+    logger.info(
+        "Deal Hunter: loaded %s local producers, %s products",
+        len(suppliers),
+        len(catalog),
+    )
+    return catalog, suppliers
+
+
 async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
     """Katalog + dostawcy TYLKO bieżącego tenanta.
 
@@ -9128,6 +9254,15 @@ async def compare_offers(req: CompareOffersRequest):
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
         await _check_ai_access(client, needs_credits=True, needs_deal_hunter=True)
         catalog, suppliers = await _fetch_catalog_and_suppliers(client)
+        lp_catalog, lp_suppliers = await _fetch_local_producers_as_catalog(client)
+        # Lokalni przetwórcy — osobne UUID; dołączamy do puli ofert Łowcy
+        existing_sids = {str(s.get("id")) for s in suppliers if s.get("id")}
+        for s in lp_suppliers:
+            sid = str(s.get("id") or "")
+            if sid and sid not in existing_sids:
+                suppliers.append(s)
+                existing_sids.add(sid)
+        catalog.extend(lp_catalog)
         sup_by_id = {s["id"]: s for s in suppliers}
 
         # Magazyn (nazwa + synonimy + gramatura 1 szt.) — natychmiastowe dopasowanie bez AI.
@@ -9192,7 +9327,11 @@ async def compare_offers(req: CompareOffersRequest):
                     better = True
             if better:
                 sup = sup_by_id.get(sid, {})
-                bbs[sid] = {
+                is_lp = bool(
+                    row.get("is_local_producer")
+                    or sup.get("is_local_producer")
+                )
+                entry = {
                     "supplier_id": sid,
                     "supplier_name": (sup.get("name") or "").strip() or "Dostawca",
                     "supplier_email": sup.get("email"),
@@ -9207,6 +9346,13 @@ async def compare_offers(req: CompareOffersRequest):
                     "pack_base_qty": round(float(pack_base_qty or 0), 4),
                     "band_hi_base": round(float(band_hi_base or 0), 4),
                 }
+                if is_lp:
+                    entry["is_local_producer"] = True
+                    if row.get("producer_product_id") or row.get("id"):
+                        entry["catalog_product_id"] = str(
+                            row.get("producer_product_id") or row.get("id")
+                        )
+                bbs[sid] = entry
 
         for it in req.items:
             req_dim, req_factor = _norm_unit(it.unit)
@@ -9554,6 +9700,9 @@ async def compare_offers(req: CompareOffersRequest):
                    if s.get("lead_time_days") is not None else {}),
                 **({"reliability_score": float(reliability_by_sid[sid])}
                    if sid in reliability_by_sid else {}),
+                **({"is_local_producer": True} if s.get("is_local_producer") else {}),
+                **({"city": s["city"]} if s.get("city") else {}),
+                **({"voivodeship": s["voivodeship"]} if s.get("voivodeship") else {}),
             }
             for sid, s in sup_by_id.items()
         }
@@ -9579,6 +9728,21 @@ async def compare_offers(req: CompareOffersRequest):
         )
         result = apply_cart_objective(result, req.cart_objective, suppliers_meta)
         result = _sanitize_optimize_unique_products(result)
+        # Flaga: czy w ofercie / koszykach są lokalni przetwórcy
+        lp_in_quotes = any(
+            bool((q or {}).get("is_local_producer"))
+            for pi in per_item
+            for q in ((pi.get("best_by_supplier") or {}).values())
+        )
+        result["includes_local_producers"] = bool(lp_in_quotes or lp_suppliers)
+        if lp_in_quotes:
+            speech = (result.get("assistant_speech") or "").strip()
+            note = (
+                "W porównaniu uwzględniam też Lokalnych Przetwórców "
+                "(aktywnych i zweryfikowanych)."
+            )
+            if note not in speech:
+                result["assistant_speech"] = f"{speech} {note}".strip() if speech else note
         if pack_notes:
             result["pack_adjustment_notes"] = pack_notes
             # Dołącz do speech, żeby FE / Jarvis widziały od razu

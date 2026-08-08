@@ -28,7 +28,7 @@ def _meets_minimum(subtotal: float, min_val: float) -> bool:
 
 
 def _item_line_entry(pi: dict, b: dict) -> dict:
-    return {
+    out = {
         "product_name": pi["product_name"],
         "quantity": pi["quantity"],
         "unit": pi["unit"],
@@ -37,6 +37,11 @@ def _item_line_entry(pi: dict, b: dict) -> dict:
         "matched_name": b["matched_name"],
         "line_total": b["line_total"],
     }
+    if b.get("is_local_producer"):
+        out["is_local_producer"] = True
+    if b.get("catalog_product_id"):
+        out["catalog_product_id"] = b["catalog_product_id"]
+    return out
 
 
 def compute_monolith(
@@ -62,6 +67,7 @@ def compute_monolith(
             "covered_count": len(covered),
             "subtotal_pln": total,
             "min_order_value": _min_order_value(suppliers_meta, sid),
+            **({"is_local_producer": True} if meta.get("is_local_producer") else {}),
         }
         if best_single is None:
             best_single = cand
@@ -137,6 +143,11 @@ def compute_split(
                 "items": [],
                 "subtotal_pln": 0.0,
                 "min_order_value": _min_order_value(suppliers_meta, sid),
+                **(
+                    {"is_local_producer": True}
+                    if (b.get("is_local_producer") or _supplier_meta(suppliers_meta, sid).get("is_local_producer"))
+                    else {}
+                ),
             },
         )
         g["items"].append(_item_line_entry(pi, b))

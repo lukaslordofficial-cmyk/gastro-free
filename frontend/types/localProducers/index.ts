@@ -25,13 +25,21 @@ export type ProducerShipmentStatus =
   | 'delivered'
   | 'cancelled';
 
+/** Wartości zgodne z CHECK producer_orders_order_status (WWW + apka). */
 export type ProducerOrderStatus =
+  | 'pending'
   | 'pending_payment'
+  | 'awaiting_payment'
+  | 'new'
+  | 'confirmed'
   | 'paid'
   | 'processing'
+  | 'preparing'
   | 'shipped'
   | 'delivered'
-  | 'cancelled';
+  | 'cancelled'
+  | 'canceled'
+  | 'refunded';
 
 /** Dni wysyłki — jsonb z profilu WWW (np. ["pon","wt","sr"]). */
 export type ProducerShippingDays = string[] | Record<string, boolean> | null;

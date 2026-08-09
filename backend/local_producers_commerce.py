@@ -139,25 +139,29 @@ async def mark_producer_order_paid(
     patch: dict[str, Any] = {
         "payment_status": "paid",
         "order_status": "paid",
-        "shipment_status": order.get("shipment_status") or "confirmed",
+        "shipment_status": "confirmed",
         "settlement_status": "pending",
     }
     if payment_intent_id:
         patch["payment_intent"] = payment_intent_id
-    # checkout session id — jeśli kolumna nie istnieje, patch może failnąć; retry bez
+    # Kolumny / CHECK mogą różnić się między migracjami WWW — degraduj payload
     try:
         await sb_patch(client, "producer_orders", {"id": f"eq.{order_id}"}, patch)
     except Exception as e:
         msg = str(e).lower()
-        if "column" in msg or "schema" in msg:
-            minimal = {
-                "payment_status": "paid",
-                "shipment_status": "confirmed",
-            }
-            await sb_patch(client, "producer_orders", {"id": f"eq.{order_id}"}, minimal)
+        if "column" in msg or "schema" in msg or "check" in msg or "order_status" in msg:
+            for candidate in (
+                {"payment_status": "paid", "order_status": "confirmed", "shipment_status": "confirmed"},
+                {"payment_status": "paid", "shipment_status": "confirmed"},
+                {"payment_status": "paid"},
+            ):
+                try:
+                    await sb_patch(client, "producer_orders", {"id": f"eq.{order_id}"}, candidate)
+                    break
+                except Exception:
+                    continue
         else:
             raise
-
     refreshed = await sb_get(
         client,
         "producer_orders",

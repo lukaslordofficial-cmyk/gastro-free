@@ -53,6 +53,19 @@ Produkty: `available = true` (oraz producent spełnia HARD RULE).
 2. Admin WWW: **Akceptuj** → `verification_status=approved`, `verified=true`, `active=true`.
 3. Apka: lista → klik → produkty / km / **Złóż zamówienie** / **Zamów kuriera**.
 
+## FIX order_status (wymagane przy błędzie CHECK)
+
+Jeśli insert pada na `producer_orders_order_status`, uruchom w SQL Editor:
+[`FIX_PRODUCER_ORDERS_ORDER_STATUS.sql`](../supabase_migrations/FIX_PRODUCER_ORDERS_ORDER_STATUS.sql)
+
+Apka wstawia `order_status = 'pending'`.
+
+## Stripe — ten sam klucz co subskrypcje?
+
+**Tak.** Użyj tego samego `STRIPE_SECRET_KEY` (i tego samego konta Stripe) co do kredytów/planów.
+Webhook `/api/billing/webhook` obsługuje też `kind=local_producer_order`.
+Opcjonalnie osobno: `INPOST_*` dla kuriera.
+
 ## Płatność + kurier (bez nowych paczek Expo)
 
 | Endpoint | Rola |

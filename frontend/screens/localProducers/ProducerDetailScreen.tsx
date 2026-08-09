@@ -10,7 +10,6 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Image,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -23,6 +22,7 @@ import {
 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useProducerDetail } from '@/hooks/localProducers/useProducerDetail';
 import { formatPlnNumber } from '@/lib/format';
 import { formatDistanceKm, estimateEtaMinutes } from '@/lib/localProducers/haversine';
@@ -43,6 +43,7 @@ const NEON = '#00FF88';
 
 export function ProducerDetailScreen() {
   const theme = useAppTheme();
+  const { alert: premiumAlert } = usePremiumAlert();
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const producerId = typeof id === 'string' ? id : Array.isArray(id) ? id[0] : undefined;
@@ -75,11 +76,15 @@ export function ProducerDetailScreen() {
 
   const confirmOrder = (withCourier: boolean) => {
     if (!cart.length) {
-      Alert.alert('Koszyk pusty', 'Dodaj produkty, zanim złożysz zamówienie.');
+      premiumAlert('Koszyk pusty', 'Dodaj produkty, zanim złożysz zamówienie.', [
+        { text: 'OK', style: 'primary' },
+      ]);
       return;
     }
     if (withCourier && producer && !producer.courier_available) {
-      Alert.alert('Brak kuriera', 'Ten producent nie oferuje dostawy kurierskiej.');
+      premiumAlert('Brak kuriera', 'Ten producent nie oferuje dostawy kurierskiej.', [
+        { text: 'OK', style: 'primary' },
+      ]);
       return;
     }
     const fee = Math.round(cartTotal * PLATFORM_FEE_RATE * 100) / 100;
@@ -91,7 +96,7 @@ export function ProducerDetailScreen() {
       delivery = freeFrom != null && cartTotal >= freeFrom ? 0 : COURIER_DELIVERY_STUB_PLN;
     }
     const total = cartTotal + fee + delivery;
-    Alert.alert(
+    premiumAlert(
       withCourier ? 'Zamów kuriera' : 'Złóż zamówienie',
       [
         `Produkty: ${formatPlnNumber(cartTotal)} zł`,
@@ -110,6 +115,7 @@ export function ProducerDetailScreen() {
         { text: 'Anuluj', style: 'cancel' },
         {
           text: 'Zapłać',
+          style: 'primary',
           onPress: () => {
             void (async () => {
               setBusy(true);
@@ -117,25 +123,27 @@ export function ProducerDetailScreen() {
                 const order = await placeOrder(withCourier);
                 const pay = await openProducerOrderCheckout(order.id);
                 if (!pay.ok) {
-                  Alert.alert(
-                    'Zamówienie zapisane, płatność nieotwarta',
-                    `${pay.message}\n\nID: ${order.id.slice(0, 8)}…\nMożesz spróbować ponownie później.`,
+                  premiumAlert(
+                    'Zamówienie zapisane',
+                    `${pay.message}\n\nID: ${order.id.slice(0, 8)}…\nSprawdź STRIPE_SECRET_KEY na Railway albo spróbuj ponownie.`,
+                    [{ text: 'OK', style: 'primary' }],
                   );
                   return;
                 }
-                Alert.alert(
+                premiumAlert(
                   'Stripe Checkout',
-                  'Opłać zamówienie BLIK-iem lub kartą. Po powrocie do apki kliknij „Potwierdź płatność”.',
+                  'Opłać zamówienie BLIK-iem lub kartą. Po powrocie do apki potwierdź płatność.',
                   [
                     {
                       text: 'Potwierdź płatność',
+                      style: 'primary',
                       onPress: () => {
                         void (async () => {
                           const conf = await confirmProducerOrderPayment(pay.session_id);
-                          Alert.alert(
-                            conf.paid ? 'Opłacono' : 'Status',
+                          premiumAlert(
+                            conf.paid ? 'Opłacono' : 'Status płatności',
                             conf.message,
-                            [{ text: 'OK', onPress: () => router.back() }],
+                            [{ text: 'OK', style: 'primary', onPress: () => router.back() }],
                           );
                         })();
                       },
@@ -144,9 +152,10 @@ export function ProducerDetailScreen() {
                   ],
                 );
               } catch (e) {
-                Alert.alert(
-                  'Błąd',
+                premiumAlert(
+                  'Błąd zamówienia',
                   e instanceof Error ? e.message : 'Nie udało się złożyć zamówienia',
+                  [{ text: 'OK', style: 'primary' }],
                 );
               } finally {
                 setBusy(false);

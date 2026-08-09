@@ -263,6 +263,7 @@ export async function createProducerOrder(
   }
   const totalPrice = Math.round((producerAmount + deliveryCost + platformFee) * 100) / 100;
 
+  // order_status: 'pending' — zgodne z typowym CHECK WWW (nie 'pending_payment')
   const orderPayload: Record<string, unknown> = {
     producer_id: input.producerId,
     restaurant_id: uid,
@@ -273,8 +274,8 @@ export async function createProducerOrder(
     platform_fee: platformFee,
     producer_amount: producerAmount,
     payment_status: 'pending',
-    shipment_status: input.withCourier ? 'draft' : 'draft',
-    order_status: 'pending_payment',
+    shipment_status: 'draft',
+    order_status: 'pending',
     notes: input.notes ?? (input.withCourier ? 'Dostawa kurierska' : 'Odbiór / do uzgodnienia'),
   };
 
@@ -284,24 +285,38 @@ export async function createProducerOrder(
     .select('*')
     .maybeSingle();
 
-  // Retry bez kolumn z nowszych migracji WWW
-  if (orderErr && /column|schema cache/i.test(orderErr.message)) {
-    const minimal = {
-      producer_id: input.producerId,
-      restaurant_id: uid,
-      restaurant_account_key: accountKey,
-      total_price: totalPrice,
-      shipping_cost: deliveryCost,
-      platform_fee: platformFee,
-      payment_status: 'pending',
-      shipment_status: 'draft',
-      notes: orderPayload.notes,
-    };
-    const retry = await supabase
+  // Retry: brak kolumn WWW / zbyt wąski CHECK order_status
+  if (
+    orderErr
+    && (/column|schema cache|order_status|check constraint/i.test(orderErr.message))
+  ) {
+    const withoutStatus = { ...orderPayload };
+    delete withoutStatus.order_status;
+    delete withoutStatus.delivery_cost;
+    delete withoutStatus.producer_amount;
+    let retry = await supabase
       .from(LOCAL_PRODUCERS_TABLES.orders)
-      .insert(minimal)
+      .insert(withoutStatus)
       .select('*')
       .maybeSingle();
+    if (retry.error && /column|schema cache|check constraint/i.test(retry.error.message)) {
+      const minimal = {
+        producer_id: input.producerId,
+        restaurant_id: uid,
+        restaurant_account_key: accountKey,
+        total_price: totalPrice,
+        shipping_cost: deliveryCost,
+        platform_fee: platformFee,
+        payment_status: 'pending',
+        shipment_status: 'draft',
+        notes: orderPayload.notes,
+      };
+      retry = await supabase
+        .from(LOCAL_PRODUCERS_TABLES.orders)
+        .insert(minimal)
+        .select('*')
+        .maybeSingle();
+    }
     order = retry.data;
     orderErr = retry.error;
   }

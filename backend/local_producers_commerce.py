@@ -1,20 +1,26 @@
 """
 Marketplace Lokalni Przetwórcy — Stripe Checkout (BLIK + karta) + InPost ShipX.
-Bez nowych zależności: httpx + istniejący billing_stripe.
+
+Jedna ścieżka: Zamów i zapłać = produkty + kurier + opłata serwisu 5%.
+Po płatności:
+  - dystrybutor: producer_amount (Connect destination charge lub Transfer),
+  - platforma: 5% (application_fee / saldo platformy),
+  - InPost: opłata kuriera zatrzymana na platformie + utworzenie przesyłki ShipX
+    (pickup u producenta → dostawa do restauracji).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from typing import Any, Optional
 
 import httpx
 
 from billing_stripe import (
-    _secret,
     _ssl_verify,
     _stripe_post,
-    retrieve_checkout_session,
     stripe_configured,
 )
 
@@ -22,6 +28,7 @@ logger = logging.getLogger("local_producers.commerce")
 
 INPOST_SANDBOX = "https://sandbox-api-shipx-pl.easypack24.net"
 INPOST_PROD = "https://api-shipx-pl.easypack24.net"
+LP_SHIP_PREFIX = "lp_ship:"
 
 
 def inpost_configured() -> bool:
@@ -40,6 +47,47 @@ def _inpost_base() -> str:
     return INPOST_PROD
 
 
+def _pln_to_grosze(value: Any) -> int:
+    try:
+        return int(round(float(value or 0) * 100))
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_lp_ship_from_notes(notes: Optional[str]) -> Optional[dict[str, Any]]:
+    """Wyciąga adres dostawy zapisany w notes jako lp_ship:{json}."""
+    if not notes:
+        return None
+    idx = notes.find(LP_SHIP_PREFIX)
+    if idx < 0:
+        return None
+    raw = notes[idx + len(LP_SHIP_PREFIX) :].strip()
+    # JSON kończy się przed ' | ' albo na końcu
+    if " |" in raw:
+        raw = raw.split(" |", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def encode_lp_ship_note(delivery: dict[str, Any], extra: str = "") -> str:
+    payload = json.dumps(delivery, ensure_ascii=False, separators=(",", ":"))
+    base = f"{LP_SHIP_PREFIX}{payload}"
+    extra = (extra or "").strip()
+    return f"{extra} | {base}".strip(" |") if extra else base
+
+
+def _split_street(address: Optional[str]) -> tuple[str, str]:
+    """Prosta próba wydzielenia numeru budynku z linii adresu."""
+    text = (address or "").strip() or "ul. Producenta"
+    m = re.search(r"^(.*?)[\s,]+(\d+[A-Za-z]?(?:/\d+[A-Za-z]?)?)\s*$", text)
+    if m:
+        return m.group(1).strip()[:60] or "ul. Producenta", m.group(2)[:10]
+    return text[:60], "1"
+
+
 async def create_producer_order_checkout(
     *,
     order: dict[str, Any],
@@ -50,7 +98,11 @@ async def create_producer_order_checkout(
     cancel_url: str,
     idempotency_key: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Stripe Checkout Session — payment mode, card + BLIK, kwota z zamówienia."""
+    """
+    Stripe Checkout — 3 pozycje: produkty, kurier InPost, opłata serwisu 5%.
+    Przy Connect: destination charge → producent dostaje produkty,
+    platforma application_fee = 5% + kurier (kurier na InPost przez ShipX).
+    """
     if not stripe_configured():
         raise RuntimeError("Brak STRIPE_SECRET_KEY")
 
@@ -58,26 +110,106 @@ async def create_producer_order_checkout(
     if total <= 0:
         raise ValueError("Kwota zamówienia musi być > 0")
 
-    amount_grosze = int(round(total * 100))
     order_id = str(order["id"])
     producer_id = str(order.get("producer_id") or producer.get("id") or "")
     company = (producer.get("company_name") or "Lokalny producent").strip()[:120]
-    with_courier = "1" if float(order.get("delivery_cost") or order.get("shipping_cost") or 0) > 0 else "0"
-    # Heurystyka: notes zawierają „kuriersk” albo delivery > 0
-    notes = (order.get("notes") or "").lower()
-    if "kurier" in notes:
-        with_courier = "1"
+
+    producer_amount = float(order.get("producer_amount") or 0)
+    platform_fee = float(order.get("platform_fee") or 0)
+    delivery_cost = float(order.get("delivery_cost") or order.get("shipping_cost") or 0)
+
+    # Fallback gdy brak kolumn WWW
+    if producer_amount <= 0:
+        producer_amount = max(total - platform_fee - delivery_cost, 0)
+    if platform_fee <= 0 and producer_amount > 0:
+        platform_fee = round(producer_amount * 0.05, 2)
+
+    prod_g = _pln_to_grosze(producer_amount)
+    fee_g = _pln_to_grosze(platform_fee)
+    del_g = _pln_to_grosze(delivery_cost)
+    # Upewnij się, że suma line_items = total (korekta groszy na produktach)
+    total_g = _pln_to_grosze(total)
+    parts_sum = prod_g + fee_g + del_g
+    if parts_sum != total_g and prod_g > 0:
+        prod_g = max(total_g - fee_g - del_g, 0)
+
+    if prod_g + fee_g + del_g <= 0:
+        raise ValueError("Kwota zamówienia musi być > 0")
+
+    line_items: list[dict[str, Any]] = []
+    if prod_g > 0:
+        line_items.append({
+            "quantity": 1,
+            "price_data": {
+                "currency": "pln",
+                "unit_amount": prod_g,
+                "product_data": {
+                    "name": f"Produkty — {company}",
+                    "description": f"Lokalni Przetwórcy · zamówienie {order_id[:8]}",
+                },
+            },
+        })
+    if del_g > 0:
+        line_items.append({
+            "quantity": 1,
+            "price_data": {
+                "currency": "pln",
+                "unit_amount": del_g,
+                "product_data": {
+                    "name": "Kurier InPost",
+                    "description": "Dostawa od producenta do restauracji",
+                },
+            },
+        })
+    if fee_g > 0:
+        line_items.append({
+            "quantity": 1,
+            "price_data": {
+                "currency": "pln",
+                "unit_amount": fee_g,
+                "product_data": {
+                    "name": "Opłata serwisu platformy (5%)",
+                    "description": "Prowizja Gastro Manager",
+                },
+            },
+        })
+    # Edge: samo total bez rozbicia
+    if not line_items:
+        line_items.append({
+            "quantity": 1,
+            "price_data": {
+                "currency": "pln",
+                "unit_amount": total_g,
+                "product_data": {"name": f"Zamówienie od {company}"},
+            },
+        })
+
+    connect_acct = (producer.get("stripe_account_id") or "").strip()
+    payouts_ok = producer.get("payouts_enabled") is not False
+    use_destination = bool(connect_acct) and payouts_ok and prod_g > 0
+    # Platforma zatrzymuje 5% + kurier; producent dostaje resztę (produkty)
+    application_fee_g = fee_g + del_g
+    split_mode = "destination" if use_destination and application_fee_g >= 0 else "platform_hold"
 
     meta = {
         "kind": "local_producer_order",
         "order_id": order_id,
         "account_key": account_key,
         "producer_id": producer_id,
-        "with_courier": with_courier,
-        "producer_amount": str(order.get("producer_amount") or 0),
-        "platform_fee": str(order.get("platform_fee") or 0),
-        "delivery_cost": str(order.get("delivery_cost") or order.get("shipping_cost") or 0),
+        "with_courier": "1",
+        "producer_amount": str(producer_amount),
+        "platform_fee": str(platform_fee),
+        "delivery_cost": str(delivery_cost),
+        "split_mode": split_mode,
     }
+
+    payment_intent_data: dict[str, Any] = {"metadata": meta}
+    if use_destination:
+        # Destination charge: Connected Account dostaje produkty,
+        # application_fee (5% + kurier) zostaje na platformie → kurier → InPost ShipX.
+        payment_intent_data["transfer_data"] = {"destination": connect_acct}
+        if application_fee_g > 0:
+            payment_intent_data["application_fee_amount"] = application_fee_g
 
     payload: dict[str, Any] = {
         "mode": "payment",
@@ -85,33 +217,43 @@ async def create_producer_order_checkout(
         "cancel_url": cancel_url,
         "client_reference_id": account_key[:200],
         "payment_method_types": ["card", "blik"],
-        "line_items": [
-            {
-                "quantity": 1,
-                "price_data": {
-                    "currency": "pln",
-                    "unit_amount": amount_grosze,
-                    "product_data": {
-                        "name": f"Zamówienie od {company}",
-                        "description": f"Lokalni Przetwórcy · {order_id[:8]}",
-                    },
-                },
-            }
-        ],
+        "line_items": line_items,
         "metadata": meta,
-        "payment_intent_data": {"metadata": meta},
+        "payment_intent_data": payment_intent_data,
         "locale": "pl",
     }
     if customer_email:
         payload["customer_email"] = customer_email
 
-    session = await _stripe_post("/checkout/sessions", payload, idempotency_key=idempotency_key)
+    try:
+        session = await _stripe_post("/checkout/sessions", payload, idempotency_key=idempotency_key)
+    except Exception as e:
+        # Connect destination może nie być gotowy — spadnij na charge na platformie + Transfer po pay
+        if use_destination and "transfer_data" in str(payment_intent_data):
+            logger.warning("Destination checkout failed, fallback platform_hold: %s", e)
+            split_mode = "platform_hold"
+            meta["split_mode"] = split_mode
+            payload["metadata"] = meta
+            payload["payment_intent_data"] = {"metadata": meta}
+            session = await _stripe_post(
+                "/checkout/sessions",
+                payload,
+                idempotency_key=(f"{idempotency_key}_hold" if idempotency_key else None),
+            )
+        else:
+            raise
     return {
         "id": session["id"],
         "url": session["url"],
-        "amount_total": amount_grosze,
+        "amount_total": total_g,
         "metadata": meta,
         "order_id": order_id,
+        "split_mode": split_mode,
+        "line_breakdown": {
+            "products_grosze": prod_g,
+            "courier_grosze": del_g,
+            "platform_fee_grosze": fee_g,
+        },
     }
 
 
@@ -123,6 +265,7 @@ async def mark_producer_order_paid(
     order_id: str,
     payment_intent_id: Optional[str] = None,
     checkout_session_id: Optional[str] = None,
+    split_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Ustaw payment_status=paid po udanym Checkout / webhooku."""
     rows = await sb_get(
@@ -136,15 +279,16 @@ async def mark_producer_order_paid(
     if str(order.get("payment_status") or "").lower() == "paid":
         return {"ok": True, "already_paid": True, "order": order}
 
+    # destination = Connect już rozbił; transfer = zrobimy ręcznie poniżej
+    settlement = "transferred" if split_mode == "destination" else "pending"
     patch: dict[str, Any] = {
         "payment_status": "paid",
         "order_status": "paid",
         "shipment_status": "confirmed",
-        "settlement_status": "pending",
+        "settlement_status": settlement,
     }
     if payment_intent_id:
         patch["payment_intent"] = payment_intent_id
-    # Kolumny / CHECK mogą różnić się między migracjami WWW — degraduj payload
     try:
         await sb_patch(client, "producer_orders", {"id": f"eq.{order_id}"}, patch)
     except Exception as e:
@@ -169,17 +313,18 @@ async def mark_producer_order_paid(
     )
     order = (refreshed or [order])[0]
 
-    # Transfer Connect (opcjonalnie)
     transfer_id = None
-    try:
-        transfer_id = await _maybe_transfer_to_producer(
-            client=client,
-            sb_get=sb_get,
-            sb_patch=sb_patch,
-            order=order,
-        )
-    except Exception as e:
-        logger.warning("Connect transfer skipped: %s", e)
+    # Tylko gdy NIE było destination charge — unikamy podwójnej wypłaty
+    if split_mode != "destination":
+        try:
+            transfer_id = await _maybe_transfer_to_producer(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                order=order,
+            )
+        except Exception as e:
+            logger.warning("Connect transfer skipped: %s", e)
 
     return {
         "ok": True,
@@ -187,6 +332,7 @@ async def mark_producer_order_paid(
         "order": order,
         "stripe_transfer_id": transfer_id,
         "checkout_session_id": checkout_session_id,
+        "split_mode": split_mode,
     }
 
 
@@ -203,7 +349,11 @@ async def _maybe_transfer_to_producer(
     rows = await sb_get(
         client,
         "local_producers",
-        params={"select": "id,stripe_account_id,payouts_enabled,stripe_onboarding_complete", "id": f"eq.{producer_id}", "limit": "1"},
+        params={
+            "select": "id,stripe_account_id,payouts_enabled,stripe_onboarding_complete",
+            "id": f"eq.{producer_id}",
+            "limit": "1",
+        },
     )
     if not rows:
         return None
@@ -216,7 +366,6 @@ async def _maybe_transfer_to_producer(
 
     amount = float(order.get("producer_amount") or 0)
     if amount <= 0:
-        # fallback: total - fee - delivery
         amount = (
             float(order.get("total_price") or 0)
             - float(order.get("platform_fee") or 0)
@@ -265,10 +414,25 @@ async def create_inpost_shipment(
 ) -> dict[str, Any]:
     """
     Tworzy przesyłkę InPost ShipX (kurier).
-    receiver: name, email, phone, address{street, building_number, city, post_code}
+    sender = producent (pickup), receiver = restauracja (dostawa).
+    Opłata kuriera jest już w Stripe (zatrzymana na platformie) — ShipX rozlicza InPost w org.
     """
+    sender_street, sender_building = _split_street(producer.get("address"))
+    recv_addr = receiver.get("address") or {}
+    recv_street = (recv_addr.get("street") or "").strip() or "ul. Restauracyjna"
+    recv_building = (recv_addr.get("building_number") or "").strip() or "1"
+    recv_city = (recv_addr.get("city") or "").strip() or "Warszawa"
+    recv_post = (recv_addr.get("post_code") or "").strip() or "00-001"
+
+    comment = (
+        f"Gastro LP {str(order.get('id'))[:8]} | "
+        f"ODBIÓR: {producer.get('company_name') or 'Producent'}, "
+        f"{sender_street} {sender_building}, {producer.get('city') or ''} {producer.get('postal_code') or ''} | "
+        f"DOSTAWA: {receiver.get('name') or 'Restauracja'}, "
+        f"{recv_street} {recv_building}, {recv_city} {recv_post}"
+    )[:500]
+
     if not inpost_configured():
-        # Soft stub — zamówienie zostaje paid, status preparing
         try:
             await sb_patch(
                 client,
@@ -277,7 +441,11 @@ async def create_inpost_shipment(
                 {
                     "shipment_status": "preparing",
                     "order_status": "processing",
-                    "notes": ((order.get("notes") or "") + " | InPost: brak tokenu — etykieta później").strip(" |"),
+                    "notes": (
+                        (order.get("notes") or "")
+                        + " | InPost: brak tokenu — etykieta później | "
+                        + comment
+                    ).strip(" |")[:2000],
                 },
             )
         except Exception:
@@ -285,24 +453,28 @@ async def create_inpost_shipment(
         return {
             "ok": True,
             "stub": True,
-            "message": "INPOST_API_TOKEN / INPOST_ORGANIZATION_ID nie ustawione — przesyłka oznaczona jako preparing (stub).",
+            "message": (
+                "INPOST_API_TOKEN / INPOST_ORGANIZATION_ID nie ustawione — "
+                "przesyłka oznaczona jako preparing (stub). "
+                "Opłata kuriera jest na koncie platformy pod rozliczenie InPost."
+            ),
+            "pickup_hint": comment,
         }
 
     token = (os.getenv("INPOST_API_TOKEN") or "").strip()
     org_id = (os.getenv("INPOST_ORGANIZATION_ID") or "").strip()
     service = (os.getenv("INPOST_SERVICE") or "inpost_courier_standard").strip()
 
-    addr = receiver.get("address") or {}
     body = {
         "receiver": {
             "name": receiver.get("name") or "Restauracja",
-            "email": receiver.get("email") or "orders@example.com",
+            "email": receiver.get("email") or "orders@gastromanager.app",
             "phone": receiver.get("phone") or "500600700",
             "address": {
-                "street": addr.get("street") or producer.get("address") or "ul. Przykładowa",
-                "building_number": addr.get("building_number") or "1",
-                "city": addr.get("city") or producer.get("city") or "Warszawa",
-                "post_code": addr.get("post_code") or producer.get("postal_code") or "00-001",
+                "street": recv_street[:60],
+                "building_number": recv_building[:10],
+                "city": recv_city[:40],
+                "post_code": recv_post[:10],
                 "country_code": "PL",
             },
         },
@@ -311,10 +483,10 @@ async def create_inpost_shipment(
             "email": producer.get("email") or "producer@example.com",
             "phone": producer.get("phone") or "500600700",
             "address": {
-                "street": (producer.get("address") or "ul. Producenta")[:60],
-                "building_number": "1",
-                "city": producer.get("city") or "Warszawa",
-                "post_code": producer.get("postal_code") or "00-001",
+                "street": sender_street,
+                "building_number": sender_building,
+                "city": (producer.get("city") or "Warszawa")[:40],
+                "post_code": (producer.get("postal_code") or "00-001")[:10],
                 "country_code": "PL",
             },
         },
@@ -331,7 +503,7 @@ async def create_inpost_shipment(
         ],
         "service": service,
         "reference": str(order.get("id"))[:40],
-        "comments": f"Gastro LP {str(order.get('id'))[:8]}",
+        "comments": comment,
     }
 
     url = f"{_inpost_base()}/v1/organizations/{org_id}/shipments"
@@ -360,7 +532,6 @@ async def create_inpost_shipment(
         "shipment_status": "shipped" if tracking else "preparing",
         "order_status": "processing",
     }
-    # opcjonalne kolumny delivery_*
     if tracking:
         patch["delivery_tracking"] = str(tracking)
     try:
@@ -379,7 +550,64 @@ async def create_inpost_shipment(
         "shipment": data,
         "tracking_number": tracking,
         "label_hint": "Producent pobiera etykietę w panelu WWW / API InPost.",
+        "pickup_hint": comment,
+        "courier_settlement": (
+            "Opłata kuriera z Checkout jest na koncie platformy; "
+            "InPost rozlicza przesyłkę w organizacji ShipX."
+        ),
     }
+
+
+async def _resolve_receiver(
+    *,
+    client: httpx.AsyncClient,
+    sb_get,
+    order: dict[str, Any],
+    account_key: Optional[str],
+) -> dict[str, Any]:
+    ship = parse_lp_ship_from_notes(order.get("notes"))
+    receiver = {
+        "name": "Restauracja",
+        "email": "orders@gastromanager.app",
+        "phone": "500600700",
+        "address": {
+            "street": "ul. Restauracyjna",
+            "building_number": "1",
+            "city": "Warszawa",
+            "post_code": "00-001",
+        },
+    }
+    if ship:
+        receiver["name"] = ship.get("name") or receiver["name"]
+        if ship.get("email"):
+            receiver["email"] = ship["email"]
+        if ship.get("phone"):
+            receiver["phone"] = str(ship["phone"])
+        receiver["address"] = {
+            "street": ship.get("street") or receiver["address"]["street"],
+            "building_number": ship.get("building_number") or "1",
+            "city": ship.get("city") or receiver["address"]["city"],
+            "post_code": ship.get("post_code") or receiver["address"]["post_code"],
+        }
+    if account_key:
+        try:
+            profiles = await sb_get(
+                client,
+                "profiles",
+                params={
+                    "select": "restaurant_name,email",
+                    "account_key": f"eq.{account_key}",
+                    "limit": "1",
+                },
+            )
+            if profiles:
+                if not ship or not ship.get("name"):
+                    receiver["name"] = profiles[0].get("restaurant_name") or receiver["name"]
+                if profiles[0].get("email") and (not ship or not ship.get("email")):
+                    receiver["email"] = profiles[0]["email"]
+        except Exception:
+            pass
+    return receiver
 
 
 async def apply_paid_producer_checkout_session(
@@ -407,6 +635,8 @@ async def apply_paid_producer_checkout_session(
     if isinstance(pi, dict):
         pi = pi.get("id")
 
+    split_mode = meta.get("split_mode") or "platform_hold"
+
     paid = await mark_producer_order_paid(
         client=client,
         sb_get=sb_get,
@@ -414,10 +644,12 @@ async def apply_paid_producer_checkout_session(
         order_id=order_id,
         payment_intent_id=str(pi) if pi else None,
         checkout_session_id=session.get("id"),
+        split_mode=split_mode,
     )
 
     shipment = None
-    if meta.get("with_courier") == "1" and not paid.get("already_paid"):
+    # Jedna ścieżka: zawsze kurier po opłaceniu
+    if not paid.get("already_paid"):
         order = paid.get("order") or {}
         prod_rows = await sb_get(
             client,
@@ -425,36 +657,13 @@ async def apply_paid_producer_checkout_session(
             params={"select": "*", "id": f"eq.{order.get('producer_id')}", "limit": "1"},
         )
         producer = (prod_rows or [{}])[0]
-        # Odbiorca — minimalny z profilu restauracji (account_key)
         account_key = meta.get("account_key") or order.get("restaurant_account_key")
-        receiver = {
-            "name": "Restauracja",
-            "email": "orders@gastromanager.app",
-            "phone": "500600700",
-            "address": {
-                "street": "ul. Restauracyjna",
-                "building_number": "1",
-                "city": "Warszawa",
-                "post_code": "00-001",
-            },
-        }
-        if account_key:
-            try:
-                profiles = await sb_get(
-                    client,
-                    "profiles",
-                    params={
-                        "select": "restaurant_name,email",
-                        "account_key": f"eq.{account_key}",
-                        "limit": "1",
-                    },
-                )
-                if profiles:
-                    receiver["name"] = profiles[0].get("restaurant_name") or receiver["name"]
-                    if profiles[0].get("email"):
-                        receiver["email"] = profiles[0]["email"]
-            except Exception:
-                pass
+        receiver = await _resolve_receiver(
+            client=client,
+            sb_get=sb_get,
+            order=order,
+            account_key=account_key,
+        )
         try:
             shipment = await create_inpost_shipment(
                 client=client,
@@ -474,4 +683,10 @@ async def apply_paid_producer_checkout_session(
         "kind": "local_producer_order",
         **paid,
         "shipment": shipment,
+        "settlement": {
+            "producer": meta.get("producer_amount"),
+            "platform_fee_5pct": meta.get("platform_fee"),
+            "courier_inpost": meta.get("delivery_cost"),
+            "split_mode": split_mode,
+        },
     }

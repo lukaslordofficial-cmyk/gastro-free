@@ -45,6 +45,20 @@ export function isPremiumEntitled(
   return effectiveFeatureTier(tierLevel, trialEndsAt) >= 2;
 }
 
+/**
+ * Reklamy AdMob (baner + interstitial) — Free (tier 0) gdy NIE ma aktywnego trialu.
+ * Bez reklam: płatny plan (tier ≥ 1) albo trwający trial 30 dni.
+ */
+export function shouldShowAds(
+  tierLevel: number,
+  trialEndsAt: string | null | undefined,
+): boolean {
+  const tier = Number(tierLevel ?? 0);
+  if (tier >= 1) return false;
+  if (isPremiumTrialActive(trialEndsAt)) return false;
+  return true;
+}
+
 export type SubscriptionRow = {
   id: string;
   account_key: string;
@@ -282,12 +296,14 @@ export async function topupCredits(packageKey: TopupKey): Promise<SubscriptionSt
   );
 }
 
+/** Wyłączone — kredyty tylko z subskrypcji / top-up (bez reklam rewarded). */
 export async function grantRewardCredit(): Promise<{ ok: boolean; credits_balance: number; message: string }> {
   const row = await ensureRow();
-  const updated = await patchRow({
-    credits_balance: Number(row.credits_balance ?? 0) + 1,
-  });
-  return { ok: true, credits_balance: updated.credits_balance, message: '+1 kredyt AI' };
+  return {
+    ok: false,
+    credits_balance: Number(row.credits_balance ?? 0),
+    message: 'Kredyty za reklamy są wyłączone. Dokup pakiet w Subskrypcji.',
+  };
 }
 
 /** Opcjonalnie synchronizuj z backendem (AI billing) — nie blokuje UI. */

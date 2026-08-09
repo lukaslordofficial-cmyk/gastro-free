@@ -117,7 +117,7 @@ export async function confirmProducerOrderPayment(sessionId?: string): Promise<{
     ok: !!data.ok,
     paid: !!data.paid,
     message: data.paid
-      ? 'Płatność potwierdzona. Kurier InPost uruchomiony (lub stub, jeśli brak tokenu).'
+      ? 'Płatność potwierdzona. Środki: dystrybutor (produkty), platforma 5%, kurier InPost — przesyłka utworzona (lub stub bez tokenu).'
       : data.reason || 'Sesja jeszcze nieopłacona.',
     shipment: data.shipment,
   };

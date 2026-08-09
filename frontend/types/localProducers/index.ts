@@ -146,11 +146,21 @@ export type ProducerCartLine = {
   quantity: number;
 };
 
+export type ProducerDeliveryAddress = {
+  name: string;
+  phone: string;
+  street: string;
+  building_number: string;
+  city: string;
+  post_code: string;
+  email?: string | null;
+};
+
 export type CreateProducerOrderInput = {
   producerId: string;
   items: { productId: string; quantity: number; unitPrice: number }[];
-  /** true = zamówienie z dostawą kurierską (InPost później) */
-  withCourier: boolean;
+  /** Adres dostawy do restauracji (kurier InPost). */
+  delivery: ProducerDeliveryAddress;
   notes?: string | null;
 };
 
@@ -220,7 +230,7 @@ export const LOCAL_PRODUCERS_STORAGE_BUCKETS = {
   documents: 'producer-documents',
 } as const;
 
-/** Stub opłaty platformy (5%) — Edge/Stripe w kolejnym etapie. */
+/** Opłata serwisu platformy (5% od wartości produktów). */
 export const PLATFORM_FEE_RATE = 0.05;
-/** Stub kosztu kuriera PLN — InPost ShipX później. */
+/** Koszt kuriera InPost (PLN) — w Checkout jako osobna pozycja. */
 export const COURIER_DELIVERY_STUB_PLN = 15;

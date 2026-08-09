@@ -7,16 +7,16 @@ import { Wallet, Crown, Zap, ChevronRight, AlertCircle } from 'lucide-react-nati
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useSubscription } from '@/contexts/SubscriptionContext';
-import { RewardedCreditsButton } from '@/components/ads/RewardedCreditsButton';
 import { useAppTheme } from '@/hooks/useAppTheme';
 
 type Props = {
   onPress?: () => void;
+  /** @deprecated — reklamy za kredyty usunięte */
   showRewardedButton?: boolean;
   testID?: string;
 };
 
-export function CreditsWalletCard({ onPress, showRewardedButton, testID = 'wallet-widget' }: Props) {
+export function CreditsWalletCard({ onPress, testID = 'wallet-widget' }: Props) {
   const { state: data, loading } = useSubscription();
   const theme = useAppTheme();
 
@@ -79,7 +79,6 @@ export function CreditsWalletCard({ onPress, showRewardedButton, testID = 'walle
       {periodEnd && data.status === 'active' && data.tier_level >= 1 && (
         <Text style={styles.periodText}>Doładowanie: {periodEnd}</Text>
       )}
-      {showRewardedButton && data.tier_level === 0 && <RewardedCreditsButton />}
     </>
   );
 

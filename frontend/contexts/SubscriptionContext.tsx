@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
   fetchSubscriptionState,
-  grantRewardCredit,
+  shouldShowAds,
   subscribeTier,
   cancelSubscription,
   resignToFreeTier,
@@ -17,6 +17,7 @@ type SubscriptionContextValue = {
   loading: boolean;
   tier: number;
   credits: number;
+  /** Banery + interstitiale — Free po zakończonym trialu 30 dni. */
   hasAds: boolean;
   premiumUi: boolean;
   dealHunterUnlocked: boolean;
@@ -27,7 +28,6 @@ type SubscriptionContextValue = {
   cancel: () => Promise<SubscriptionState>;
   resign: () => Promise<SubscriptionState>;
   topup: (key: TopupKey) => Promise<SubscriptionState>;
-  addRewardCredit: () => Promise<{ ok: boolean; credits_balance: number; message: string }>;
 };
 
 const SubscriptionContext = createContext<SubscriptionContextValue | null>(null);
@@ -91,29 +91,28 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
     return result;
   }, [refresh]);
 
-  const value = useMemo<SubscriptionContextValue>(() => ({
-    state,
-    loading,
-    tier: state?.tier_level ?? 0,
-    credits: state?.credits_balance ?? 0,
-    // Closed beta / Internal Testing: bez reklam (AdMob wyłączony w UI).
-    hasAds: false,
-    // Dark premium chrome: trial Premium, płatny plan, albo zalogowany (closed beta).
-    premiumUi: isAuthenticated ? true : !!state?.premium_ui,
-    dealHunterUnlocked: !!state?.deal_hunter_unlocked,
-    trialActive: !!state?.trial_active,
-    trialEndsAt: state?.trial_ends_at ?? null,
-    refresh,
-    subscribe: (t) => wrap(() => subscribeTier(t)),
-    cancel: () => wrap(cancelSubscription),
-    resign: () => wrap(resignToFreeTier),
-    topup: (k) => wrap(() => topupCredits(k)),
-    addRewardCredit: async () => {
-      const r = await grantRewardCredit();
-      await refresh();
-      return r;
-    },
-  }), [state, loading, refresh, wrap, isAuthenticated]);
+  const value = useMemo<SubscriptionContextValue>(() => {
+    const tier = state?.tier_level ?? 0;
+    const trialEnds = state?.trial_ends_at ?? null;
+    return {
+      state,
+      loading,
+      tier,
+      credits: state?.credits_balance ?? 0,
+      // Reklamy dopiero po trialu, na Free (tier 0). Trial / płatny plan = bez reklam.
+      hasAds: !!isAuthenticated && shouldShowAds(tier, trialEnds),
+      // Dark premium chrome: trial Premium, płatny plan, albo zalogowany (closed beta).
+      premiumUi: isAuthenticated ? true : !!state?.premium_ui,
+      dealHunterUnlocked: !!state?.deal_hunter_unlocked,
+      trialActive: !!state?.trial_active,
+      trialEndsAt: trialEnds,
+      refresh,
+      subscribe: (t) => wrap(() => subscribeTier(t)),
+      cancel: () => wrap(cancelSubscription),
+      resign: () => wrap(resignToFreeTier),
+      topup: (k) => wrap(() => topupCredits(k)),
+    };
+  }, [state, loading, refresh, wrap, isAuthenticated]);
 
   return (
     <SubscriptionContext.Provider value={value}>

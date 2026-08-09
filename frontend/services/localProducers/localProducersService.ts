@@ -213,7 +213,8 @@ export async function listProducerReviews(producerId: string): Promise<ProducerR
 }
 
 /**
- * Utwórz zamówienie pending (bez Stripe / InPost — kolejne etapy).
+ * Utwórz zamówienie pending z kurierem (produkty + InPost + 5% platformy).
+ * Płatność i split: Stripe Checkout na backendzie.
  */
 export async function createProducerOrder(
   input: CreateProducerOrderInput,
@@ -224,8 +225,13 @@ export async function createProducerOrder(
   const producer = await getLocalProducer(input.producerId);
   if (!producer) throw new Error('Producent niedostępny w marketplace.');
 
-  if (input.withCourier && !producer.courier_available) {
+  if (!producer.courier_available) {
     throw new Error('Ten producent nie oferuje dostawy kurierskiej.');
+  }
+
+  const d = input.delivery;
+  if (!d?.street?.trim() || !d?.city?.trim() || !d?.post_code?.trim() || !d?.phone?.trim()) {
+    throw new Error('Podaj adres dostawy: ulica, miasto, kod pocztowy i telefon.');
   }
 
   const { data: auth } = await supabase.auth.getUser();
@@ -234,7 +240,7 @@ export async function createProducerOrder(
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('account_key')
+    .select('account_key, restaurant_name, email')
     .eq('id', uid)
     .maybeSingle();
 
@@ -253,15 +259,26 @@ export async function createProducerOrder(
   }
 
   const platformFee = Math.round(producerAmount * PLATFORM_FEE_RATE * 100) / 100;
-  let deliveryCost = 0;
-  if (input.withCourier) {
-    const freeFrom = producer.free_delivery_from != null
-      ? Number(producer.free_delivery_from)
-      : null;
-    deliveryCost =
-      freeFrom != null && producerAmount >= freeFrom ? 0 : COURIER_DELIVERY_STUB_PLN;
-  }
+  const freeFrom = producer.free_delivery_from != null
+    ? Number(producer.free_delivery_from)
+    : null;
+  const deliveryCost =
+    freeFrom != null && producerAmount >= freeFrom ? 0 : COURIER_DELIVERY_STUB_PLN;
   const totalPrice = Math.round((producerAmount + deliveryCost + platformFee) * 100) / 100;
+
+  const shipPayload = {
+    name: (d.name || (profile as { restaurant_name?: string } | null)?.restaurant_name || 'Restauracja').trim(),
+    phone: d.phone.trim(),
+    street: d.street.trim(),
+    building_number: (d.building_number || '1').trim(),
+    city: d.city.trim(),
+    post_code: d.post_code.trim(),
+    email: (d.email || (profile as { email?: string } | null)?.email || null),
+  };
+  const shipNote = `lp_ship:${JSON.stringify(shipPayload)}`;
+  const notes = [input.notes?.trim() || 'Zamów i zapłać · kurier InPost', shipNote]
+    .filter(Boolean)
+    .join(' | ');
 
   // order_status: 'pending' — zgodne z typowym CHECK WWW (nie 'pending_payment')
   const orderPayload: Record<string, unknown> = {
@@ -276,7 +293,7 @@ export async function createProducerOrder(
     payment_status: 'pending',
     shipment_status: 'draft',
     order_status: 'pending',
-    notes: input.notes ?? (input.withCourier ? 'Dostawa kurierska' : 'Odbiór / do uzgodnienia'),
+    notes,
   };
 
   let { data: order, error: orderErr } = await supabase

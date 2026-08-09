@@ -33,7 +33,8 @@ export const TEST_AD_UNITS = {
 };
 
 export const INTERSTITIAL_MIN_INTERVAL_MS = 7 * 60 * 1000;
-export const REWARDED_DAILY_LIMIT = 5;
+/** @deprecated — rewarded za kredyty wyłączone */
+export const REWARDED_DAILY_LIMIT = 0;
 
 export function pickAdUnit(kind: keyof typeof AD_UNITS): string {
   if (__DEV__ && process.env.EXPO_PUBLIC_ADMOB_USE_TEST_IDS === '1') {

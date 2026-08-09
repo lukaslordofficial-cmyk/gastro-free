@@ -6,6 +6,7 @@ import * as localProducersService from '@/services/localProducers';
 import type {
   LocalProducer,
   ProducerCartLine,
+  ProducerDeliveryAddress,
   ProducerOrder,
   ProducerProduct,
 } from '@/types/localProducers';
@@ -96,7 +97,7 @@ export function useProducerDetail(producerId: string | undefined) {
   const clearCart = useCallback(() => setCart([]), []);
 
   const placeOrder = useCallback(
-    async (withCourier: boolean): Promise<ProducerOrder> => {
+    async (delivery: ProducerDeliveryAddress): Promise<ProducerOrder> => {
       if (!producerId || !cart.length) {
         throw new Error('Dodaj produkty do koszyka.');
       }
@@ -104,7 +105,7 @@ export function useProducerDetail(producerId: string | undefined) {
       try {
         const order = await localProducersService.createProducerOrder({
           producerId,
-          withCourier,
+          delivery,
           items: cart.map((l) => ({
             productId: l.product.id,
             quantity: l.quantity,

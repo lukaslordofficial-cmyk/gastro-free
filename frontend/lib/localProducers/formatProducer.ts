@@ -51,8 +51,10 @@ export function isMarketplaceVisibleProducer(p: Partial<LocalProducer> | null | 
   if (p.archived_at) return false;
   if (p.active !== true) return false;
   if (p.verified !== true) return false;
+  const connectId = String(p.stripe_connect_id || p.stripe_account_id || '').trim();
+  if (!connectId.startsWith('acct_')) return false;
   const status = String(p.verification_status || '').toLowerCase();
-  // Jeśli kolumna jeszcze nie istnieje w starym wierszu — wymagaj verified+active
-  if (!status) return p.verified === true && p.active === true && !p.archived_at;
+  // Jeśli kolumna jeszcze nie istnieje w starym wierszu — wymagaj verified+active+Connect
+  if (!status) return true;
   return status === 'approved';
 }

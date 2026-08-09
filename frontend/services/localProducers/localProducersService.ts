@@ -42,14 +42,16 @@ function asRows<T>(data: unknown): T[] {
   return Array.isArray(data) ? (data as T[]) : [];
 }
 
-/** Filtr PostgREST — HARD RULE widoczności marketplace. */
+/** Filtr PostgREST — HARD RULE + Stripe Connect Express. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyMarketplaceProducerFilter(q: any) {
   return q
     .eq('active', true)
     .eq('verified', true)
     .eq('verification_status', 'approved')
-    .is('archived_at', null);
+    .is('archived_at', null)
+    .not('stripe_connect_id', 'is', null)
+    .neq('stripe_connect_id', '');
 }
 
 function withDistance(
@@ -118,8 +120,8 @@ export async function listLocalProducers(
 
   const { data, error } = await q;
   if (error) {
-    // Fallback gdy kolumna verification_status / archived_at jeszcze nie istnieje
-    if (/verification_status|archived_at/i.test(error.message)) {
+    // Fallback gdy kolumna verification_status / archived_at / stripe_connect_id jeszcze nie istnieje
+    if (/verification_status|archived_at|stripe_connect_id/i.test(error.message)) {
       const fallback = await supabase
         .from(LOCAL_PRODUCERS_TABLES.producers)
         .select('*')
@@ -148,7 +150,7 @@ export async function getLocalProducer(id: string): Promise<LocalProducer | null
 
   const { data, error } = await q.maybeSingle();
   if (error) {
-    if (/verification_status|archived_at/i.test(error.message)) {
+    if (/verification_status|archived_at|stripe_connect_id/i.test(error.message)) {
       const fallback = await supabase
         .from(LOCAL_PRODUCERS_TABLES.producers)
         .select('*')
@@ -227,6 +229,14 @@ export async function createProducerOrder(
 
   if (!producer.courier_available) {
     throw new Error('Ten producent nie oferuje dostawy kurierskiej.');
+  }
+  const connectId = String(
+    producer.stripe_connect_id || producer.stripe_account_id || '',
+  ).trim();
+  if (!connectId.startsWith('acct_')) {
+    throw new Error(
+      'Dystrybutor nie połączył Stripe Connect — zamówienie niedostępne.',
+    );
   }
 
   const d = input.delivery;

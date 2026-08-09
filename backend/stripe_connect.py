@@ -1,0 +1,288 @@
+"""
+Stripe Connect Express — onboarding dystrybutorów (Lokalni Przetwórcy).
+
+POST /api/stripe/connect → accounts.create (express, PL) + accountLinks.create
+GET  /api/stripe/connect/callback → zapis acct_... → local_producers.stripe_connect_id
+Webhook account.updated → sync payouts_enabled / onboarding complete
+"""
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any, Optional
+
+import httpx
+
+from billing_stripe import STRIPE_API, _secret, _ssl_verify, _stripe_post, stripe_configured
+
+logger = logging.getLogger("stripe.connect")
+
+
+def _public_base() -> str:
+    return (
+        (os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/")
+        or (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip("/")
+        or "https://gastro-manager-api-production-21dd.up.railway.app"
+    )
+
+
+def connect_return_url(producer_id: str) -> str:
+    custom = (os.getenv("STRIPE_CONNECT_RETURN_URL") or "").strip()
+    if custom:
+        sep = "&" if "?" in custom else "?"
+        return f"{custom}{sep}producer_id={producer_id}"
+    return f"{_public_base()}/api/stripe/connect/callback?producer_id={producer_id}"
+
+
+def connect_refresh_url(producer_id: str) -> str:
+    custom = (os.getenv("STRIPE_CONNECT_REFRESH_URL") or "").strip()
+    if custom:
+        sep = "&" if "?" in custom else "?"
+        return f"{custom}{sep}producer_id={producer_id}"
+    return f"{_public_base()}/api/stripe/connect?producer_id={producer_id}&refresh=1"
+
+
+def connect_www_success_url() -> str:
+    return (os.getenv("STRIPE_CONNECT_WWW_SUCCESS_URL") or "").strip() or (
+        f"{_public_base()}/api/stripe/connect/done"
+    )
+
+
+async def _stripe_get(path: str) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {_secret()}"}
+    async with httpx.AsyncClient(timeout=45.0, verify=_ssl_verify()) as client:
+        r = await client.get(f"{STRIPE_API}{path}", headers=headers)
+        payload = r.json()
+        if r.status_code >= 400:
+            msg = payload.get("error", {}).get("message") or r.text[:300]
+            raise RuntimeError(f"Stripe API {r.status_code}: {msg}")
+        return payload
+
+
+def producer_connect_id(producer: dict[str, Any]) -> str:
+    """Prefer stripe_connect_id; fallback legacy stripe_account_id."""
+    return (
+        (producer.get("stripe_connect_id") or "").strip()
+        or (producer.get("stripe_account_id") or "").strip()
+    )
+
+
+async def create_express_account(
+    *,
+    producer: dict[str, Any],
+    email: Optional[str] = None,
+) -> dict[str, Any]:
+    """stripe.accounts.create — type=express, country=PL."""
+    if not stripe_configured():
+        raise RuntimeError("Brak STRIPE_SECRET_KEY")
+
+    existing = producer_connect_id(producer)
+    if existing.startswith("acct_"):
+        return {"id": existing, "existing": True}
+
+    payload: dict[str, Any] = {
+        "type": "express",
+        "country": "PL",
+        "capabilities": {
+            "card_payments": {"requested": True},
+            "transfers": {"requested": True},
+        },
+        "business_type": "company",
+        "metadata": {
+            "producer_id": str(producer.get("id") or ""),
+            "kind": "local_producer_connect",
+        },
+    }
+    mail = (email or producer.get("email") or "").strip()
+    if mail:
+        payload["email"] = mail
+    company = (producer.get("company_name") or "").strip()
+    if company:
+        payload["business_profile"] = {"name": company[:100]}
+
+    account = await _stripe_post(
+        "/accounts",
+        payload,
+        idempotency_key=f"lp_connect_acct_{producer.get('id')}",
+    )
+    return account
+
+
+async def create_account_onboarding_link(
+    *,
+    account_id: str,
+    producer_id: str,
+) -> dict[str, Any]:
+    """stripe.accountLinks.create — type=account_onboarding."""
+    link = await _stripe_post(
+        "/account_links",
+        {
+            "account": account_id,
+            "refresh_url": connect_refresh_url(producer_id),
+            "return_url": connect_return_url(producer_id),
+            "type": "account_onboarding",
+        },
+    )
+    return link
+
+
+async def start_connect_onboarding(
+    *,
+    client: httpx.AsyncClient,
+    sb_get,
+    sb_patch,
+    producer_id: str,
+) -> dict[str, Any]:
+    rows = await sb_get(
+        client,
+        "local_producers",
+        params={"select": "*", "id": f"eq.{producer_id}", "limit": "1"},
+    )
+    if not rows:
+        raise ValueError("Nie znaleziono dystrybutora")
+    producer = rows[0]
+
+    account = await create_express_account(producer=producer)
+    acct_id = str(account.get("id") or "")
+    if not acct_id.startswith("acct_"):
+        raise RuntimeError("Stripe nie zwrócił acct_...")
+
+    # Zapisz ID od razu (nawet przed dokończeniem onboardingu) — callback/webhook uzupełnią flagi.
+    patch = {
+        "stripe_connect_id": acct_id,
+        "stripe_account_id": acct_id,
+    }
+    try:
+        await sb_patch(client, "local_producers", {"id": f"eq.{producer_id}"}, patch)
+    except Exception as e:
+        logger.warning("patch stripe_connect_id early failed: %s", e)
+        try:
+            await sb_patch(
+                client,
+                "local_producers",
+                {"id": f"eq.{producer_id}"},
+                {"stripe_connect_id": acct_id},
+            )
+        except Exception:
+            raise
+
+    link = await create_account_onboarding_link(account_id=acct_id, producer_id=producer_id)
+    return {
+        "ok": True,
+        "account_id": acct_id,
+        "url": link.get("url"),
+        "expires_at": link.get("expires_at"),
+        "existing": bool(account.get("existing")),
+    }
+
+
+async def sync_connect_account_to_producer(
+    *,
+    client: httpx.AsyncClient,
+    sb_get,
+    sb_patch,
+    producer_id: Optional[str] = None,
+    account_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Po return URL / webhook: pobierz konto Stripe i zapisz w Supabase."""
+    if not account_id and not producer_id:
+        raise ValueError("Wymagane producer_id lub account_id")
+
+    producer = None
+    if producer_id:
+        rows = await sb_get(
+            client,
+            "local_producers",
+            params={"select": "*", "id": f"eq.{producer_id}", "limit": "1"},
+        )
+        producer = (rows or [None])[0]
+        if not producer:
+            raise ValueError("Nie znaleziono dystrybutora")
+        account_id = account_id or producer_connect_id(producer)
+
+    if not account_id or not str(account_id).startswith("acct_"):
+        raise ValueError("Brak stripe_connect_id / acct_...")
+
+    account = await _stripe_get(f"/accounts/{account_id}")
+    acct = str(account.get("id") or account_id)
+    charges_enabled = bool(account.get("charges_enabled"))
+    payouts_enabled = bool(account.get("payouts_enabled"))
+    details_submitted = bool(account.get("details_submitted"))
+    onboarding_complete = details_submitted and (charges_enabled or payouts_enabled)
+
+    meta = dict(account.get("metadata") or {})
+    pid = producer_id or meta.get("producer_id")
+    if not pid:
+        found = await sb_get(
+            client,
+            "local_producers",
+            params={"select": "*", "stripe_connect_id": f"eq.{acct}", "limit": "1"},
+        )
+        if not found:
+            found = await sb_get(
+                client,
+                "local_producers",
+                params={"select": "*", "stripe_account_id": f"eq.{acct}", "limit": "1"},
+            )
+        if not found:
+            raise ValueError(f"Brak dystrybutora dla {acct}")
+        producer = found[0]
+        pid = producer["id"]
+    elif not producer:
+        rows = await sb_get(
+            client,
+            "local_producers",
+            params={"select": "*", "id": f"eq.{pid}", "limit": "1"},
+        )
+        producer = (rows or [None])[0]
+        if not producer:
+            raise ValueError("Nie znaleziono dystrybutora")
+
+    patch = {
+        "stripe_connect_id": acct,
+        "stripe_account_id": acct,
+        "payouts_enabled": payouts_enabled,
+        "stripe_onboarding_complete": onboarding_complete,
+    }
+    try:
+        await sb_patch(client, "local_producers", {"id": f"eq.{pid}"}, patch)
+    except Exception as e:
+        msg = str(e).lower()
+        if "column" in msg or "schema" in msg:
+            await sb_patch(
+                client,
+                "local_producers",
+                {"id": f"eq.{pid}"},
+                {"stripe_connect_id": acct},
+            )
+        else:
+            raise
+
+    return {
+        "ok": True,
+        "producer_id": pid,
+        "stripe_connect_id": acct,
+        "charges_enabled": charges_enabled,
+        "payouts_enabled": payouts_enabled,
+        "stripe_onboarding_complete": onboarding_complete,
+    }
+
+
+async def handle_connect_account_updated(
+    account_obj: dict[str, Any],
+    *,
+    client: httpx.AsyncClient,
+    sb_get,
+    sb_patch,
+) -> dict[str, Any]:
+    acct = str(account_obj.get("id") or "")
+    if not acct.startswith("acct_"):
+        return {"ok": False, "reason": "not_account"}
+    meta = dict(account_obj.get("metadata") or {})
+    return await sync_connect_account_to_producer(
+        client=client,
+        sb_get=sb_get,
+        sb_patch=sb_patch,
+        producer_id=meta.get("producer_id"),
+        account_id=acct,
+    )

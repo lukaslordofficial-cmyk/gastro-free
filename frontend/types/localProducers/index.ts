@@ -73,6 +73,11 @@ export type LocalProducer = {
   shipping_days?: ProducerShippingDays;
   next_ship_note?: string | null;
   free_delivery_from?: number | null;
+  /** Stripe Connect Express (acct_...) — wymagane do widoczności marketplace. */
+  stripe_connect_id?: string | null;
+  stripe_account_id?: string | null;
+  payouts_enabled?: boolean | null;
+  stripe_onboarding_complete?: boolean | null;
   created_at: string;
   updated_at: string;
 };

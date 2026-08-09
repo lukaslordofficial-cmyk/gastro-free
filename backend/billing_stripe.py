@@ -486,6 +486,23 @@ async def handle_stripe_event(
                     )
                     result["action"] = f"renewal_+{grant}"
 
+    elif event_type == "account.updated":
+        # Stripe Connect Express — sync acct_... → local_producers.stripe_connect_id
+        try:
+            from stripe_connect import handle_connect_account_updated
+            lp = await handle_connect_account_updated(
+                data_obj,
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+            )
+            result["action"] = "connect_account_updated"
+            result["local_producer"] = lp
+        except Exception as e:
+            logger.warning("account.updated sync failed: %s", e)
+            result["action"] = "connect_account_updated_failed"
+            result["error"] = str(e)[:200]
+
     if event_id:
         await _mark_processed(client, sb_post, event_id, event_type)
     return result

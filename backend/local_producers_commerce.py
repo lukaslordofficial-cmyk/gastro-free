@@ -184,12 +184,21 @@ async def create_producer_order_checkout(
             },
         })
 
-    connect_acct = (producer.get("stripe_account_id") or "").strip()
-    payouts_ok = producer.get("payouts_enabled") is not False
-    use_destination = bool(connect_acct) and payouts_ok and prod_g > 0
-    # Platforma zatrzymuje 5% + kurier; producent dostaje resztę (produkty)
-    application_fee_g = fee_g + del_g
-    split_mode = "destination" if use_destination and application_fee_g >= 0 else "platform_hold"
+    # Marketplace: Destination Charge — wymagany Stripe Connect Express.
+    from stripe_connect import producer_connect_id
+
+    connect_acct = producer_connect_id(producer)
+    if not connect_acct.startswith("acct_"):
+        raise ValueError(
+            "Dystrybutor nie połączył konta Stripe Connect. "
+            "Onboarding: POST /api/stripe/connect (panel WWW)."
+        )
+    if prod_g <= 0:
+        raise ValueError("Kwota produktów musi być > 0")
+
+    # transfer_data.amount = wyłącznie produkty (grosze).
+    # Kurier InPost + marża 5% zostają na saldzie platformy (reszta charge − transfer).
+    split_mode = "destination"
 
     meta = {
         "kind": "local_producer_order",
@@ -201,15 +210,16 @@ async def create_producer_order_checkout(
         "platform_fee": str(platform_fee),
         "delivery_cost": str(delivery_cost),
         "split_mode": split_mode,
+        "stripe_connect_id": connect_acct,
     }
 
-    payment_intent_data: dict[str, Any] = {"metadata": meta}
-    if use_destination:
-        # Destination charge: Connected Account dostaje produkty,
-        # application_fee (5% + kurier) zostaje na platformie → kurier → InPost ShipX.
-        payment_intent_data["transfer_data"] = {"destination": connect_acct}
-        if application_fee_g > 0:
-            payment_intent_data["application_fee_amount"] = application_fee_g
+    payment_intent_data: dict[str, Any] = {
+        "metadata": meta,
+        "transfer_data": {
+            "destination": connect_acct,
+            "amount": prod_g,
+        },
+    }
 
     payload: dict[str, Any] = {
         "mode": "payment",
@@ -225,23 +235,7 @@ async def create_producer_order_checkout(
     if customer_email:
         payload["customer_email"] = customer_email
 
-    try:
-        session = await _stripe_post("/checkout/sessions", payload, idempotency_key=idempotency_key)
-    except Exception as e:
-        # Connect destination może nie być gotowy — spadnij na charge na platformie + Transfer po pay
-        if use_destination and "transfer_data" in str(payment_intent_data):
-            logger.warning("Destination checkout failed, fallback platform_hold: %s", e)
-            split_mode = "platform_hold"
-            meta["split_mode"] = split_mode
-            payload["metadata"] = meta
-            payload["payment_intent_data"] = {"metadata": meta}
-            session = await _stripe_post(
-                "/checkout/sessions",
-                payload,
-                idempotency_key=(f"{idempotency_key}_hold" if idempotency_key else None),
-            )
-        else:
-            raise
+    session = await _stripe_post("/checkout/sessions", payload, idempotency_key=idempotency_key)
     return {
         "id": session["id"],
         "url": session["url"],
@@ -249,10 +243,12 @@ async def create_producer_order_checkout(
         "metadata": meta,
         "order_id": order_id,
         "split_mode": split_mode,
+        "stripe_connect_id": connect_acct,
         "line_breakdown": {
             "products_grosze": prod_g,
             "courier_grosze": del_g,
             "platform_fee_grosze": fee_g,
+            "transfer_to_distributor_grosze": prod_g,
         },
     }
 
@@ -350,7 +346,7 @@ async def _maybe_transfer_to_producer(
         client,
         "local_producers",
         params={
-            "select": "id,stripe_account_id,payouts_enabled,stripe_onboarding_complete",
+            "select": "id,stripe_connect_id,stripe_account_id,payouts_enabled,stripe_onboarding_complete",
             "id": f"eq.{producer_id}",
             "limit": "1",
         },
@@ -358,7 +354,8 @@ async def _maybe_transfer_to_producer(
     if not rows:
         return None
     p = rows[0]
-    acct = (p.get("stripe_account_id") or "").strip()
+    from stripe_connect import producer_connect_id
+    acct = producer_connect_id(p)
     if not acct:
         return None
     if p.get("payouts_enabled") is False:
@@ -665,16 +662,28 @@ async def apply_paid_producer_checkout_session(
             account_key=account_key,
         )
         try:
-            shipment = await create_inpost_shipment(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                order=order,
-                producer=producer,
-                receiver=receiver,
-            )
+            # Broker Furgonetka (InPost Kurier) — prepaid skarbonka, bez umowy ShipX.
+            from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
+
+            if furgonetka_configured():
+                shipment = await create_furgonetka_shipment(
+                    str(order.get("id") or order_id),
+                    client=client,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
+                )
+            else:
+                # Fallback legacy ShipX tylko gdy brak Furgonetki, a jest token InPost.
+                shipment = await create_inpost_shipment(
+                    client=client,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
+                    order=order,
+                    producer=producer,
+                    receiver=receiver,
+                )
         except Exception as e:
-            logger.exception("InPost after pay failed")
+            logger.exception("Courier broker after pay failed")
             shipment = {"ok": False, "error": str(e)[:300]}
 
     return {
@@ -686,7 +695,7 @@ async def apply_paid_producer_checkout_session(
         "settlement": {
             "producer": meta.get("producer_amount"),
             "platform_fee_5pct": meta.get("platform_fee"),
-            "courier_inpost": meta.get("delivery_cost"),
+            "courier_broker": meta.get("delivery_cost"),
             "split_mode": split_mode,
         },
     }

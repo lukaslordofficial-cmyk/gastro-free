@@ -14832,6 +14832,190 @@ async def billing_status():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stripe Connect Express — onboarding dystrybutorów (panel WWW)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StripeConnectRequest(BaseModel):
+    producer_id: str
+    email: Optional[str] = None
+
+
+async def _auth_user_id_from_request(request: Request) -> Optional[str]:
+    """Supabase Auth user id z Bearer JWT (panel WWW / apka)."""
+    auth = (request.headers.get("authorization") or "").strip()
+    if not auth.lower().startswith("bearer ") or not SUPABASE_URL:
+        return None
+    user_jwt = auth[7:].strip()
+    if not user_jwt or user_jwt == SUPABASE_KEY:
+        return None
+    try:
+        apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
+        async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
+            uresp = await httpx_c.get(
+                f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+                headers={"Authorization": f"Bearer {user_jwt}", "apikey": apikey},
+            )
+            if uresp.status_code == 200:
+                return (uresp.json() or {}).get("id")
+    except Exception:
+        return None
+    return None
+
+
+async def _run_stripe_connect_onboard(pid: str, *, require_owner_uid: Optional[str]) -> dict:
+    from billing_stripe import stripe_configured
+    from stripe_connect import start_connect_onboarding
+
+    if not stripe_configured():
+        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
+    pid = (pid or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="Brak producer_id")
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        rows = await sb_get(client, "local_producers", params={
+            "select": "id,auth_user_id,email,company_name,stripe_connect_id,stripe_account_id",
+            "id": f"eq.{pid}",
+            "limit": "1",
+        })
+        if not rows:
+            raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
+        owner = (rows[0].get("auth_user_id") or "").strip()
+        if require_owner_uid is not None:
+            if not require_owner_uid:
+                raise HTTPException(status_code=401, detail="Zaloguj się (Bearer JWT)")
+            if owner and owner != require_owner_uid:
+                raise HTTPException(status_code=403, detail="To nie jest Twój profil dystrybutora")
+        try:
+            return await start_connect_onboarding(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                producer_id=pid,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.exception("stripe connect onboard failed")
+            raise HTTPException(status_code=502, detail=str(e)[:300])
+
+
+@app.post("/api/stripe/connect")
+async def stripe_connect_onboard_post(request: Request, body: StripeConnectRequest):
+    """
+    Tworzy Stripe Express (PL) + Account Link onboarding.
+    Panel WWW: POST JSON { producer_id } z Bearer JWT właściciela.
+    """
+    uid = await _auth_user_id_from_request(request)
+    return await _run_stripe_connect_onboard(body.producer_id, require_owner_uid=uid)
+
+
+@app.get("/api/stripe/connect")
+async def stripe_connect_onboard_get(producer_id: str, refresh: Optional[int] = None):
+    """Refresh URL z Stripe Account Link — przekierowanie do nowego linku onboardingu."""
+    from fastapi.responses import RedirectResponse
+    result = await _run_stripe_connect_onboard(producer_id, require_owner_uid=None)
+    if result.get("url"):
+        return RedirectResponse(url=result["url"], status_code=303)
+    return result
+
+
+@app.get("/api/stripe/connect/callback")
+async def stripe_connect_callback(
+    producer_id: Optional[str] = None,
+    account_id: Optional[str] = None,
+):
+    """
+    Return URL po onboardingu Stripe — pobiera acct_... i zapisuje stripe_connect_id.
+    """
+    from fastapi.responses import RedirectResponse, HTMLResponse
+    from stripe_connect import sync_connect_account_to_producer, connect_www_success_url
+
+    pid = (producer_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="Brak producer_id")
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        try:
+            synced = await sync_connect_account_to_producer(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                producer_id=pid,
+                account_id=(account_id or "").strip() or None,
+            )
+        except Exception as e:
+            logger.exception("stripe connect callback failed")
+            return HTMLResponse(
+                content=(
+                    "<html><body style='font-family:sans-serif;padding:2rem'>"
+                    f"<h1>Stripe Connect — błąd</h1><p>{str(e)[:300]}</p>"
+                    "</body></html>"
+                ),
+                status_code=502,
+            )
+
+    success = connect_www_success_url()
+    if success.startswith("http"):
+        sep = "&" if "?" in success else "?"
+        return RedirectResponse(
+            url=f"{success}{sep}producer_id={pid}&stripe_connect_id={synced.get('stripe_connect_id','')}",
+            status_code=303,
+        )
+    return {
+        "ok": True,
+        "message": "Konto Stripe Connect zapisane. Możesz wrócić do panelu WWW.",
+        **synced,
+    }
+
+
+@app.get("/api/stripe/connect/done")
+async def stripe_connect_done(
+    producer_id: Optional[str] = None,
+    stripe_connect_id: Optional[str] = None,
+):
+    """Prosta strona sukcesu (gdy brak STRIPE_CONNECT_WWW_SUCCESS_URL)."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(
+        content=(
+            "<html><body style='font-family:sans-serif;padding:2rem'>"
+            "<h1>Stripe połączony</h1>"
+            f"<p>Dystrybutor: <code>{producer_id or '—'}</code></p>"
+            f"<p>Konto: <code>{stripe_connect_id or '—'}</code></p>"
+            "<p>Produkty będą widoczne dla restauratorów po zatwierdzeniu profilu.</p>"
+            "</body></html>"
+        )
+    )
+
+
+@app.get("/api/stripe/connect/status")
+async def stripe_connect_status(producer_id: str, request: Request):
+    """Status Connect dystrybutora (panel WWW)."""
+    pid = (producer_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="Brak producer_id")
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        rows = await sb_get(client, "local_producers", params={
+            "select": "id,stripe_connect_id,stripe_account_id,payouts_enabled,stripe_onboarding_complete",
+            "id": f"eq.{pid}",
+            "limit": "1",
+        })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
+    p = rows[0]
+    from stripe_connect import producer_connect_id
+    acct = producer_connect_id(p)
+    return {
+        "ok": True,
+        "producer_id": pid,
+        "stripe_connect_id": acct or None,
+        "connected": bool(acct),
+        "payouts_enabled": bool(p.get("payouts_enabled")),
+        "stripe_onboarding_complete": bool(p.get("stripe_onboarding_complete")),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Lokalni Przetwórcy — Checkout Stripe (BLIK+karta) + InPost ShipX
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -14862,11 +15046,18 @@ class LpShipmentRequest(BaseModel):
 async def local_producers_commerce_status():
     from billing_stripe import stripe_configured
     from local_producers_commerce import inpost_configured
+    from furgonetka_broker import furgonetka_configured
     return {
         "ok": True,
         "stripe_configured": stripe_configured(),
+        "furgonetka_configured": furgonetka_configured(),
         "inpost_configured": inpost_configured(),
+        "courier_broker": "furgonetka" if furgonetka_configured() else ("inpost_shipx" if inpost_configured() else None),
         "payment_methods": ["card", "blik"],
+        "marketplace_model": "destination_charges",
+        "requires_stripe_connect_id": True,
+        "connect_onboard": "POST /api/stripe/connect",
+        "label_endpoint": "GET /api/orders/{order_id}/furgonetka-label",
     }
 
 
@@ -14986,15 +15177,16 @@ async def local_producers_confirm_payment(req: LpConfirmRequest):
 
 @app.post("/api/local-producers/create-shipment")
 async def local_producers_create_shipment(req: LpShipmentRequest):
-    """Ręczne utworzenie przesyłki InPost (po paid) — np. retry."""
-    from local_producers_commerce import create_inpost_shipment
+    """Ręczne utworzenie przesyłki przez Furgonetkę (InPost Kurier) po paid."""
+    from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
+    from local_producers_commerce import create_inpost_shipment, parse_lp_ship_from_notes
 
     order_id = (req.order_id or "").strip()
     if not order_id:
         raise HTTPException(status_code=400, detail="Brak order_id")
     account_key = get_account_key()
 
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
         orders = await sb_get(client, "producer_orders", params={
             "select": "*", "id": f"eq.{order_id}", "limit": "1",
         })
@@ -15010,30 +15202,121 @@ async def local_producers_create_shipment(req: LpShipmentRequest):
             "select": "*", "id": f"eq.{order.get('producer_id')}", "limit": "1",
         })
         producer = (producers or [{}])[0]
+        ship = parse_lp_ship_from_notes(order.get("notes")) or {}
         receiver = {
-            "name": req.receiver_name or "Restauracja",
-            "email": req.receiver_email or "orders@gastromanager.app",
-            "phone": req.receiver_phone or "500600700",
+            "name": req.receiver_name or ship.get("name") or "Restauracja",
+            "email": req.receiver_email or ship.get("email") or "orders@gastromanager.app",
+            "phone": req.receiver_phone or ship.get("phone") or "500600700",
             "address": {
-                "street": req.street or "ul. Restauracyjna",
-                "building_number": req.building_number or "1",
-                "city": req.city or "Warszawa",
-                "post_code": req.post_code or "00-001",
+                "street": req.street or ship.get("street") or "ul. Restauracyjna",
+                "building_number": req.building_number or ship.get("building_number") or "1",
+                "city": req.city or ship.get("city") or "Warszawa",
+                "post_code": req.post_code or ship.get("post_code") or "00-001",
             },
         }
         try:
-            result = await create_inpost_shipment(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                order=order,
-                producer=producer,
-                receiver=receiver,
-            )
+            if furgonetka_configured():
+                result = await create_furgonetka_shipment(
+                    order_id,
+                    client=client,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
+                )
+            else:
+                result = await create_inpost_shipment(
+                    client=client,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
+                    order=order,
+                    producer=producer,
+                    receiver=receiver,
+                )
         except Exception as e:
             logger.exception("LP create-shipment failed")
             raise HTTPException(status_code=502, detail=str(e)[:300])
     return result
+
+
+@app.get("/api/orders/{order_id}/furgonetka-label")
+@app.get("/api/orders/{order_id}/label")
+@app.get("/api/producer-orders/{order_id}/label")
+@app.get("/api/local-producers/orders/{order_id}/label")
+async def producer_order_furgonetka_label(order_id: str, request: Request):
+    """
+    Etykieta PDF z Furgonetki (InPost Kurier) — StreamingResponse do druku w panelu WWW.
+    """
+    import io
+    from fastapi.responses import StreamingResponse
+    from furgonetka_broker import download_label_pdf, furgonetka_configured
+
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+    if not furgonetka_configured():
+        raise HTTPException(status_code=503, detail="Furgonetka nie skonfigurowana")
+
+    uid = await _auth_user_id_from_request(request)
+    account_key = get_account_key()
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        orders = await sb_get(client, "producer_orders", params={
+            "select": "id,producer_id,restaurant_account_key,furgonetka_package_id,broker_package_id,payment_status",
+            "id": f"eq.{oid}",
+            "limit": "1",
+        })
+        if not orders:
+            # Kolumna furgonetka_package_id może jeszcze nie istnieć
+            orders = await sb_get(client, "producer_orders", params={
+                "select": "id,producer_id,restaurant_account_key,broker_package_id,payment_status",
+                "id": f"eq.{oid}",
+                "limit": "1",
+            })
+        if not orders:
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+        order = orders[0]
+        package_id = (
+            (order.get("furgonetka_package_id") or order.get("broker_package_id") or "")
+        ).strip()
+        if not package_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Brak furgonetka_package_id — poczekaj na utworzenie przesyłki po płatności.",
+            )
+
+        producers = await sb_get(client, "local_producers", params={
+            "select": "id,auth_user_id",
+            "id": f"eq.{order.get('producer_id')}",
+            "limit": "1",
+        })
+        owner = ((producers or [{}])[0].get("auth_user_id") or "").strip()
+        is_owner = bool(uid and owner and uid == owner)
+        is_restaurant = bool(
+            order.get("restaurant_account_key")
+            and order.get("restaurant_account_key") == account_key
+            and account_key != "default"
+        )
+        if not (is_owner or is_restaurant):
+            raise HTTPException(status_code=403, detail="Brak dostępu do etykiety tego zamówienia")
+
+        try:
+            pdf = await download_label_pdf(package_id)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e)[:300])
+
+        try:
+            await sb_patch(client, "producer_orders", {"id": f"eq.{oid}"}, {
+                "broker_label_ready": True,
+            })
+        except Exception:
+            pass
+
+    return StreamingResponse(
+        io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="etykieta-{package_id}.pdf"',
+        },
+    )
 
 
 @app.post("/api/subscription/resign")

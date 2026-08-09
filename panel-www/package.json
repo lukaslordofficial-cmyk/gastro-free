@@ -1,0 +1,19 @@
+{
+  "name": "gastro-panel-www-broker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stripe Connect + Furgonetka broker (InPost Kurier) dla panelu dystrybutora",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "express": "^4.21.2",
+    "stripe": "^17.7.0"
+  }
+}

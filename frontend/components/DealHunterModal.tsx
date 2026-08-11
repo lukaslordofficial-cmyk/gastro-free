@@ -56,6 +56,11 @@ import {
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
+import {
+  type DealHunterSearchScope,
+  DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
+  DEFAULT_DEAL_HUNTER_SEARCH_SCOPE,
+} from '@/lib/dealHunterSearchScope';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -1299,6 +1304,9 @@ export function DealHunterModal({
   const [draftSavedInfo, setDraftSavedInfo] = useState<string | null>(null);
   const [step, setStep] = useState<Step>('qty');
   const [qty, setQty] = useState('1');
+  const [searchScope, setSearchScope] = useState<DealHunterSearchScope>(
+    DEFAULT_DEAL_HUNTER_SEARCH_SCOPE,
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compare, setCompare] = useState<OptimizeResult | null>(null);
@@ -1739,6 +1747,7 @@ export function DealHunterModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           restaurant_name: restaurantName ?? 'Nasza restauracja',
+          search_scope: searchScope,
           items: [{ product_name_or_id: product.product_name, quantity: q, unit: product.unit }],
         }),
       });
@@ -1746,7 +1755,13 @@ export function DealHunterModal({
       const data = await res.json();
       const normalized = applyCompareResult(data);
       if (!normalized.best_option && !normalized.option_optimized?.suppliers?.length) {
-        setError('Nie znaleziono tego produktu w katalogu dostawców.');
+        setError(
+          searchScope === 'local_producers_only'
+            ? 'Nie znaleziono tego produktu u lokalnych producentów.'
+            : searchScope === 'both'
+              ? 'Nie znaleziono tego produktu u hurtowników ani lokalnych producentów.'
+              : 'Nie znaleziono tego produktu w katalogu dostawców.',
+        );
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się pobrać ofert.';
@@ -1754,7 +1769,7 @@ export function DealHunterModal({
     } finally {
       setLoading(false);
     }
-  }, [product, qty, restaurantName, applyCompareResult, dealHunterUnlocked, premiumAlert, onClose]);
+  }, [product, qty, restaurantName, searchScope, applyCompareResult, dealHunterUnlocked, premiumAlert, onClose]);
 
   const generateMessages = useCallback(async (groups?: SupplierGroup[]) => {
     const suppliers = groups ?? pendingGroups ?? selectedSuppliers();
@@ -2407,6 +2422,35 @@ export function DealHunterModal({
                 Zaproponowaliśmy ilość o połowę większą niż aktualny stan. Możesz ją zmienić przed
                 porównaniem ofert.
               </Text>
+              <Text style={styles.fieldLabel}>Gdzie szukać ofert?</Text>
+              <View style={{ gap: 8, marginBottom: 14 }}>
+                {DEAL_HUNTER_SEARCH_SCOPE_OPTIONS.map((opt) => {
+                  const on = searchScope === opt.key;
+                  return (
+                    <TouchableOpacity
+                      key={opt.key}
+                      onPress={() => setSearchScope(opt.key)}
+                      activeOpacity={0.85}
+                      testID={`deal-hunter-scope-${opt.key}`}
+                      style={{
+                        borderWidth: StyleSheet.hairlineWidth,
+                        borderColor: on ? C.accent : C.border,
+                        backgroundColor: on ? C.accentLight : C.card,
+                        borderRadius: 12,
+                        paddingHorizontal: 12,
+                        paddingVertical: 10,
+                      }}
+                    >
+                      <Text style={{ color: C.textPrimary, fontWeight: '800', fontSize: 14 }}>
+                        {opt.label}
+                      </Text>
+                      <Text style={{ color: C.textSecondary, fontSize: 12, marginTop: 2 }}>
+                        {opt.hint}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
               <Text style={styles.fieldLabel}>Ilość do zamówienia</Text>
               <View style={styles.qtyInputRow}>
                 <TextInput

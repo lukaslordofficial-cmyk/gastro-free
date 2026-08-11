@@ -8144,6 +8144,8 @@ class CompareOffersRequest(BaseModel):
     restaurant_name: Optional[str] = None
     # Strategia koszyka: fast_delivery | min_deliveries | lowest_price
     cart_objective: Optional[str] = None
+    # Gdzie Łowca szuka ofert: suppliers_only | local_producers_only | both
+    search_scope: Optional[str] = "suppliers_only"
 
 
 class MessageSupplierGroup(BaseModel):
@@ -8247,6 +8249,144 @@ async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
     allowed_set = set(allowed_ids)
     catalog = [r for r in catalog if str(r.get("supplier_id") or "") in allowed_set]
     return catalog, suppliers
+
+
+def _normalize_deal_hunter_search_scope(raw: Optional[str]) -> str:
+    v = (raw or "suppliers_only").strip().lower()
+    if v in ("local_producers_only", "local", "producers", "lokalni", "lp"):
+        return "local_producers_only"
+    if v in ("both", "all", "wszystkie", "oba"):
+        return "both"
+    return "suppliers_only"
+
+
+async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
+    """Mapuje marketplace Lokalni Przetworcy -> format supplier_catalog dla Lowcy.
+
+    HARD RULE: active + verified + approved + nie zarchiwizowany (+ Connect gdy kolumna jest).
+    """
+    producers = []
+    try:
+        producers = await sb_get(client, "local_producers", params={
+            "select": "id,company_name,email,phone,owner_name,min_order_value,"
+                      "active,verified,verification_status,archived_at,stripe_connect_id",
+            "active": "eq.true",
+            "verified": "eq.true",
+            "limit": "500",
+        }) or []
+    except Exception as e:
+        logger.warning("local_producers fetch (connect) failed: %s — retry", e)
+        try:
+            producers = await sb_get(client, "local_producers", params={
+                "select": "id,company_name,email,phone,owner_name,min_order_value,"
+                          "active,verified,verification_status,archived_at",
+                "active": "eq.true",
+                "verified": "eq.true",
+                "limit": "500",
+            }) or []
+        except Exception as e2:
+            logger.warning("local_producers fetch for Deal Hunter failed: %s", e2)
+            return [], []
+
+    visible = []
+    for p in producers:
+        if p.get("archived_at"):
+            continue
+        status = str(p.get("verification_status") or "").lower()
+        if status and status != "approved":
+            continue
+        if "stripe_connect_id" in p:
+            connect = (p.get("stripe_connect_id") or "").strip()
+            if not connect.startswith("acct_"):
+                continue
+        visible.append(p)
+
+    if not visible:
+        return [], []
+
+    producer_ids = [str(p["id"]) for p in visible if p.get("id")]
+    products: list = []
+    for i in range(0, len(producer_ids), 40):
+        chunk = producer_ids[i : i + 40]
+        id_filter = f"in.({','.join(chunk)})"
+        try:
+            rows = await sb_get(client, "producer_products", params={
+                "select": "id,producer_id,title,description,price,unit,available,stock",
+                "producer_id": id_filter,
+                "available": "eq.true",
+                "limit": "2000",
+            }) or []
+        except Exception as e:
+            logger.warning("producer_products fetch failed: %s", e)
+            rows = []
+        products.extend(rows)
+
+    suppliers = []
+    for p in visible:
+        name = (p.get("company_name") or "Lokalny producent").strip()
+        suppliers.append({
+            "id": str(p["id"]),
+            "name": f"{name} · Lokalny",
+            "email": p.get("email"),
+            "contact_person": p.get("owner_name"),
+            "phone": p.get("phone"),
+            "min_order_value": p.get("min_order_value") or 0,
+            "shipping_cost": 0,
+            "free_shipping_threshold": None,
+            "lead_time_days": None,
+            "source": "local_producer",
+        })
+
+    catalog = []
+    for row in products:
+        try:
+            price = float(row.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            continue
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+        catalog.append({
+            "id": str(row.get("id")),
+            "supplier_id": str(row.get("producer_id")),
+            "name": title,
+            "variant": (row.get("description") or "")[:80] or None,
+            "unit": (row.get("unit") or "szt").strip() or "szt",
+            "price_pln": price,
+            "liters_total": None,
+            "kg_total": None,
+            "unit_count": 1,
+            "is_visible": True,
+            "source": "local_producer",
+        })
+    return catalog, suppliers
+
+
+async def _load_catalog_for_search_scope(client: httpx.AsyncClient, search_scope: Optional[str]):
+    """Łączy katalogi hurtowników i/lub lokalnych producentów wg search_scope."""
+    scope = _normalize_deal_hunter_search_scope(search_scope)
+    catalog: list = []
+    suppliers: list = []
+
+    if scope in ("suppliers_only", "both"):
+        c, s = await _fetch_catalog_and_suppliers(client)
+        for row in c:
+            row = dict(row)
+            row.setdefault("source", "supplier")
+            catalog.append(row)
+        for srow in s:
+            srow = dict(srow)
+            srow.setdefault("source", "supplier")
+            suppliers.append(srow)
+
+    if scope in ("local_producers_only", "both"):
+        c, s = await _fetch_local_producer_catalog(client)
+        catalog.extend(c)
+        suppliers.extend(s)
+
+    return catalog, suppliers, scope
 
 
 async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[str, float]:
@@ -9127,8 +9267,10 @@ async def compare_offers(req: CompareOffersRequest):
 
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
         await _check_ai_access(client, needs_credits=True, needs_deal_hunter=True)
-        catalog, suppliers = await _fetch_catalog_and_suppliers(client)
-        sup_by_id = {s["id"]: s for s in suppliers}
+        catalog, suppliers, search_scope = await _load_catalog_for_search_scope(
+            client, req.search_scope,
+        )
+        sup_by_id = {str(s["id"]): s for s in suppliers if s.get("id")}
 
         # Magazyn (nazwa + synonimy + gramatura 1 szt.) — natychmiastowe dopasowanie bez AI.
         has_syn = await _has_inventory_synonyms(client)
@@ -9655,6 +9797,7 @@ async def optimizer_critical_order(req: CriticalOrderRequest):
             for c in critical
         ],
         restaurant_name=req.restaurant_name,
+        search_scope=getattr(req, 'search_scope', None) or 'suppliers_only',
     )
     try:
         compare_result = await compare_offers(compare_req)
@@ -9892,6 +10035,8 @@ class CriticalByCategoryRequest(BaseModel):
     items: list[ExtraOrderItem] = Field(default_factory=list)
     # Strategia koszyka Łowcy: fast_delivery | min_deliveries | lowest_price
     cart_objective: Optional[str] = None
+    # suppliers_only | local_producers_only | both
+    search_scope: Optional[str] = "suppliers_only"
 
 
 @app.post("/api/orders/critical-by-category")
@@ -10389,6 +10534,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         ],
         restaurant_name=req.restaurant_name,
         cart_objective=req.cart_objective,
+        search_scope=req.search_scope,
     )
     compare_result: Optional[dict] = None
     compare_error: Optional[str] = None
@@ -12120,6 +12266,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             compare = await compare_offers(CompareOffersRequest(
                 items=compare_items,
                 restaurant_name=p.get("restaurant_name"),
+                search_scope=p.get("search_scope") or "suppliers_only",
             ))
         except HTTPException as e:
             return {

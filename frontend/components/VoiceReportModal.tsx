@@ -967,7 +967,10 @@ export function VoiceReportModal({
         const cmp = await fetchJson<Record<string, any>>(`${BACKEND_URL}/api/orders/compare-offers`, {
           method: 'POST',
           headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
-                body: JSON.stringify({ items: compareItems }),
+                body: JSON.stringify({
+                  items: compareItems,
+                  search_scope: curEdited.search_scope || 'suppliers_only',
+                }),
         });
         if (!cmp.ok) throw new Error(cmp.error);
         const compare = cmp.data;
@@ -3737,6 +3740,9 @@ function seedPayload(
       'najnizsza cena': 'lowest_price',
     };
     p.cart_objective = objMap[obj] || null;
+  }
+  if (intent === 'order_product' || intent === 'order_critical_items_by_category') {
+    if (!p.search_scope) p.search_scope = 'suppliers_only';
   }
   if (intent === 'order_product') {
     if (!Array.isArray(p.items) || p.items.length === 0) {

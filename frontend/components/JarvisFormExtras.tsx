@@ -9,11 +9,46 @@ import { Check, Plus, X, Upload } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { DS } from '@/constants/premiumTheme';
+import {
+  type DealHunterSearchScope,
+  DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
+  DEFAULT_DEAL_HUNTER_SEARCH_SCOPE,
+} from '@/lib/dealHunterSearchScope';
 
 const GREEN = DS.color.greenEnd;
 const CTA_TEXT = '#0A0A0A';
 
 type Patch = (p: Record<string, any>) => void;
+
+function SearchScopePicker({
+  value,
+  onChange,
+}: {
+  value?: string | null;
+  onChange: (v: DealHunterSearchScope) => void;
+}) {
+  const current = (value || DEFAULT_DEAL_HUNTER_SEARCH_SCOPE) as DealHunterSearchScope;
+  return (
+    <View style={{ marginTop: 10, marginBottom: 4 }}>
+      <Text style={styles.label}>Gdzie szukać ofert?</Text>
+      <View style={styles.pillRow}>
+        {DEAL_HUNTER_SEARCH_SCOPE_OPTIONS.map((o) => {
+          const on = current === o.key;
+          return (
+            <TouchableOpacity
+              key={o.key}
+              style={[styles.pill, on && styles.pillOn]}
+              onPress={() => onChange(o.key)}
+              testID={`voice-search-scope-${o.key}`}
+            >
+              <Text style={[styles.pillText, on && styles.pillTextOn]}>{o.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
 
 export function JarvisSuggestBox({
   query,
@@ -442,8 +477,12 @@ export function OrderProductEditor({
     <View style={styles.card}>
       <Text style={styles.hint}>
         Wpisz produkty do zamówienia. Po literkach pojawią się propozycje z magazynu — możesz też zostawić
-        wpisaną nazwę. Łowca Okazji znajdzie najtańszą ofertę u Twoich dostawców.
+        wpisaną nazwę. Łowca Okazji znajdzie oferty w wybranym zakresie (hurtownicy / lokalni / oba).
       </Text>
+      <SearchScopePicker
+        value={edited.search_scope}
+        onChange={(v) => patch({ search_scope: v })}
+      />
       {items.map((it, idx) => (
         <OrderLine
           key={idx}
@@ -661,6 +700,10 @@ export function CriticalOrderEditor({
         Zaznacz kategorie braków (np. Warzywa) i/lub dodaj konkretne produkty z nazwy
         (np. ser kozi). Po zatwierdzeniu Łowca Okazji, zbuduje dla Ciebie koszyk zakupowy.
       </Text>
+      <SearchScopePicker
+        value={edited.search_scope}
+        onChange={(v) => patch({ search_scope: v })}
+      />
       <Text style={styles.label}>Kategorie braków</Text>
       <View style={styles.pillRow}>
         <TouchableOpacity style={[styles.pill, allOn && styles.pillOn]} onPress={() => toggle('all')}>

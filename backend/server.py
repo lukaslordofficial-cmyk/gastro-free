@@ -8264,12 +8264,22 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
     """Mapuje marketplace Lokalni Przetworcy -> format supplier_catalog dla Lowcy.
 
     HARD RULE: active + verified + approved + nie zarchiwizowany (+ Connect gdy kolumna jest).
+    Fail-soft: brak tabel / migracji → puste listy.
     """
     producers = []
+    select_full = (
+        "id,company_name,email,phone,owner_name,min_order_value,city,voivodeship,"
+        "pickup_available,courier_available,active,verified,verification_status,"
+        "archived_at,stripe_connect_id"
+    )
+    select_no_connect = (
+        "id,company_name,email,phone,owner_name,min_order_value,city,voivodeship,"
+        "pickup_available,courier_available,active,verified,verification_status,"
+        "archived_at"
+    )
     try:
         producers = await sb_get(client, "local_producers", params={
-            "select": "id,company_name,email,phone,owner_name,min_order_value,"
-                      "active,verified,verification_status,archived_at,stripe_connect_id",
+            "select": select_full,
             "active": "eq.true",
             "verified": "eq.true",
             "limit": "500",
@@ -8278,8 +8288,7 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
         logger.warning("local_producers fetch (connect) failed: %s — retry", e)
         try:
             producers = await sb_get(client, "local_producers", params={
-                "select": "id,company_name,email,phone,owner_name,min_order_value,"
-                          "active,verified,verification_status,archived_at",
+                "select": select_no_connect,
                 "active": "eq.true",
                 "verified": "eq.true",
                 "limit": "500",
@@ -8311,7 +8320,7 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
         id_filter = f"in.({','.join(chunk)})"
         try:
             rows = await sb_get(client, "producer_products", params={
-                "select": "id,producer_id,title,description,price,unit,available,stock",
+                "select": "id,producer_id,title,description,price,unit,available,stock,weight_g",
                 "producer_id": id_filter,
                 "available": "eq.true",
                 "limit": "2000",
@@ -8324,21 +8333,45 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
     suppliers = []
     for p in visible:
         name = (p.get("company_name") or "Lokalny producent").strip()
+        city = (p.get("city") or "").strip()
+        if p.get("pickup_available"):
+            lead = 0.0
+        elif p.get("courier_available"):
+            lead = 1.0
+        else:
+            lead = 1.0
+        if city and city.lower() not in name.lower():
+            display = f"{name} · Lokalny · {city}"
+        else:
+            display = f"{name} · Lokalny"
         suppliers.append({
             "id": str(p["id"]),
-            "name": f"{name} · Lokalny",
+            "name": display,
             "email": p.get("email"),
-            "contact_person": p.get("owner_name"),
+            "contact_person": p.get("owner_name") or p.get("phone"),
             "phone": p.get("phone"),
-            "min_order_value": p.get("min_order_value") or 0,
-            "shipping_cost": 0,
-            "free_shipping_threshold": None,
-            "lead_time_days": None,
+            "min_order_value": float(p.get("min_order_value") or 0),
+            "shipping_cost": 0.0,
+            "free_shipping_threshold": 0.0,
+            "lead_time_days": lead,
+            "is_local_producer": True,
+            "city": city or None,
+            "voivodeship": (p.get("voivodeship") or None),
             "source": "local_producer",
         })
 
+    by_producer = {str(p["id"]) for p in visible if p.get("id")}
     catalog = []
     for row in products:
+        pid = str(row.get("producer_id") or "")
+        if pid not in by_producer:
+            continue
+        try:
+            stock = float(row.get("stock") or 0)
+        except (TypeError, ValueError):
+            stock = 0.0
+        if stock <= 0:
+            continue
         try:
             price = float(row.get("price") or 0)
         except (TypeError, ValueError):
@@ -8348,19 +8381,36 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
         title = (row.get("title") or "").strip()
         if not title:
             continue
-        catalog.append({
+        kg_total = None
+        try:
+            wg = float(row.get("weight_g") or 0)
+            if wg > 0:
+                kg_total = round(wg / 1000.0, 6)
+        except (TypeError, ValueError):
+            kg_total = None
+        entry = {
             "id": str(row.get("id")),
-            "supplier_id": str(row.get("producer_id")),
+            "supplier_id": pid,
             "name": title,
             "variant": (row.get("description") or "")[:80] or None,
             "unit": (row.get("unit") or "szt").strip() or "szt",
             "price_pln": price,
             "liters_total": None,
-            "kg_total": None,
             "unit_count": 1,
             "is_visible": True,
+            "is_local_producer": True,
+            "producer_product_id": str(row.get("id")),
             "source": "local_producer",
-        })
+        }
+        if kg_total:
+            entry["kg_total"] = kg_total
+        catalog.append(entry)
+
+    logger.info(
+        "Deal Hunter: loaded %s local producers, %s products (search scope)",
+        len(suppliers),
+        len(catalog),
+    )
     return catalog, suppliers
 
 
@@ -9270,6 +9320,7 @@ async def compare_offers(req: CompareOffersRequest):
         catalog, suppliers, search_scope = await _load_catalog_for_search_scope(
             client, req.search_scope,
         )
+        lp_suppliers = [s for s in suppliers if s.get("is_local_producer")]
         sup_by_id = {str(s["id"]): s for s in suppliers if s.get("id")}
 
         # Magazyn (nazwa + synonimy + gramatura 1 szt.) — natychmiastowe dopasowanie bez AI.
@@ -9334,7 +9385,13 @@ async def compare_offers(req: CompareOffersRequest):
                     better = True
             if better:
                 sup = sup_by_id.get(sid, {})
-                bbs[sid] = {
+                is_lp = bool(
+                    row.get("is_local_producer")
+                    or sup.get("is_local_producer")
+                    or row.get("source") == "local_producer"
+                    or sup.get("source") == "local_producer"
+                )
+                entry = {
                     "supplier_id": sid,
                     "supplier_name": (sup.get("name") or "").strip() or "Dostawca",
                     "supplier_email": sup.get("email"),
@@ -9349,6 +9406,13 @@ async def compare_offers(req: CompareOffersRequest):
                     "pack_base_qty": round(float(pack_base_qty or 0), 4),
                     "band_hi_base": round(float(band_hi_base or 0), 4),
                 }
+                if is_lp:
+                    entry["is_local_producer"] = True
+                    if row.get("producer_product_id") or row.get("id"):
+                        entry["catalog_product_id"] = str(
+                            row.get("producer_product_id") or row.get("id")
+                        )
+                bbs[sid] = entry
 
         for it in req.items:
             req_dim, req_factor = _norm_unit(it.unit)
@@ -9696,6 +9760,10 @@ async def compare_offers(req: CompareOffersRequest):
                    if s.get("lead_time_days") is not None else {}),
                 **({"reliability_score": float(reliability_by_sid[sid])}
                    if sid in reliability_by_sid else {}),
+                **({"is_local_producer": True}
+                   if (s.get("is_local_producer") or s.get("source") == "local_producer") else {}),
+                **({"city": s["city"]} if s.get("city") else {}),
+                **({"voivodeship": s["voivodeship"]} if s.get("voivodeship") else {}),
             }
             for sid, s in sup_by_id.items()
         }
@@ -9721,6 +9789,27 @@ async def compare_offers(req: CompareOffersRequest):
         )
         result = apply_cart_objective(result, req.cart_objective, suppliers_meta)
         result = _sanitize_optimize_unique_products(result)
+        # Flaga: czy w ofercie / koszykach są lokalni przetwórcy
+        lp_in_quotes = any(
+            bool((q or {}).get("is_local_producer"))
+            for pi in per_item
+            for q in ((pi.get("best_by_supplier") or {}).values())
+        )
+        result["includes_local_producers"] = bool(lp_in_quotes or lp_suppliers)
+        result["search_scope"] = search_scope
+        if lp_in_quotes or (search_scope != "suppliers_only" and lp_suppliers):
+            speech = (result.get("assistant_speech") or "").strip()
+            if search_scope == "local_producers_only":
+                note = "Szukam wyłącznie wśród Lokalnych Przetwórców (aktywni i zweryfikowani)."
+            elif search_scope == "both":
+                note = (
+                    "W porównaniu uwzględniam hurtowników i Lokalnych Przetwórców "
+                    "(aktywnych i zweryfikowanych)."
+                )
+            else:
+                note = ""
+            if note and note not in speech:
+                result["assistant_speech"] = f"{speech} {note}".strip() if speech else note
         if pack_notes:
             result["pack_adjustment_notes"] = pack_notes
             # Dołącz do speech, żeby FE / Jarvis widziały od razu

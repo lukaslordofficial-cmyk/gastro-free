@@ -1335,7 +1335,7 @@ export function DealHunterModal({
     const ids = new Set<string>();
     const collect = (groups?: SupplierGroup[] | null) => {
       (groups ?? []).forEach((g) => {
-        if (g.supplier_id) ids.add(g.supplier_id);
+        if (g.supplier_id && !g.is_local_producer) ids.add(g.supplier_id);
       });
     };
     collect(normalized.scenario_split_max?.suppliers);
@@ -1362,6 +1362,7 @@ export function DealHunterModal({
     if (!Object.keys(byId).length) return normalized;
 
     const fixGroup = (g: SupplierGroup): SupplierGroup => {
+      if (g.is_local_producer) return g;
       const hit = g.supplier_id ? byId[g.supplier_id] : null;
       if (!hit) return g;
       const cur = (g.supplier_name || '').trim();
@@ -1673,7 +1674,51 @@ export function DealHunterModal({
     setSavingDraft(true);
     try {
       let saved = 0;
+      let savedLocal = 0;
+      const { data: authData } = await supabase.auth.getUser();
+      const restaurantId = authData?.user?.id ?? null;
+      const accountKey = getAccountKey() || null;
+
       for (const g of groups) {
+        if (g.is_local_producer) {
+          if (!restaurantId || !accountKey || !g.supplier_id) {
+            continue;
+          }
+          const { data: order, error: orderErr } = await supabase
+            .from('producer_orders')
+            .insert({
+              producer_id: g.supplier_id,
+              restaurant_id: restaurantId,
+              restaurant_account_key: accountKey,
+              total_price: Number(g.subtotal_pln) || 0,
+              shipping_cost: Number(g.shipping_pln) || 0,
+              payment_status: 'pending',
+              shipment_status: 'draft',
+              notes: 'Szkic z Łowcy Okazji',
+            })
+            .select('id')
+            .single();
+          if (orderErr || !order) throw orderErr ?? new Error('Nie utworzono zamówienia lokalnego');
+          const rows = g.items
+            .map((it) => {
+              const productId = (it as { catalog_product_id?: string }).catalog_product_id;
+              if (!productId) return null;
+              return {
+                order_id: order.id,
+                product_id: productId,
+                quantity: Number(it.quantity) || 0,
+                unit_price: Number(it.unit_price_base) || 0,
+              };
+            })
+            .filter(Boolean);
+          if (rows.length) {
+            const { error: itemsErr } = await supabase.from('producer_order_items').insert(rows);
+            if (itemsErr) throw itemsErr;
+          }
+          savedLocal += 1;
+          continue;
+        }
+
         const { data: order, error: orderErr } = await supabase
           .from('supplier_orders')
           .insert({
@@ -1697,8 +1742,13 @@ export function DealHunterModal({
         saved += 1;
       }
       lastDraftFpRef.current = fp;
+      const parts: string[] = [];
+      if (saved) parts.push(`${saved} szkic(ów) u hurtowników (Dostawcy → Koszyk)`);
+      if (savedLocal) parts.push(`${savedLocal} szkic(ów) u lokalnych przetwórców`);
       setDraftSavedInfo(
-        `Utworzono ${saved} szkic(ów) zamówienia. Znajdziesz je w Dostawcach → Koszyk (status: draft).`,
+        parts.length
+          ? `Utworzono: ${parts.join(' · ')}.`
+          : 'Brak koszyków do zapisania.',
       );
     } catch (e: any) {
       premiumAlert('Błąd', e?.message ?? 'Nie udało się zapisać koszyka.');
@@ -2103,7 +2153,10 @@ export function DealHunterModal({
         </Text>
         {groups.length > 0 ? (
           <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 4 }]} testID="deal-hunter-suppliers-summary">
-            Od: {groups.map((g) => (g.supplier_name || '').trim() || 'Dostawca').join(' · ')}
+            Od: {groups.map((g) => {
+              const name = (g.supplier_name || '').trim() || 'Dostawca';
+              return g.is_local_producer ? `${name}` : name;
+            }).join(' · ')}
           </Text>
         ) : null}
         <Text style={styles.editCartHint}>
@@ -2132,17 +2185,27 @@ export function DealHunterModal({
               <View style={styles.groupHeader}>
                 <Truck size={16} color={C.accent} strokeWidth={2.2} />
                 <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={[styles.editCartHint, { marginBottom: 0 }]}>Zamówienie od</Text>
+                  <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
+                    {g.is_local_producer ? 'Lokalny przetwórca' : 'Zamówienie od'}
+                  </Text>
                   <Text style={styles.groupName} numberOfLines={2}>
                     {(g.supplier_name || '').trim() || 'Dostawca (uzupełnij nazwę)'}
                   </Text>
+                  {g.is_local_producer && g.local_producer_city ? (
+                    <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
+                      {g.local_producer_city}
+                      {g.local_producer_voivodeship ? ` · ${g.local_producer_voivodeship}` : ''}
+                    </Text>
+                  ) : null}
                 </View>
                 <Text style={styles.groupSub}>{formatPln(g.subtotal_pln)}</Text>
               </View>
               <Text style={[styles.editCartHint, { marginBottom: 6 }]}>
                 {g.supplier_email
                   ? `E-mail: ${g.supplier_email}`
-                  : 'Brak e-maila dostawcy — uzupełnij w module Dostawcy.'}
+                  : g.is_local_producer
+                    ? 'Brak e-maila lokalnego przetwórcy — skontaktuj się przez Dostawcy → Lokalni Przetwórcy.'
+                    : 'Brak e-maila dostawcy — uzupełnij w module Dostawcy.'}
               </Text>
               <MinOrderBadge meets={g.meets_minimum_order} minVal={g.min_order_value} />
               {g.items.map((it, idx) => (

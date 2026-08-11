@@ -27,6 +27,8 @@ export interface OfferItem {
   matched_name: string;
   line_total: number;
   base_dim: string;
+  is_local_producer?: boolean;
+  catalog_product_id?: string;
 }
 
 export interface SupplierGroup {
@@ -39,6 +41,11 @@ export interface SupplierGroup {
   meets_minimum_order?: boolean;
   shipping_pln?: number;
   total_pln?: number;
+  /** Marketplace B2B — Lokalni Przetwórcy (nie suppliers) */
+  is_local_producer?: boolean;
+  local_producer_city?: string | null;
+  local_producer_voivodeship?: string | null;
+  lead_time_days?: number;
 }
 
 export interface OptionAllOne {

@@ -177,6 +177,12 @@ def _enrich_group(g: dict, suppliers_meta: dict[str, dict]) -> dict:
     # Echo lead time: realna wartość z DB albo bezpieczny default (nie fałszujemy wiersza dostawcy)
     out["lead_time_days"] = resolve_lead_time_days(meta)
     out["lead_time_is_default"] = meta.get("lead_time_days") is None
+    if meta.get("is_local_producer"):
+        out["is_local_producer"] = True
+        if meta.get("city"):
+            out["local_producer_city"] = meta.get("city")
+        if meta.get("voivodeship"):
+            out["local_producer_voivodeship"] = meta.get("voivodeship")
     return out
 
 
@@ -506,7 +512,8 @@ def _fill_soft_gaps_min_delta(
 
 
 def _new_group(sid: str, quote: dict, suppliers_meta: dict[str, dict]) -> dict:
-    return {
+    meta = _supplier_meta(suppliers_meta, sid)
+    g = {
         "supplier_id": sid,
         "supplier_name": quote["supplier_name"],
         "supplier_email": quote.get("supplier_email"),
@@ -514,6 +521,9 @@ def _new_group(sid: str, quote: dict, suppliers_meta: dict[str, dict]) -> dict:
         "subtotal_pln": 0.0,
         "min_order_value": _min_order_value(suppliers_meta, sid),
     }
+    if quote.get("is_local_producer") or meta.get("is_local_producer"):
+        g["is_local_producer"] = True
+    return g
 
 
 def _add_line_to_groups(

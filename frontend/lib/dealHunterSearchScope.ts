@@ -16,13 +16,13 @@ export const DEAL_HUNTER_SEARCH_SCOPE_OPTIONS: {
   },
   {
     key: 'local_producers_only',
-    label: 'Tylko lokalni producenci',
-    hint: 'Marketplace Lokalni Przetwórcy',
+    label: 'Tylko lokalni dostawcy',
+    hint: 'Marketplace Lokalni Przetwórcy / dystrybutorzy',
   },
   {
     key: 'both',
-    label: 'Hurtownicy i lokalni',
-    hint: 'Oba źródła naraz',
+    label: 'Hurtownicy i lokalni dostawcy',
+    hint: 'Porównaj obie bazy naraz',
   },
 ];
 

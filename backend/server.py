@@ -7991,6 +7991,88 @@ def _catalog_pack_base_qty(row: dict, base_dim: str) -> float:
     return 1.0
 
 
+def _catalog_available_base_qty(row: dict, base_dim: str) -> Optional[float]:
+    """Max. dostępna ilość oferty w jednostce bazowej (kg/l/szt).
+
+    Dla hurtowników (brak stocku w katalogu) → None (= bez limitu).
+    Dla lokalnych dostawców `available_stock` / `stock` jest w jednostce produktu.
+    """
+    raw = row.get("available_stock")
+    if raw is None:
+        raw = row.get("stock")
+    if raw is None:
+        return None
+    try:
+        stock = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if stock <= 0:
+        return 0.0
+
+    unit_raw = (row.get("unit") or "szt").strip() or "szt"
+    stock_dim, stock_factor = _norm_unit(unit_raw)
+    stock_in_unit_dim = stock * stock_factor
+
+    try:
+        kg_pack = float(row.get("kg_total") or 0)
+    except (TypeError, ValueError):
+        kg_pack = 0.0
+    try:
+        l_pack = float(row.get("liters_total") or 0)
+    except (TypeError, ValueError):
+        l_pack = 0.0
+
+    if base_dim == stock_dim:
+        return round(stock_in_unit_dim, 6)
+    # Opakowania sztukowe z wagą/objętością → przelicz na kg/l
+    if base_dim == "kg" and kg_pack > 0 and stock_dim == "szt":
+        return round(stock * kg_pack, 6)
+    if base_dim == "l" and l_pack > 0 and stock_dim == "szt":
+        return round(stock * l_pack, 6)
+    if base_dim == "szt" and stock_dim == "szt":
+        return round(stock, 6)
+    # Brak bezpiecznej konwersji — traktuj stock jako już w base_dim (np. unit=kg)
+    if stock_dim in ("kg", "l", "szt") and base_dim in ("kg", "l", "szt"):
+        return None
+    return round(stock_in_unit_dim, 6)
+
+
+def _cap_order_qty_to_available_stock(
+    order_base: float,
+    pack: float,
+    row: dict,
+    base_dim: str,
+) -> Tuple[float, bool]:
+    """Ogranicza ilość zamówienia do stocku lokalnego dostawcy.
+
+    Przykład: potrzeba 5 kg, stock 3 kg → zamów 3 kg (nawet poniżej pasma ±10%).
+    Zwraca (qty, stock_capped).
+    """
+    import math
+
+    avail = _catalog_available_base_qty(row, base_dim)
+    if avail is None:
+        return float(order_base or 0), False
+    if avail <= 0:
+        return 0.0, True
+
+    qty = float(order_base or 0)
+    if qty <= avail + 1e-9:
+        return qty, False
+
+    pack_v = float(pack or 0) or 0.0
+    # Ciągłe / jednostkowe (kg luzem, litry) — utnij do stocku
+    if pack_v <= 1.0001:
+        return round(avail, 4), True
+
+    # Pełne opakowania mieszczące się w stocku
+    n = int(math.floor(avail / pack_v + 1e-9))
+    if n >= 1:
+        return round(n * pack_v, 4), True
+    # Stock mniejszy niż 1 opakowanie, ale > 0 — sprzedaj dostępne (np. 0.5 kg z worka 1 kg)
+    return round(avail, 4), True
+
+
 def _qty_in_band(target: float, lo: float, hi: float, pack: float) -> Tuple[float, bool]:
     """Dobiera ilość w paśmie [lo, hi] (±10% wokół targetu), preferując pełne opakowania.
 
@@ -8253,9 +8335,12 @@ async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
 
 def _normalize_deal_hunter_search_scope(raw: Optional[str]) -> str:
     v = (raw or "suppliers_only").strip().lower()
-    if v in ("local_producers_only", "local", "producers", "lokalni", "lp"):
+    if v in (
+        "local_producers_only", "local", "producers", "lokalni", "lp",
+        "local_suppliers", "dostawcy", "dystrybutorzy", "lokalni_dostawcy",
+    ):
         return "local_producers_only"
-    if v in ("both", "all", "wszystkie", "oba"):
+    if v in ("both", "all", "wszystkie", "oba", "compare", "porownaj"):
         return "both"
     return "suppliers_only"
 
@@ -8381,19 +8466,24 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
         title = (row.get("title") or "").strip()
         if not title:
             continue
+        unit_raw = (row.get("unit") or "szt").strip() or "szt"
+        unit_dim, _ = _norm_unit(unit_raw)
+        # weight_g → kg_total tylko dla produktów sztukowych (opakowanie),
+        # nie dla towaru sprzedawanego luzem w kg/l (tam stock = dostępne kg/l).
         kg_total = None
-        try:
-            wg = float(row.get("weight_g") or 0)
-            if wg > 0:
-                kg_total = round(wg / 1000.0, 6)
-        except (TypeError, ValueError):
-            kg_total = None
+        if unit_dim == "szt":
+            try:
+                wg = float(row.get("weight_g") or 0)
+                if wg > 0:
+                    kg_total = round(wg / 1000.0, 6)
+            except (TypeError, ValueError):
+                kg_total = None
         entry = {
             "id": str(row.get("id")),
             "supplier_id": pid,
             "name": title,
             "variant": (row.get("description") or "")[:80] or None,
-            "unit": (row.get("unit") or "szt").strip() or "szt",
+            "unit": unit_raw,
             "price_pln": price,
             "liters_total": None,
             "unit_count": 1,
@@ -8401,6 +8491,9 @@ async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
             "is_local_producer": True,
             "producer_product_id": str(row.get("id")),
             "source": "local_producer",
+            # Dostępny stan w jednostce produktu — Łowca ucina zamówienie do stocku
+            "available_stock": stock,
+            "stock": stock,
         }
         if kg_total:
             entry["kg_total"] = kg_total
@@ -9366,10 +9459,19 @@ async def compare_offers(req: CompareOffersRequest):
 
         def _consider(bbs: dict, row: dict, price_base: float, base_dim: str,
                       order_base_qty: float, target_base_qty: float, via: str,
-                      pack_base_qty: float = 0.0, band_hi_base: float = 0.0) -> None:
+                      pack_base_qty: float = 0.0, band_hi_base: float = 0.0,
+                      stock_capped: bool = False) -> None:
             sid = row.get("supplier_id")
             if not sid:
                 return
+            # Lokalny dostawca: nigdy nie zamawiaj więcej niż ma na stanie
+            capped_qty, did_cap = _cap_order_qty_to_available_stock(
+                order_base_qty, pack_base_qty, row, base_dim,
+            )
+            if capped_qty <= 0:
+                return
+            stock_capped = bool(stock_capped or did_cap)
+            order_base_qty = capped_qty
             line_total = round(price_base * order_base_qty, 2)
             prev = bbs.get(sid)
             # Tańsza linia wygrywa; przy remisie — ilość bliżej targetu
@@ -9406,6 +9508,11 @@ async def compare_offers(req: CompareOffersRequest):
                     "pack_base_qty": round(float(pack_base_qty or 0), 4),
                     "band_hi_base": round(float(band_hi_base or 0), 4),
                 }
+                if stock_capped:
+                    entry["stock_capped"] = True
+                    avail = _catalog_available_base_qty(row, base_dim)
+                    if avail is not None:
+                        entry["available_stock_base"] = round(float(avail), 4)
                 if is_lp:
                     entry["is_local_producer"] = True
                     if row.get("producer_product_id") or row.get("id"):
@@ -9496,8 +9603,13 @@ async def compare_offers(req: CompareOffersRequest):
                     order_base, adjusted = _qty_in_band(
                         target_in_dim, lo_in_dim, hi_in_dim, pack,
                     )
+                order_base, stock_capped = _cap_order_qty_to_available_stock(
+                    order_base, pack, row, base_dim,
+                )
                 if order_base <= 0:
                     continue
+                if stock_capped:
+                    adjusted = True
                 if adjusted:
                     item_pack_adjusted = True
                     match_dim_used = base_dim
@@ -9511,7 +9623,8 @@ async def compare_offers(req: CompareOffersRequest):
                 if _strict_local_catalog_accept(primary_names, row_name):
                     _consider(best_by_supplier, row, price_base, base_dim,
                               order_base, target_in_dim, "fuzzy",
-                              pack_base_qty=pack, band_hi_base=hi_in_dim)
+                              pack_base_qty=pack, band_hi_base=hi_in_dim,
+                              stock_capped=stock_capped)
                     cid = str(row.get("id") or "")
                     if cid:
                         accepted_catalog_ids.add(cid)
@@ -9538,7 +9651,7 @@ async def compare_offers(req: CompareOffersRequest):
                     or food_ok
                 ):
                     ai_pool.append(
-                        (score, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, sim)
+                        (score, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, sim, stock_capped)
                     )
 
             # Agent OpenAI: przeszukaj REALNE oferty z katalogów dostawców
@@ -9562,13 +9675,13 @@ async def compare_offers(req: CompareOffersRequest):
                 # Top kandydaci spoza już zaakceptowanych id
                 agent_candidates: list[dict] = []
                 by_id: dict[str, tuple] = {}
-                for score, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, sim in ai_pool:
+                for score, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, sim, stock_capped in ai_pool:
                     cid = str(row.get("id") or "")
                     if not cid or cid in accepted_catalog_ids:
                         continue
                     if cid in by_id:
                         continue
-                    by_id[cid] = (row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim)
+                    by_id[cid] = (row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, stock_capped)
                     sup = sup_by_id.get(row.get("supplier_id"), {})
                     agent_candidates.append({
                         "id": cid,
@@ -9590,13 +9703,14 @@ async def compare_offers(req: CompareOffersRequest):
                         slot = by_id.get(cid)
                         if not slot:
                             continue
-                        row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim = slot
+                        row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, stock_capped = slot
                         # Agent AI już potwierdził (conf ≥ AI_SYNONYM_CONF_MIN) —
                         # nie odrzucaj batat/bataty ani filet↔kurczak filet drugim filtrem.
                         row_name = row.get("name") or ""
                         _consider(best_by_supplier, row, price_base, base_dim,
                                   order_base, target_in_dim, "ai",
-                                  pack_base_qty=pack, band_hi_base=hi_in_dim)
+                                  pack_base_qty=pack, band_hi_base=hi_in_dim,
+                                  stock_capped=stock_capped)
                         accepted_catalog_ids.add(cid)
                         if inv_id and conf >= AI_SYNONYM_CONF_MIN:
                             syn_slot = synonym_additions.setdefault(
@@ -9642,19 +9756,24 @@ async def compare_offers(req: CompareOffersRequest):
                         target_in_dim = float(req_base_qty)
                     pack = _catalog_pack_base_qty(row, base_dim)
                     order_base = max(float(pack or 0), float(target_in_dim), 1.0)
+                    order_base, stock_capped = _cap_order_qty_to_available_stock(
+                        order_base, pack, row, base_dim,
+                    )
+                    if order_base <= 0:
+                        continue
                     wide.append(
-                        (sim, row, base_dim, price_base, order_base, pack, target_in_dim, target_in_dim * 1.1, sim)
+                        (sim, row, base_dim, price_base, order_base, pack, target_in_dim, target_in_dim * 1.1, sim, stock_capped)
                     )
                 wide.sort(key=lambda t: t[0], reverse=True)
                 if wide:
                     ai_item_budget -= 1
                     agent_candidates = []
                     by_id = {}
-                    for sim, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, _s in wide:
+                    for sim, row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, _s, stock_capped in wide:
                         cid = str(row.get("id") or "")
                         if cid in by_id:
                             continue
-                        by_id[cid] = (row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim)
+                        by_id[cid] = (row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, stock_capped)
                         sup = sup_by_id.get(row.get("supplier_id"), {})
                         agent_candidates.append({
                             "id": cid,
@@ -9674,10 +9793,11 @@ async def compare_offers(req: CompareOffersRequest):
                         slot = by_id.get(cid)
                         if not slot:
                             continue
-                        row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim = slot
+                        row, base_dim, price_base, order_base, pack, target_in_dim, hi_in_dim, stock_capped = slot
                         _consider(best_by_supplier, row, price_base, base_dim,
                                   order_base, target_in_dim, "ai",
-                                  pack_base_qty=pack, band_hi_base=hi_in_dim)
+                                  pack_base_qty=pack, band_hi_base=hi_in_dim,
+                                  stock_capped=stock_capped)
                         if inv_id and conf >= AI_SYNONYM_CONF_MIN:
                             syn_slot = synonym_additions.setdefault(
                                 inv_id, {"existing": existing_syn, "new": set()})
@@ -9838,6 +9958,8 @@ class CriticalOrderRequest(BaseModel):
     categories: list[str] = Field(default_factory=lambda: ["all"])
     restaurant_name: Optional[str] = None
     force_refresh: bool = False
+    # suppliers_only | local_producers_only | both
+    search_scope: Optional[str] = "suppliers_only"
 
 
 @app.post("/api/optimizer/critical-order")
@@ -9886,7 +10008,7 @@ async def optimizer_critical_order(req: CriticalOrderRequest):
             for c in critical
         ],
         restaurant_name=req.restaurant_name,
-        search_scope=getattr(req, 'search_scope', None) or 'suppliers_only',
+        search_scope=req.search_scope,
     )
     try:
         compare_result = await compare_offers(compare_req)

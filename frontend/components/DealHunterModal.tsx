@@ -1807,9 +1807,9 @@ export function DealHunterModal({
       if (!normalized.best_option && !normalized.option_optimized?.suppliers?.length) {
         setError(
           searchScope === 'local_producers_only'
-            ? 'Nie znaleziono tego produktu u lokalnych producentów.'
+            ? 'Nie znaleziono tego produktu u lokalnych dostawców.'
             : searchScope === 'both'
-              ? 'Nie znaleziono tego produktu u hurtowników ani lokalnych producentów.'
+              ? 'Nie znaleziono tego produktu u hurtowników ani lokalnych dostawców.'
               : 'Nie znaleziono tego produktu w katalogu dostawców.',
         );
       }

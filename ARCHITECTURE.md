@@ -20,6 +20,12 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-12 — `insufficient_capabilities_for_transfer` → komunikat dla restauratora
+
+- Checkout wymaga `transfers=active` (nie `pending`); Restricted → HTTP 400 z PL komunikatem.
+- `Account.create` wymusza `capabilities.card_payments/transfers.requested=true` (+ refresh po create).
+- Mapowanie błędu Stripe `insufficient_capabilities_for_transfer` (bez retry BLIK).
+
 ### 2026-08-12 — Fix Stripe 400 przy zamówieniu od lokalnych (Connect)
 
 - Istniejące `acct_...` dostają `Account.update` z `card_payments` + `transfers`

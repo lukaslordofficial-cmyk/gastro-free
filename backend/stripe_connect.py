@@ -17,6 +17,33 @@ from billing_stripe import STRIPE_API, _secret, _ssl_verify, _stripe_post, strip
 
 logger = logging.getLogger("stripe.connect")
 
+# Capabilities wymagane przy Account.create / Account.update (destination charges).
+EXPRESS_REQUESTED_CAPABILITIES: dict[str, dict[str, bool]] = {
+    "card_payments": {"requested": True},
+    "transfers": {"requested": True},
+}
+
+RESTAURATEUR_DISTRIBUTOR_INACTIVE_PL = (
+    "Wybrany lokalny dystrybutor nie ma jeszcze w pełni aktywnego konta Stripe Connect "
+    "(status Restricted / brak aktywnego `transfers`). "
+    "Nie możesz teraz opłacić tego zamówienia. "
+    "Poproś dystrybutora o dokończenie onboardingu Connect w panelu WWW "
+    "albo wybierz innego dostawcę."
+)
+
+
+def distributor_inactive_message(*, account_id: str = "", detail: str = "") -> str:
+    """Komunikat dla restauratora — bez żargonu Stripe API."""
+    base = RESTAURATEUR_DISTRIBUTOR_INACTIVE_PL
+    acct = (account_id or "").strip()
+    extra = (detail or "").strip()
+    bits = [base]
+    if acct.startswith("acct_"):
+        bits.append(f"(konto: {acct})")
+    if extra and "insufficient_capabilities" not in extra.lower():
+        bits.append(extra[:160])
+    return " ".join(bits)
+
 
 def _public_base() -> str:
     return (
@@ -54,8 +81,10 @@ async def _stripe_get(path: str) -> dict[str, Any]:
         r = await client.get(f"{STRIPE_API}{path}", headers=headers)
         payload = r.json()
         if r.status_code >= 400:
-            msg = payload.get("error", {}).get("message") or r.text[:300]
-            raise RuntimeError(f"Stripe API {r.status_code}: {msg}")
+            err = payload.get("error") or {}
+            msg = err.get("message") or r.text[:300]
+            code = err.get("code") or ""
+            raise RuntimeError(f"Stripe API {r.status_code}: {code + ': ' if code else ''}{msg}")
         return payload
 
 
@@ -72,19 +101,14 @@ async def ensure_express_capabilities(account_id: str) -> dict[str, Any]:
     Dopina capabilities na istniejącym Express (Account.update).
 
     Konta utworzone wcześniej bez card_payments/transfers dają przy Checkout
-    destination charge błąd 400 o legacy_payments / card_payments / transfers.
+    destination charge błąd insufficient_capabilities_for_transfer.
     """
     acct = (account_id or "").strip()
     if not acct.startswith("acct_"):
         raise ValueError("Nieprawidłowy stripe_connect_id (oczekiwane acct_...)")
     return await _stripe_post(
         f"/accounts/{acct}",
-        {
-            "capabilities": {
-                "card_payments": {"requested": True},
-                "transfers": {"requested": True},
-            },
-        },
+        {"capabilities": EXPRESS_REQUESTED_CAPABILITIES},
     )
 
 
@@ -96,10 +120,21 @@ def _capability_status(account: dict[str, Any], name: str) -> str:
     return str(raw or "").lower()
 
 
+def _account_looks_restricted(account: dict[str, Any]) -> bool:
+    """Restricted / disabled w Dashboard → destination charge zwykle pada."""
+    req = account.get("requirements") or {}
+    disabled = str(req.get("disabled_reason") or "").strip().lower()
+    if disabled:
+        return True
+    # Stripe czasem zwraca past_due / currently_due pełne listy przy Restricted
+    if req.get("disabled_reason"):
+        return True
+    return False
+
+
 async def assert_destination_charge_ready(account_id: str) -> dict[str, Any]:
     """
-    Przed Checkout: upewnij się, że Connect ma transfers (destination charges).
-    Gdy brak — request capabilities; gdy nadal nieaktywne — czytelny błąd PL.
+    Przed Checkout: ``transfers`` musi być **active** (pending/Restricted = błąd 400).
     """
     acct = (account_id or "").strip()
     if not acct.startswith("acct_"):
@@ -118,20 +153,22 @@ async def assert_destination_charge_ready(account_id: str) -> dict[str, Any]:
     card_payments = _capability_status(account, "card_payments")
     charges_enabled = bool(account.get("charges_enabled"))
     details_submitted = bool(account.get("details_submitted"))
+    restricted = _account_looks_restricted(account)
+    disabled_reason = str((account.get("requirements") or {}).get("disabled_reason") or "")
 
-    if transfers not in ("active", "pending"):
+    if restricted or transfers != "active":
         raise ValueError(
-            "Konto Connect dystrybutora nie ma capability `transfers` "
-            f"(status={transfers or 'brak'}). W Stripe Dashboard → Connect → konto "
-            f"{acct} dokończ onboarding / włącz Transfers. "
-            "Bez tego destination charge kończy się Stripe API 400."
+            distributor_inactive_message(
+                account_id=acct,
+                detail=(
+                    f"transfers={transfers or 'brak'}; "
+                    f"card_payments={card_payments or 'brak'}; "
+                    f"disabled_reason={disabled_reason or '—'}; "
+                    f"details_submitted={details_submitted}"
+                ),
+            )
         )
-    if transfers == "pending" and not details_submitted:
-        raise ValueError(
-            "Dystrybutor nie dokończył onboardingu Stripe Connect "
-            f"({acct}). Poproś o ponowne otwarcie linku onboardingowego."
-        )
-    # Test mode często ma transfers=active zanim charges_enabled=true — nie blokuj na charges.
+
     return {
         "account_id": acct,
         "transfers": transfers,
@@ -139,6 +176,7 @@ async def assert_destination_charge_ready(account_id: str) -> dict[str, Any]:
         "charges_enabled": charges_enabled,
         "details_submitted": details_submitted,
         "payouts_enabled": bool(account.get("payouts_enabled")),
+        "restricted": False,
     }
 
 
@@ -147,7 +185,10 @@ async def create_express_account(
     producer: dict[str, Any],
     email: Optional[str] = None,
 ) -> dict[str, Any]:
-    """stripe.accounts.create — type=express, country=PL."""
+    """
+    stripe.Account.create — Express PL z wymuszonymi capabilities:
+    ``card_payments`` + ``transfers`` (requested=True).
+    """
     if not stripe_configured():
         raise RuntimeError("Brak STRIPE_SECRET_KEY")
 
@@ -160,19 +201,18 @@ async def create_express_account(
             logger.warning("capabilities refresh for %s: %s", existing, e)
         return {"id": existing, "existing": True}
 
+    # Wymuszamy capabilities już przy CREATE (nie dopiero w update).
     payload: dict[str, Any] = {
         "type": "express",
         "country": "PL",
-        "capabilities": {
-            "card_payments": {"requested": True},
-            "transfers": {"requested": True},
-        },
+        "capabilities": dict(EXPRESS_REQUESTED_CAPABILITIES),
         "business_type": "company",
         "metadata": {
             "producer_id": str(producer.get("id") or ""),
             "kind": "local_producer_connect",
         },
     }
+
     mail = (email or producer.get("email") or "").strip()
     if mail:
         payload["email"] = mail
@@ -185,7 +225,26 @@ async def create_express_account(
         payload,
         idempotency_key=f"lp_connect_acct_{producer.get('id')}",
     )
+    acct_id = str(account.get("id") or "")
+    # Po create — natychmiast upewnij się, że requested capabilities są na koncie
+    if acct_id.startswith("acct_"):
+        try:
+            account = await ensure_express_capabilities(acct_id)
+        except Exception as e:
+            logger.warning("post-create capabilities for %s: %s", acct_id, e)
     return account
+
+
+def is_insufficient_capabilities_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "insufficient_capabilities_for_transfer" in text
+        or "legacy_payments" in text
+        or (
+            "destination account needs to have" in text
+            and "transfers" in text
+        )
+    )
 
 
 async def create_account_onboarding_link(

@@ -47,6 +47,33 @@ def test_capability_status_string_and_dict():
     assert _capability_status({}, "transfers") == ""
 
 
+def test_insufficient_capabilities_error_detect():
+    from stripe_connect import is_insufficient_capabilities_error, distributor_inactive_message
+
+    assert is_insufficient_capabilities_error(
+        RuntimeError(
+            "Your destination account needs to have at least one of the following "
+            "capabilities enabled: transfers, crypto_transfers, or legacy_payments."
+        )
+    )
+    assert is_insufficient_capabilities_error(
+        RuntimeError("insufficient_capabilities_for_transfer")
+    )
+    assert not is_insufficient_capabilities_error(RuntimeError("card declined"))
+    msg = distributor_inactive_message(account_id="acct_123")
+    assert "dystrybutor" in msg.lower()
+    assert "acct_123" in msg
+
+
+def test_account_looks_restricted():
+    from stripe_connect import _account_looks_restricted
+
+    assert _account_looks_restricted({
+        "requirements": {"disabled_reason": "requirements.past_due"},
+    })
+    assert not _account_looks_restricted({"requirements": {}})
+
+
 def test_pln_to_grosze_rounding():
     assert _pln_to_grosze(12.34) == 1234
     assert _pln_to_grosze(10.01) == 1001

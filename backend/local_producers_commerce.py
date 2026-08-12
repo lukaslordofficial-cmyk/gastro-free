@@ -184,8 +184,13 @@ async def create_producer_order_checkout(
             },
         })
 
-    # Marketplace: Destination Charge — wymagany Stripe Connect Express + transfers.
-    from stripe_connect import assert_destination_charge_ready, producer_connect_id
+    # Marketplace: Destination Charge — wymagany Stripe Connect Express + transfers=active.
+    from stripe_connect import (
+        assert_destination_charge_ready,
+        distributor_inactive_message,
+        is_insufficient_capabilities_error,
+        producer_connect_id,
+    )
 
     connect_acct = producer_connect_id(producer)
     if not connect_acct.startswith("acct_"):
@@ -196,7 +201,17 @@ async def create_producer_order_checkout(
     if prod_g <= 0:
         raise ValueError("Kwota produktów musi być > 0")
 
-    ready = await assert_destination_charge_ready(connect_acct)
+    try:
+        ready = await assert_destination_charge_ready(connect_acct)
+    except ValueError:
+        raise
+    except Exception as e:
+        if is_insufficient_capabilities_error(e):
+            raise ValueError(
+                distributor_inactive_message(account_id=connect_acct, detail=str(e)[:120])
+            ) from e
+        raise
+
     logger.info(
         "LP checkout Connect ready acct=%s transfers=%s card_payments=%s",
         ready.get("account_id"),
@@ -204,9 +219,6 @@ async def create_producer_order_checkout(
         ready.get("card_payments"),
     )
 
-    # Standard marketplace: application_fee = kurier + 5% platformy;
-    # reszta charge (produkty) idzie na Connect przez transfer_data.destination.
-    # (Bez transfer_data.amount — mniej błędów walidacji Stripe.)
     split_mode = "destination"
     application_fee = fee_g + del_g
 
@@ -225,17 +237,12 @@ async def create_producer_order_checkout(
 
     payment_intent_data: dict[str, Any] = {
         "metadata": meta,
-        "transfer_data": {
-            "destination": connect_acct,
-        },
+        "transfer_data": {"destination": connect_acct},
     }
     if application_fee > 0:
         payment_intent_data["application_fee_amount"] = application_fee
 
-    # Destination charge: karta zawsze; BLIK tylko gdy platforma ma blik_payments.
-    # Wiele sandboxów Connect pada 400 przy BLIK + transfer — wtedy retry card-only poniżej.
     payment_methods = ["card", "blik"]
-
     payload: dict[str, Any] = {
         "mode": "payment",
         "success_url": success_url,
@@ -255,28 +262,29 @@ async def create_producer_order_checkout(
             "/checkout/sessions", payload, idempotency_key=idempotency_key,
         )
     except RuntimeError as e:
+        if is_insufficient_capabilities_error(e):
+            raise ValueError(
+                distributor_inactive_message(account_id=connect_acct, detail=str(e)[:120])
+            ) from e
         msg = str(e)
-        # Retry bez BLIK gdy Connect / capability nie wspiera tej metody
-        blik_related = any(
-            x in msg.lower()
-            for x in (
-                "blik",
-                "payment_method_types",
-                "legacy_payments",
-                "card_payments",
-                "transfers",
-                "capability",
-            )
-        )
+        blik_related = "blik" in msg.lower() or "payment_method_types" in msg.lower()
         if blik_related and "blik" in payment_methods:
             logger.warning("LP Checkout retry card-only after Stripe error: %s", msg[:240])
             payload = dict(payload)
             payload["payment_method_types"] = ["card"]
-            # Nowa idempotency — Stripe nie pozwala zmienić body przy tym samym kluczu
             retry_key = f"{idempotency_key}_card" if idempotency_key else None
-            session = await _stripe_post(
-                "/checkout/sessions", payload, idempotency_key=retry_key,
-            )
+            try:
+                session = await _stripe_post(
+                    "/checkout/sessions", payload, idempotency_key=retry_key,
+                )
+            except RuntimeError as e2:
+                if is_insufficient_capabilities_error(e2):
+                    raise ValueError(
+                        distributor_inactive_message(
+                            account_id=connect_acct, detail=str(e2)[:120],
+                        )
+                    ) from e2
+                raise
         else:
             raise
     return {
@@ -296,6 +304,7 @@ async def create_producer_order_checkout(
         },
         "connect_ready": ready,
     }
+
 
 
 async def mark_producer_order_paid(

@@ -15367,19 +15367,24 @@ async def local_producers_checkout(req: LpCheckoutRequest):
                 idempotency_key=req.idempotency_key or str(uuid.uuid4()),
             )
         except ValueError as e:
+            # 400 — czytelny komunikat dla restauratora (konto dystrybutora nieaktywne itd.)
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             logger.exception("LP checkout failed")
-            detail = str(e)[:400]
-            low = detail.lower()
-            if any(x in low for x in ("transfers", "card_payments", "legacy_payments", "capability")):
-                detail = (
-                    f"{detail} — Konto Connect dystrybutora musi mieć aktywne "
-                    "`transfers` (i zwykle `card_payments`). W Stripe Dashboard: "
-                    "Connect → Accounts → wybierz acct_... → Capabilities / "
-                    "dokończ onboarding Express."
+            from stripe_connect import (
+                distributor_inactive_message,
+                is_insufficient_capabilities_error,
+                producer_connect_id,
+            )
+            if is_insufficient_capabilities_error(e):
+                raise HTTPException(
+                    status_code=400,
+                    detail=distributor_inactive_message(
+                        account_id=producer_connect_id(producer),
+                        detail=str(e)[:120],
+                    ),
                 )
-            raise HTTPException(status_code=502, detail=detail)
+            raise HTTPException(status_code=502, detail=str(e)[:400])
 
         # Zapisz session id w notes (best-effort) — kolumna payment_intent po opłaceniu
         try:

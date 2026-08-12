@@ -15459,7 +15459,7 @@ async def local_producers_billing_return(
 <style>
 body{{font-family:system-ui,sans-serif;background:#0A120E;color:#F5F5F5;
 display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:24px;text-align:center}}
-a{{color:#00FF88;font-weight:700}}
+a{{color:#00FF88;font-weight:700;display:inline-block;margin:8px}}
 p{{opacity:.75;line-height:1.45}}
 </style></head><body>
 <div>
@@ -15467,7 +15467,13 @@ p{{opacity:.75;line-height:1.45}}
 <p>{escape(hint)}</p>
 <p style="margin-top:20px"><a href="{safe_deep}">Otwórz aplikację</a></p>
 </div>
-<script>try{{window.location.replace({json.dumps(deep)});}}catch(e){{}}</script>
+<script>
+(function(){{
+  var deep = {json.dumps(deep)};
+  try {{ window.location.replace(deep); }} catch (e) {{}}
+  setTimeout(function(){{ try {{ window.location.href = deep; }} catch (e) {{}} }}, 250);
+}})();
+</script>
 </body></html>"""
     return HTMLResponse(content=html)
 
@@ -15495,6 +15501,8 @@ async def local_producers_confirm_payment(req: LpConfirmRequest):
             sb_get=sb_get,
             sb_patch=sb_patch,
             sb_post=sb_post,
+            # Szybka odpowiedź do apki — kurier/SMS w tle.
+            defer_fulfillment=True,
         )
     if result.get("paid"):
         result["message"] = (

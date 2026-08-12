@@ -24,6 +24,11 @@ import {
 } from '@/types/localProducers';
 import { formatPlnNumber } from '@/lib/format';
 import { SettlementDocumentsSection } from '@/components/localProducers/SettlementDocumentsSection';
+import {
+  deliverySummaryLabelPl,
+  paymentStatusLabelPl,
+  shipmentStatusLabelPl,
+} from '@/lib/localProducers/orderStatusLabels';
 
 const DS_NEON = '#00FF88';
 
@@ -32,16 +37,6 @@ const SUB_TABS: { key: DeliveryBucket; label: string }[] = [
   { key: 'in_transit', label: 'W drodze' },
   { key: 'delivered', label: 'Doręczone' },
 ];
-
-function statusLabel(order: ProducerOrderWithProducer): string {
-  const pay = String(order.payment_status || '').toLowerCase();
-  const ship = String(order.shipment_status || '').toLowerCase();
-  if (pay !== 'paid') return 'Oczekuje na płatność';
-  if (ship === 'delivered') return 'Doręczone';
-  if (ship === 'shipped') return 'Kurier w drodze';
-  if (ship === 'preparing' || ship === 'confirmed') return 'Przygotowywane u przetwórcy';
-  return 'Oczekujące';
-}
 
 function OrderCard({
   order,
@@ -78,9 +73,14 @@ function OrderCard({
         {company}
       </Text>
       <Text style={[styles.meta, { color: muted }]}>
-        {statusLabel(order)}
+        {deliverySummaryLabelPl(order)}
         {' · '}
         {formatPlnNumber(Number(order.total_price) || 0)} zł
+      </Text>
+      <Text style={[styles.meta, { color: muted }]}>
+        Płatność: {paymentStatusLabelPl(order.payment_status)}
+        {' · '}
+        Wysyłka: {shipmentStatusLabelPl(order.shipment_status)}
       </Text>
       <Text style={[styles.meta, { color: muted }]}>Złożono: {created}</Text>
       <Text style={[styles.meta, { color: muted }]}>

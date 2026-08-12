@@ -674,8 +674,13 @@ async def apply_paid_producer_checkout_session(
     sb_get,
     sb_patch,
     sb_post=None,
+    defer_fulfillment: bool = False,
 ) -> dict[str, Any]:
-    """Obsługa opłaconej sesji Checkout (confirm-session lub webhook)."""
+    """Obsługa opłaconej sesji Checkout (confirm-session lub webhook).
+
+    ``defer_fulfillment=True`` — po oznaczeniu paid od razu wraca do apki;
+    Furgonetka + e-mail/SMS lecą w tle (szybszy komunikat „Opłacono”).
+    """
     meta = dict(session.get("metadata") or {})
     if meta.get("kind") != "local_producer_order":
         return {"ok": False, "paid": False, "reason": "not_lp_order"}
@@ -716,52 +721,70 @@ async def apply_paid_producer_checkout_session(
         )
         producer = (prod_rows or [{}])[0]
         account_key = meta.get("account_key") or order.get("restaurant_account_key")
-        receiver = await _resolve_receiver(
-            client=client,
-            sb_get=sb_get,
-            order=order,
-            account_key=account_key,
-        )
-        try:
-            # Broker Furgonetka (InPost Kurier) — prepaid skarbonka, bez umowy ShipX.
-            from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
 
-            if furgonetka_configured():
-                shipment = await create_furgonetka_shipment(
-                    str(order.get("id") or order_id),
-                    client=client,
+        async def _run_fulfillment(http: httpx.AsyncClient) -> tuple[Any, Any]:
+            receiver = await _resolve_receiver(
+                client=http,
+                sb_get=sb_get,
+                order=order,
+                account_key=account_key,
+            )
+            ship_res = None
+            notify_res = None
+            try:
+                from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
+
+                if furgonetka_configured():
+                    ship_res = await create_furgonetka_shipment(
+                        str(order.get("id") or order_id),
+                        client=http,
+                        sb_get=sb_get,
+                        sb_patch=sb_patch,
+                    )
+                else:
+                    ship_res = await create_inpost_shipment(
+                        client=http,
+                        sb_get=sb_get,
+                        sb_patch=sb_patch,
+                        order=order,
+                        producer=producer,
+                        receiver=receiver,
+                    )
+            except Exception as e:
+                logger.exception("Courier broker after pay failed")
+                ship_res = {"ok": False, "error": str(e)[:300]}
+
+            try:
+                from lp_paid_notifications import notify_distributor_order_paid
+
+                notify_res = await notify_distributor_order_paid(
+                    client=http,
                     sb_get=sb_get,
                     sb_patch=sb_patch,
-                )
-            else:
-                # Fallback legacy ShipX tylko gdy brak Furgonetki, a jest token InPost.
-                shipment = await create_inpost_shipment(
-                    client=client,
-                    sb_get=sb_get,
-                    sb_patch=sb_patch,
+                    sb_post=sb_post,
                     order=order,
                     producer=producer,
-                    receiver=receiver,
                 )
-        except Exception as e:
-            logger.exception("Courier broker after pay failed")
-            shipment = {"ok": False, "error": str(e)[:300]}
+            except Exception as e:
+                logger.exception("LP paid notify failed")
+                notify_res = {"ok": False, "error": str(e)[:300]}
+            return ship_res, notify_res
 
-        # E-mail (Resend) + SMS (SMSAPI) do dystrybutora — jak WWW order-fulfillment.
-        try:
-            from lp_paid_notifications import notify_distributor_order_paid
+        if defer_fulfillment:
+            import asyncio
 
-            notify = await notify_distributor_order_paid(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                sb_post=sb_post,
-                order=order,
-                producer=producer,
-            )
-        except Exception as e:
-            logger.exception("LP paid notify failed")
-            notify = {"ok": False, "error": str(e)[:300]}
+            async def _bg() -> None:
+                try:
+                    async with httpx.AsyncClient(timeout=90.0) as bg_client:
+                        await _run_fulfillment(bg_client)
+                except Exception:
+                    logger.exception("LP deferred fulfillment crashed")
+
+            asyncio.create_task(_bg())
+            shipment = {"ok": True, "deferred": True}
+            notify = {"ok": True, "deferred": True}
+        else:
+            shipment, notify = await _run_fulfillment(client)
 
     return {
         "ok": True,

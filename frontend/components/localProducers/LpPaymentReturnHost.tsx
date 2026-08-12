@@ -1,6 +1,5 @@
 /**
- * Po Stripe Checkout (BLIK/karta): deep link myapp://lp/success + AppState →
- * auto-confirm i komunikat „Opłacono”.
+ * Po Stripe Checkout (BLIK/karta): deep link → od razu „Opłacono”, confirm w tle.
  */
 import { useEffect, useRef } from 'react';
 import * as Linking from 'expo-linking';
@@ -8,6 +7,7 @@ import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
   LP_PAID_MESSAGE,
   LP_PAID_TITLE,
+  claimOptimisticLpPaidAlert,
   parseLpBillingDeepLink,
   subscribeLpAppStateConfirm,
   tryConfirmPendingLpPayment,
@@ -24,14 +24,15 @@ export function LpPaymentReturnHost() {
 
     const handleUrl = (url: string | null) => {
       const parsed = parseLpBillingDeepLink(url);
-      if (!parsed.kind) return;
-      if (parsed.kind === 'cancel') return;
+      if (!parsed.kind || parsed.kind === 'cancel') return;
       if (handling.current) return;
       handling.current = true;
       void (async () => {
         try {
-          const r = await tryConfirmPendingLpPayment({ sessionId: parsed.sessionId });
-          if (r.paid && r.shouldShowPaidAlert) showPaid(r.message);
+          // Najpierw komunikat (Stripe success URL = płatność OK), potem confirm.
+          const optimistic = await claimOptimisticLpPaidAlert(parsed.sessionId);
+          if (optimistic.shouldShow) showPaid(optimistic.message);
+          void tryConfirmPendingLpPayment({ sessionId: parsed.sessionId });
         } finally {
           handling.current = false;
         }

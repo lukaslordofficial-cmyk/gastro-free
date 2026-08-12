@@ -1,6 +1,6 @@
 /**
  * Stripe Checkout + InPost dla zamówień Lokalnych Przetwórców.
- * Po Stripe: deep link myapp://lp/success (przez HTML na API) → auto-confirm.
+ * Po Stripe: deep link myapp://lp/success (przez HTML na API) → szybki komunikat + confirm.
  */
 import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -81,7 +81,6 @@ export async function openProducerOrderCheckout(
   } catch {
     /* ignore */
   }
-  // Krótka pauza, żeby UI zdążyło pokazać „Otwieranie Stripe…”
   await new Promise((r) => setTimeout(r, 120));
   await Linking.openURL(url);
   return {
@@ -150,10 +149,15 @@ export function parseLpBillingDeepLink(url: string | null | undefined): {
 } {
   if (!url) return { kind: null };
   const lower = url.toLowerCase();
-  if (!lower.includes('lp/success') && !lower.includes('lp/cancel')) {
-    return { kind: null };
-  }
-  const kind = lower.includes('lp/success') ? 'success' : 'cancel';
+  // Także billing-return z API (gdy OS otworzy http zamiast deep linku)
+  const isSuccess =
+    lower.includes('lp/success')
+    || (lower.includes('billing-return') && lower.includes('status=success'));
+  const isCancel =
+    lower.includes('lp/cancel')
+    || (lower.includes('billing-return') && lower.includes('status=cancel'));
+  if (!isSuccess && !isCancel) return { kind: null };
+  const kind = isSuccess ? 'success' : 'cancel';
   let sessionId: string | undefined;
   try {
     const parsed = Linking.parse(url);
@@ -174,9 +178,41 @@ let confirmInFlight: Promise<{
   session_id?: string;
 }> | null = null;
 
+async function markPaidAlertShown(sessionId: string): Promise<boolean> {
+  try {
+    const last = await AsyncStorage.getItem(LAST_SHOWN_PAID_SESSION_KEY);
+    if (last === sessionId) return false;
+    await AsyncStorage.setItem(LAST_SHOWN_PAID_SESSION_KEY, sessionId);
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Natychmiastowy komunikat po deep linku success (nie czeka na Furgonetkę/SMS).
+ * Confirm leci w tle.
+ */
+export async function claimOptimisticLpPaidAlert(sessionId?: string | null): Promise<{
+  shouldShow: boolean;
+  session_id?: string;
+  message: string;
+}> {
+  let sid = sessionId || null;
+  if (!sid) {
+    try {
+      sid = await AsyncStorage.getItem(PENDING_LP_SESSION_KEY);
+    } catch {
+      sid = null;
+    }
+  }
+  if (!sid) return { shouldShow: false, message: LP_PAID_MESSAGE };
+  const shouldShow = await markPaidAlertShown(sid);
+  return { shouldShow, session_id: sid, message: LP_PAID_MESSAGE };
+}
+
 /**
  * Potwierdza pending LP po powrocie do apki (deep link / AppState).
- * Deduplikuje równoległe wywołania i wielokrotne pokazywanie „Opłacono”.
  */
 export async function tryConfirmPendingLpPayment(opts?: {
   sessionId?: string;
@@ -202,12 +238,14 @@ export async function tryConfirmPendingLpPayment(opts?: {
       return { ...conf, shouldShowPaidAlert: false };
     }
     let shouldShow = true;
-    try {
-      const last = await AsyncStorage.getItem(LAST_SHOWN_PAID_SESSION_KEY);
-      if (last === conf.session_id && !opts?.forceShow) shouldShow = false;
-      else await AsyncStorage.setItem(LAST_SHOWN_PAID_SESSION_KEY, conf.session_id);
-    } catch {
-      /* ignore */
+    if (!opts?.forceShow) {
+      shouldShow = await markPaidAlertShown(conf.session_id);
+    } else {
+      try {
+        await AsyncStorage.setItem(LAST_SHOWN_PAID_SESSION_KEY, conf.session_id);
+      } catch {
+        /* ignore */
+      }
     }
     return { ...conf, shouldShowPaidAlert: shouldShow };
   } finally {
@@ -224,8 +262,19 @@ export function subscribeLpAppStateConfirm(
       try {
         const pending = await AsyncStorage.getItem(PENDING_LP_SESSION_KEY);
         if (!pending) return;
-        const r = await tryConfirmPendingLpPayment();
-        if (r.paid) onResult(r);
+        // Szybki komunikat przy powrocie z przeglądarki (zainstalowana apka).
+        const optimistic = await claimOptimisticLpPaidAlert(pending);
+        if (optimistic.shouldShow) {
+          onResult({
+            ok: true,
+            paid: true,
+            message: optimistic.message,
+            shouldShowPaidAlert: true,
+            session_id: optimistic.session_id,
+          });
+        }
+        const r = await tryConfirmPendingLpPayment({ sessionId: pending });
+        if (r.paid && r.shouldShowPaidAlert) onResult(r);
       } catch {
         /* ignore */
       }

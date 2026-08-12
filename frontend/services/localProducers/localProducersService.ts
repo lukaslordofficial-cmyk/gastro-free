@@ -452,6 +452,53 @@ export async function getMyProducerOrder(
   return data as import('@/types/localProducers').ProducerOrderWithProducer;
 }
 
+export type ProducerOrderLine = {
+  id: string;
+  quantity: number;
+  unit_price: number;
+  title: string;
+  unit?: string | null;
+};
+
+/** Pozycje zamówienia z nazwami produktów. */
+export async function listMyProducerOrderItems(
+  orderId: string,
+): Promise<ProducerOrderLine[]> {
+  if (!isSupabaseConfigured || !orderId) return [];
+  const { data, error } = await supabase
+    .from(LOCAL_PRODUCERS_TABLES.orderItems)
+    .select('id, quantity, unit_price, product_id, producer_products(title, unit)')
+    .eq('order_id', orderId);
+
+  if (error || !data) {
+    const retry = await supabase
+      .from(LOCAL_PRODUCERS_TABLES.orderItems)
+      .select('id, quantity, unit_price, product_id')
+      .eq('order_id', orderId);
+    if (retry.error || !retry.data) return [];
+    return (retry.data as { id: string; quantity: number; unit_price: number }[]).map((r) => ({
+      id: r.id,
+      quantity: Number(r.quantity) || 0,
+      unit_price: Number(r.unit_price) || 0,
+      title: 'Produkt',
+      unit: null,
+    }));
+  }
+
+  return (data as Array<{
+    id: string;
+    quantity: number;
+    unit_price: number;
+    producer_products?: { title?: string; unit?: string } | null;
+  }>).map((r) => ({
+    id: r.id,
+    quantity: Number(r.quantity) || 0,
+    unit_price: Number(r.unit_price) || 0,
+    title: r.producer_products?.title || 'Produkt',
+    unit: r.producer_products?.unit ?? null,
+  }));
+}
+
 export async function createLocalProducer(
   input: CreateLocalProducerInput,
 ): Promise<LocalProducer | null> {

@@ -65,8 +65,6 @@ export const FEATURE_CATALOG = [
   { key: 'menu', icon: '🥗', name: 'Analiza karty menu i receptur', cost: '~25-30 kredytów', requires_deal_hunter: false },
   { key: 'trend', icon: '📊', name: 'Analiza trendów AI', cost: '~5-10 kredytów', requires_deal_hunter: false },
   { key: 'deal_hunter', icon: '🏷️', name: 'Łowca Okazji (porównywarka ofert)', cost: '~3-8 kredytów', requires_deal_hunter: true },
-  // Delta-Scraper wyłączony w UI — silnik w backend/delta_scraper
-  // { key: 'scraper', icon: '🌐', name: 'Skan stron dostawców (monitoring)', cost: '5 kredytów / skan', requires_deal_hunter: false },
 ];
 
 export const TOPUP_PACKAGES = [

@@ -28,7 +28,7 @@ Funkcje z pełnym UI + backendiem (lub lokalnym seedem), rozsądnie domknięte p
 
 Bez tych kroków funkcje „są w kodzie”, ale lokal/staging nie zadziała:
 
-- **Migracje Supabase** — 20 plików w `supabase_migrations/` (m.in. daily reports, soft delete, expiry, push tokens, shipping, `lead_time_days`, reliability, Stripe, delta scraper). Uruchamiać ręcznie w SQL Editor.
+- **Migracje Supabase** — pliki w `supabase_migrations/` (m.in. daily reports, soft delete, expiry, push tokens, shipping, `lead_time_days`, reliability, Stripe). Uruchamiać ręcznie w SQL Editor.
 - **`EXPO_PUBLIC_BACKEND_URL`** — musi wskazywać host:port backendu (**8001**, nie Metro 8081); po zmianie IP → restart Expo
 - **`backend/.env`** — Supabase URL/keys, OpenAI, Stripe (`STRIPE_*`, price IDs), opcjonalnie `ALLOW_MOCK_BILLING`
 - **Edge cron expiry** — deploy `supabase/functions/expiry-daily-cron` + harmonogram **lub** scheduler na `/api/inventory/expiry-daily-job`

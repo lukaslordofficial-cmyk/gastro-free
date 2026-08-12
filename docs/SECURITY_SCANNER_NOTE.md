@@ -23,8 +23,8 @@ Zrobione w kodzie:
 |---|---|
 | `python-multipart==0.0.12` (DoS / path traversal) | → **0.0.32** (`requirements-prod.txt`, `backend/requirements*.txt`) |
 | Dockerfile jako root | → **USER appuser** (uid 10001) w `Dockerfile` i `backend/Dockerfile` |
-| SSRF (`server.py` / scraper / Stripe redirects) | → `backend/url_safety.py` + walidacja path REST, URL scrapera, allowlista redirectów |
-| Weak hash MD5 (fingerprint) | → **SHA-256** (`delta_scraper/hashing.py`, smart basket fingerprints) + migracja `ALTER_SCRAPER_HASH_SHA256.sql` |
+| SSRF (`server.py` / Stripe redirects) | → `backend/url_safety.py` + walidacja path REST, allowlista redirectów |
+| Weak hash MD5 (fingerprint) | → **SHA-256** (smart basket fingerprints) |
 | Weak RNG (`Math.random` na ID) | → `frontend/lib/secureId.ts` (Web Crypto) |
 | `nanoid` < 3.3.17 | → yarn resolution **3.3.18** |
 | `image-size` DoS | → resolution **1.2.1** (już patched w lockfile) |
@@ -36,6 +36,8 @@ Zrobione w kodzie:
 - `@react-native-community/datetimepicker@~8.4.4`
 
 („Latest” spoza SDK 54 = breaking dla Expo Go / EAS.)
+
+**Usunięte (2026-08):** Delta-Scraper (`backend/delta_scraper`, `/api/scraper/*`, UI monitora). Migracja: `DROP_DELTA_SCRAPER.sql`.
 
 Fałszywe alarmy z raportu (nie wymagały patcha):
 
@@ -49,7 +51,6 @@ Fałszywe alarmy z raportu (nie wymagały patcha):
 - Brak sekretów w git (`sk_…`, `service_role`) — tylko `EXPO_PUBLIC_*` (anon / publishable).
 - Nie commituj wyniku `sync-eas-preview-env.js` z prawdziwymi kluczami do `eas.json` (placeholder w repo).
 - Zależności Expo aktualizuj przez `npx expo install` / audit gdy będzie rebuild AAB.
-- Po deployu backendu uruchom w Supabase SQL Editor: `ALTER_SCRAPER_HASH_SHA256.sql`.
 
 ## Backend (Railway)
 

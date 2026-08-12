@@ -2,7 +2,6 @@
 Walidacja URL-i wychodzących (ochrona przed SSRF / open redirect).
 
 Używane przy:
-- Delta-Scraper (fetch stron hurtowni)
 - Stripe success/cancel/return URL (redirect allowlist)
 - ścieżkach PostgREST (tylko bezpieczne nazwy tabel)
 """

@@ -54,7 +54,7 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
   `Relationships: []`, Views/Functions/Enums/CompositeTypes, domenowe `type` (nie
   `interface` — inaczej Row nie spełnia `Record<string, unknown>` i Insert → `never`).
   Dodane `account_key` tam, gdzie migracje tenantowe je wymagają. Stuby tabel
-  używanych w kodzie (`warehouse_inventory`, `scrape_targets`, …).
+  używanych w kodzie (`warehouse_inventory`, …).
 - **tsc:** ~154 błędów (`never`) → ~100 (reszta: brakujące pola UI, bargainHunter,
   AdsProvider — nie blokują IO).
 - **`services/suppliersService.ts`** — `recipe_ingredients` filtr przez

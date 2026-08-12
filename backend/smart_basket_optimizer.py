@@ -2205,7 +2205,7 @@ def build_smart_speech(result: dict) -> str:
     ):
         return (
             "Niestety nie znalazłem produktów w katalogu dostawców. "
-            "Dodaj oferty dostawców albo uruchom Delta-Scrapera."
+            "Dodaj oferty dostawców (faktura / katalog PDF)."
         )
     if not result.get("is_multivariable"):
         best = result.get("best_option")

@@ -55,8 +55,6 @@ import {
 } from '@/components/OrderEmailComposer';
 import { CatalogScanModal } from '@/components/CatalogScanModal';
 import { fetchOrderEmailTemplate, isInternalOrderNote } from '@/lib/orderEmailTemplate';
-// Delta-Scraper UI wyłączone — kod w backend/delta_scraper zachowany na przyszłość
-// import { ScraperMonitorModal } from '@/components/ScraperMonitorModal';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';

@@ -35,7 +35,6 @@ const ENDPOINT_LABELS: Record<string, string> = {
   '/api/pos/close-day': 'Zamknięcie dnia (raport AI)',
   '/api/reports/analyze-period': 'Analiza trendów AI',
   '/api/reports/compare-periods': 'Porównanie okresów AI',
-  '/api/scraper/check': 'Skan stron dostawców',
 };
 
 export function endpointLabel(endpoint: string): string {

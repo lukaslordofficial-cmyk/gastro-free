@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for PyMuPDF / SSL; Playwright Chromium is optional (SCRAPER fetch_mode=httpx by default)
+# System deps for PyMuPDF / SSL
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \

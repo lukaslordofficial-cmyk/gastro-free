@@ -135,7 +135,7 @@ Otrzymasz `https://*.trycloudflare.com` — wstaw do `EXPO_PUBLIC_BACKEND_URL` i
 | Warstwa | Closed beta (OK) | Tysiące użytkowników później |
 |---------|------------------|------------------------------|
 | **DB** | Supabase (Postgres) — już primary, nie SQLite | Connection pooler (Supabase pooler / PgBouncer), indeksy, RLS per tenant |
-| **API** | 1× uvicorn worker na Railway/Render | Kilka replik; `gunicorn -k uvicorn.workers.UvicornWorker -w 2..4`; osobny worker na scraper/playwright |
+| **API** | 1× uvicorn worker na Railway/Render | Kilka replik; `gunicorn -k uvicorn.workers.UvicornWorker -w 2..4` |
 | **Auth** | Login/register + `profiles.account_key` + nagłówek `X-Account-Key` (patrz [`BETA_AUTH.md`](./BETA_AUTH.md)) | Pełne RLS na inventory/menu per tenant; JWT claim w `app_metadata` |
 | **Pliki / CDN** | Lokalne / Supabase Storage | CDN na assety, limity uploadu |
 | **Rate limits** | Brak / słabe | Rate limit na `/api/*` (AI kosztuje), Stripe webhook idempotency |

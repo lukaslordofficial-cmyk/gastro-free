@@ -80,8 +80,6 @@ export type Database = {
       >;
       /** Tabele używane w kodzie, ale bez pełnego modelu domenowego — stub pod typowanie. */
       warehouse_inventory: DbTable<Record<string, unknown>>;
-      scrape_targets: DbTable<Record<string, unknown>>;
-      price_alerts: DbTable<Record<string, unknown>>;
       device_push_tokens: DbTable<Record<string, unknown>>;
       inventory_combo_ingredients: DbTable<Record<string, unknown>>;
       daily_reports: DbTable<Record<string, unknown>>;

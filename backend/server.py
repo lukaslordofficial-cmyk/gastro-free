@@ -1702,7 +1702,6 @@ FEATURE_CATALOG = [
     {"key": "menu",        "icon": "🥗", "name": "Analiza karty menu i receptur",     "cost": "~25-30 kredytów", "requires_deal_hunter": False},
     {"key": "trend",       "icon": "📊", "name": "Analiza trendów AI",                "cost": "~5-10 kredytów",  "requires_deal_hunter": False},
     {"key": "deal_hunter", "icon": "🏷️", "name": "Łowca Okazji (porównywarka ofert)", "cost": "~3-8 kredytów",   "requires_deal_hunter": True},
-    {"key": "scraper",     "icon": "🌐", "name": "Skan stron dostawców (monitoring)",  "cost": "5 kredytów / skan", "requires_deal_hunter": False},
 ]
 
 
@@ -4770,7 +4769,7 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
         if not name:
             continue
         try:
-            from delta_scraper.parser import is_valid_product_name
+            from product_name_validation import is_valid_product_name
             if not is_valid_product_name(name):
                 warnings.append(f"Pominięto niepoprawną nazwę: {name!r}")
                 continue
@@ -15198,7 +15197,6 @@ async def billing_status():
         "confirm_session_available": True,
         "mock_billing": os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() in ("1", "true", "yes"),
         "prices": DEFAULT_PRICES,
-        "scraper_credits_per_check": int(os.getenv("SCRAPER_CREDITS_PER_CHECK", "5") or 5),
     }
 
 
@@ -15719,229 +15717,6 @@ async def subscription_cancel():
                                           "bieżącego okresu, bez kolejnych doładowań.")
         view["ok"] = True
         return view
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Delta-Scraper — monitorowanie zmian na stronach hurtowni (SHA-256 + delta JSON)
-# ─────────────────────────────────────────────────────────────────────────────
-
-from delta_scraper.engine import (  # noqa: E402
-    check_all_targets,
-    check_target_record,
-    _products_to_offer_format,
-)
-
-
-class ScrapeTargetIn(BaseModel):
-    url: str
-    supplier_id: Optional[str] = None
-    label: Optional[str] = None
-    fetch_mode: Literal["auto", "httpx", "playwright"] = "auto"
-    css_selector: Optional[str] = None
-    check_interval_hours: int = 24
-
-
-class ScrapeCheckRequest(BaseModel):
-    target_ids: Optional[list[str]] = None
-    force: bool = False
-
-
-async def _scraper_catalog_sync(client: httpx.AsyncClient, supplier_id: str, products) -> dict:
-    """Synchronizuje wykryte produkty z supplier_catalog (widoczność fuzzy)."""
-    return await _process_offer(client, supplier_id, {
-        "products": _products_to_offer_format(products),
-    })
-
-
-# ─── Delta-Scraper API ───────────────────────────────────────────────────────
-# WYŁĄCZONE W UI Gastro Manager (2026-07). Silnik: backend/delta_scraper.
-# Endpointy zwracają 410 — kod zostaje na ewentualny powrót w innych aplikacjach.
-_SCRAPER_UI_DISABLED = True
-
-
-def _assert_scraper_enabled() -> None:
-    if _SCRAPER_UI_DISABLED:
-        raise HTTPException(
-            status_code=410,
-            detail="Delta-Scraper jest wyłączony w tej aplikacji. Silnik zachowany w backend/delta_scraper.",
-        )
-
-
-@app.get("/api/scraper/targets")
-async def scraper_list_targets():
-    _assert_scraper_enabled()
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            rows = await sb_get(client, "scrape_targets", params={
-                "select": "*",
-                "order": "created_at.desc",
-            })
-        except httpx.HTTPStatusError:
-            return {"ok": False, "needs_migration": True, "targets": []}
-        return {"ok": True, "targets": rows or []}
-
-
-@app.post("/api/scraper/targets")
-async def scraper_add_target(req: ScrapeTargetIn):
-    _assert_scraper_enabled()
-    from url_safety import assert_safe_outbound_url
-    safe_url = assert_safe_outbound_url(req.url)
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        if req.supplier_id:
-            sup = await sb_get(client, "suppliers",
-                               params={"select": "id", "id": f"eq.{req.supplier_id}", "limit": "1"})
-            if not sup:
-                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-        try:
-            row = await sb_post(client, "scrape_targets", {
-                "url": safe_url,
-                "supplier_id": req.supplier_id,
-                "label": req.label,
-                "fetch_mode": req.fetch_mode,
-                "css_selector": req.css_selector,
-                "check_interval_hours": max(1, int(req.check_interval_hours)),
-                "is_active": True,
-            })
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 409:
-                raise HTTPException(status_code=409, detail="Ten URL jest już monitorowany.")
-            raise
-        created = row[0] if isinstance(row, list) else row
-        return {"ok": True, "target": created}
-
-
-@app.delete("/api/scraper/targets/{target_id}")
-async def scraper_remove_target(target_id: str):
-    _assert_scraper_enabled()
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await sb_delete(client, "scrape_targets", {"id": f"eq.{target_id}"})
-        return {"ok": True}
-
-
-async def _bill_scraper_check(client: httpx.AsyncClient, *, checks: int = 1) -> dict:
-    """Opłata w kredytach za skan stron (+ opcjonalny filtr AI kulinarny).
-    Kwota: SCRAPER_CREDITS_PER_CHECK × liczba celów. AI: SCRAPER_AI_INTERPRET=1 (domyślnie)."""
-
-    per = max(0, int(os.getenv("SCRAPER_CREDITS_PER_CHECK", "5") or 5))
-    total = per * max(1, int(checks))
-    if total <= 0:
-        return {"credits_deducted": 0, "credits_remaining": None}
-    sub = await _get_subscription(client)
-    bal = int(sub.get("credits_balance") or 0)
-    if bal < total:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Brak kredytów na skan stron (potrzeba {total}, masz {bal}). Doładuj portfel.",
-        )
-    new_bal = await _deduct_credits(client, total, endpoint="/api/scraper/check")
-    try:
-        await sb_post(client, "token_usage", {
-            "endpoint": "/api/scraper/check",
-            "model": "delta-scraper",
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cost_usd": 0,
-            "cost_pln": 0,
-            "extras": {
-                "credits_charged": total,
-                "scraper_checks": checks,
-                "per_check": per,
-                "request_id": str(uuid.uuid4()),
-            },
-        })
-    except Exception:
-        pass
-    return {"credits_deducted": total, "credits_remaining": new_bal}
-
-
-@app.post("/api/scraper/check")
-async def scraper_check_all(req: ScrapeCheckRequest):
-    _assert_scraper_enabled()
-    """Sprawdza aktywne cele (lub podane target_ids). Cron: raz na dobę.
-    Każdy cel może przejść crawl podstron — dłuższy timeout. Płatne w kredytach."""
-    async with httpx.AsyncClient(timeout=480.0, verify=_httpx_verify()) as client:
-        try:
-            params: dict = {
-                "select": "id",
-                "is_active": "eq.true",
-            }
-            rows = await sb_get(client, "scrape_targets", params=params)
-            if req.target_ids:
-                ids_set = set(req.target_ids)
-                rows = [r for r in (rows or []) if str(r.get("id")) in ids_set]
-            n = len(rows or [])
-            billing = await _bill_scraper_check(client, checks=max(1, n) if n else 1) if n else {"credits_deducted": 0}
-            results = await check_all_targets(
-                client,
-                sb_get=sb_get, sb_post=sb_post, sb_patch=sb_patch,
-                httpx_verify=_httpx_verify,
-                catalog_sync_fn=_scraper_catalog_sync,
-                force=req.force,
-                target_ids=req.target_ids,
-            )
-        except HTTPException:
-            raise
-        except httpx.HTTPStatusError:
-            return {"ok": False, "needs_migration": True,
-                    "message": "Uruchom ADD_DELTA_SCRAPER.sql w Supabase."}
-        return {
-            "ok": True,
-            "checked": len(results),
-            "results": [r.to_dict() for r in results],
-            **billing,
-        }
-
-
-@app.post("/api/scraper/check/{target_id}")
-async def scraper_check_one(target_id: str, force: bool = False):
-    _assert_scraper_enabled()
-    async with httpx.AsyncClient(timeout=480.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "scrape_targets", params={
-            "select": "*", "id": f"eq.{target_id}", "limit": "1",
-        })
-        if not rows:
-            raise HTTPException(status_code=404, detail="Nie znaleziono celu monitoringu.")
-        billing = await _bill_scraper_check(client, checks=1)
-        result = await check_target_record(
-            client, rows[0],
-            sb_get=sb_get, sb_post=sb_post, sb_patch=sb_patch,
-            httpx_verify=_httpx_verify,
-            catalog_sync_fn=_scraper_catalog_sync,
-            force=force,
-        )
-        out = result.to_dict()
-        out.update(billing)
-        return {"ok": True, "result": out}
-
-
-@app.get("/api/scraper/alerts")
-async def scraper_list_alerts(limit: int = 50, supplier_id: Optional[str] = None):
-    _assert_scraper_enabled()
-    cap = max(1, min(int(limit), 200))
-    params = [("select", "*"), ("order", "detected_at.desc"), ("limit", str(cap))]
-    if supplier_id:
-        params.append(("supplier_id", f"eq.{supplier_id}"))
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            rows = await sb_get(client, "price_alerts", params=params)
-        except httpx.HTTPStatusError:
-            return {"ok": False, "needs_migration": True, "alerts": []}
-        return {"ok": True, "alerts": rows or [], "count": len(rows or [])}
-
-
-@app.delete("/api/scraper/alerts/{alert_id}")
-async def scraper_delete_alert(alert_id: str):
-    _assert_scraper_enabled()
-    """Ręczne usunięcie alertu cenowego."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            await sb_delete(client, "price_alerts", params={"id": f"eq.{alert_id}"})
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Alert nie istnieje.")
-            raise HTTPException(status_code=400, detail=e.response.text[:200])
-    return {"ok": True, "deleted": alert_id}
 
 
 @app.get("/api/suppliers/{supplier_id}/catalog")

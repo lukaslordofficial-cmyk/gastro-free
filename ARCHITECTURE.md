@@ -20,6 +20,12 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-12 — Łowca: lokalni → „Zamów i zapłać” (Stripe)
+
+- Przy koszyku lokalnego przetwórcy zamiast e-mail/SMS: sheet adresu + Stripe Checkout
+  (`LocalProducerCheckoutSheet` + `createProducerOrder` / `openProducerOrderCheckout`).
+- Hurtownicy bez zmian (przygotuj e-mail/SMS).
+
 ### 2026-08-12 — `insufficient_capabilities_for_transfer` → komunikat dla restauratora
 
 - Checkout wymaga `transfers=active` (nie `pending`); Restricted → HTTP 400 z PL komunikatem.

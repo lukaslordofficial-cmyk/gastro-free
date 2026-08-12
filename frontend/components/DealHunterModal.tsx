@@ -33,6 +33,7 @@ import {
   Search,
   ShoppingCart,
   Package,
+  CreditCard,
 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
@@ -61,6 +62,7 @@ import {
   DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
   DEFAULT_DEAL_HUNTER_SEARCH_SCOPE,
 } from '@/lib/dealHunterSearchScope';
+import { LocalProducerCheckoutSheet } from '@/components/dealHunter/LocalProducerCheckoutSheet';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -1328,6 +1330,7 @@ export function DealHunterModal({
   const [catalogPicker, setCatalogPicker] = useState<{ id: string; name: string } | null>(null);
   const [pendingGroups, setPendingGroups] = useState<SupplierGroup[] | null>(null);
   const [showNewOrder, setShowNewOrder] = useState(false);
+  const [lpPayGroup, setLpPayGroup] = useState<SupplierGroup | null>(null);
 
   const isBulkMode = !!initialCompare;
 
@@ -1863,7 +1866,32 @@ export function DealHunterModal({
 
   const prepareEmailForGroups = useCallback(async (groups: SupplierGroup[]) => {
     if (!groups.length) return;
-    const withItems = groups.filter((g) => g.items.length > 0);
+    // Lokalni → Stripe Checkout (jak w Lokalni Przetwórcy), nie e-mail/SMS
+    const localGroups = groups.filter((g) => g.is_local_producer && g.items.length > 0);
+    const wholesalerGroups = groups.filter((g) => !g.is_local_producer && g.items.length > 0);
+    if (localGroups.length === 1 && wholesalerGroups.length === 0) {
+      setLpPayGroup(localGroups[0]);
+      return;
+    }
+    if (localGroups.length > 0 && wholesalerGroups.length === 0) {
+      // Kilka lokalnych naraz — po kolei (pierwszy sheet)
+      setLpPayGroup(localGroups[0]);
+      if (localGroups.length > 1) {
+        Alert.alert(
+          'Lokalni dystrybutorzy',
+          `Masz ${localGroups.length} koszyków lokalnych. Opłać pierwszy w Stripe, potem wróć i zamów kolejne.`,
+        );
+      }
+      return;
+    }
+    if (localGroups.length > 0 && wholesalerGroups.length > 0) {
+      Alert.alert(
+        'Mieszane zamówienie',
+        'Lokalnych dystrybutorów opłacisz przez Stripe (przycisk „Zamów i zapłać” przy ich koszyku). '
+        + 'Teraz przygotujemy e-mail/SMS tylko do hurtowników.',
+      );
+    }
+    const withItems = wholesalerGroups.length ? wholesalerGroups : groups.filter((g) => g.items.length > 0);
     if (!withItems.length) {
       setError('Brak pozycji do zamówienia u tego dostawcy.');
       return;
@@ -2201,10 +2229,10 @@ export function DealHunterModal({
                 <Text style={styles.groupSub}>{formatPln(g.subtotal_pln)}</Text>
               </View>
               <Text style={[styles.editCartHint, { marginBottom: 6 }]}>
-                {g.supplier_email
-                  ? `E-mail: ${g.supplier_email}`
-                  : g.is_local_producer
-                    ? 'Brak e-maila lokalnego przetwórcy — skontaktuj się przez Dostawcy → Lokalni Przetwórcy.'
+                {g.is_local_producer
+                  ? 'Płatność Stripe (produkty + kurier + 5% serwisu) — bez e-maila do dystrybutora.'
+                  : g.supplier_email
+                    ? `E-mail: ${g.supplier_email}`
                     : 'Brak e-maila dostawcy — uzupełnij w module Dostawcy.'}
               </Text>
               <MinOrderBadge meets={g.meets_minimum_order} minVal={g.min_order_value} />
@@ -2218,6 +2246,8 @@ export function DealHunterModal({
                   onRemove={() => removeCartItem(g.supplier_id, it.product_name)}
                 />
               ))}
+              // „Dodaj z katalogu” tylko dla hurtowników — lokalni mają produkty marketplace
+              {!g.is_local_producer ? (
               <TouchableOpacity
                 style={styles.addFromCatalogBtn}
                 onPress={() => {
@@ -2240,13 +2270,17 @@ export function DealHunterModal({
                     : 'Dodaj produkt z katalogów dostawców'}
                 </Text>
               </TouchableOpacity>
+              ) : null}
               <TouchableOpacity
                 style={[
                   styles.prepareSupplierBtn,
                   { backgroundColor: blocked ? C.dangerLight : ctaBg },
                   (loading || blocked) && styles.primaryBtnDisabled,
                 ]}
-                onPress={() => prepareEmailForGroups([g])}
+                onPress={() => {
+                  if (g.is_local_producer) setLpPayGroup(g);
+                  else void prepareEmailForGroups([g]);
+                }}
                 disabled={loading || blocked}
                 activeOpacity={0.85}
                 testID={`deal-hunter-prepare-${g.supplier_id ?? gi}`}
@@ -2255,9 +2289,17 @@ export function DealHunterModal({
                   <ActivityIndicator size="small" color={ctaFg} />
                 ) : (
                   <>
-                    <Mail size={15} color={blocked ? C.danger : ctaFg} strokeWidth={2.2} />
+                    {g.is_local_producer && !blocked ? (
+                      <CreditCard size={15} color={ctaFg} strokeWidth={2.2} />
+                    ) : (
+                      <Mail size={15} color={blocked ? C.danger : ctaFg} strokeWidth={2.2} />
+                    )}
                     <Text style={[styles.prepareSupplierBtnText, { color: blocked ? C.danger : ctaFg }]}>
-                      {blocked ? 'Poniżej minimum — uzupełnij koszyk' : 'Przygotuj e-mail/SMS'}
+                      {blocked
+                        ? 'Poniżej minimum — uzupełnij koszyk'
+                        : g.is_local_producer
+                          ? 'Zamów i zapłać'
+                          : 'Przygotuj e-mail/SMS'}
                     </Text>
                   </>
                 )}
@@ -2309,9 +2351,17 @@ export function DealHunterModal({
               <ActivityIndicator size="small" color={ctaFg} />
             ) : (
               <>
-                <Send size={15} color={ctaFg} strokeWidth={2.2} />
+                {orderable.every((g) => g.is_local_producer) ? (
+                  <CreditCard size={15} color={ctaFg} strokeWidth={2.2} />
+                ) : (
+                  <Send size={15} color={ctaFg} strokeWidth={2.2} />
+                )}
                 <Text style={[styles.prepareSupplierBtnText, { color: ctaFg }]}>
-                  Zamów wszystkie ({orderable.length})
+                  {orderable.every((g) => g.is_local_producer)
+                    ? `Zamów i zapłać (${orderable.length})`
+                    : orderable.some((g) => g.is_local_producer)
+                      ? `Zamów hurtowników · lokalni osobno (${orderable.length})`
+                      : `Zamów wszystkie (${orderable.length})`}
                 </Text>
               </>
             )}
@@ -2854,6 +2904,12 @@ export function DealHunterModal({
         </View>
       </View>
     </Modal>
+    <LocalProducerCheckoutSheet
+      visible={!!lpPayGroup}
+      group={lpPayGroup}
+      colors={C}
+      onClose={() => setLpPayGroup(null)}
+    />
     </>
   );
 }

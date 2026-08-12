@@ -1,0 +1,60 @@
+"""Unit tests for SSRF / redirect allowlist helpers."""
+import os
+
+import pytest
+from fastapi import HTTPException
+
+from url_safety import (
+    assert_safe_outbound_url,
+    assert_safe_redirect_url,
+    assert_safe_rest_path,
+)
+
+
+def test_rest_path_ok():
+    assert assert_safe_rest_path("inventory_items") == "inventory_items"
+    assert assert_safe_rest_path("/menu_items") == "menu_items"
+
+
+def test_rest_path_rejects_traversal():
+    with pytest.raises(HTTPException):
+        assert_safe_rest_path("../etc/passwd")
+    with pytest.raises(HTTPException):
+        assert_safe_rest_path("a/b")
+    with pytest.raises(HTTPException):
+        assert_safe_rest_path("bad;drop")
+
+
+def test_outbound_blocks_localhost():
+    with pytest.raises(HTTPException):
+        assert_safe_outbound_url("http://127.0.0.1/secret", resolve_dns=False)
+    with pytest.raises(HTTPException):
+        assert_safe_outbound_url("http://localhost/admin", resolve_dns=False)
+    with pytest.raises(HTTPException):
+        assert_safe_outbound_url("file:///etc/passwd", resolve_dns=False)
+
+
+def test_outbound_allows_https_public(monkeypatch):
+    # Skip DNS in unit test — host is public-looking.
+    url = assert_safe_outbound_url("https://example.com/cennik", resolve_dns=False)
+    assert url.startswith("https://example.com")
+
+
+def test_redirect_allows_deep_link():
+    assert assert_safe_redirect_url("myapp://billing/success").startswith("myapp://")
+
+
+def test_redirect_allows_localhost_http():
+    assert assert_safe_redirect_url("http://localhost:8081/billing-success")
+
+
+def test_redirect_blocks_unknown_host(monkeypatch):
+    monkeypatch.delenv("PUBLIC_APP_URL", raising=False)
+    monkeypatch.delenv("ALLOWED_REDIRECT_HOSTS", raising=False)
+    with pytest.raises(HTTPException):
+        assert_safe_redirect_url("https://evil.example/phish")
+
+
+def test_redirect_allows_public_app_host(monkeypatch):
+    monkeypatch.setenv("PUBLIC_APP_URL", "https://app.example.com")
+    assert assert_safe_redirect_url("https://app.example.com/billing-success")

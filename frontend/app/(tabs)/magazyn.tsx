@@ -69,6 +69,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
+import { secureId } from '@/lib/secureId';
 
 // ─── Types ───────────────────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ const COMBO_UNIT_OPTIONS = ['porcja', 'g', 'ml', 'szt', 'kg', 'L'] as const;
 
 function newComboIngredient(): ComboIngredientDraft {
   return {
-    key: `combo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    key: secureId('combo'),
     name: '',
     quantity: '',
     unit: 'g',

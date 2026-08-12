@@ -65,6 +65,7 @@ import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { ingredientDedupeKey, normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
+import { secureId } from '@/lib/secureId';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 
@@ -161,7 +162,7 @@ function makePosId(category: string, total: number): string {
 }
 
 function newDraftIngredient(): IngredientDraft {
-  return { key: String(Date.now() + Math.random()), name: '', quantity: '', unit: 'g', pieceWeightG: '' };
+  return { key: secureId('ing'), name: '', quantity: '', unit: 'g', pieceWeightG: '' };
 }
 
 /** Dedupe / link key — stem-ish (pomidor ≡ pomidory). */
@@ -1065,7 +1066,7 @@ export default function MenuScreen() {
           setIngredients(
             rows.length > 0
               ? rows.map((r: any) => ({
-                  key: String(Date.now() + Math.random()),
+                  key: secureId('ing'),
                   name: r.ingredient_name ?? '',
                   quantity: String(r.quantity ?? 0),
                   unit: r.unit || 'g',
@@ -1273,7 +1274,7 @@ export default function MenuScreen() {
     setIngredients(
       dish.recipe.length > 0
         ? dish.recipe.map((r) => ({
-            key: String(Date.now() + Math.random()),
+            key: secureId('ing'),
             name: r.name,
             quantity: String(r.quantity),
             unit: r.unit,
@@ -2559,7 +2560,7 @@ export default function MenuScreen() {
               setIngredients(
                 ings.length > 0
                   ? ings.map((ing) => ({
-                      key: String(Date.now() + Math.random()),
+                      key: secureId('ing'),
                       name: ing.name,
                       quantity: String(normalizeRecipeQuantity(ing.quantity)),
                       unit: normalizeMenuUnit(ing.unit),
@@ -2585,7 +2586,7 @@ export default function MenuScreen() {
               setIngredients(
                 ings.length > 0
                   ? ings.map((ing) => ({
-                      key: String(Date.now() + Math.random()),
+                      key: secureId('ing'),
                       name: ing.name,
                       quantity: String(normalizeRecipeQuantity(ing.quantity)),
                       unit: normalizeMenuUnit(ing.unit),

@@ -1,6 +1,7 @@
 /**
  * Typy i stałe skanera menu — wydzielone z MenuScanModal (.agentrules §I).
  */
+import { secureId } from '@/lib/secureId';
 
 export const MENU_CATEGORIES = [
   'Przystawki', 'Zupy', 'Sałatki', 'Burgery', 'Dania główne',
@@ -51,7 +52,7 @@ export type MenuScanStage =
   | 'done';
 
 export function newIngredientKey(): string {
-  return String(Date.now() + Math.random());
+  return secureId('ing');
 }
 
 export function newIngredient(

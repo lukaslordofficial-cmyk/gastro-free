@@ -2,6 +2,7 @@
  * Lokalne receptury użytkownika (kafelek Receptury w Menu).
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { secureId } from '@/lib/secureId';
 
 const KEY = '@gm/user_recipes_v1';
 
@@ -62,7 +63,7 @@ export async function saveUserRecipe(recipe: Omit<UserRecipe, 'id' | 'createdAt'
     return next;
   }
   const created: UserRecipe = {
-    id: `ur_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: secureId('ur'),
     name: recipe.name,
     imageSlug: recipe.imageSlug,
     localAsset: recipe.localAsset,

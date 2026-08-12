@@ -53,10 +53,12 @@ export type ExpiryProductDraft = {
   alert_days: number[];
 };
 
+import { secureId } from '@/lib/secureId';
+
 const ALERT_PRESETS = [14, 7, 5, 3, 1] as const;
 
 function newKey() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return secureId('invexp');
 }
 
 /** Normalizuje datę do YYYY-MM-DD; zwraca null jeśli niepoprawna. */

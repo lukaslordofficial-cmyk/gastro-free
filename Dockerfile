@@ -20,6 +20,11 @@ RUN pip install --upgrade pip && pip install -r requirements-prod.txt
 
 COPY backend/ .
 
+# Non-root runtime user (Code Registry / container hardening).
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 # Railway injects PORT at runtime — listen on 0.0.0.0:$PORT (not a hardcoded port).
 EXPOSE 8001
 

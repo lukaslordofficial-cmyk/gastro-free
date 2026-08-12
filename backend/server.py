@@ -353,6 +353,8 @@ def _strip_account_key_params(params: dict | list | None) -> dict | list | None:
 
 async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
     _require_supabase()
+    from url_safety import assert_safe_rest_path
+    path = assert_safe_rest_path(path)
     tenant_params = _with_tenant_params(path, params)
     r = await client.get(
         f"{SUPABASE_URL}/rest/v1/{path}",
@@ -393,6 +395,8 @@ def _pg_ts(iso: str) -> str:
 
 async def sb_post(client: httpx.AsyncClient, path: str, payload):
     _require_supabase()
+    from url_safety import assert_safe_rest_path
+    path = assert_safe_rest_path(path)
     body = _with_tenant_payload(path, payload)
     r = await client.post(
         f"{SUPABASE_URL}/rest/v1/{path}",
@@ -411,6 +415,8 @@ async def sb_post(client: httpx.AsyncClient, path: str, payload):
 
 async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
     _require_supabase()
+    from url_safety import assert_safe_rest_path
+    path = assert_safe_rest_path(path)
     tenant_params = _with_tenant_params(path, params)
     r = await client.patch(
         f"{SUPABASE_URL}/rest/v1/{path}",
@@ -431,6 +437,8 @@ async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
 
 async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
     _require_supabase()
+    from url_safety import assert_safe_rest_path
+    path = assert_safe_rest_path(path)
     tenant_params = _with_tenant_params(path, params)
     r = await client.delete(
         f"{SUPABASE_URL}/rest/v1/{path}",
@@ -15055,6 +15063,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
     from billing_stripe import create_checkout_session, stripe_configured
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
+    from url_safety import assert_safe_redirect_url
     success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
     cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or "myapp://billing/cancel").strip()
     # Stripe wymaga https lub http localhost — deep linki Expo: użyj https success page z redirect
@@ -15064,6 +15073,8 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
     if cancel.startswith("myapp://"):
         public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
         cancel = f"{public}/billing-cancel"
+    success = assert_safe_redirect_url(success)
+    cancel = assert_safe_redirect_url(cancel)
     try:
         session = await create_checkout_session(
             account_key=get_account_key(),
@@ -15137,7 +15148,9 @@ async def billing_portal(req: PortalSessionRequest):
         cid = sub.get("stripe_customer_id")
         if not cid:
             raise HTTPException(status_code=400, detail="Brak klienta Stripe — najpierw wykup plan.")
+        from url_safety import assert_safe_redirect_url
         ret = (req.return_url or os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").strip()
+        ret = assert_safe_redirect_url(ret)
         try:
             portal = await create_billing_portal_session(customer_id=cid, return_url=ret)
         except Exception as e:
@@ -15432,6 +15445,7 @@ async def local_producers_checkout(req: LpCheckoutRequest):
         raise HTTPException(status_code=400, detail="Brak order_id")
 
     account_key = get_account_key()
+    from url_safety import assert_safe_redirect_url
     success = (req.success_url or os.getenv("LP_BILLING_SUCCESS_URL") or os.getenv("BILLING_SUCCESS_URL") or "myapp://lp/success").strip()
     cancel = (req.cancel_url or os.getenv("LP_BILLING_CANCEL_URL") or os.getenv("BILLING_CANCEL_URL") or "myapp://lp/cancel").strip()
     if success.startswith("myapp://"):
@@ -15440,6 +15454,8 @@ async def local_producers_checkout(req: LpCheckoutRequest):
     if cancel.startswith("myapp://"):
         public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
         cancel = f"{public}/lp-billing-cancel"
+    success = assert_safe_redirect_url(success)
+    cancel = assert_safe_redirect_url(cancel)
 
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
         orders = await sb_get(client, "producer_orders", params={
@@ -15706,7 +15722,7 @@ async def subscription_cancel():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Delta-Scraper — monitorowanie zmian na stronach hurtowni (MD5 + delta JSON)
+# Delta-Scraper — monitorowanie zmian na stronach hurtowni (SHA-256 + delta JSON)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from delta_scraper.engine import (  # noqa: E402
@@ -15768,6 +15784,8 @@ async def scraper_list_targets():
 @app.post("/api/scraper/targets")
 async def scraper_add_target(req: ScrapeTargetIn):
     _assert_scraper_enabled()
+    from url_safety import assert_safe_outbound_url
+    safe_url = assert_safe_outbound_url(req.url)
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
         if req.supplier_id:
             sup = await sb_get(client, "suppliers",
@@ -15776,7 +15794,7 @@ async def scraper_add_target(req: ScrapeTargetIn):
                 raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
         try:
             row = await sb_post(client, "scrape_targets", {
-                "url": req.url.strip(),
+                "url": safe_url,
                 "supplier_id": req.supplier_id,
                 "label": req.label,
                 "fetch_mode": req.fetch_mode,

@@ -18,6 +18,7 @@ import { Colors } from '@/constants/colors';
 import { supabase } from '@/lib/supabase';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { secureId } from '@/lib/secureId';
 import { ExpiryDateField } from '@/components/ExpiryDateField';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 
@@ -50,7 +51,7 @@ type Props = {
 };
 
 function newKey() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  return secureId('expv');
 }
 
 function normalizeBatches(edited: Record<string, any>): BatchRow[] {

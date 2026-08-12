@@ -8,6 +8,7 @@ import { Platform } from 'react-native';
 import type { TopupKey } from '@/lib/subscriptionCatalog';
 import { getAccountKey } from '@/lib/accountKey';
 import { supabase } from '@/lib/supabase';
+import { secureIdempotencyKey } from '@/lib/secureId';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
 const PENDING_SESSION_KEY = 'stripe_pending_checkout_session';
@@ -15,7 +16,7 @@ const PENDING_SESSION_KEY = 'stripe_pending_checkout_session';
 export type CheckoutKind = 'subscription' | 'topup';
 
 function makeIdempotencyKey(prefix: string): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return secureIdempotencyKey(prefix);
 }
 
 async function authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {

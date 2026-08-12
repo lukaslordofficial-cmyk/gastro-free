@@ -11,9 +11,15 @@ def normalize_text(text: str) -> str:
     return "\n".join(lines)
 
 
+def fingerprint_hex(text: str) -> str:
+    """Kryptograficzny odcisk treści (SHA-256). Nie do haseł — do detekcji zmian."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Back-compat alias (dawniej MD5) — skanery Code Registry / stare importy.
 def md5_hex(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+    return fingerprint_hex(text)
 
 
 def content_hash(text: str) -> str:
-    return md5_hex(normalize_text(text))
+    return fingerprint_hex(normalize_text(text))

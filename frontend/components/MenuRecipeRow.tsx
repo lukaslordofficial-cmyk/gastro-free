@@ -23,6 +23,7 @@ import {
   Trash2,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { secureId } from '@/lib/secureId';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
@@ -130,7 +131,7 @@ function toEditable(rows: RecipeIngredientRow[]): EditableIngredient[] {
 
 function newEditable(): EditableIngredient {
   return {
-    key: `new-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    key: secureId('new'),
     id: null,
     name: '',
     quantity: '',

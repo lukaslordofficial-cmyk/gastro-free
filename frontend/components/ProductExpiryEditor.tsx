@@ -18,6 +18,7 @@ import { ExpiryDateField } from '@/components/ExpiryDateField';
 import { scheduleExpiryReminders } from '@/lib/pushNotifications';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { secureId } from '@/lib/secureId';
 import { DS } from '@/constants/premiumTheme';
 
 const ALERT_PRESETS = [14, 7, 5, 3, 1];
@@ -37,7 +38,7 @@ type Props = {
 };
 
 function newKey() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  return secureId('exp');
 }
 
 function statusOf(iso: string): string {

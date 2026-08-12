@@ -2246,7 +2246,7 @@ def fingerprint_critical(critical: list[dict]) -> str:
         (str(c.get("id") or c.get("name")), round(float(c.get("deficit") or c.get("quantity") or 0), 4))
         for c in critical
     )
-    return hashlib.md5(json.dumps(rows).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
 
 
 def fingerprint_prices(per_item: list[dict], suppliers_meta: dict) -> str:
@@ -2264,7 +2264,7 @@ def fingerprint_prices(per_item: list[dict], suppliers_meta: dict) -> str:
         )
         for sid, m in sorted(suppliers_meta.items())
     }
-    return hashlib.md5(json.dumps({"i": blob, "m": meta}, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps({"i": blob, "m": meta}, sort_keys=True).encode()).hexdigest()
 
 
 def cache_get(key: str) -> Optional[dict]:

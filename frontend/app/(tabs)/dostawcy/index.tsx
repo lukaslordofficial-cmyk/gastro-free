@@ -73,6 +73,7 @@ import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { formatPln, formatPlnNumber } from '@/lib/format';
 import type { SupplierOffer, SupplierOfferItem } from '@/lib/types';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
+import { secureId } from '@/lib/secureId';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1927,7 +1928,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           supplier_email: d.suppliers?.email ?? null,
           notes: d.notes ?? null,
           items: (d.supplier_order_items ?? []).map((it: any) => ({
-            id: it.id || `tmp-${Math.random()}`,
+            id: it.id || secureId('tmp'),
             name: it.raw_product_name,
             qty: Number(it.quantity_ordered) || 0,
             unit: it.unit || 'szt',

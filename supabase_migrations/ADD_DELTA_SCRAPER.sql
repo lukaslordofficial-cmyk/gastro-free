@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS public.scrape_targets (
   css_selector        text,                            -- opcjonalny kontener produktów
   check_interval_hours integer NOT NULL DEFAULT 24,
   is_active           boolean NOT NULL DEFAULT true,
-  content_hash        varchar(32),                   -- MD5 hex
+  content_hash        varchar(64),                   -- SHA-256 hex
   last_checked_at     timestamptz,
   last_changed_at     timestamptz,
   product_count       integer NOT NULL DEFAULT 0,
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS public.scrape_targets (
 CREATE TABLE IF NOT EXISTS public.scrape_snapshots (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   target_id           uuid NOT NULL REFERENCES public.scrape_targets(id) ON DELETE CASCADE,
-  content_hash        varchar(32) NOT NULL,
+  content_hash        varchar(64) NOT NULL,
   products_json       jsonb NOT NULL DEFAULT '[]'::jsonb,
   product_count       integer NOT NULL DEFAULT 0,
   text_length         integer NOT NULL DEFAULT 0,

@@ -19,6 +19,11 @@ RUN pip install --upgrade pip && pip install -r requirements-prod.txt
 
 COPY . .
 
+# Non-root runtime user (Code Registry / container hardening).
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 # Do not bake secrets into the image — set them on the host (Railway/Render env).
 EXPOSE 8001
 

@@ -15,6 +15,8 @@ DEFAULT_UA = (
 
 
 async def fetch_httpx(url: str, *, timeout: float = 45.0, verify=True) -> str:
+    from url_safety import assert_safe_outbound_url
+    url = assert_safe_outbound_url(url)
     headers = {"User-Agent": DEFAULT_UA, "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"}
     async with httpx.AsyncClient(timeout=timeout, verify=verify, follow_redirects=True) as client:
         r = await client.get(url, headers=headers)
@@ -25,6 +27,8 @@ async def fetch_httpx(url: str, *, timeout: float = 45.0, verify=True) -> str:
 async def fetch_playwright_page(url: str, *, timeout_ms: int = 45_000) -> tuple[str, str]:
     """Zwraca (widoczny_tekst, html) — HTML potrzebny do odkrywania podstron."""
     from playwright.async_api import async_playwright
+    from url_safety import assert_safe_outbound_url
+    url = assert_safe_outbound_url(url)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)

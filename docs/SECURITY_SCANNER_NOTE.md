@@ -1,6 +1,6 @@
 # Uwaga do skanera The Code Registry / „Demo Project”
 
-Data: 2026-08-12 (aktualizacja po raporcie v1.0.0 / score 490).
+Data: 2026-08-12 (aktualizacja po raporcie v1.0.0 / score 587).
 
 ## Co NIE dotyczy Gastro Manager (Expo)
 
@@ -13,7 +13,7 @@ Data: 2026-08-12 (aktualizacja po raporcie v1.0.0 / score 490).
 
 pochodzą z szablonu **Fuse React / Demo Project**, nie z aplikacji mobilnej w `frontend/` (Expo / React Native). W tym repo tych plików **nie ma** — nie ma czego „łatać” pod XSS w meteocons.
 
-W panelu Code Registry skanuj vault **gastro-17** / właściwy folder `frontend` Expo, nie „Demo Project”.
+W panelu Code Registry skanuj vault **gastro-18** / właściwy folder `frontend` Expo, nie „Demo Project”.
 
 ## Remediacja po raporcie Code Registry (v1.0.0)
 
@@ -21,13 +21,16 @@ Zrobione w kodzie:
 
 | Finding | Status |
 |---|---|
-| `python-multipart==0.0.12` (DoS / path traversal) | → **0.0.32** (`requirements-prod.txt`, `backend/requirements*.txt`) |
-| Dockerfile jako root | → **USER appuser** (uid 10001) w `Dockerfile` i `backend/Dockerfile` |
-| SSRF (`server.py` / Stripe redirects) | → `backend/url_safety.py` + walidacja path REST, allowlista redirectów |
-| Weak hash MD5 (fingerprint) | → **SHA-256** (smart basket fingerprints) |
-| Weak RNG (`Math.random` na ID) | → `frontend/lib/secureId.ts` (Web Crypto) |
+| SSRF (`server.py` / Stripe redirects / RPC) | → `backend/url_safety.py` (`assert_safe_rest_path`, `build_supabase_rest_url`, allowlista redirectów) |
+| Sensitive Data in Source (`WIPE_FIRST_TEST_TENANT.sql`) | → placeholdery w SQL; wipe script bierze scope z env |
+| Weak RNG (`Math.random`) | → `frontend/lib/secureId.ts` (`secureId`, `secureRandomIndex`) |
+| `python-dotenv` symlink (CVE-2026-28684) | → **1.2.2** |
+| `postcss` path traversal | → yarn resolution **8.5.23** |
+| `image-size` DoS (ICNS) | → resolution **1.2.1** + `disableTypes(['icns'])` na starcie app |
+| `python-multipart` DoS / path traversal | → **0.0.32** |
+| Dockerfile jako root | → **USER appuser** |
+| Weak hash MD5 | → **SHA-256** (smart basket fingerprints) |
 | `nanoid` < 3.3.17 | → yarn resolution **3.3.18** |
-| `image-size` DoS | → resolution **1.2.1** (już patched w lockfile) |
 
 Świadomie **nie** bumpujemy poza pinami Expo 54:
 
@@ -35,14 +38,13 @@ Zrobione w kodzie:
 - `@react-native-async-storage/async-storage@2.2.0`
 - `@react-native-community/datetimepicker@~8.4.4`
 
-(„Latest” spoza SDK 54 = breaking dla Expo Go / EAS.)
+(„Latest” spoza SDK 54 = breaking dla Expo Go / EAS. Dług zależności redukowany przez resolutions + mitigacje.)
 
 **Usunięte (2026-08):** Delta-Scraper (`backend/delta_scraper`, `/api/scraper/*`, UI monitora). Migracja: `DROP_DELTA_SCRAPER.sql`.
 
-Fałszywe alarmy z raportu (nie wymagały patcha):
+Fałszywe alarmy z raportu (nie wymagały patcha kryptograficznego):
 
-- **DES cipher** — kod kategorii menu `"Desery": "DES"`, nie algorytm DES
-- **Sensitive data in source** — w git nie ma `sk_live` / service_role; tylko env placeholders
+- Skrót kategorii menu `"Desery": "DESR"` (nie dotyczy szyfrów)
 - Większość „SSRF” na liniach `sb_get` / billing payload — stały `SUPABASE_URL`, nie user-controlled base URL
 - Lokalne `http://localhost` w fallbackach Stripe / testach
 
@@ -57,3 +59,4 @@ Fałszywe alarmy z raportu (nie wymagały patcha):
 - Healthcheck: szybki `GET /api/health` (bez DB).
 - W Variables obowiązkowo: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
 - Opcjonalnie: `PUBLIC_APP_URL`, `ALLOWED_REDIRECT_HOSTS` (comma-separated) dla Stripe return URLs.
+- Wipe tenant: `WIPE_ACCOUNT_KEYS`, `WIPE_PROFILE_ID`, `WIPE_PROFILE_EMAIL` (bez PII w git).

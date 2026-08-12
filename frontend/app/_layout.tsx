@@ -20,6 +20,7 @@ import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
 import { BrandSplash, BRAND_SPLASH_MIN_MS } from '@/components/BrandSplash';
 import { warmProductImageIndexes } from '@/lib/productImages';
 import { DS } from '@/constants/premiumTheme';
+import { initImageSizeSecurity } from '@/src/utils/imageSizeSecurity';
 
 
 LogBox.ignoreLogs(['Unable to activate keep awake', 'KeepAwake']);
@@ -125,6 +126,11 @@ export default function RootLayout() {
       }
     });
     return () => task.cancel();
+  }, []);
+
+  // Best-effort mitigation for vulnerable `image-size` ICNS parser DoS.
+  useEffect(() => {
+    initImageSizeSecurity();
   }, []);
 
   if (!loaded && !error) return null;

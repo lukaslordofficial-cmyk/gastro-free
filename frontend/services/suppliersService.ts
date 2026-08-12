@@ -4,6 +4,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
+import { secureRandomIndex } from '@/lib/secureId';
 import type { Database, SupplierOffer, SupplierOfferItem } from '@/lib/types';
 
 type SupplierRow = Database['public']['Tables']['suppliers']['Row'] & {
@@ -12,7 +13,7 @@ type SupplierRow = Database['public']['Tables']['suppliers']['Row'] & {
 type RecipeIngredientRow = Database['public']['Tables']['recipe_ingredients']['Row'];
 
 const ICON_COLORS = ['#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2', '#475569'];
-const randomIconColor = () => ICON_COLORS[Math.floor(Math.random() * ICON_COLORS.length)];
+const randomIconColor = () => ICON_COLORS[secureRandomIndex(ICON_COLORS.length)];
 
 const EXTRA = 'min_order_value, shipping_cost, free_shipping_threshold, lead_time_days';
 const CAT = 'supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order';

@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
-_TABLE_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+_SEGMENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _BLOCKED_HOSTS = frozenset({
     "localhost",
     "metadata.google.internal",
@@ -25,13 +25,71 @@ _BLOCKED_HOSTS = frozenset({
 })
 
 
+def assert_supabase_origin(base_url: str) -> str:
+    """
+    Ensure outbound Supabase calls use a fixed https origin from env
+    (never a user-controlled host). Keeps scanners from treating
+    f\"{SUPABASE_URL}/...\" as an SSRF sink.
+    """
+    cleaned = (base_url or "").strip().rstrip("/")
+    if not cleaned:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL nie jest skonfigurowane.")
+    parsed = urlparse(cleaned)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL musi być https:// z hostem.")
+    host = parsed.hostname.lower().rstrip(".")
+    if host in _BLOCKED_HOSTS or host.endswith(".local") or host.endswith(".internal"):
+        raise HTTPException(status_code=503, detail="SUPABASE_URL host niedozwolony.")
+    # Allow only known Supabase / custom project hosts (no raw IP / file schemes).
+    try:
+        if _is_blocked_ip(ipaddress.ip_address(host)):
+            raise HTTPException(status_code=503, detail="SUPABASE_URL nie może wskazywać na prywatne IP.")
+    except ValueError:
+        pass
+    return cleaned
+
+
+def build_supabase_rest_url(base_url: str, path: str) -> str:
+    """Compose `{SUPABASE_URL}/rest/v1/{path}` with path + origin checks."""
+    origin = assert_supabase_origin(base_url)
+    safe_path = assert_safe_rest_path(path)
+    return f"{origin}/rest/v1/{safe_path}"
+
+
+def build_supabase_auth_admin_url(base_url: str, user_id: str) -> str:
+    """Compose Auth Admin user URL; user_id must already be a UUID-like token."""
+    origin = assert_supabase_origin(base_url)
+    uid = (user_id or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F-]{32,36}", uid):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy user_id.")
+    return f"{origin}/auth/v1/admin/users/{uid}"
+
+
 def assert_safe_rest_path(path: str) -> str:
     """Zapobiega path traversal / SSRF przez path w `{SUPABASE_URL}/rest/v1/{path}`."""
     raw = (path or "").strip().lstrip("/")
-    if not raw or ".." in raw or "//" in raw or "\\" in raw or "/" in raw.split("?", 1)[0]:
+    raw_no_query = raw.split("?", 1)[0]
+    if not raw or ".." in raw or "//" in raw or "\\" in raw:
         raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka REST.")
-    table = raw.split("?", 1)[0]
-    if not _TABLE_RE.fullmatch(table):
+    # Allow only these safe patterns inside `rest/v1/<path>`:
+    # - `<table>`
+    # - `rpc/<rpc_function>`
+    if "/" in raw_no_query and not raw_no_query.startswith("rpc/"):
+        raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka REST.")
+    if raw_no_query.count("/") > 1:
+        raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka REST.")
+
+    # PostgREST REST endpoints also accept `rpc/<function_name>`.
+    # The security scanner flags SSRF when rpc endpoints are assembled into URLs without validation,
+    # so we explicitly allow the only safe slash pattern: `rpc/<fn>`.
+    if raw_no_query.startswith("rpc/"):
+        fn = raw_no_query.split("/", 1)[1]
+        if not _SEGMENT_RE.fullmatch(fn):
+            raise HTTPException(status_code=400, detail="Nieprawidłowa nazwa RPC.")
+        return raw
+
+    # Default: a PostgREST table name without any additional path segments.
+    if not _SEGMENT_RE.fullmatch(raw_no_query):
         raise HTTPException(status_code=400, detail="Nieprawidłowa nazwa tabeli.")
     return raw
 

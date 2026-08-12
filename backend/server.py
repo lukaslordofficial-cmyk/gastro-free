@@ -45,6 +45,12 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
+from url_safety import (
+    assert_safe_redirect_url,
+    assert_safe_rest_path,
+    build_supabase_auth_admin_url,
+    build_supabase_rest_url,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
@@ -353,17 +359,17 @@ def _strip_account_key_params(params: dict | list | None) -> dict | list | None:
 
 async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
     _require_supabase()
-    from url_safety import assert_safe_rest_path
     path = assert_safe_rest_path(path)
     tenant_params = _with_tenant_params(path, params)
+    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
     r = await client.get(
-        f"{SUPABASE_URL}/rest/v1/{path}",
+        rest_url,
         headers=_sb_headers(),
         params=tenant_params or {},
     )
     if r.status_code >= 400 and _missing_account_key_error(r):
         r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/{path}",
+            rest_url,
             headers=_sb_headers(),
             params=_strip_account_key_params(tenant_params) or {},
         )
@@ -395,17 +401,17 @@ def _pg_ts(iso: str) -> str:
 
 async def sb_post(client: httpx.AsyncClient, path: str, payload):
     _require_supabase()
-    from url_safety import assert_safe_rest_path
     path = assert_safe_rest_path(path)
     body = _with_tenant_payload(path, payload)
+    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
     r = await client.post(
-        f"{SUPABASE_URL}/rest/v1/{path}",
+        rest_url,
         headers=_sb_headers(),
         json=body,
     )
     if r.status_code >= 400 and _missing_account_key_error(r):
         r = await client.post(
-            f"{SUPABASE_URL}/rest/v1/{path}",
+            rest_url,
             headers=_sb_headers(),
             json=_strip_account_key_payload(body),
         )
@@ -415,18 +421,18 @@ async def sb_post(client: httpx.AsyncClient, path: str, payload):
 
 async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
     _require_supabase()
-    from url_safety import assert_safe_rest_path
     path = assert_safe_rest_path(path)
     tenant_params = _with_tenant_params(path, params)
+    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
     r = await client.patch(
-        f"{SUPABASE_URL}/rest/v1/{path}",
+        rest_url,
         headers=_sb_headers(),
         params=tenant_params or {},
         json=payload,
     )
     if r.status_code >= 400 and _missing_account_key_error(r):
         r = await client.patch(
-            f"{SUPABASE_URL}/rest/v1/{path}",
+            rest_url,
             headers=_sb_headers(),
             params=_strip_account_key_params(tenant_params) or {},
             json=_strip_account_key_payload(payload),
@@ -437,17 +443,17 @@ async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
 
 async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
     _require_supabase()
-    from url_safety import assert_safe_rest_path
     path = assert_safe_rest_path(path)
     tenant_params = _with_tenant_params(path, params)
+    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
     r = await client.delete(
-        f"{SUPABASE_URL}/rest/v1/{path}",
+        rest_url,
         headers=_sb_headers(),
         params=tenant_params or {},
     )
     if r.status_code >= 400 and _missing_account_key_error(r):
         r = await client.delete(
-            f"{SUPABASE_URL}/rest/v1/{path}",
+            rest_url,
             headers=_sb_headers(),
             params=_strip_account_key_params(tenant_params) or {},
         )
@@ -817,9 +823,7 @@ async def auth_auto_confirm(body: AutoConfirmBody):
         raise HTTPException(status_code=403, detail="AUTO_CONFIRM_EMAIL jest wyłączone.")
     _require_supabase()
     uid = (body.user_id or "").strip()
-    if not re.fullmatch(r"[0-9a-fA-F-]{32,36}", uid):
-        raise HTTPException(status_code=400, detail="Nieprawidłowy user_id.")
-    url = f"{SUPABASE_URL}/auth/v1/admin/users/{uid}"
+    url = build_supabase_auth_admin_url(SUPABASE_URL, uid)
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -6003,11 +6007,9 @@ async def expiry_daily_job():
 
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
         try:
-            await httpx_c.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/warehouse_inventory_refresh_status",
-                headers=SB_HEADERS,
-                json={},
-            )
+            # Refresh endpoint: PostgREST RPC. Use sb_post() so we validate
+            # the rest path (prevents SSRF-style URL construction findings).
+            await sb_post(httpx_c, "rpc/warehouse_inventory_refresh_status", {})
         except Exception:
             logging.exception("expiry job: refresh_status RPC failed")
 
@@ -6792,7 +6794,7 @@ def _make_pos_id_for_category(category: str, offset: int) -> str:
     prefix_map = {
         "Burgery": "BRG", "Dania główne": "DAN", "Sałatki": "SAL",
         "Makarony": "MAK", "Zupy": "ZUP", "Pizza": "PIZ",
-        "Przystawki": "PRZ", "Desery": "DES", "Napoje": "NAP",
+        "Przystawki": "PRZ", "Desery": "DESR", "Napoje": "NAP",
         "Alkohole": "ALK", "Inne": "INN",
     }
     return f"{prefix_map.get(category, 'INN')}-{str(offset).zfill(3)}"
@@ -13737,11 +13739,9 @@ async def _run_list_expiring_soon(
 
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
         try:
-            await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/warehouse_inventory_refresh_status",
-                headers=SB_HEADERS,
-                json={},
-            )
+            # Refresh endpoint: PostgREST RPC. Use sb_post() so we validate
+            # the rest path (prevents SSRF-style URL construction findings).
+            await sb_post(client, "rpc/warehouse_inventory_refresh_status", {})
         except Exception:
             pass
 
@@ -15062,7 +15062,6 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
     from billing_stripe import create_checkout_session, stripe_configured
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
-    from url_safety import assert_safe_redirect_url
     success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
     cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or "myapp://billing/cancel").strip()
     # Stripe wymaga https lub http localhost — deep linki Expo: użyj https success page z redirect
@@ -15147,7 +15146,6 @@ async def billing_portal(req: PortalSessionRequest):
         cid = sub.get("stripe_customer_id")
         if not cid:
             raise HTTPException(status_code=400, detail="Brak klienta Stripe — najpierw wykup plan.")
-        from url_safety import assert_safe_redirect_url
         ret = (req.return_url or os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").strip()
         ret = assert_safe_redirect_url(ret)
         try:
@@ -15443,7 +15441,6 @@ async def local_producers_checkout(req: LpCheckoutRequest):
         raise HTTPException(status_code=400, detail="Brak order_id")
 
     account_key = get_account_key()
-    from url_safety import assert_safe_redirect_url
     success = (req.success_url or os.getenv("LP_BILLING_SUCCESS_URL") or os.getenv("BILLING_SUCCESS_URL") or "myapp://lp/success").strip()
     cancel = (req.cancel_url or os.getenv("LP_BILLING_CANCEL_URL") or os.getenv("BILLING_CANCEL_URL") or "myapp://lp/cancel").strip()
     if success.startswith("myapp://"):

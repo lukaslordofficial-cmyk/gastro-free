@@ -1,13 +1,13 @@
 -- =============================================================================
--- WIPE: shared demo tenant `default` + first early-test profile
--- Project: tucmmrcwwcltkqwyvzxa
+-- WIPE: shared demo tenant `default` + optional first early-test profile
+-- Project: (set in Supabase dashboard — do not hardcode secrets here)
 --
 -- SAFE SCOPE (do NOT expand without review):
 --   1) account_key = 'default'  — shared demo / race-fallback wallet (Premium leak)
---   2) first test profile lukaslord.official@gmail.com
---      account_key = ak_8adc1de5fced4ae8bb1e554b92f54bdf
+--   2) first test profile — replace placeholders before running:
+--      account_key / profile id / email via env-driven wipe script
 --
--- Does NOT touch other beta profiles (mithril.*, palac.*, etc.).
+-- Prefer: scripts/wipe_first_test_tenant.py with WIPE_* env vars.
 -- Idempotent deletes.
 -- =============================================================================
 
@@ -15,7 +15,7 @@ DO $$
 DECLARE
   wipe_keys text[] := ARRAY[
     'default',
-    'ak_8adc1de5fced4ae8bb1e554b92f54bdf'
+    '__REDACTED_FIRST_TEST_ACCOUNT_KEY__'
   ];
   k text;
   t text;
@@ -115,9 +115,9 @@ BEGIN
 
   -- Usuń profil pierwszego testu (auth user opcjonalnie — wymaga dashboard / Admin API)
   DELETE FROM public.profiles
-  WHERE id = '8adc1de5-fced-4ae8-bb1e-554b92f54bdf'
-     OR account_key = 'ak_8adc1de5fced4ae8bb1e554b92f54bdf'
-     OR lower(email) = 'lukaslord.official@gmail.com';
+  WHERE id = '__REDACTED_FIRST_TEST_PROFILE_ID__'
+     OR account_key = '__REDACTED_FIRST_TEST_ACCOUNT_KEY__'
+     OR lower(email) = '__REDACTED_FIRST_TEST_EMAIL__';
 END $$;
 
 -- Po wipe: NIE odtwarzaj Premium na „default”.

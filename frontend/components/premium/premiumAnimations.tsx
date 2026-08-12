@@ -11,6 +11,7 @@ import Animated, {
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PremiumColors } from '@/constants/premiumTheme';
+import { secureRandomIndex } from '@/lib/secureId';
 
 const GLITCH_CHARS = '$#@%&*01<>/\\|';
 
@@ -36,7 +37,7 @@ export function GlitchTyping({
         setShown(text);
         return;
       }
-      const glitch = GLITCH_CHARS[Math.floor(Math.random() * GLITCH_CHARS.length)];
+      const glitch = GLITCH_CHARS[secureRandomIndex(GLITCH_CHARS.length)];
       setShown(text.slice(0, i) + glitch);
       setTimeout(() => {
         if (cancelled) return;

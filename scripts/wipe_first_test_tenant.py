@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
-Wipe shared `default` tenant + first test profile (lukaslord) via service_role REST.
-Does NOT print secrets. Safe scope only — see WIPE_FIRST_TEST_TENANT.sql.
+Wipe shared `default` tenant + first test profile via service_role REST.
+
+Does NOT print secrets. Scope is driven by env (no hard-coded PII in git):
+
+  WIPE_ACCOUNT_KEYS=default,ak_...
+  WIPE_PROFILE_ID=<uuid>
+  WIPE_PROFILE_EMAIL=<email>
+
+Safe defaults wipe only the shared `default` tenant when optional vars are unset.
+See supabase_migrations/WIPE_FIRST_TEST_TENANT.sql for the SQL equivalent (placeholders).
 """
 from __future__ import annotations
 
@@ -26,11 +34,12 @@ URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
 KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or ""
 
 WIPE_KEYS = [
-    "default",
-    "ak_8adc1de5fced4ae8bb1e554b92f54bdf",
+    k.strip()
+    for k in (os.environ.get("WIPE_ACCOUNT_KEYS") or "default").split(",")
+    if k.strip()
 ]
-FIRST_PROFILE_ID = "8adc1de5-fced-4ae8-bb1e-554b92f54bdf"
-FIRST_EMAIL = "lukaslord.official@gmail.com"
+FIRST_PROFILE_ID = (os.environ.get("WIPE_PROFILE_ID") or "").strip()
+FIRST_EMAIL = (os.environ.get("WIPE_PROFILE_EMAIL") or "").strip()
 
 TENANT_TABLES = [
     "inventory_expiry_batches",
@@ -108,7 +117,6 @@ def main() -> int:
                 supplier_ids = []
 
         if supplier_ids:
-            # PostgREST: in.(uuid1,uuid2)
             in_list = ",".join(supplier_ids)
             for child, col in (("supplier_catalog", "supplier_id"), ("supplier_offer_items", "supplier_id")):
                 st, bd = req("DELETE", child, params=f"{col}=in.({in_list})")
@@ -154,11 +162,12 @@ def main() -> int:
             r = delete_eq(table, "account_key", ak)
             results.setdefault(ak, []).append(f"{table}:{r}")
 
-    # Delete first test profile row
-    st, bd = req("DELETE", "profiles", params=f"id=eq.{FIRST_PROFILE_ID}")
-    print(f"profiles delete by id: {st}")
-    st2, _ = req("DELETE", "profiles", params=f"email=eq.{urllib.parse.quote(FIRST_EMAIL)}")
-    print(f"profiles delete by email: {st2}")
+    if FIRST_PROFILE_ID:
+        st, bd = req("DELETE", "profiles", params=f"id=eq.{FIRST_PROFILE_ID}")
+        print(f"profiles delete by id: {st}")
+    if FIRST_EMAIL:
+        st2, _ = req("DELETE", "profiles", params=f"email=eq.{urllib.parse.quote(FIRST_EMAIL)}")
+        print(f"profiles delete by email: {st2}")
 
     # Neutralize default wallet (no Premium leftovers)
     payload = json.dumps({
@@ -168,7 +177,6 @@ def main() -> int:
         "status": "active",
         "free_starter_claimed": True,
     }).encode()
-    # upsert
     st, bd = req(
         "POST",
         "subscriptions",
@@ -178,7 +186,6 @@ def main() -> int:
             "Prefer": "resolution=merge-duplicates,return=minimal",
         },
     )
-    # Prefer header on POST needs on_conflict — use PATCH if exists
     if st not in (200, 201):
         st, bd = req(
             "PATCH",
@@ -194,18 +201,18 @@ def main() -> int:
         )
     print(f"default subscription neutralize: {st}")
 
-    # Try delete auth user (Admin API)
-    auth_url = f"{URL}/auth/v1/admin/users/{FIRST_PROFILE_ID}"
-    ar = urllib.request.Request(
-        auth_url,
-        headers={"apikey": KEY, "Authorization": f"Bearer {KEY}"},
-        method="DELETE",
-    )
-    try:
-        with urllib.request.urlopen(ar, timeout=30) as resp:
-            print(f"auth user delete: {resp.status}")
-    except urllib.error.HTTPError as e:
-        print(f"auth user delete: {e.code} (may already be gone)")
+    if FIRST_PROFILE_ID:
+        auth_url = f"{URL}/auth/v1/admin/users/{FIRST_PROFILE_ID}"
+        ar = urllib.request.Request(
+            auth_url,
+            headers={"apikey": KEY, "Authorization": f"Bearer {KEY}"},
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(ar, timeout=30) as resp:
+                print(f"auth user delete: {resp.status}")
+        except urllib.error.HTTPError as e:
+            print(f"auth user delete: {e.code} (may already be gone)")
 
     print("Per-tenant delete summary:")
     for ak, rows in results.items():

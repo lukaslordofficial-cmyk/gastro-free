@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import random
+import secrets
 import sys
 from datetime import datetime, timezone
 
@@ -168,7 +168,9 @@ async def run_orders(n: int, close_day: bool) -> None:
         total_burgers = 0
         total_revenue = 0.0
         for i in range(1, n + 1):
-            qty = random.randint(1, 3)
+            # Use cryptographically secure randomness even in simulations,
+            # so scanners don't flag weak RNG usage.
+            qty = 1 + secrets.randbelow(3)
             total_burgers += qty
             order_id = f"SIM-{datetime.now(timezone.utc).strftime('%H%M%S')}-{i:02d}"
             payload = {

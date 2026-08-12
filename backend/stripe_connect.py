@@ -67,6 +67,81 @@ def producer_connect_id(producer: dict[str, Any]) -> str:
     )
 
 
+async def ensure_express_capabilities(account_id: str) -> dict[str, Any]:
+    """
+    Dopina capabilities na istniejącym Express (Account.update).
+
+    Konta utworzone wcześniej bez card_payments/transfers dają przy Checkout
+    destination charge błąd 400 o legacy_payments / card_payments / transfers.
+    """
+    acct = (account_id or "").strip()
+    if not acct.startswith("acct_"):
+        raise ValueError("Nieprawidłowy stripe_connect_id (oczekiwane acct_...)")
+    return await _stripe_post(
+        f"/accounts/{acct}",
+        {
+            "capabilities": {
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+        },
+    )
+
+
+def _capability_status(account: dict[str, Any], name: str) -> str:
+    caps = account.get("capabilities") or {}
+    raw = caps.get(name)
+    if isinstance(raw, dict):
+        return str(raw.get("status") or "").lower()
+    return str(raw or "").lower()
+
+
+async def assert_destination_charge_ready(account_id: str) -> dict[str, Any]:
+    """
+    Przed Checkout: upewnij się, że Connect ma transfers (destination charges).
+    Gdy brak — request capabilities; gdy nadal nieaktywne — czytelny błąd PL.
+    """
+    acct = (account_id or "").strip()
+    if not acct.startswith("acct_"):
+        raise ValueError(
+            "Dystrybutor nie ma poprawnego Stripe Connect (acct_...). "
+            "Onboarding: panel WWW → Stripe Connect."
+        )
+
+    try:
+        await ensure_express_capabilities(acct)
+    except Exception as e:
+        logger.warning("ensure_express_capabilities(%s) failed: %s", acct, e)
+
+    account = await _stripe_get(f"/accounts/{acct}")
+    transfers = _capability_status(account, "transfers")
+    card_payments = _capability_status(account, "card_payments")
+    charges_enabled = bool(account.get("charges_enabled"))
+    details_submitted = bool(account.get("details_submitted"))
+
+    if transfers not in ("active", "pending"):
+        raise ValueError(
+            "Konto Connect dystrybutora nie ma capability `transfers` "
+            f"(status={transfers or 'brak'}). W Stripe Dashboard → Connect → konto "
+            f"{acct} dokończ onboarding / włącz Transfers. "
+            "Bez tego destination charge kończy się Stripe API 400."
+        )
+    if transfers == "pending" and not details_submitted:
+        raise ValueError(
+            "Dystrybutor nie dokończył onboardingu Stripe Connect "
+            f"({acct}). Poproś o ponowne otwarcie linku onboardingowego."
+        )
+    # Test mode często ma transfers=active zanim charges_enabled=true — nie blokuj na charges.
+    return {
+        "account_id": acct,
+        "transfers": transfers,
+        "card_payments": card_payments,
+        "charges_enabled": charges_enabled,
+        "details_submitted": details_submitted,
+        "payouts_enabled": bool(account.get("payouts_enabled")),
+    }
+
+
 async def create_express_account(
     *,
     producer: dict[str, Any],
@@ -78,6 +153,11 @@ async def create_express_account(
 
     existing = producer_connect_id(producer)
     if existing.startswith("acct_"):
+        # Istniejące konto: dociągnij capabilities (naprawa starych acct bez transfers).
+        try:
+            await ensure_express_capabilities(existing)
+        except Exception as e:
+            logger.warning("capabilities refresh for %s: %s", existing, e)
         return {"id": existing, "existing": True}
 
     payload: dict[str, Any] = {

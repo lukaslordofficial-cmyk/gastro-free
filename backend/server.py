@@ -15370,7 +15370,16 @@ async def local_producers_checkout(req: LpCheckoutRequest):
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             logger.exception("LP checkout failed")
-            raise HTTPException(status_code=502, detail=str(e)[:300])
+            detail = str(e)[:400]
+            low = detail.lower()
+            if any(x in low for x in ("transfers", "card_payments", "legacy_payments", "capability")):
+                detail = (
+                    f"{detail} — Konto Connect dystrybutora musi mieć aktywne "
+                    "`transfers` (i zwykle `card_payments`). W Stripe Dashboard: "
+                    "Connect → Accounts → wybierz acct_... → Capabilities / "
+                    "dokończ onboarding Express."
+                )
+            raise HTTPException(status_code=502, detail=detail)
 
         # Zapisz session id w notes (best-effort) — kolumna payment_intent po opłaceniu
         try:

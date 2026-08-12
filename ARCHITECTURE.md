@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-12 — Fix Stripe 400 przy zamówieniu od lokalnych (Connect)
+
+- Istniejące `acct_...` dostają `Account.update` z `card_payments` + `transfers`
+  (wcześniej capabilities tylko przy `accounts.create` → stare konta → 400).
+- Przed Checkout: `assert_destination_charge_ready`; czytelny komunikat PL.
+- Destination charge: `application_fee_amount` (kurier+5%) + `transfer_data.destination`
+  (bez `transfer_data.amount`); retry Checkout card-only gdy BLIK/capability pada.
+
 ### 2026-08-12 — Fix: Łowca Okazji `search_scope` lokalni vs hurtownicy
 
 - Jarvis `order_critical_items_by_category` **nie przekazywał** `search_scope` → zawsze hurtownicy.

@@ -18,11 +18,14 @@ from server import (  # noqa: E402
 
 def test_search_scope_aliases():
     assert _normalize_deal_hunter_search_scope("lokalni") == "local_producers_only"
-    assert _normalize_deal_hunter_search_scope("dostawcy") == "local_producers_only"
     assert _normalize_deal_hunter_search_scope("dystrybutorzy") == "local_producers_only"
+    assert _normalize_deal_hunter_search_scope("local_producers_only") == "local_producers_only"
     assert _normalize_deal_hunter_search_scope("both") == "both"
     assert _normalize_deal_hunter_search_scope("porownaj") == "both"
     assert _normalize_deal_hunter_search_scope(None) == "suppliers_only"
+    # „dostawcy” = hurtownicy (nie lokalni)
+    assert _normalize_deal_hunter_search_scope("dostawcy") == "suppliers_only"
+    assert _normalize_deal_hunter_search_scope("suppliers_only") == "suppliers_only"
 
 
 def test_stock_cap_5kg_need_3kg_available():

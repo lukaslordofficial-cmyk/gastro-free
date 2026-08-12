@@ -1794,7 +1794,7 @@ export function DealHunterModal({
     try {
       const res = await fetch(`${BACKEND_URL}/api/orders/compare-offers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({
           restaurant_name: restaurantName ?? 'Nasza restauracja',
           search_scope: searchScope,

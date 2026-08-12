@@ -8,6 +8,7 @@ from url_safety import (
     assert_safe_outbound_url,
     assert_safe_redirect_url,
     assert_safe_rest_path,
+    build_supabase_auth_user_url,
 )
 
 
@@ -58,3 +59,9 @@ def test_redirect_blocks_unknown_host(monkeypatch):
 def test_redirect_allows_public_app_host(monkeypatch):
     monkeypatch.setenv("PUBLIC_APP_URL", "https://app.example.com")
     assert assert_safe_redirect_url("https://app.example.com/billing-success")
+
+
+def test_auth_user_url_fixed_origin():
+    assert build_supabase_auth_user_url("https://proj.supabase.co") == (
+        "https://proj.supabase.co/auth/v1/user"
+    )

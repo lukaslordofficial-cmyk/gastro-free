@@ -47,9 +47,18 @@ from token_billing import (
 )
 from url_safety import (
     assert_safe_redirect_url,
-    assert_safe_rest_path,
     build_supabase_auth_admin_url,
+    build_supabase_auth_user_url,
     build_supabase_rest_url,
+)
+from supabase_rest import (
+    configure as _configure_supabase_rest,
+    require_supabase as _require_supabase,
+    sb_delete,
+    sb_get,
+    sb_headers as _sb_headers,
+    sb_patch,
+    sb_post,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,6 +108,9 @@ def get_account_key() -> str:
         return _account_key_ctx.get() or _ACCOUNT_KEY_DEFAULT
     except LookupError:
         return _ACCOUNT_KEY_DEFAULT
+
+
+_configure_supabase_rest(get_account_key=get_account_key)
 
 
 def require_tenant_account_key() -> str:
@@ -171,7 +183,7 @@ async def account_key_middleware(request: Request, call_next):
                     apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
                     async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
                         uresp = await httpx_c.get(
-                            f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+                            build_supabase_auth_user_url(SUPABASE_URL),
                             headers={
                                 "Authorization": f"Bearer {user_jwt}",
                                 "apikey": apikey,
@@ -181,7 +193,7 @@ async def account_key_middleware(request: Request, call_next):
                             uid = (uresp.json() or {}).get("id")
                             if uid:
                                 pref = await httpx_c.get(
-                                    f"{SUPABASE_URL.rstrip('/')}/rest/v1/profiles",
+                                    build_supabase_rest_url(SUPABASE_URL, "profiles"),
                                     params={"select": "account_key", "id": f"eq.{uid}", "limit": "1"},
                                     headers={
                                         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -238,143 +250,11 @@ def _openai() -> AsyncOpenAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Supabase helper (service_role → bypasses RLS)
+# Supabase REST — see backend/supabase_rest.py (service_role, tenant filters)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _sb_headers() -> dict[str, str]:
-    if not SUPABASE_KEY:
-        return {
-            "Content-Type": "application/json",
-            "Prefer": "return=representation",
-        }
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
 
 # Back-compat for modules that import SB_HEADERS as a dict snapshot.
 SB_HEADERS = _sb_headers()
-
-
-def _require_supabase() -> None:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Supabase nie jest skonfigurowane. Ustaw SUPABASE_URL oraz "
-                "SUPABASE_SERVICE_ROLE_KEY w Variables na Railway."
-            ),
-        )
-
-
-# Tabele z kolumną account_key (ADD_TENANT_ISOLATION / FIX_FINANCE_TENANT_RLS).
-_TENANT_TABLES = frozenset({
-    "inventory_items",
-    "inventory_categories",
-    "menu_items",
-    "suppliers",
-    "waste_logs",
-    "warehouse_inventory",
-    "supplier_offers",
-    "revenue_entries",
-    "fixed_costs",
-    "variable_cost_entries",
-    "daily_reports",
-    "token_usage",
-    "sales_log",
-    "financial_records",
-    "subscriptions",
-})
-
-
-def _table_name(path: str) -> str:
-    return (path or "").split("?", 1)[0].strip("/").split("/")[0]
-
-
-def _with_tenant_params(path: str, params: dict | list | None) -> dict | list | None:
-    """Dokleja filtr account_key do zapytań tenantowych (service_role omija RLS)."""
-    if _table_name(path) not in _TENANT_TABLES:
-        return params
-    ak_filter = f"eq.{get_account_key()}"
-    if isinstance(params, dict):
-        if "account_key" in params:
-            return params
-        out = dict(params)
-        out["account_key"] = ak_filter
-        return out
-    if isinstance(params, list):
-        if any(
-            (isinstance(p, (list, tuple)) and len(p) >= 1 and p[0] == "account_key")
-            or (isinstance(p, str) and p.startswith("account_key"))
-            for p in params
-        ):
-            return params
-        return list(params) + [("account_key", ak_filter)]
-    return params
-
-
-def _with_tenant_payload(path: str, payload):
-    if _table_name(path) not in _TENANT_TABLES:
-        return payload
-    ak = get_account_key()
-    if isinstance(payload, list):
-        return [{**row, "account_key": (row.get("account_key") or ak)} for row in payload if isinstance(row, dict)]
-    if isinstance(payload, dict):
-        if payload.get("account_key"):
-            return payload
-        return {**payload, "account_key": ak}
-    return payload
-
-def _missing_account_key_error(resp: httpx.Response) -> bool:
-    body = (resp.text or "").lower()
-    return "account_key" in body and (
-        "does not exist" in body or "schema cache" in body or "pgrst204" in body or "42703" in body
-    )
-
-
-def _strip_account_key_payload(payload):
-    if isinstance(payload, list):
-        return [{k: v for k, v in row.items() if k != "account_key"} for row in payload if isinstance(row, dict)]
-    if isinstance(payload, dict):
-        return {k: v for k, v in payload.items() if k != "account_key"}
-    return payload
-
-
-def _strip_account_key_params(params: dict | list | None) -> dict | list | None:
-    if isinstance(params, dict):
-        return {k: v for k, v in params.items() if k != "account_key"}
-    if isinstance(params, list):
-        return [
-            p for p in params
-            if not (
-                (isinstance(p, (list, tuple)) and len(p) >= 1 and p[0] == "account_key")
-                or (isinstance(p, str) and p.startswith("account_key"))
-            )
-        ]
-    return params
-
-
-async def sb_get(client: httpx.AsyncClient, path: str, params: dict | list | None = None):
-    _require_supabase()
-    path = assert_safe_rest_path(path)
-    tenant_params = _with_tenant_params(path, params)
-    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
-    r = await client.get(
-        rest_url,
-        headers=_sb_headers(),
-        params=tenant_params or {},
-    )
-    if r.status_code >= 400 and _missing_account_key_error(r):
-        r = await client.get(
-            rest_url,
-            headers=_sb_headers(),
-            params=_strip_account_key_params(tenant_params) or {},
-        )
-    r.raise_for_status()
-    return r.json()
 
 
 def _pg_ts(iso: str) -> str:
@@ -397,68 +277,6 @@ def _pg_ts(iso: str) -> str:
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return raw.replace("+", "%2B")
-
-
-async def sb_post(client: httpx.AsyncClient, path: str, payload):
-    _require_supabase()
-    path = assert_safe_rest_path(path)
-    body = _with_tenant_payload(path, payload)
-    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
-    r = await client.post(
-        rest_url,
-        headers=_sb_headers(),
-        json=body,
-    )
-    if r.status_code >= 400 and _missing_account_key_error(r):
-        r = await client.post(
-            rest_url,
-            headers=_sb_headers(),
-            json=_strip_account_key_payload(body),
-        )
-    r.raise_for_status()
-    return r.json() if r.text else None
-
-
-async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload):
-    _require_supabase()
-    path = assert_safe_rest_path(path)
-    tenant_params = _with_tenant_params(path, params)
-    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
-    r = await client.patch(
-        rest_url,
-        headers=_sb_headers(),
-        params=tenant_params or {},
-        json=payload,
-    )
-    if r.status_code >= 400 and _missing_account_key_error(r):
-        r = await client.patch(
-            rest_url,
-            headers=_sb_headers(),
-            params=_strip_account_key_params(tenant_params) or {},
-            json=_strip_account_key_payload(payload),
-        )
-    r.raise_for_status()
-    return r.json() if r.text else None
-
-
-async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
-    _require_supabase()
-    path = assert_safe_rest_path(path)
-    tenant_params = _with_tenant_params(path, params)
-    rest_url = build_supabase_rest_url(SUPABASE_URL, path)
-    r = await client.delete(
-        rest_url,
-        headers=_sb_headers(),
-        params=tenant_params or {},
-    )
-    if r.status_code >= 400 and _missing_account_key_error(r):
-        r = await client.delete(
-            rest_url,
-            headers=_sb_headers(),
-            params=_strip_account_key_params(tenant_params) or {},
-        )
-    r.raise_for_status()
-    return r.json() if r.text else None
 
 
 def _current_year_month() -> str:
@@ -8343,14 +8161,19 @@ async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
 
 
 def _normalize_deal_hunter_search_scope(raw: Optional[str]) -> str:
-    v = (raw or "suppliers_only").strip().lower()
+    v = (raw or "suppliers_only").strip().lower().replace("-", "_").replace(" ", "_")
     if v in (
         "local_producers_only", "local", "producers", "lokalni", "lp",
-        "local_suppliers", "dostawcy", "dystrybutorzy", "lokalni_dostawcy",
+        "local_suppliers", "local_producers", "dystrybutorzy", "lokalni_dostawcy",
+        "tylko_lokalni", "tylko_lokalne",
     ):
         return "local_producers_only"
-    if v in ("both", "all", "wszystkie", "oba", "compare", "porownaj"):
+    if v in (
+        "both", "all", "wszystkie", "oba", "compare", "porownaj",
+        "hurtownicy_i_lokalni", "suppliers_and_local",
+    ):
         return "both"
+    # Explicit hurtownicy / default
     return "suppliers_only"
 
 
@@ -9423,7 +9246,50 @@ async def compare_offers(req: CompareOffersRequest):
             client, req.search_scope,
         )
         lp_suppliers = [s for s in suppliers if s.get("is_local_producer")]
+        wholesaler_suppliers = [s for s in suppliers if not s.get("is_local_producer")]
+        # Twarda bramka zakresu — nigdy nie mieszaj hurtowników przy „tylko lokalni”
+        # i odwrotnie (obrona przed regresją / złym cache).
+        if search_scope == "local_producers_only":
+            suppliers = list(lp_suppliers)
+            catalog = [
+                r for r in catalog
+                if r.get("is_local_producer") or r.get("source") == "local_producer"
+            ]
+        elif search_scope == "suppliers_only":
+            suppliers = list(wholesaler_suppliers)
+            catalog = [
+                r for r in catalog
+                if not (r.get("is_local_producer") or r.get("source") == "local_producer")
+            ]
         sup_by_id = {str(s["id"]): s for s in suppliers if s.get("id")}
+
+        if search_scope == "local_producers_only" and not catalog:
+            return {
+                "ok": True,
+                "optimizer_version": 2,
+                "search_scope": search_scope,
+                "includes_local_producers": False,
+                "items_requested": [
+                    {
+                        "product_name": it.product_name_or_id,
+                        "quantity": it.quantity,
+                        "unit": it.unit,
+                        "found": False,
+                    }
+                    for it in req.items
+                ],
+                "best_option": None,
+                "option_optimized": {"suppliers": [], "total_pln": 0},
+                "scenarios": [],
+                "assistant_speech": (
+                    "Brak ofert u lokalnych dostawców (Lokalni Przetwórcy). "
+                    "Sprawdź, czy dystrybutorzy są active/verified/approved "
+                    "i mają Stripe Connect, oraz czy produkty mają stan > 0."
+                ),
+                "message": (
+                    "Nie znaleziono katalogu lokalnych dostawców dla wybranego zakresu."
+                ),
+            }
 
         # Magazyn (nazwa + synonimy + gramatura 1 szt.) — natychmiastowe dopasowanie bez AI.
         has_syn = await _has_inventory_synonyms(client)
@@ -9999,7 +9865,8 @@ async def optimizer_critical_order(req: CriticalOrderRequest):
         }
 
     crit_fp = fingerprint_critical(critical)
-    soft_key = make_cache_key(crit_fp, "soft")
+    scope = _normalize_deal_hunter_search_scope(req.search_scope)
+    soft_key = make_cache_key(f"{crit_fp}|scope:{scope}", "soft")
     if not req.force_refresh:
         cached = cache_get(soft_key)
         if cached and cached.get("compare"):
@@ -10017,7 +9884,7 @@ async def optimizer_critical_order(req: CriticalOrderRequest):
             for c in critical
         ],
         restaurant_name=req.restaurant_name,
-        search_scope=req.search_scope,
+        search_scope=scope,
     )
     try:
         compare_result = await compare_offers(compare_req)
@@ -12556,6 +12423,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
                 str(p.get("cart_objective")).strip()
                 if p.get("cart_objective") else None
             ),
+            search_scope=p.get("search_scope") or "suppliers_only",
         ))
     raise HTTPException(status_code=400, detail=f"Intencja {it!r} nie obsługiwana przez /voice/dispatch.")
 

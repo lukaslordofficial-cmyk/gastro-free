@@ -1,6 +1,6 @@
 # Uwaga do skanera The Code Registry / „Demo Project”
 
-Data: 2026-08-12 (aktualizacja po raporcie v1.0.0 / score 587).
+Data: 2026-08-12 (aktualizacja po raporcie GitHub vault v1.0.0 — 61 security findings, głównie SSRF false-flags + OSS).
 
 ## Co NIE dotyczy Gastro Manager (Expo)
 
@@ -21,7 +21,7 @@ Zrobione w kodzie:
 
 | Finding | Status |
 |---|---|
-| SSRF (`server.py` / Stripe redirects / RPC) | → `backend/url_safety.py` (`assert_safe_rest_path`, `build_supabase_rest_url`, allowlista redirectów) |
+| SSRF (`server.py` / Stripe redirects / RPC) | → `url_safety.py` + **`supabase_rest.py`** (`httpx.URL` host z env; path tylko tabela/rpc) |
 | Sensitive Data in Source (`WIPE_FIRST_TEST_TENANT.sql`) | → placeholdery w SQL; wipe script bierze scope z env |
 | Weak RNG (`Math.random`) | → `frontend/lib/secureId.ts` (`secureId`, `secureRandomIndex`) |
 | `python-dotenv` symlink (CVE-2026-28684) | → **1.2.2** |

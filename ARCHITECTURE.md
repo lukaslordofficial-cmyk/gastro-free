@@ -20,6 +20,30 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-12 — Fix: Łowca Okazji `search_scope` lokalni vs hurtownicy
+
+- Jarvis `order_critical_items_by_category` **nie przekazywał** `search_scope` → zawsze hurtownicy.
+- `compare-offers`: twarda bramka katalogu po scope + czytelny komunikat gdy lokalni pusti.
+- Cache `optimizer/critical-order` uwzględnia scope w kluczu.
+- FE DealHunter: `compare-offers` z `apiJsonHeaders` (tenant).
+
+### 2026-08-12 — Kęs #9: `supabase_rest` + SSRF posture (Code Registry GitHub report)
+
+- **`backend/supabase_rest.py`** — `sb_get` / `sb_post` / `sb_patch` / `sb_delete` + tenant filters
+  wydzielone z monolitu `server.py` (dekalog §I / §VIII). URL = stały host z env + walidowany path
+  (`httpx.URL(scheme, host, path)` — bez składania hosta z inputu).
+- Middleware account_key: Auth `/user` i REST `profiles` przez `build_supabase_auth_user_url` /
+  `build_supabase_rest_url`.
+- **`dayjs` → 1.11.21** (patch OSS). Bez bumpów Expo native (async-storage / webview / datetimepicker).
+
+### 2026-08-12 — Code Registry harden + fix Expo bundle
+
+- **`backend/url_safety.py`** — walidacja REST/RPC path, origin Supabase, allowlista redirectów Stripe
+  (SSRF / open redirect). Helpery: `build_supabase_rest_url`, `build_supabase_auth_admin_url`.
+- **`frontend/lib/secureId.ts`** — wspólne `secureId` / `secureRandomIndex` (bez `Math.random`).
+- **Nie importować `image-size` w RN** — paczka używa Node `fs`; pin zostaje tylko w yarn resolutions.
+- Expo crash (bundle) naprawiony przez usunięcie `src/utils/imageSizeSecurity.ts`.
+
 ### 2026-08 — Kęs #8: Skan menu → pełny magazyn (jak gastro-manager-15)
 
 - Porównano z `lukaslordofficial-cmyk/gastro-manager-15`: onboarding = składniki z receptur.

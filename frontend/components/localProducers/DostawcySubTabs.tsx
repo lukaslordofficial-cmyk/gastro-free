@@ -30,6 +30,7 @@ export function DostawcySubTabs() {
     pathname.includes('lokalni-przetworcy')
     || pathname.includes('/producent/')
     || pathname.includes('/dostawy')
+    || pathname.includes('/zamowienie/')
       ? 'lokalni'
       : 'index';
 

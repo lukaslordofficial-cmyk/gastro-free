@@ -368,6 +368,7 @@ async def handle_stripe_event(
                 client=client,
                 sb_get=sb_get,
                 sb_patch=sb_patch,
+                sb_post=sb_post,
             )
             result["action"] = "local_producer_order_paid"
             result["local_producer"] = lp

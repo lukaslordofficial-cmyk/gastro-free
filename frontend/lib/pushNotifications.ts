@@ -208,7 +208,11 @@ export async function scheduleExpiryReminders(
   }
 }
 
-export async function showDesktopOrLocalNow(title: string, body: string): Promise<void> {
+export async function showDesktopOrLocalNow(
+  title: string,
+  body: string,
+  data?: Record<string, unknown>,
+): Promise<void> {
   const ok = await ensureNotificationPermissions();
   if (!ok) return;
   if (Platform.OS === 'web' && typeof Notification !== 'undefined') {
@@ -222,7 +226,7 @@ export async function showDesktopOrLocalNow(title: string, body: string): Promis
   if (!Notifications) return;
   try {
     await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: true },
+      content: { title, body, sound: true, data: data || {} },
       trigger: null,
     });
   } catch {

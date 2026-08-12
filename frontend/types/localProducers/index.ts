@@ -135,6 +135,10 @@ export type ProducerOrder = {
   notes: string | null;
   delivery_tracking?: string | null;
   broker_package_id?: string | null;
+  /** URL faktury/rachunku wgranego przez dystrybutora (panel WWW). */
+  invoice_url?: string | null;
+  settlement_invoice_url?: string | null;
+  invoice_file_url?: string | null;
   created_at: string;
   updated_at?: string;
 };

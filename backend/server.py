@@ -15293,6 +15293,8 @@ async def local_producers_commerce_status():
         "marketplace_model": "destination_charges",
         "requires_stripe_connect_id": True,
         "connect_payout_schedule": "daily",
+        "notify_email": "resend",
+        "notify_sms": "smsapi",
         "connect_onboard": "POST /api/stripe/connect",
         "label_endpoint": "GET /api/orders/{order_id}/furgonetka-label",
     }
@@ -15492,6 +15494,7 @@ async def local_producers_confirm_payment(req: LpConfirmRequest):
             client=client,
             sb_get=sb_get,
             sb_patch=sb_patch,
+            sb_post=sb_post,
         )
     if result.get("paid"):
         result["message"] = (

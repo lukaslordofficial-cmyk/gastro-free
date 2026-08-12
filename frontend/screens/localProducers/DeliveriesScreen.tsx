@@ -15,7 +15,7 @@ import {
 import { Package, Truck, CheckCircle2 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { listMyProducerOrders } from '@/services/localProducers/localProducersService';
 import {
   deliveryBucketForOrder,
@@ -23,6 +23,7 @@ import {
   type ProducerOrderWithProducer,
 } from '@/types/localProducers';
 import { formatPlnNumber } from '@/lib/format';
+import { SettlementDocumentsSection } from '@/components/localProducers/SettlementDocumentsSection';
 
 const DS_NEON = '#00FF88';
 
@@ -45,9 +46,11 @@ function statusLabel(order: ProducerOrderWithProducer): string {
 function OrderCard({
   order,
   isPremium,
+  onPress,
 }: {
   order: ProducerOrderWithProducer;
   isPremium: boolean;
+  onPress: () => void;
 }) {
   const titleColor = isPremium ? '#F5F5F5' : Colors.textPrimary;
   const muted = isPremium ? 'rgba(255,255,255,0.55)' : Colors.textSecondary;
@@ -66,7 +69,11 @@ function OrderCard({
     : '—';
 
   return (
-    <View style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}>
+    <TouchableOpacity
+      activeOpacity={0.88}
+      onPress={onPress}
+      style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}
+    >
       <Text style={[styles.cardTitle, { color: titleColor }]} numberOfLines={2}>
         {company}
       </Text>
@@ -89,13 +96,15 @@ function OrderCard({
           Spodziewane doręczenie: zwykle 1–2 dni robocze.
         </Text>
       ) : null}
-    </View>
+      <SettlementDocumentsSection order={order} isPremium={isPremium} />
+    </TouchableOpacity>
   );
 }
 
 /** Panel Dostawy — używany wewnątrz Lokalnych Przetwórców. */
 export function DeliveriesPanel() {
   const theme = useAppTheme();
+  const router = useRouter();
   const isPremium = !!theme.isPremium;
   const [bucket, setBucket] = useState<DeliveryBucket>('pending');
   const [orders, setOrders] = useState<ProducerOrderWithProducer[]>([]);
@@ -235,7 +244,17 @@ export function DeliveriesPanel() {
             </View>
           ) : null}
           {filtered.map((o) => (
-            <OrderCard key={o.id} order={o} isPremium={isPremium} />
+            <OrderCard
+              key={o.id}
+              order={o}
+              isPremium={isPremium}
+              onPress={() =>
+                router.push({
+                  pathname: '/(tabs)/dostawcy/zamowienie/[id]',
+                  params: { id: o.id },
+                })
+              }
+            />
           ))}
         </ScrollView>
       )}

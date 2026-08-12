@@ -415,6 +415,43 @@ export async function listMyProducerOrders(): Promise<
   return asRows(data);
 }
 
+export async function getMyProducerOrder(
+  orderId: string,
+): Promise<import('@/types/localProducers').ProducerOrderWithProducer | null> {
+  if (!isSupabaseConfigured || !orderId) return null;
+  const { data: auth } = await supabase.auth.getUser();
+  const uid = auth.user?.id;
+  if (!uid) return null;
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('account_key')
+    .eq('id', uid)
+    .maybeSingle();
+  const accountKey =
+    (profile as { account_key?: string } | null)?.account_key
+    || `ak_${uid.replace(/-/g, '')}`;
+
+  const { data, error } = await supabase
+    .from(LOCAL_PRODUCERS_TABLES.orders)
+    .select('*, local_producers(company_name, city)')
+    .eq('id', orderId)
+    .eq('restaurant_account_key', accountKey)
+    .maybeSingle();
+
+  if (error || !data) {
+    const retry = await supabase
+      .from(LOCAL_PRODUCERS_TABLES.orders)
+      .select('*')
+      .eq('id', orderId)
+      .eq('restaurant_account_key', accountKey)
+      .maybeSingle();
+    if (retry.error || !retry.data) return null;
+    return retry.data as import('@/types/localProducers').ProducerOrderWithProducer;
+  }
+  return data as import('@/types/localProducers').ProducerOrderWithProducer;
+}
+
 export async function createLocalProducer(
   input: CreateLocalProducerInput,
 ): Promise<LocalProducer | null> {

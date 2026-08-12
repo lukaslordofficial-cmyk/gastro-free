@@ -20,6 +20,7 @@ import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
 import {
   LpPaymentReturnHost,
   ProducerShipmentWatcher,
+  ProducerInvoiceWatcher,
 } from '@/components/localProducers';
 import { BrandSplash, BRAND_SPLASH_MIN_MS } from '@/components/BrandSplash';
 import { warmProductImageIndexes } from '@/lib/productImages';
@@ -81,6 +82,7 @@ function RootLayoutNav() {
               <PushConsentBootstrap />
               <LpPaymentReturnHost />
               <ProducerShipmentWatcher />
+              <ProducerInvoiceWatcher />
               <UiOverlayProvider>
             <AdsProvider>
               <Stack screenOptions={{ headerShown: false }}>

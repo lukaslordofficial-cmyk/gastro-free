@@ -705,6 +705,7 @@ async def apply_paid_producer_checkout_session(
     )
 
     shipment = None
+    notify = None
     # Jedna ścieżka: zawsze kurier po opłaceniu
     if not paid.get("already_paid"):
         order = paid.get("order") or {}
@@ -746,12 +747,29 @@ async def apply_paid_producer_checkout_session(
             logger.exception("Courier broker after pay failed")
             shipment = {"ok": False, "error": str(e)[:300]}
 
+        # E-mail (Resend) + SMS (SMSAPI) do dystrybutora — jak WWW order-fulfillment.
+        try:
+            from lp_paid_notifications import notify_distributor_order_paid
+
+            notify = await notify_distributor_order_paid(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                sb_post=sb_post,
+                order=order,
+                producer=producer,
+            )
+        except Exception as e:
+            logger.exception("LP paid notify failed")
+            notify = {"ok": False, "error": str(e)[:300]}
+
     return {
         "ok": True,
         "paid": True,
         "kind": "local_producer_order",
         **paid,
         "shipment": shipment,
+        "notify": notify,
         "settlement": {
             "producer": meta.get("producer_amount"),
             "platform_fee_5pct": meta.get("platform_fee"),

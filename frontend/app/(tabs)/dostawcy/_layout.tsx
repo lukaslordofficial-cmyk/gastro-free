@@ -15,7 +15,8 @@ export default function DostawcySectionLayout() {
   const theme = useAppTheme();
   const pathname = usePathname();
   const bg = theme.isPremium ? '#0A0A0A' : Colors.background;
-  const hideSubTabs = pathname.includes('/producent/');
+  const hideSubTabs =
+    pathname.includes('/producent/') || pathname.includes('/zamowienie/');
 
   return (
     <SafeAreaView

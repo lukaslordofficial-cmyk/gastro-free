@@ -133,9 +133,33 @@ export type ProducerOrder = {
   shipment_status: ProducerShipmentStatus | string;
   order_status?: ProducerOrderStatus | string | null;
   notes: string | null;
+  delivery_tracking?: string | null;
+  broker_package_id?: string | null;
   created_at: string;
   updated_at?: string;
 };
+
+export type ProducerOrderWithProducer = ProducerOrder & {
+  local_producers?: {
+    company_name?: string | null;
+    city?: string | null;
+  } | null;
+};
+
+/** Buckety zakładki Dostawy (sync z producer_orders / panel dystrybutora). */
+export type DeliveryBucket = 'pending' | 'in_transit' | 'delivered';
+
+export function deliveryBucketForOrder(order: {
+  shipment_status?: string | null;
+  order_status?: string | null;
+  payment_status?: string | null;
+}): DeliveryBucket {
+  const ship = String(order.shipment_status || '').toLowerCase();
+  const ost = String(order.order_status || '').toLowerCase();
+  if (ship === 'delivered' || ost === 'delivered') return 'delivered';
+  if (ship === 'shipped' || ost === 'shipped') return 'in_transit';
+  return 'pending';
+}
 
 export type ProducerOrderItem = {
   id: string;

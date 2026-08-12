@@ -1,6 +1,7 @@
 /**
  * Przełącznik podzakładek w module Dostawcy.
- * Nie zależy od logiki suppliers — tylko nawigacja expo-router.
+ * U góry tylko: Dostawcy | Lokalni Przetwórcy.
+ * (Dostawy są wewnątrz Lokalnych Przetwórców.)
  */
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
@@ -26,7 +27,9 @@ export function DostawcySubTabs() {
   const isPremium = theme.isPremium;
 
   const activeKey =
-    pathname.includes('lokalni-przetworcy') || pathname.includes('/producent/')
+    pathname.includes('lokalni-przetworcy')
+    || pathname.includes('/producent/')
+    || pathname.includes('/dostawy')
       ? 'lokalni'
       : 'index';
 

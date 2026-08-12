@@ -1,16 +1,21 @@
 /**
  * Stripe Checkout + InPost dla zamówień Lokalnych Przetwórców.
- * Bez nowych paczek — Linking.openURL (jak billing subskrypcji).
+ * Po Stripe: deep link myapp://lp/success (przez HTML na API) → auto-confirm.
  */
 import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { getAccountKey } from '@/lib/accountKey';
 import { supabase } from '@/lib/supabase';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 const PENDING_LP_SESSION_KEY = 'lp_stripe_pending_checkout_session';
 const PENDING_LP_ORDER_KEY = 'lp_stripe_pending_order_id';
+const LAST_SHOWN_PAID_SESSION_KEY = 'lp_stripe_last_shown_paid_session';
+
+export const LP_PAID_TITLE = 'Opłacono';
+export const LP_PAID_MESSAGE =
+  'Płatność potwierdzona. Lokalny przetwórca wkrótce otrzyma pieniądze i nada do ciebie paczkę z kurierem.';
 
 async function authHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
@@ -27,7 +32,10 @@ async function authHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
-export async function openProducerOrderCheckout(orderId: string): Promise<{
+export async function openProducerOrderCheckout(
+  orderId: string,
+  opts?: { onOpening?: () => void },
+): Promise<{
   ok: boolean;
   url?: string;
   session_id?: string;
@@ -68,12 +76,19 @@ export async function openProducerOrderCheckout(orderId: string): Promise<{
   if (!can && Platform.OS !== 'web') {
     return { ok: false, message: 'Nie można otworzyć Stripe Checkout.' };
   }
+  try {
+    opts?.onOpening?.();
+  } catch {
+    /* ignore */
+  }
+  // Krótka pauza, żeby UI zdążyło pokazać „Otwieranie Stripe…”
+  await new Promise((r) => setTimeout(r, 120));
   await Linking.openURL(url);
   return {
     ok: true,
     url,
     session_id: sessionId,
-    message: 'Otwarto płatność (BLIK / karta). Po powrocie potwierdź płatność w apce.',
+    message: 'Otwarto płatność Stripe (BLIK / karta).',
   };
 }
 
@@ -81,6 +96,7 @@ export async function confirmProducerOrderPayment(sessionId?: string): Promise<{
   ok: boolean;
   paid?: boolean;
   message: string;
+  session_id?: string;
   shipment?: unknown;
 }> {
   if (!BACKEND_URL) return { ok: false, message: 'Brak backendu' };
@@ -104,6 +120,7 @@ export async function confirmProducerOrderPayment(sessionId?: string): Promise<{
     return {
       ok: false,
       message: typeof data.detail === 'string' ? data.detail : `Błąd potwierdzenia (${res.status})`,
+      session_id: sid,
     };
   }
   if (data.paid) {
@@ -116,11 +133,105 @@ export async function confirmProducerOrderPayment(sessionId?: string): Promise<{
   return {
     ok: !!data.ok,
     paid: !!data.paid,
+    session_id: sid,
     message: data.paid
-      ? 'Płatność potwierdzona. Środki: dystrybutor (produkty), platforma 5%, kurier InPost — przesyłka utworzona (lub stub bez tokenu).'
+      ? (typeof data.message === 'string' && data.message.trim()
+        ? data.message
+        : LP_PAID_MESSAGE)
       : data.reason || 'Sesja jeszcze nieopłacona.',
     shipment: data.shipment,
   };
+}
+
+/** Parsuje myapp://lp/success?session_id=cs_… */
+export function parseLpBillingDeepLink(url: string | null | undefined): {
+  kind: 'success' | 'cancel' | null;
+  sessionId?: string;
+} {
+  if (!url) return { kind: null };
+  const lower = url.toLowerCase();
+  if (!lower.includes('lp/success') && !lower.includes('lp/cancel')) {
+    return { kind: null };
+  }
+  const kind = lower.includes('lp/success') ? 'success' : 'cancel';
+  let sessionId: string | undefined;
+  try {
+    const parsed = Linking.parse(url);
+    const q = parsed.queryParams || {};
+    const raw = q.session_id ?? q.sessionId;
+    if (typeof raw === 'string' && raw.startsWith('cs_')) sessionId = raw;
+  } catch {
+    const m = url.match(/session_id=(cs_[A-Za-z0-9_]+)/);
+    if (m) sessionId = m[1];
+  }
+  return { kind, sessionId };
+}
+
+let confirmInFlight: Promise<{
+  ok: boolean;
+  paid?: boolean;
+  message: string;
+  session_id?: string;
+}> | null = null;
+
+/**
+ * Potwierdza pending LP po powrocie do apki (deep link / AppState).
+ * Deduplikuje równoległe wywołania i wielokrotne pokazywanie „Opłacono”.
+ */
+export async function tryConfirmPendingLpPayment(opts?: {
+  sessionId?: string;
+  forceShow?: boolean;
+}): Promise<{
+  ok: boolean;
+  paid?: boolean;
+  message: string;
+  shouldShowPaidAlert: boolean;
+  session_id?: string;
+}> {
+  if (confirmInFlight) {
+    const r = await confirmInFlight;
+    return { ...r, shouldShowPaidAlert: false };
+  }
+  confirmInFlight = (async () => {
+    const conf = await confirmProducerOrderPayment(opts?.sessionId);
+    return conf;
+  })();
+  try {
+    const conf = await confirmInFlight;
+    if (!conf.paid || !conf.session_id) {
+      return { ...conf, shouldShowPaidAlert: false };
+    }
+    let shouldShow = true;
+    try {
+      const last = await AsyncStorage.getItem(LAST_SHOWN_PAID_SESSION_KEY);
+      if (last === conf.session_id && !opts?.forceShow) shouldShow = false;
+      else await AsyncStorage.setItem(LAST_SHOWN_PAID_SESSION_KEY, conf.session_id);
+    } catch {
+      /* ignore */
+    }
+    return { ...conf, shouldShowPaidAlert: shouldShow };
+  } finally {
+    confirmInFlight = null;
+  }
+}
+
+export function subscribeLpAppStateConfirm(
+  onResult: (r: Awaited<ReturnType<typeof tryConfirmPendingLpPayment>>) => void,
+): () => void {
+  const sub = AppState.addEventListener('change', (state) => {
+    if (state !== 'active') return;
+    void (async () => {
+      try {
+        const pending = await AsyncStorage.getItem(PENDING_LP_SESSION_KEY);
+        if (!pending) return;
+        const r = await tryConfirmPendingLpPayment();
+        if (r.paid) onResult(r);
+      } catch {
+        /* ignore */
+      }
+    })();
+  });
+  return () => sub.remove();
 }
 
 export async function getLpCommerceStatus(): Promise<{

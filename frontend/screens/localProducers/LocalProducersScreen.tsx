@@ -1,5 +1,5 @@
 /**
- * Lista marketplace — klik → szczegóły (produkty, km, zamówienie).
+ * Lista marketplace + wewnętrzna zakładka Dostawy.
  */
 import React, { useState } from 'react';
 import {
@@ -21,6 +21,7 @@ import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import { LocalProducersEmptyState } from '@/components/localProducers';
 import { useLocalProducers } from '@/hooks/localProducers';
+import { DeliveriesPanel } from '@/screens/localProducers/DeliveriesScreen';
 import {
   LOCAL_PRODUCERS_MODULE,
   type LocalProducerWithDistance,
@@ -29,6 +30,8 @@ import { formatPlnNumber } from '@/lib/format';
 import { formatDistanceKm } from '@/lib/localProducers/haversine';
 
 const DS_NEON = '#00FF88';
+
+type InnerTab = 'producers' | 'deliveries';
 
 function ProducerCard({
   item,
@@ -84,6 +87,7 @@ function ProducerCard({
 export function LocalProducersScreen() {
   const theme = useAppTheme();
   const router = useRouter();
+  const [innerTab, setInnerTab] = useState<InnerTab>('producers');
   const [query, setQuery] = useState('');
   const {
     items,
@@ -100,6 +104,7 @@ export function LocalProducersScreen() {
   const inputBg = theme.isPremium ? 'rgba(255,255,255,0.06)' : Colors.card;
   const border = theme.isPremium ? 'rgba(255,255,255,0.12)' : Colors.border;
   const textColor = theme.isPremium ? '#F5F5F5' : Colors.textPrimary;
+  const isPremium = !!theme.isPremium;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: bg }]} edges={[]}>
@@ -107,70 +112,126 @@ export function LocalProducersScreen() {
         title={LOCAL_PRODUCERS_MODULE.title}
         subtitle="Marketplace lokalnych producentów"
         meta={
-          backendReady
-            ? `${items.length} zatwierdzonych`
-            : 'Skonfiguruj Supabase (.env)'
+          innerTab === 'deliveries'
+            ? 'Twoje dostawy'
+            : backendReady
+              ? `${items.length} zatwierdzonych`
+              : 'Skonfiguruj Supabase (.env)'
         }
         floatNames={['chleb', 'ser', 'miód', 'warzywa']}
       >
         <View style={styles.body}>
-          <View style={[styles.searchWrap, { backgroundColor: inputBg, borderColor: border }]}>
-            <Search size={16} color={muted} />
-            <TextInput
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Szukaj producenta, miasta…"
-              placeholderTextColor={muted}
-              style={[styles.searchInput, { color: textColor }]}
-              autoCorrect={false}
-            />
+          <View
+            style={[
+              styles.innerTabs,
+              {
+                backgroundColor: isPremium ? 'rgba(255,255,255,0.06)' : Colors.borderLight,
+                borderColor: border,
+              },
+            ]}
+          >
+            {(
+              [
+                { key: 'producers' as const, label: 'Producenci' },
+                { key: 'deliveries' as const, label: 'Dostawy' },
+              ]
+            ).map((tab) => {
+              const active = innerTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={[
+                    styles.innerTab,
+                    active && {
+                      backgroundColor: isPremium ? DS_NEON : Colors.accent,
+                    },
+                  ]}
+                  onPress={() => setInnerTab(tab.key)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                >
+                  <Text
+                    style={[
+                      styles.innerTabLabel,
+                      {
+                        color: active
+                          ? isPremium
+                            ? '#0A0A0A'
+                            : '#fff'
+                          : muted,
+                      },
+                    ]}
+                  >
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
-          <Text style={[styles.badgeText, { color: muted }]}>
-            Tylko approved + verified + active
-            {permissionDenied ? ' · włącz GPS, by sortować po km' : ' · sortowanie po dystansie'}
-          </Text>
-
-          {loading && !refreshing ? (
-            <View style={styles.center}>
-              <ActivityIndicator color={theme.isPremium ? DS_NEON : Colors.accent} />
-            </View>
+          {innerTab === 'deliveries' ? (
+            <DeliveriesPanel />
           ) : (
-            <ScrollView
-              contentContainerStyle={styles.scroll}
-              refreshControl={
-                <RefreshControl
-                  refreshing={refreshing}
-                  onRefresh={refresh}
-                  tintColor={theme.isPremium ? DS_NEON : Colors.accent}
+            <>
+              <View style={[styles.searchWrap, { backgroundColor: inputBg, borderColor: border }]}>
+                <Search size={16} color={muted} />
+                <TextInput
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder="Szukaj producenta, miasta…"
+                  placeholderTextColor={muted}
+                  style={[styles.searchInput, { color: textColor }]}
+                  autoCorrect={false}
                 />
-              }
-            >
-              {error ? (
-                <Text style={[styles.error, { color: Colors.danger }]}>{error}</Text>
-              ) : null}
+              </View>
 
-              {items.length === 0 ? (
-                <LocalProducersEmptyState
-                  title="Brak zatwierdzonych producentów"
-                  message="Widoczni są tylko producenci z verification_status = approved (po akceptacji w panelu admina WWW)."
-                />
+              <Text style={[styles.badgeText, { color: muted }]}>
+                Tylko approved + verified + active
+                {permissionDenied ? ' · włącz GPS, by sortować po km' : ' · sortowanie po dystansie'}
+              </Text>
+
+              {loading && !refreshing ? (
+                <View style={styles.center}>
+                  <ActivityIndicator color={isPremium ? DS_NEON : Colors.accent} />
+                </View>
               ) : (
-                items.map((item) => (
-                  <ProducerCard
-                    key={item.id}
-                    item={item}
-                    isPremium={!!theme.isPremium}
-                    onPress={() =>
-                      router.push({
-                        pathname: '/(tabs)/dostawcy/producent/[id]',
-                        params: { id: item.id },
-                      })
-                    }
-                  />
-                ))
+                <ScrollView
+                  contentContainerStyle={styles.scroll}
+                  refreshControl={
+                    <RefreshControl
+                      refreshing={refreshing}
+                      onRefresh={refresh}
+                      tintColor={isPremium ? DS_NEON : Colors.accent}
+                    />
+                  }
+                >
+                  {error ? (
+                    <Text style={[styles.error, { color: Colors.danger }]}>{error}</Text>
+                  ) : null}
+
+                  {items.length === 0 ? (
+                    <LocalProducersEmptyState
+                      title="Brak zatwierdzonych producentów"
+                      message="Widoczni są tylko producenci z verification_status = approved (po akceptacji w panelu admina WWW)."
+                    />
+                  ) : (
+                    items.map((item) => (
+                      <ProducerCard
+                        key={item.id}
+                        item={item}
+                        isPremium={isPremium}
+                        onPress={() =>
+                          router.push({
+                            pathname: '/(tabs)/dostawcy/producent/[id]',
+                            params: { id: item.id },
+                          })
+                        }
+                      />
+                    ))
+                  )}
+                </ScrollView>
               )}
-            </ScrollView>
+            </>
           )}
         </View>
       </PremiumTabChrome>
@@ -183,6 +244,22 @@ export default LocalProducersScreen;
 const styles = StyleSheet.create({
   container: { flex: 1 },
   body: { flex: 1 },
+  innerTabs: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginBottom: 10,
+    padding: 4,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: 4,
+  },
+  innerTab: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: 9,
+    alignItems: 'center',
+  },
+  innerTabLabel: { fontSize: 12, fontWeight: '700' },
   searchWrap: {
     flexDirection: 'row',
     alignItems: 'center',

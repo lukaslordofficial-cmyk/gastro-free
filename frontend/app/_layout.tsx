@@ -17,6 +17,10 @@ import { JarvisVoiceHost } from '@/components/JarvisVoiceHost';
 import { DocumentScanHost } from '@/components/DocumentScanHost';
 import { PremiumAlertProvider } from '@/components/PremiumAlert';
 import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
+import {
+  LpPaymentReturnHost,
+  ProducerShipmentWatcher,
+} from '@/components/localProducers';
 import { BrandSplash, BRAND_SPLASH_MIN_MS } from '@/components/BrandSplash';
 import { warmProductImageIndexes } from '@/lib/productImages';
 import { DS } from '@/constants/premiumTheme';
@@ -74,8 +78,10 @@ function RootLayoutNav() {
     <AuthGate>
       <SubscriptionProvider>
         <PremiumAlertProvider>
-          <PushConsentBootstrap />
-          <UiOverlayProvider>
+              <PushConsentBootstrap />
+              <LpPaymentReturnHost />
+              <ProducerShipmentWatcher />
+              <UiOverlayProvider>
             <AdsProvider>
               <Stack screenOptions={{ headerShown: false }}>
                 <Stack.Screen name="(auth)" options={{ headerShown: false }} />

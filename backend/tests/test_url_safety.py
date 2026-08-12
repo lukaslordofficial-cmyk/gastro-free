@@ -61,6 +61,19 @@ def test_redirect_allows_public_app_host(monkeypatch):
     assert assert_safe_redirect_url("https://app.example.com/billing-success")
 
 
+def test_checkout_redirect_skips_localhost_expo(monkeypatch):
+    from url_safety import checkout_redirect_public_base
+
+    monkeypatch.setenv("PUBLIC_APP_URL", "http://localhost:8081")
+    monkeypatch.delenv("CHECKOUT_REDIRECT_BASE_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_API_URL", raising=False)
+    monkeypatch.delenv("BACKEND_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("RAILWAY_PUBLIC_DOMAIN", raising=False)
+    base = checkout_redirect_public_base()
+    assert "localhost" not in base
+    assert base.startswith("https://")
+
+
 def test_auth_user_url_fixed_origin():
     assert build_supabase_auth_user_url("https://proj.supabase.co") == (
         "https://proj.supabase.co/auth/v1/user"

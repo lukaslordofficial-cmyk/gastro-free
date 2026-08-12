@@ -373,6 +373,48 @@ export async function createProducerOrder(
   return order as ProducerOrder;
 }
 
+/**
+ * Zamówienia LP zalogowanej restauracji (zakładka Dostawy).
+ */
+export async function listMyProducerOrders(): Promise<
+  import('@/types/localProducers').ProducerOrderWithProducer[]
+> {
+  if (!isSupabaseConfigured) return [];
+  const { data: auth } = await supabase.auth.getUser();
+  const uid = auth.user?.id;
+  if (!uid) return [];
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('account_key')
+    .eq('id', uid)
+    .maybeSingle();
+
+  const accountKey =
+    (profile as { account_key?: string } | null)?.account_key
+    || `ak_${uid.replace(/-/g, '')}`;
+
+  const { data, error } = await supabase
+    .from(LOCAL_PRODUCERS_TABLES.orders)
+    .select('*, local_producers(company_name, city)')
+    .eq('restaurant_account_key', accountKey)
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  if (error) {
+    // Fallback bez join gdy FK/relacja niedostępna
+    const retry = await supabase
+      .from(LOCAL_PRODUCERS_TABLES.orders)
+      .select('*')
+      .eq('restaurant_account_key', accountKey)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (retry.error) throw new Error(retry.error.message);
+    return asRows(retry.data);
+  }
+  return asRows(data);
+}
+
 export async function createLocalProducer(
   input: CreateLocalProducerInput,
 ): Promise<LocalProducer | null> {

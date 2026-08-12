@@ -40,9 +40,9 @@ import {
   PLATFORM_FEE_RATE,
 } from '@/types/localProducers';
 import {
-  confirmProducerOrderPayment,
   openProducerOrderCheckout,
 } from '@/services/localProducers/checkoutClient';
+import { StripeOpeningOverlay } from '@/components/localProducers';
 
 const NEON = '#00FF88';
 
@@ -68,6 +68,7 @@ export function ProducerDetailScreen() {
   } = useProducerDetail(producerId);
 
   const [busy, setBusy] = useState(false);
+  const [busyMsg, setBusyMsg] = useState('Przygotowywanie płatności…');
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [shipName, setShipName] = useState('');
   const [shipPhone, setShipPhone] = useState('');
@@ -130,6 +131,7 @@ export function ProducerDetailScreen() {
     setCheckoutOpen(false);
     void (async () => {
       setBusy(true);
+      setBusyMsg('Składanie zamówienia…');
       try {
         const order = await placeOrder({
           name: shipName.trim() || 'Restauracja',
@@ -139,7 +141,10 @@ export function ProducerDetailScreen() {
           city,
           post_code: post,
         });
-        const pay = await openProducerOrderCheckout(order.id);
+        setBusyMsg('Otwieranie Stripe…');
+        const pay = await openProducerOrderCheckout(order.id, {
+          onOpening: () => setBusyMsg('Otwieranie Stripe…'),
+        });
         if (!pay.ok) {
           premiumAlert(
             'Zamówienie zapisane',
@@ -148,27 +153,8 @@ export function ProducerDetailScreen() {
           );
           return;
         }
-        premiumAlert(
-          'Stripe Checkout',
-          'W Checkout widać: produkty, kurier InPost i opłatę serwisu 5%. Opłać BLIK-iem lub kartą, potem potwierdź w apce.',
-          [
-            {
-              text: 'Potwierdź płatność',
-              style: 'primary',
-              onPress: () => {
-                void (async () => {
-                  const conf = await confirmProducerOrderPayment(pay.session_id);
-                  premiumAlert(
-                    conf.paid ? 'Opłacono' : 'Status płatności',
-                    conf.message,
-                    [{ text: 'OK', style: 'primary', onPress: () => router.back() }],
-                  );
-                })();
-              },
-            },
-            { text: 'Później', style: 'cancel', onPress: () => router.back() },
-          ],
-        );
+        // Po Stripe: LpPaymentReturnHost → „Opłacono” (bez pośredniego alertu).
+        router.back();
       } catch (e) {
         premiumAlert(
           'Błąd zamówienia',
@@ -435,6 +421,7 @@ export function ProducerDetailScreen() {
           </Modal>
         </>
       )}
+      <StripeOpeningOverlay visible={busy} message={busyMsg} />
     </SafeAreaView>
   );
 }

@@ -45,8 +45,9 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
-from url_safety import (
+    from url_safety import (
     assert_safe_redirect_url,
+    checkout_redirect_public_base,
     build_supabase_auth_admin_url,
     build_supabase_auth_user_url,
     build_supabase_rest_url,
@@ -15291,6 +15292,7 @@ async def local_producers_commerce_status():
         "payment_methods": ["card", "blik"],
         "marketplace_model": "destination_charges",
         "requires_stripe_connect_id": True,
+        "connect_payout_schedule": "daily",
         "connect_onboard": "POST /api/stripe/connect",
         "label_endpoint": "GET /api/orders/{order_id}/furgonetka-label",
     }
@@ -15309,14 +15311,33 @@ async def local_producers_checkout(req: LpCheckoutRequest):
         raise HTTPException(status_code=400, detail="Brak order_id")
 
     account_key = get_account_key()
-    success = (req.success_url or os.getenv("LP_BILLING_SUCCESS_URL") or os.getenv("BILLING_SUCCESS_URL") or "myapp://lp/success").strip()
-    cancel = (req.cancel_url or os.getenv("LP_BILLING_CANCEL_URL") or os.getenv("BILLING_CANCEL_URL") or "myapp://lp/cancel").strip()
+    # Stripe wymaga http(s). Strona na API robi deep link myapp:// — NIE Expo localhost:8081.
+    public = checkout_redirect_public_base()
+    success = (
+        req.success_url
+        or os.getenv("LP_BILLING_SUCCESS_URL")
+        or f"{public}/api/local-producers/billing-return?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+    ).strip()
+    cancel = (
+        req.cancel_url
+        or os.getenv("LP_BILLING_CANCEL_URL")
+        or f"{public}/api/local-producers/billing-return?status=cancel"
+    ).strip()
     if success.startswith("myapp://"):
-        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
-        success = f"{public}/lp-billing-success?session_id={{CHECKOUT_SESSION_ID}}"
+        success = (
+            f"{public}/api/local-producers/billing-return"
+            f"?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+        )
     if cancel.startswith("myapp://"):
-        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
-        cancel = f"{public}/lp-billing-cancel"
+        cancel = f"{public}/api/local-producers/billing-return?status=cancel"
+    # Env czasem ma PUBLIC_APP_URL=http://localhost:8081 — na telefonie pada.
+    if "localhost" in success or "127.0.0.1" in success:
+        success = (
+            f"{public}/api/local-producers/billing-return"
+            f"?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+        )
+    if "localhost" in cancel or "127.0.0.1" in cancel:
+        cancel = f"{public}/api/local-producers/billing-return?status=cancel"
     success = assert_safe_redirect_url(success)
     cancel = assert_safe_redirect_url(cancel)
 
@@ -15400,6 +15421,55 @@ async def local_producers_checkout(req: LpCheckoutRequest):
     return {"ok": True, **session}
 
 
+@app.get("/api/local-producers/billing-return")
+async def local_producers_billing_return(
+    status: str = "success",
+    session_id: str = "",
+):
+    """
+    Stripe success/cancel (http/https) → HTML z deep linkiem myapp://lp/...
+    Bez tej strony telefon ląduje na localhost Expo i pokazuje „witryna nieosiągalna”.
+    """
+    from html import escape
+    from urllib.parse import quote
+    from fastapi.responses import HTMLResponse
+
+    ok = (status or "").strip().lower() in ("success", "ok", "paid")
+    sid = (session_id or "").strip()
+    if ok:
+        deep = "myapp://lp/success"
+        if sid.startswith("cs_"):
+            deep = f"{deep}?session_id={quote(sid, safe='')}"
+        title = "Płatność zrealizowana"
+        hint = "Wracamy do aplikacji Gastro Manager…"
+    else:
+        deep = "myapp://lp/cancel"
+        title = "Płatność anulowana"
+        hint = "Możesz wrócić do aplikacji i spróbować ponownie."
+
+    safe_deep = escape(deep, quote=True)
+    html = f"""<!DOCTYPE html>
+<html lang="pl"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta http-equiv="refresh" content="0;url={safe_deep}"/>
+<title>{escape(title)}</title>
+<style>
+body{{font-family:system-ui,sans-serif;background:#0A120E;color:#F5F5F5;
+display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:24px;text-align:center}}
+a{{color:#00FF88;font-weight:700}}
+p{{opacity:.75;line-height:1.45}}
+</style></head><body>
+<div>
+<h1 style="font-size:1.35rem;margin:0 0 12px">{escape(title)}</h1>
+<p>{escape(hint)}</p>
+<p style="margin-top:20px"><a href="{safe_deep}">Otwórz aplikację</a></p>
+</div>
+<script>try{{window.location.replace({json.dumps(deep)});}}catch(e){{}}</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
 @app.post("/api/local-producers/confirm-payment")
 async def local_producers_confirm_payment(req: LpConfirmRequest):
     """Potwierdzenie płatności LP bez webhooka (odpytanie Stripe)."""
@@ -15423,7 +15493,104 @@ async def local_producers_confirm_payment(req: LpConfirmRequest):
             sb_get=sb_get,
             sb_patch=sb_patch,
         )
+    if result.get("paid"):
+        result["message"] = (
+            "Płatność potwierdzona. Lokalny przetwórca wkrótce otrzyma pieniądze "
+            "i nada do ciebie paczkę z kurierem."
+        )
     return result
+
+
+@app.post("/api/local-producers/orders/{order_id}/mark-handed-to-courier")
+async def local_producers_mark_handed_to_courier(order_id: str, request: Request):
+    """
+    Panel dystrybutora: paczka przekazana kurierowi → shipment_status=shipped + push do restauracji.
+    """
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+    uid = await _auth_user_id_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Wymagane logowanie dystrybutora")
+
+    async with httpx.AsyncClient(timeout=45.0, verify=_httpx_verify()) as client:
+        orders = await sb_get(client, "producer_orders", params={
+            "select": "id,producer_id,restaurant_id,restaurant_account_key,payment_status,shipment_status,delivery_tracking",
+            "id": f"eq.{oid}",
+            "limit": "1",
+        })
+        if not orders:
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+        order = orders[0]
+        producers = await sb_get(client, "local_producers", params={
+            "select": "id,auth_user_id,company_name",
+            "id": f"eq.{order.get('producer_id')}",
+            "limit": "1",
+        })
+        if not producers:
+            raise HTTPException(status_code=404, detail="Producent nie istnieje")
+        producer = producers[0]
+        if str(producer.get("auth_user_id") or "") != str(uid):
+            raise HTTPException(status_code=403, detail="Tylko właściciel profilu dystrybutora")
+
+        if str(order.get("payment_status") or "").lower() != "paid":
+            raise HTTPException(status_code=400, detail="Zamówienie nie jest opłacone")
+
+        already = str(order.get("shipment_status") or "").lower() == "shipped"
+        if not already:
+            await sb_patch(client, "producer_orders", {"id": f"eq.{oid}"}, {
+                "shipment_status": "shipped",
+                "order_status": "shipped",
+            })
+
+        tracking = (order.get("delivery_tracking") or "").strip()
+        company = (producer.get("company_name") or "Lokalny przetwórca").strip()
+        eta = "Zwykle doręczenie w 1–2 dni robocze."
+        body = (
+            f"{company}: kurier jest już w drodze. {eta}"
+            + (f" Numer przesyłki: {tracking}." if tracking else "")
+        )
+        pushed = 0
+        restaurant_id = (order.get("restaurant_id") or "").strip()
+        if restaurant_id:
+            try:
+                tokens = await sb_get(client, "device_push_tokens", params={
+                    "select": "token",
+                    "user_id": f"eq.{restaurant_id}",
+                    "limit": "50",
+                }) or []
+                msgs = []
+                for t in tokens:
+                    tok = str(t.get("token") or "").strip()
+                    if tok:
+                        msgs.append({
+                            "to": tok,
+                            "title": "Kurier w drodze",
+                            "body": body[:180],
+                            "sound": "default",
+                            "data": {"type": "lp_shipment", "order_id": oid},
+                        })
+                for i in range(0, len(msgs), 80):
+                    chunk = msgs[i:i + 80]
+                    if not chunk:
+                        continue
+                    await client.post(
+                        "https://exp.host/--/api/v2/push/send",
+                        json=chunk,
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        timeout=30.0,
+                    )
+                    pushed += len(chunk)
+            except Exception:
+                logger.exception("LP mark-handed push failed")
+
+    return {
+        "ok": True,
+        "shipment_status": "shipped",
+        "already": already,
+        "pushed": pushed,
+        "message": body,
+    }
 
 
 @app.post("/api/local-producers/create-shipment")

@@ -184,7 +184,10 @@ async def create_producer_order_checkout(
             },
         })
 
-    # Marketplace: Destination Charge — wymagany Stripe Connect Express + transfers=active.
+    # Marketplace: Destination Charges — cała kwota Checkout trafia na platformę,
+    # transfer_data.destination od razu zasila saldo Connect dystrybutora (produkty),
+    # application_fee_amount = 5% + kurier zostaje na platformie.
+    # Dystrybutor NIE klika wypłaty: settings.payouts.schedule.interval=daily.
     from stripe_connect import (
         assert_destination_charge_ready,
         distributor_inactive_message,
@@ -220,6 +223,7 @@ async def create_producer_order_checkout(
     )
 
     split_mode = "destination"
+    # Destination charge: connected account dostaje (charge − application_fee) = produkty.
     application_fee = fee_g + del_g
 
     meta = {
@@ -233,10 +237,12 @@ async def create_producer_order_checkout(
         "delivery_cost": str(delivery_cost),
         "split_mode": split_mode,
         "stripe_connect_id": connect_acct,
+        "payout_schedule": "daily",
     }
 
     payment_intent_data: dict[str, Any] = {
         "metadata": meta,
+        # Bez transfer_data.amount → Stripe przekazuje całość minus application_fee.
         "transfer_data": {"destination": connect_acct},
     }
     if application_fee > 0:

@@ -22,8 +22,8 @@ import { usePremiumAlert } from '@/components/PremiumAlert';
 import { createProducerOrder } from '@/services/localProducers/localProducersService';
 import {
   openProducerOrderCheckout,
-  confirmProducerOrderPayment,
 } from '@/services/localProducers/checkoutClient';
+import { StripeOpeningOverlay } from '@/components/localProducers';
 import {
   COURIER_DELIVERY_STUB_PLN,
   PLATFORM_FEE_RATE,
@@ -49,6 +49,7 @@ type Props = {
 export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: Props) {
   const { alert: premiumAlert } = usePremiumAlert();
   const [busy, setBusy] = useState(false);
+  const [busyMsg, setBusyMsg] = useState('Przygotowywanie płatności…');
   const [shipName, setShipName] = useState('Restauracja');
   const [shipPhone, setShipPhone] = useState('');
   const [shipStreet, setShipStreet] = useState('');
@@ -106,6 +107,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
 
     void (async () => {
       setBusy(true);
+      setBusyMsg('Składanie zamówienia…');
       try {
         const order = await createProducerOrder({
           producerId: group.supplier_id!,
@@ -120,37 +122,19 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
           },
           notes: 'Zamów i zapłać · Łowca Okazji',
         });
+        setBusyMsg('Otwieranie Stripe…');
+        const payRes = await openProducerOrderCheckout(order.id, {
+          onOpening: () => setBusyMsg('Otwieranie Stripe…'),
+        });
         onClose();
-        const payRes = await openProducerOrderCheckout(order.id);
         if (!payRes.ok) {
           premiumAlert(
             'Zamówienie zapisane',
             `${payRes.message}\n\nID: ${order.id.slice(0, 8)}…`,
             [{ text: 'OK', style: 'primary' }],
           );
-          return;
         }
-        premiumAlert(
-          'Stripe Checkout',
-          'W Checkout: produkty, kurier i opłata 5%. Opłać BLIK-iem lub kartą, potem potwierdź w apce.',
-          [
-            {
-              text: 'Potwierdź płatność',
-              style: 'primary',
-              onPress: () => {
-                void (async () => {
-                  const conf = await confirmProducerOrderPayment(payRes.session_id);
-                  premiumAlert(
-                    conf.paid ? 'Opłacono' : 'Status płatności',
-                    conf.message,
-                    [{ text: 'OK', style: 'primary' }],
-                  );
-                })();
-              },
-            },
-            { text: 'Później', style: 'cancel' },
-          ],
-        );
+        // Po Stripe: LpPaymentReturnHost pokaże „Opłacono” (deep link / powrót do apki).
       } catch (e) {
         premiumAlert(
           'Błąd zamówienia',
@@ -167,6 +151,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
   const inputBg = colors.isPremium ? '#0A0A0A' : colors.background;
 
   return (
+    <>
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView
         style={styles.overlay}
@@ -242,6 +227,8 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
         </View>
       </KeyboardAvoidingView>
     </Modal>
+    <StripeOpeningOverlay visible={busy} message={busyMsg} />
+    </>
   );
 }
 

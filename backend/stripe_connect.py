@@ -23,6 +23,16 @@ EXPRESS_REQUESTED_CAPABILITIES: dict[str, dict[str, bool]] = {
     "transfers": {"requested": True},
 }
 
+# Automatyczne wypłaty na konto bankowe — codziennie, bez klikania w panelu.
+# Środki z Destination Charge lądują od razu na saldo Connect; Stripe payout → bank next day.
+EXPRESS_PAYOUT_SETTINGS: dict[str, Any] = {
+    "payouts": {
+        "schedule": {
+            "interval": "daily",
+        },
+    },
+}
+
 RESTAURATEUR_DISTRIBUTOR_INACTIVE_PL = (
     "Wybrany lokalny dystrybutor nie ma jeszcze w pełni aktywnego konta Stripe Connect "
     "(status Restricted / brak aktywnego `transfers`). "
@@ -98,7 +108,7 @@ def producer_connect_id(producer: dict[str, Any]) -> str:
 
 async def ensure_express_capabilities(account_id: str) -> dict[str, Any]:
     """
-    Dopina capabilities na istniejącym Express (Account.update).
+    Dopina capabilities + codzienny payout_schedule na istniejącym Express (Account.update).
 
     Konta utworzone wcześniej bez card_payments/transfers dają przy Checkout
     destination charge błąd insufficient_capabilities_for_transfer.
@@ -106,10 +116,23 @@ async def ensure_express_capabilities(account_id: str) -> dict[str, Any]:
     acct = (account_id or "").strip()
     if not acct.startswith("acct_"):
         raise ValueError("Nieprawidłowy stripe_connect_id (oczekiwane acct_...)")
-    return await _stripe_post(
-        f"/accounts/{acct}",
-        {"capabilities": EXPRESS_REQUESTED_CAPABILITIES},
-    )
+    payload: dict[str, Any] = {
+        "capabilities": EXPRESS_REQUESTED_CAPABILITIES,
+        "settings": EXPRESS_PAYOUT_SETTINGS,
+    }
+    try:
+        return await _stripe_post(f"/accounts/{acct}", payload)
+    except Exception as e:
+        # Stare konta / ograniczenia Stripe — nie blokuj capabilities przez settings.
+        logger.warning(
+            "Account.update with daily payouts failed for %s (%s) — retry capabilities only",
+            acct,
+            e,
+        )
+        return await _stripe_post(
+            f"/accounts/{acct}",
+            {"capabilities": EXPRESS_REQUESTED_CAPABILITIES},
+        )
 
 
 def _capability_status(account: dict[str, Any], name: str) -> str:
@@ -187,25 +210,27 @@ async def create_express_account(
 ) -> dict[str, Any]:
     """
     stripe.Account.create — Express PL z wymuszonymi capabilities:
-    ``card_payments`` + ``transfers`` (requested=True).
+    ``card_payments`` + ``transfers`` (requested=True)
+    oraz ``settings.payouts.schedule.interval=daily`` (auto-wypłata na bank).
     """
     if not stripe_configured():
         raise RuntimeError("Brak STRIPE_SECRET_KEY")
 
     existing = producer_connect_id(producer)
     if existing.startswith("acct_"):
-        # Istniejące konto: dociągnij capabilities (naprawa starych acct bez transfers).
+        # Istniejące konto: dociągnij capabilities + daily payouts.
         try:
             await ensure_express_capabilities(existing)
         except Exception as e:
-            logger.warning("capabilities refresh for %s: %s", existing, e)
+            logger.warning("capabilities/payouts refresh for %s: %s", existing, e)
         return {"id": existing, "existing": True}
 
-    # Wymuszamy capabilities już przy CREATE (nie dopiero w update).
+    # Wymuszamy capabilities + daily payouts już przy CREATE.
     payload: dict[str, Any] = {
         "type": "express",
         "country": "PL",
         "capabilities": dict(EXPRESS_REQUESTED_CAPABILITIES),
+        "settings": dict(EXPRESS_PAYOUT_SETTINGS),
         "business_type": "company",
         "metadata": {
             "producer_id": str(producer.get("id") or ""),

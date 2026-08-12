@@ -159,9 +159,51 @@ def assert_safe_outbound_url(
     return cleaned
 
 
+# Domyślny publiczny API (Railway) — Stripe success musi być http(s), nie Expo Metro.
+_DEFAULT_API_PUBLIC = "https://gastro-manager-api-production-21dd.up.railway.app"
+
+
+def checkout_redirect_public_base() -> str:
+    """
+    Bazowy URL pod Stripe success/cancel (strona HTML → deep link myapp://).
+    NIE używaj PUBLIC_APP_URL=localhost:8081 (Expo) — telefon dostaje „witryna nieosiągalna”.
+    """
+    for key in (
+        "CHECKOUT_REDIRECT_BASE_URL",
+        "PUBLIC_API_URL",
+        "BACKEND_PUBLIC_URL",
+        "RAILWAY_PUBLIC_DOMAIN",
+    ):
+        raw = (os.getenv(key) or "").strip().rstrip("/")
+        if not raw:
+            continue
+        if "://" not in raw:
+            raw = f"https://{raw}"
+        host = (urlparse(raw).hostname or "").lower()
+        if host in ("localhost", "127.0.0.1"):
+            continue
+        return raw
+    public_app = (os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/")
+    if public_app:
+        host = (urlparse(public_app if "://" in public_app else f"https://{public_app}").hostname or "").lower()
+        if host and host not in ("localhost", "127.0.0.1"):
+            return public_app if "://" in public_app else f"https://{public_app}"
+    return _DEFAULT_API_PUBLIC
+
+
 def _allowed_redirect_hosts() -> set[str]:
     hosts: set[str] = {"localhost", "127.0.0.1"}
-    for key in ("PUBLIC_APP_URL", "BILLING_SUCCESS_URL", "BILLING_CANCEL_URL", "LP_BILLING_SUCCESS_URL", "LP_BILLING_CANCEL_URL"):
+    for key in (
+        "PUBLIC_APP_URL",
+        "BILLING_SUCCESS_URL",
+        "BILLING_CANCEL_URL",
+        "LP_BILLING_SUCCESS_URL",
+        "LP_BILLING_CANCEL_URL",
+        "CHECKOUT_REDIRECT_BASE_URL",
+        "PUBLIC_API_URL",
+        "BACKEND_PUBLIC_URL",
+        "RAILWAY_PUBLIC_DOMAIN",
+    ):
         raw = (os.getenv(key) or "").strip()
         if not raw:
             continue
@@ -171,6 +213,12 @@ def _allowed_redirect_hosts() -> set[str]:
                 hosts.add(p.hostname.lower())
         except Exception:
             continue
+    try:
+        h = urlparse(_DEFAULT_API_PUBLIC).hostname
+        if h:
+            hosts.add(h.lower())
+    except Exception:
+        pass
     extra = (os.getenv("ALLOWED_REDIRECT_HOSTS") or "").strip()
     for part in extra.split(","):
         h = part.strip().lower()

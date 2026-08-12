@@ -39,6 +39,19 @@ def test_form_encode_application_fee_destination():
     assert "payment_intent_data[transfer_data][amount]" not in items
 
 
+def test_form_encode_daily_payout_schedule():
+    from stripe_connect import EXPRESS_PAYOUT_SETTINGS, EXPRESS_REQUESTED_CAPABILITIES
+
+    items = dict(_form_encode({
+        "type": "express",
+        "capabilities": EXPRESS_REQUESTED_CAPABILITIES,
+        "settings": EXPRESS_PAYOUT_SETTINGS,
+    }))
+    assert items["settings[payouts][schedule][interval]"] == "daily"
+    assert items["capabilities[transfers][requested]"] == "true"
+    assert items["capabilities[card_payments][requested]"] == "true"
+
+
 def test_capability_status_string_and_dict():
     assert _capability_status({"capabilities": {"transfers": "active"}}, "transfers") == "active"
     assert _capability_status(

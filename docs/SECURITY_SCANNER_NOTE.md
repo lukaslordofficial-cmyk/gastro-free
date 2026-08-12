@@ -26,7 +26,7 @@ Zrobione w kodzie:
 | Weak RNG (`Math.random`) | → `frontend/lib/secureId.ts` (`secureId`, `secureRandomIndex`) |
 | `python-dotenv` symlink (CVE-2026-28684) | → **1.2.2** |
 | `postcss` path traversal | → yarn resolution **8.5.23** |
-| `image-size` DoS (ICNS) | → resolution **1.2.1** + `disableTypes(['icns'])` na starcie app |
+| `image-size` DoS (ICNS) | → resolution **1.2.1** (tylko tool chain Metro; **nie** importować w RN — używa Node `fs`) |
 | `python-multipart` DoS / path traversal | → **0.0.32** |
 | Dockerfile jako root | → **USER appuser** |
 | Weak hash MD5 | → **SHA-256** (smart basket fingerprints) |

@@ -711,65 +711,67 @@ async def apply_paid_producer_checkout_session(
 
     shipment = None
     notify = None
-    # Jedna ścieżka: zawsze kurier po opłaceniu
-    if not paid.get("already_paid"):
-        order = paid.get("order") or {}
-        prod_rows = await sb_get(
-            client,
-            "local_producers",
-            params={"select": "*", "id": f"eq.{order.get('producer_id')}", "limit": "1"},
-        )
-        producer = (prod_rows or [{}])[0]
-        account_key = meta.get("account_key") or order.get("restaurant_account_key")
+    order = paid.get("order") or {}
+    prod_rows = await sb_get(
+        client,
+        "local_producers",
+        params={"select": "*", "id": f"eq.{order.get('producer_id')}", "limit": "1"},
+    )
+    producer = (prod_rows or [{}])[0]
+    account_key = meta.get("account_key") or order.get("restaurant_account_key")
 
-        async def _run_fulfillment(http: httpx.AsyncClient) -> tuple[Any, Any]:
-            receiver = await _resolve_receiver(
+    async def _run_notify(http: httpx.AsyncClient) -> Any:
+        try:
+            from lp_paid_notifications import notify_distributor_order_paid
+
+            return await notify_distributor_order_paid(
                 client=http,
                 sb_get=sb_get,
+                sb_patch=sb_patch,
+                sb_post=sb_post,
                 order=order,
-                account_key=account_key,
+                producer=producer,
             )
-            ship_res = None
-            notify_res = None
-            try:
-                from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
+        except Exception as e:
+            logger.exception("LP paid notify failed")
+            return {"ok": False, "error": str(e)[:300]}
 
-                if furgonetka_configured():
-                    ship_res = await create_furgonetka_shipment(
-                        str(order.get("id") or order_id),
-                        client=http,
-                        sb_get=sb_get,
-                        sb_patch=sb_patch,
-                    )
-                else:
-                    ship_res = await create_inpost_shipment(
-                        client=http,
-                        sb_get=sb_get,
-                        sb_patch=sb_patch,
-                        order=order,
-                        producer=producer,
-                        receiver=receiver,
-                    )
-            except Exception as e:
-                logger.exception("Courier broker after pay failed")
-                ship_res = {"ok": False, "error": str(e)[:300]}
+    async def _run_fulfillment(http: httpx.AsyncClient) -> tuple[Any, Any]:
+        receiver = await _resolve_receiver(
+            client=http,
+            sb_get=sb_get,
+            order=order,
+            account_key=account_key,
+        )
+        ship_res = None
+        try:
+            from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
 
-            try:
-                from lp_paid_notifications import notify_distributor_order_paid
-
-                notify_res = await notify_distributor_order_paid(
+            if furgonetka_configured():
+                ship_res = await create_furgonetka_shipment(
+                    str(order.get("id") or order_id),
                     client=http,
                     sb_get=sb_get,
                     sb_patch=sb_patch,
-                    sb_post=sb_post,
+                )
+            else:
+                ship_res = await create_inpost_shipment(
+                    client=http,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
                     order=order,
                     producer=producer,
+                    receiver=receiver,
                 )
-            except Exception as e:
-                logger.exception("LP paid notify failed")
-                notify_res = {"ok": False, "error": str(e)[:300]}
-            return ship_res, notify_res
+        except Exception as e:
+            logger.exception("Courier broker after pay failed")
+            ship_res = {"ok": False, "error": str(e)[:300]}
 
+        notify_res = await _run_notify(http)
+        return ship_res, notify_res
+
+    # Jedna ścieżka: kurier po pierwszym paid; notify zawsze (idempotentny).
+    if not paid.get("already_paid"):
         if defer_fulfillment:
             import asyncio
 
@@ -785,6 +787,22 @@ async def apply_paid_producer_checkout_session(
             notify = {"ok": True, "deferred": True}
         else:
             shipment, notify = await _run_fulfillment(client)
+    else:
+        # Webhook / drugie confirm — dociągnij e-mail jeśli jeszcze nie poszedł.
+        if defer_fulfillment:
+            import asyncio
+
+            async def _bg_notify() -> None:
+                try:
+                    async with httpx.AsyncClient(timeout=45.0) as bg_client:
+                        await _run_notify(bg_client)
+                except Exception:
+                    logger.exception("LP deferred notify crashed")
+
+            asyncio.create_task(_bg_notify())
+            notify = {"ok": True, "deferred": True}
+        else:
+            notify = await _run_notify(client)
 
     return {
         "ok": True,

@@ -1,6 +1,7 @@
 """
 Wysyłka e-mail przez Resend API (jak lib/email/resend.ts w gastro-manager-landing).
 Bez SDK — httpx. Brak klucza = skipped, bez wyjątku.
+Zawsze własny klient HTTP (nie współdziel z Supabase — SSL/proxy).
 """
 from __future__ import annotations
 
@@ -20,8 +21,11 @@ def is_resend_configured() -> bool:
 
 
 def resend_from_header() -> str:
-    raw = (os.getenv("RESEND_FROM_EMAIL") or "asystent.dostaw@gmail.com").strip()
+    raw = (os.getenv("RESEND_FROM_EMAIL") or "").strip()
     name = (os.getenv("RESEND_FROM_NAME") or "Gastro Manager").strip()
+    # Domyślnie domena testowa Resend — Gmail jako From zwykle odpada (weryfikacja domeny).
+    if not raw:
+        raw = "onboarding@resend.dev"
     if "<" in raw:
         return raw
     return f"{name} <{raw}>"
@@ -37,7 +41,7 @@ async def send_email(
 ) -> dict[str, Any]:
     key = (os.getenv("RESEND_API_KEY") or "").strip()
     if not key:
-        logger.info("[email] RESEND_API_KEY brak — pomijam: %s | %s", to, subject)
+        logger.warning("[email] RESEND_API_KEY brak — pomijam: %s | %s", to, subject)
         return {"ok": False, "error": "Brak RESEND_API_KEY", "skipped": True}
 
     payload: dict[str, Any] = {
@@ -49,8 +53,8 @@ async def send_email(
     if text:
         payload["text"] = text
 
-    own = client is None
-    http = client or httpx.AsyncClient(timeout=30.0)
+    # Własny klient — nie używaj klienta Supabase (inny SSL / keep-alive).
+    http = httpx.AsyncClient(timeout=30.0)
     try:
         r = await http.post(
             RESEND_API,
@@ -62,13 +66,19 @@ async def send_email(
         )
         data = r.json() if r.content else {}
         if r.status_code >= 400:
-            err = data.get("message") or data.get("error") or r.text[:200]
-            logger.error("[email] Resend error: %s", err)
+            err = data.get("message") or data.get("error") or r.text[:240]
+            logger.error(
+                "[email] Resend HTTP %s: %s | from=%s to=%s",
+                r.status_code,
+                err,
+                payload["from"],
+                to,
+            )
             return {"ok": False, "error": str(err)}
+        logger.info("[email] Resend OK id=%s to=%s", data.get("id"), to)
         return {"ok": True, "id": data.get("id")}
     except Exception as e:
         logger.exception("[email] Resend exception")
         return {"ok": False, "error": str(e)[:300]}
     finally:
-        if own:
-            await http.aclose()
+        await http.aclose()

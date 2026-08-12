@@ -2,7 +2,6 @@
  * Realtime: invoice_url na producer_orders → push/in-app + deep link do zamówienia.
  */
 import { useEffect, useRef } from 'react';
-import * as Linking from 'expo-linking';
 import { useRouter } from 'expo-router';
 import { getAccountKey } from '@/lib/accountKey';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
@@ -102,14 +101,11 @@ export function ProducerInvoiceWatcher() {
         invoice_url?: string;
       };
       if (data.type === 'lp_invoice' && data.order_id) {
+        // Zawsze szczegóły zamówienia — invoice_url bywa ``bucket:path``, nie HTTPS.
         router.push({
           pathname: '/(tabs)/dostawcy/zamowienie/[id]',
           params: { id: data.order_id },
         });
-        return;
-      }
-      if (data.type === 'lp_invoice' && data.invoice_url) {
-        void Linking.openURL(String(data.invoice_url));
       }
     });
     return () => sub.remove();

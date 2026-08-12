@@ -15666,6 +15666,70 @@ async def local_producers_create_shipment(req: LpShipmentRequest):
     return result
 
 
+@app.get("/api/local-producers/orders/{order_id}/invoice-url")
+async def producer_order_invoice_url(order_id: str, request: Request):
+    """
+    Podpisany HTTPS URL do faktury.
+    WWW zapisuje invoice_url jako ``producer-documents:path`` (prywatny Storage) —
+    apka nie może tego otworzyć przez Linking.openURL bez podpisu.
+    """
+    from lp_invoice_url import resolve_order_invoice_url
+
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+
+    uid = await _auth_user_id_from_request(request)
+    account_key = get_account_key()
+
+    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
+        orders = await sb_get(client, "producer_orders", params={
+            "select": (
+                "id,producer_id,restaurant_account_key,"
+                "invoice_url,settlement_invoice_url,invoice_file_url"
+            ),
+            "id": f"eq.{oid}",
+            "limit": "1",
+        })
+        if not orders:
+            # Starszy schemat bez settlement_invoice_url
+            orders = await sb_get(client, "producer_orders", params={
+                "select": "id,producer_id,restaurant_account_key,invoice_url",
+                "id": f"eq.{oid}",
+                "limit": "1",
+            })
+        if not orders:
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+        order = orders[0]
+
+        producers = await sb_get(client, "local_producers", params={
+            "select": "id,auth_user_id",
+            "id": f"eq.{order.get('producer_id')}",
+            "limit": "1",
+        })
+        owner = ((producers or [{}])[0].get("auth_user_id") or "").strip()
+        is_owner = bool(uid and owner and uid == owner)
+        is_restaurant = bool(
+            order.get("restaurant_account_key")
+            and order.get("restaurant_account_key") == account_key
+            and account_key != "default"
+        )
+        if not (is_owner or is_restaurant):
+            raise HTTPException(status_code=403, detail="Brak dostępu do faktury tego zamówienia")
+
+        try:
+            url = await resolve_order_invoice_url(
+                order, client=client, verify=_httpx_verify(), expires_in=3600,
+            )
+        except Exception as e:
+            logger.exception("LP invoice signed URL failed")
+            raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+
+    if not url:
+        raise HTTPException(status_code=404, detail="Brak faktury dla tego zamówienia")
+    return {"ok": True, "url": url, "expires_in": 3600}
+
+
 @app.get("/api/orders/{order_id}/furgonetka-label")
 @app.get("/api/orders/{order_id}/label")
 @app.get("/api/producer-orders/{order_id}/label")

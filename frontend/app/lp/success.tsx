@@ -8,7 +8,6 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   LP_PAID_MESSAGE,
   LP_PAID_TITLE,
-  claimOptimisticLpPaidAlert,
   tryConfirmPendingLpPayment,
 } from '@/services/localProducers/checkoutClient';
 import { usePremiumAlert } from '@/components/PremiumAlert';
@@ -21,13 +20,12 @@ export default function LpSuccessScreen() {
   useEffect(() => {
     const sid = typeof params.session_id === 'string' ? params.session_id : undefined;
     void (async () => {
-      const optimistic = await claimOptimisticLpPaidAlert(sid);
-      if (optimistic.shouldShow) {
-        alert(LP_PAID_TITLE, optimistic.message || LP_PAID_MESSAGE, [
+      const conf = await tryConfirmPendingLpPayment({ sessionId: sid });
+      if (conf.paid && conf.shouldShowPaidAlert) {
+        alert(LP_PAID_TITLE, conf.message || LP_PAID_MESSAGE, [
           { text: 'OK', style: 'primary' },
         ]);
       }
-      void tryConfirmPendingLpPayment({ sessionId: sid });
       router.replace('/(tabs)/dostawcy');
     })();
   }, [alert, params.session_id, router]);

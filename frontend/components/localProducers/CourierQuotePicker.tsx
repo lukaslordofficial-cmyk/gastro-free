@@ -52,6 +52,10 @@ function postOk(raw: string) {
   return raw.replace(/\D/g, '').length === 5;
 }
 
+function bookableQuote(q: FurgonetkaQuote): boolean {
+  return Boolean(q.available && q.price_gross && !q.error);
+}
+
 export function CourierQuotePicker({
   producerId,
   items,
@@ -65,17 +69,22 @@ export function CourierQuotePicker({
   selected,
   onSelect,
 }: Props) {
-  const [width, setWidth] = useState('30');
-  const [height, setHeight] = useState('20');
-  const [depth, setDepth] = useState('40');
+  const [width, setWidth] = useState('');
+  const [height, setHeight] = useState('');
+  const [depth, setDepth] = useState('');
+  const [dimsDirty, setDimsDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [quotes, setQuotes] = useState<FurgonetkaQuote[]>([]);
   const [weightKg, setWeightKg] = useState(0);
+  const [parcelCount, setParcelCount] = useState(1);
+  const [suggested, setSuggested] = useState<{ w: number; h: number; d: number } | null>(null);
 
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  const dimsDirtyRef = useRef(dimsDirty);
+  dimsDirtyRef.current = dimsDirty;
   const itemsKey = JSON.stringify(
     items.map((i) => [i.product_id || '', i.quantity, i.unit || '', i.weight_g || 0]),
   );
@@ -84,6 +93,13 @@ export function CourierQuotePicker({
     () => Boolean(producerId && street.trim() && city.trim() && postOk(postCode)),
     [producerId, street, city, postCode],
   );
+
+  const dimsKey = dimsDirty ? `${width}x${height}x${depth}` : 'auto';
+
+  useEffect(() => {
+    dimsDirtyRef.current = false;
+    setDimsDirty(false);
+  }, [itemsKey]);
 
   useEffect(() => {
     if (!ready) {
@@ -95,9 +111,10 @@ export function CourierQuotePicker({
         setBusy(true);
         setError(null);
         try {
-          const w = Number(width) || undefined;
-          const h = Number(height) || undefined;
-          const d = Number(depth) || undefined;
+          const useCustom = dimsDirtyRef.current;
+          const w = Number(width);
+          const h = Number(height);
+          const d = Number(depth);
           const res = await fetchCourierQuotes({
             producerId,
             items,
@@ -107,33 +124,48 @@ export function CourierQuotePicker({
             buildingNumber,
             city,
             postCode,
-            widthCm: w,
-            heightCm: h,
-            depthCm: d,
+            ...(useCustom && w > 0 && h > 0 && d > 0
+              ? { widthCm: w, heightCm: h, depthCm: d }
+              : {}),
           });
           if (!res.ok) {
             setError(res.message || 'Nie udało się pobrać stawek Furgonetka.');
             setQuotes([]);
             return;
           }
-          setQuotes(res.quotes);
+          const visible = (res.quotes || []).filter(bookableQuote);
+          setQuotes(visible);
           setWeightKg(res.weight_kg);
+          setParcelCount(res.parcels || 1);
           setNote(res.note || '');
-          const pick = res.cheapest || res.quotes.find((q) => q.available && q.price_gross);
+          if (res.width_cm && res.height_cm && res.depth_cm) {
+            setSuggested({ w: res.width_cm, h: res.height_cm, d: res.depth_cm });
+            if (!dimsDirtyRef.current) {
+              setWidth(String(res.width_cm));
+              setHeight(String(res.height_cm));
+              setDepth(String(res.depth_cm));
+            }
+          }
+          const pick = res.cheapest && bookableQuote(res.cheapest)
+            ? res.cheapest
+            : visible[0];
           const current = selectedRef.current;
           const keep = current
-            ? res.quotes.find((q) => String(q.service_id) === String(current.serviceId) && q.available && q.price_gross)
+            ? visible.find((q) => String(q.service_id) === String(current.serviceId))
             : null;
           const chosen = keep || pick;
           if (chosen?.price_gross) {
+            const dw = dimsDirtyRef.current ? Number(width) : res.width_cm;
+            const dh = dimsDirtyRef.current ? Number(height) : res.height_cm;
+            const dd = dimsDirtyRef.current ? Number(depth) : res.depth_cm;
             onSelect({
               serviceId: chosen.service_id,
               service: chosen.service,
               name: chosen.name,
               priceGross: chosen.price_gross,
-              widthCm: Number(width) || res.width_cm,
-              heightCm: Number(height) || res.height_cm,
-              depthCm: Number(depth) || res.depth_cm,
+              widthCm: dw || res.width_cm,
+              heightCm: dh || res.height_cm,
+              depthCm: dd || res.depth_cm,
               weightKg: res.weight_kg,
               source: res.source,
             });
@@ -147,7 +179,14 @@ export function CourierQuotePicker({
     }, 450);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, producerId, street, buildingNumber, city, postCode, width, height, depth, itemsKey]);
+  }, [ready, producerId, street, buildingNumber, city, postCode, itemsKey, dimsKey]);
+
+  const setDim = (which: 'w' | 'h' | 'd') => (text: string) => {
+    setDimsDirty(true);
+    if (which === 'w') setWidth(text);
+    else if (which === 'h') setHeight(text);
+    else setDepth(text);
+  };
 
   return (
     <View style={styles.wrap}>
@@ -155,15 +194,24 @@ export function CourierQuotePicker({
         Kalkulator Furgonetka
       </Text>
       <Text style={[styles.hint, { color: colors.textSecondary }]}>
-        Waga i wymiary paczki (cm) — porównanie stawek wszystkich kurierów.
-        {weightKg > 0 ? ` Szacowana waga: ${weightKg.toFixed(2)} kg.` : ''}
+        Waga i wymiary paczki (cm) dobierane z zawartości koszyka — kurierzy bez dostawy
+        w Polsce są ukryci.
+        {weightKg > 0
+          ? ` Szacowana waga: ${weightKg.toFixed(2)} kg${parcelCount > 1 ? ` · ${parcelCount} paczki` : ''}.`
+          : ''}
       </Text>
+      {suggested ? (
+        <Text style={[styles.hint, { color: colors.textSecondary }]}>
+          Sugerowany rozmiar: {suggested.w}×{suggested.h}×{suggested.d} cm
+          {dimsDirty ? ' (edytujesz ręcznie)' : ''}
+        </Text>
+      ) : null}
       <View style={styles.dims}>
         {(
           [
-            ['Szer.', width, setWidth],
-            ['Wys.', height, setHeight],
-            ['Gł.', depth, setDepth],
+            ['Szer.', width, setDim('w')],
+            ['Wys.', height, setDim('h')],
+            ['Gł.', depth, setDim('d')],
           ] as const
         ).map(([label, value, setter]) => (
           <View key={label} style={styles.dimField}>
@@ -172,6 +220,8 @@ export function CourierQuotePicker({
               value={value}
               onChangeText={setter}
               keyboardType="number-pad"
+              placeholder="auto"
+              placeholderTextColor={colors.textSecondary}
               style={[
                 styles.dimInput,
                 {
@@ -196,13 +246,16 @@ export function CourierQuotePicker({
       {note ? (
         <Text style={[styles.hint, { color: colors.textSecondary }]}>{note}</Text>
       ) : null}
+      {!busy && ready && quotes.length === 0 && !error ? (
+        <Text style={[styles.hint, { color: colors.textSecondary }]}>
+          Brak kurierów dostępnych dla tej wagi i trasy Polska → Polska.
+        </Text>
+      ) : null}
       {quotes.map((q) => {
         const active = selected?.serviceId === q.service_id;
-        const disabled = !q.available || !q.price_gross;
         return (
           <TouchableOpacity
             key={String(q.service_id)}
-            disabled={disabled}
             onPress={() => {
               if (!q.price_gross) return;
               onSelect({
@@ -210,9 +263,9 @@ export function CourierQuotePicker({
                 service: q.service,
                 name: q.name,
                 priceGross: q.price_gross,
-                widthCm: Number(width) || 30,
-                heightCm: Number(height) || 20,
-                depthCm: Number(depth) || 40,
+                widthCm: Number(width) || suggested?.w || 30,
+                heightCm: Number(height) || suggested?.h || 20,
+                depthCm: Number(depth) || suggested?.d || 40,
                 weightKg,
                 source: q.source,
               });
@@ -221,7 +274,6 @@ export function CourierQuotePicker({
               styles.row,
               {
                 borderColor: active ? colors.accent : colors.border,
-                opacity: disabled ? 0.45 : 1,
               },
             ]}
           >
@@ -229,7 +281,7 @@ export function CourierQuotePicker({
               {String(q.name || q.service || 'Kurier')}
             </Text>
             <Text style={[styles.rowPrice, { color: colors.accent }]}>
-              {disabled ? String(q.error || 'niedostępny') : formatPln(q.price_gross || 0)}
+              {formatPln(q.price_gross || 0)}
             </Text>
           </TouchableOpacity>
         );

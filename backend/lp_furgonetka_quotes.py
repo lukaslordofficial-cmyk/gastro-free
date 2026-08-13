@@ -135,3 +135,91 @@ def normalize_services_prices(
         })
     rows.sort(key=lambda r: (not r["available"], r.get("price_gross") or 9999))
     return rows
+
+
+INTL_HINTS = (
+    "international",
+    "zagranic",
+    "export",
+    "worldwide",
+    "cross-border",
+    "abroad",
+    "europa",
+    "europe",
+    "eu only",
+    "outside poland",
+    "poza polsk",
+)
+
+# Poniżej tego progu brutto Furgonetka zwykle zwraca śmieci (np. Orlen 1,23 zł).
+MIN_DOMESTIC_GROSS_PLN = 4.0
+
+
+def is_bookable_quote(q: dict[str, Any], *, weight_kg: float = 0.0) -> bool:
+    """Tylko kurierzy, których da się realnie nadać w Polsce."""
+    _ = weight_kg
+    if not isinstance(q, dict):
+        return False
+    if q.get("error"):
+        return False
+    if not q.get("available"):
+        return False
+    try:
+        price = float(q.get("price_gross") or 0)
+    except (TypeError, ValueError):
+        return False
+    if price < MIN_DOMESTIC_GROSS_PLN:
+        return False
+    blob = f"{q.get('name') or ''} {q.get('service') or ''} {q.get('error') or ''}".lower()
+    if any(h in blob for h in INTL_HINTS):
+        return False
+    return True
+
+
+def bookable_quotes(quotes: list[dict[str, Any]], *, weight_kg: float = 0.0) -> list[dict[str, Any]]:
+    visible = [q for q in quotes if is_bookable_quote(q, weight_kg=weight_kg)]
+    visible.sort(key=lambda r: r.get("price_gross") or 9999)
+    return visible
+
+
+_INTL_HINTS = (
+    "international",
+    "zagranic",
+    "export",
+    "worldwide",
+    "europa",
+    "europe",
+    "cross-border",
+    "abroad",
+    "import",
+    "world",
+)
+
+
+def is_bookable_quote(q: dict[str, Any], *, weight_kg: float = 0.0) -> bool:
+    """Tylko kurierzy, których da się zamówić na trasie PL→PL z realną stawką."""
+    if not isinstance(q, dict):
+        return False
+    if not q.get("available"):
+        return False
+    if q.get("error"):
+        return False
+    try:
+        price = float(q.get("price_gross") or 0)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0:
+        return False
+    # 1,23 zł za paczkę spożywczą to nie stawka kuriera (często śmieciowy wiersz API).
+    if price < 4.0:
+        return False
+    blob = f"{q.get('name') or ''} {q.get('service') or ''} {q.get('error') or ''}".lower()
+    if any(h in blob for h in _INTL_HINTS):
+        return False
+    return True
+
+
+def bookable_quotes(quotes: list[dict[str, Any]], *, weight_kg: float = 0.0) -> list[dict[str, Any]]:
+    rows = [q for q in quotes if is_bookable_quote(q, weight_kg=weight_kg)]
+    rows.sort(key=lambda r: r.get("price_gross") or 9999)
+    return rows

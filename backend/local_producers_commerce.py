@@ -29,6 +29,7 @@ logger = logging.getLogger("local_producers.commerce")
 INPOST_SANDBOX = "https://sandbox-api-shipx-pl.easypack24.net"
 INPOST_PROD = "https://api-shipx-pl.easypack24.net"
 LP_SHIP_PREFIX = "lp_ship:"
+LP_COURIER_PREFIX = "lp_courier:"
 
 
 def inpost_configured() -> bool:
@@ -79,6 +80,38 @@ def encode_lp_ship_note(delivery: dict[str, Any], extra: str = "") -> str:
     return f"{extra} | {base}".strip(" |") if extra else base
 
 
+def parse_lp_courier_from_notes(notes: Optional[str]) -> Optional[dict[str, Any]]:
+    if not notes:
+        return None
+    idx = notes.find(LP_COURIER_PREFIX)
+    if idx < 0:
+        return None
+    raw = notes[idx + len(LP_COURIER_PREFIX) :].strip()
+    if " |" in raw:
+        raw = raw.split(" |", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def courier_line_item_name(order: dict[str, Any]) -> str:
+    """Nazwa kuriera na podsumowaniu Stripe — ta sama, którą restauracja wybrała."""
+    raw = str(order.get("courier_name") or "").strip()
+    if not raw:
+        sel = parse_lp_courier_from_notes(order.get("notes")) or {}
+        raw = str(sel.get("name") or sel.get("service") or "").strip()
+    if not raw:
+        return "Kurier"
+    low = raw.lower()
+    if low in ("inpost", "inpost kurier"):
+        return "Kurier InPost"
+    if low.startswith("kurier"):
+        return raw[:80]
+    return f"Kurier — {raw}"[:80]
+
+
 def _split_street(address: Optional[str]) -> tuple[str, str]:
     """Prosta próba wydzielenia numeru budynku z linii adresu."""
     text = (address or "").strip() or "ul. Producenta"
@@ -99,7 +132,7 @@ async def create_producer_order_checkout(
     idempotency_key: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Stripe Checkout — 3 pozycje: produkty, kurier InPost, opłata serwisu 5%.
+    Stripe Checkout — 3 pozycje: produkty, wybrany kurier, opłata serwisu 5%.
     Przy Connect: destination charge → producent dostaje produkty,
     platforma application_fee = 5% + kurier (kurier na InPost przez ShipX).
     """
@@ -156,7 +189,7 @@ async def create_producer_order_checkout(
                 "currency": "pln",
                 "unit_amount": del_g,
                 "product_data": {
-                    "name": "Kurier InPost",
+                    "name": courier_line_item_name(order),
                     "description": "Dostawa od producenta do restauracji",
                 },
             },

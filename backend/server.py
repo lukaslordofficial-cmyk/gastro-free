@@ -15401,7 +15401,19 @@ async def local_producers_courier_quotes(req: LpCourierQuoteRequest):
             postcode=post,
         )
         items = [it.model_dump() for it in (req.items or [])]
-        weight_kg = estimate_order_weight_kg(items)
+        product_ids = [str(it.get("product_id") or "") for it in items if it.get("product_id")]
+        products_by_id: dict = {}
+        if product_ids:
+            uniq = list(dict.fromkeys(product_ids))[:80]
+            try:
+                rows = await sb_get(client, "producer_products", params={
+                    "select": "id,unit,weight_g",
+                    "id": f"in.({','.join(uniq)})",
+                })
+                products_by_id = {str(r.get("id")): r for r in (rows or [])}
+            except Exception:
+                logger.warning("LP courier quotes: product weight lookup failed", exc_info=True)
+        weight_kg = estimate_order_weight_kg(items, products_by_id)
         parcels_full = parcels_for_weight_kg(weight_kg)
         if req.width_cm and req.height_cm and req.depth_cm and parcels_full:
             parcels_full[0]["width"] = int(req.width_cm)
@@ -15423,8 +15435,10 @@ async def local_producers_courier_quotes(req: LpCourierQuoteRequest):
             logger.exception("LP courier quotes failed")
             raise HTTPException(status_code=502, detail=str(e)[:280])
 
-    quotes = quoted.get("quotes") or []
-    cheapest = next((q for q in quotes if q.get("available") and q.get("price_gross")), None)
+    from lp_furgonetka_quotes import bookable_quotes
+
+    quotes = bookable_quotes(quoted.get("quotes") or [], weight_kg=weight_kg)
+    cheapest = quotes[0] if quotes else None
     auth_error = quoted.get("auth_error")
     if quoted.get("source") == "sandbox" and auth_error:
         note = (
@@ -15445,6 +15459,7 @@ async def local_producers_courier_quotes(req: LpCourierQuoteRequest):
         "height_cm": dims.get("height"),
         "depth_cm": dims.get("depth"),
         "parcels": len(parcels),
+        "package_size": (parcels_full[0].get("package_size") if parcels_full else "S"),
         "quotes": quotes,
         "cheapest": cheapest,
         "note": note,

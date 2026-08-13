@@ -906,7 +906,7 @@ async def _create_mock_shipment(
         "order_status": "awaiting_courier",
         "tracking_state": "ordered",
         "parcel_weight_kg": weight_kg,
-        "courier_name": "inpost",
+        "courier_name": order.get("courier_name") or "inpost",
         "delivery_tracking": tracking,
         "pickup_date": pickup_day,
         "pickup_min_time": "10:00",
@@ -933,7 +933,7 @@ async def _create_mock_shipment(
             "pickup_max_time": "18:00",
         },
         "label_storage_path": label_ref,
-        "courier_name": "inpost",
+        "courier_name": order.get("courier_name") or "inpost",
         "prepaid_note": "Tryb testowy (FURGONETKA_MOCK / SANDBOX) — kurier nie jedzie na serio.",
     }
 

@@ -153,11 +153,9 @@ export function parseLpBillingDeepLink(url: string | null | undefined): {
   // Także billing-return z API (gdy OS otworzy http zamiast deep linku)
   const isSuccess =
     lower.includes('lp/success')
-    || (lower.includes('/success') && (lower.includes('session_id=') || lower.includes('lp')))
     || (lower.includes('billing-return') && lower.includes('status=success'));
   const isCancel =
     lower.includes('lp/cancel')
-    || (lower.includes('/cancel') && lower.includes('lp'))
     || (lower.includes('billing-return') && lower.includes('status=cancel'));
   if (!isSuccess && !isCancel) return { kind: null };
   const kind = isSuccess ? 'success' : 'cancel';
@@ -195,23 +193,22 @@ async function markPaidAlertShown(sessionId: string): Promise<boolean> {
 /**
  * Natychmiastowy komunikat po deep linku success (nie czeka na Furgonetkę/SMS).
  * Confirm leci w tle.
+ * @deprecated Komunikat „Opłacono” tylko po confirmProducerOrderPayment.paid.
  */
 export async function claimOptimisticLpPaidAlert(sessionId?: string | null): Promise<{
   shouldShow: boolean;
   session_id?: string;
   message: string;
 }> {
-  let sid = sessionId || null;
-  if (!sid) {
-    try {
-      sid = await AsyncStorage.getItem(PENDING_LP_SESSION_KEY);
-    } catch {
-      sid = null;
-    }
+  return { shouldShow: false, session_id: sessionId || undefined, message: LP_PAID_MESSAGE };
+}
+
+export async function clearPendingLpCheckout(): Promise<void> {
+  try {
+    await AsyncStorage.multiRemove([PENDING_LP_SESSION_KEY, PENDING_LP_ORDER_KEY]);
+  } catch {
+    /* ignore */
   }
-  if (!sid) return { shouldShow: false, message: LP_PAID_MESSAGE };
-  const shouldShow = await markPaidAlertShown(sid);
-  return { shouldShow, session_id: sid, message: LP_PAID_MESSAGE };
 }
 
 /**
@@ -265,17 +262,6 @@ export function subscribeLpAppStateConfirm(
       try {
         const pending = await AsyncStorage.getItem(PENDING_LP_SESSION_KEY);
         if (!pending) return;
-        // Szybki komunikat przy powrocie z przeglądarki (zainstalowana apka).
-        const optimistic = await claimOptimisticLpPaidAlert(pending);
-        if (optimistic.shouldShow) {
-          onResult({
-            ok: true,
-            paid: true,
-            message: optimistic.message,
-            shouldShowPaidAlert: true,
-            session_id: optimistic.session_id,
-          });
-        }
         const r = await tryConfirmPendingLpPayment({ sessionId: pending });
         if (r.paid && r.shouldShowPaidAlert) onResult(r);
       } catch {

@@ -78,9 +78,13 @@ export async function fetchCourierQuotes(input: {
       building_number: input.buildingNumber,
       city: input.city,
       post_code: input.postCode,
-      width_cm: input.widthCm,
-      height_cm: input.heightCm,
-      depth_cm: input.depthCm,
+      ...(input.widthCm && input.heightCm && input.depthCm
+        ? {
+            width_cm: input.widthCm,
+            height_cm: input.heightCm,
+            depth_cm: input.depthCm,
+          }
+        : {}),
     }),
   });
   const data = await res.json().catch(() => ({}));

@@ -1321,20 +1321,18 @@ function rememberResolve(key: string, value: ResolvedProductImage | null): Resol
   return value;
 }
 
-function toImageSource(r: ResolvedProductImage | null, preferDishes = false): number | { uri: string } {
+function dishImageSource(r: ResolvedProductImage | null): number | { uri: string } | undefined {
   if (r?.localAsset != null) return r.localAsset;
   if (r?.uri) return { uri: r.uri };
-  // Menu / dania: NIGDY skrzynka warzyw / kartony — brak matcha = brak źródła (caller używa category placeholder)
+  return undefined;
+}
+
+function toImageSource(r: ResolvedProductImage | null, preferDishes = false): number | { uri: string } {
+  const dish = dishImageSource(r);
+  if (dish) return dish;
+  // Menu: brak dopasowania = puste pole (nie wstawiamy kurczaka / kaczki wszystkim daniom)
   if (preferDishes) {
-    try {
-      return require('@/assets/premium/dishes/dinners/dinner_04.webp'); // pieczona kaczka / danie główne fallback visual
-    } catch {
-      try {
-        return require('@/assets/premium/dishes/soups_pl/soup_pl_01.webp');
-      } catch {
-        return require('@/assets/premium/placeholders/ph_mieso_surowe_stek.webp');
-      }
-    }
+    return { uri: '' };
   }
   try {
     return require('@/assets/premium/placeholders/ph_skrzynka_warzywa.webp');
@@ -1736,7 +1734,7 @@ export function imageSourceForProduct(
  * Zwraca źródło + tier/badge do UI.
  */
 export type DishThumbAssignment = {
-  source: number | { uri: string };
+  source?: number | { uri: string };
   slug?: string;
   matchTier?: 'exact' | 'tags' | 'category';
   placeholderLabel?: string;
@@ -1751,13 +1749,18 @@ export function assignUniqueDishImageSources(
   for (const item of items) {
     if (out.has(item.name)) continue;
     const r = resolveProductImage(item.name, used, true, item.category);
-    if (r?.slug) used.add(r.slug);
+    const source = dishImageSource(r);
+    // Tylko realne dopasowanie nazwy — placeholder kategorii (ten sam kurczak) pomijamy.
+    if (!source || !r || (r.matchTier === 'category' && (r.score ?? 0) < 70)) {
+      continue;
+    }
+    if (r.slug) used.add(r.slug);
     out.set(item.name, {
-      source: toImageSource(r, true),
-      slug: r?.slug,
-      matchTier: r?.matchTier,
-      placeholderLabel: r?.placeholderLabel,
-      score: r?.score,
+      source,
+      slug: r.slug,
+      matchTier: r.matchTier,
+      placeholderLabel: r.placeholderLabel,
+      score: r.score,
     });
   }
   return out;

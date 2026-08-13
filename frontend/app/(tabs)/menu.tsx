@@ -16,6 +16,7 @@ import {
   Pressable,
   DeviceEventEmitter,
   ActivityIndicator,
+  InteractionManager,
 } from 'react-native';
 import {
   emitRecipeIngredientsChanged,
@@ -89,13 +90,12 @@ interface Dish {
 }
 
 type DishThumbAssignment = {
-  source: number | { uri: string };
+  source?: number | { uri: string };
   slug?: string;
   matchTier?: 'exact' | 'tags' | 'category';
   placeholderLabel?: string;
 };
 
-const MENU_THUMB_FALLBACK = require('@/assets/premium/dishes/dinners/dinner_04.webp');
 const MENU_LIST_CACHE = new Map<string, Dish[]>();
 
 type MenuListRow =
@@ -228,16 +228,16 @@ function DishCard({
   onDelete: (dish: Dish) => void;
   onBatchPrep?: (dish: Dish) => void;
   premium?: boolean;
-  thumb: DishThumbAssignment;
+  thumb?: DishThumbAssignment;
   onChangePhoto?: (dish: Dish) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const anim = useRef(new Animated.Value(0)).current;
   const catColor = CATEGORY_COLORS[dish.category] ?? Colors.textSecondary;
   const customUri = getDishCustomImageSync(dish.id);
-  const thumbSrc = customUri ? { uri: customUri } : thumb.source;
+  const thumbSrc = customUri ? { uri: customUri } : thumb?.source;
   const showPlaceholderBadge =
-    !customUri && (thumb.matchTier === 'category' || thumb.matchTier === 'tags') && !!thumb.placeholderLabel;
+    !customUri && !!thumb && (thumb.matchTier === 'category' || thumb.matchTier === 'tags') && !!thumb.placeholderLabel;
 
   const toggle = () => {
     const toValue = expanded ? 0 : 1;
@@ -259,14 +259,18 @@ function DishCard({
             }}
             style={dishStyles.premThumbWrap}
           >
-            <Image
-              source={thumbSrc as any}
-              style={dishStyles.premThumb}
-              contentFit="contain"
-              cachePolicy="disk"
-              transition={120}
-              recyclingKey={dish.id}
-            />
+            {thumbSrc ? (
+              <Image
+                source={thumbSrc as any}
+                style={dishStyles.premThumb}
+                contentFit="contain"
+                cachePolicy="disk"
+                transition={180}
+                recyclingKey={dish.id}
+              />
+            ) : (
+              <View style={dishStyles.premThumb} />
+            )}
             {showPlaceholderBadge && (
               <View style={dishStyles.thumbBadge}>
                 <Text style={dishStyles.thumbBadgeText} numberOfLines={1} allowFontScaling={false}>
@@ -1189,18 +1193,52 @@ export default function MenuScreen() {
     return rows;
   }, [grouped]);
 
-  const dishThumbByName = useMemo(() => {
-    const out = new Map<string, DishThumbAssignment>();
-    for (const d of dishes) {
-      if (out.has(d.name)) continue;
-      out.set(d.name, {
-        source: MENU_THUMB_FALLBACK,
-        matchTier: 'category',
-        placeholderLabel: d.category || 'Danie',
-      });
+  const [dishThumbByName, setDishThumbByName] = useState<Map<string, DishThumbAssignment>>(
+    () => new Map(),
+  );
+
+  useEffect(() => {
+    if (!dishes.length) {
+      setDishThumbByName(new Map());
+      return;
     }
-    return out;
-  }, [dishes]);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setDishThumbByName(new Map());
+    const handle = InteractionManager.runAfterInteractions(() => {
+      timer = setTimeout(() => {
+        void import('@/lib/productImages').then(({ assignUniqueDishImageSources }) => {
+          if (cancelled) return;
+          const assigned = assignUniqueDishImageSources(
+            dishes.map((d) => ({ name: d.name, category: d.category })),
+          );
+          const entries = [...assigned.entries()];
+          if (!entries.length) return;
+          let i = 0;
+          const chunk = 8;
+          const pump = () => {
+            if (cancelled) return;
+            const part = entries.slice(i, i + chunk);
+            if (!part.length) return;
+            setDishThumbByName((prev) => {
+              const next = new Map(prev);
+              for (const [k, v] of part) next.set(k, v);
+              return next;
+            });
+            i += chunk;
+            if (i < entries.length) requestAnimationFrame(pump);
+          };
+          pump();
+        });
+      }, 60);
+    });
+    return () => {
+      cancelled = true;
+      handle.cancel?.();
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dishes.map((d) => d.name).join('|')]);
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
@@ -1438,13 +1476,7 @@ export default function MenuScreen() {
             })
           }
           premium
-          thumb={
-            dishThumbByName.get(item.dish.name) ?? {
-              source: require('@/assets/premium/dishes/dinners/dinner_04.webp'),
-              matchTier: 'category',
-              placeholderLabel: item.dish.category || 'Danie',
-            }
-          }
+          thumb={dishThumbByName.get(item.dish.name)}
           onChangePhoto={handleChangeDishPhoto}
         />
       );
@@ -2113,13 +2145,7 @@ export default function MenuScreen() {
                 dish={dish}
                 onEdit={handleOpenEdit}
                 onDelete={handleDeleteDish}
-                thumb={
-                  dishThumbByName.get(dish.name) ?? {
-                    source: require('@/assets/premium/dishes/dinners/dinner_04.webp'),
-                    matchTier: 'category',
-                    placeholderLabel: dish.category || 'Danie',
-                  }
-                }
+                thumb={dishThumbByName.get(dish.name)}
                 onChangePhoto={handleChangeDishPhoto}
               />
             ))}

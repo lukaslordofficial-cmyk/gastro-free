@@ -1,14 +1,13 @@
 /**
  * Wspólny „Pro Dark” chrome — brand header + background.
  */
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, StyleSheet } from 'react-native';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { FloatingAsset } from '@/components/premium/premiumAnimations';
 import { PremiumScreenBackground } from '@/components/premium/PremiumScreenBackground';
 import { PremiumBrandHeader } from '@/components/premium/PremiumUI';
 import { DS, PremiumTokens } from '@/constants/premiumTheme';
-import { imageSourceForProduct } from '@/lib/productImages';
 
 type Props = {
   title: string;
@@ -36,17 +35,34 @@ export function PremiumTabChrome({
   headerVariant = 'default',
 }: Props) {
   const t = useAppTheme();
+  const floatKey = showFloats ? floatNames.slice(0, 4).join('|') : '';
+  const [floatSrcs, setFloatSrcs] = useState<(number | { uri: string })[]>([]);
+
+  useEffect(() => {
+    if (!floatKey) {
+      setFloatSrcs([]);
+      return;
+    }
+    const names = floatKey.split('|');
+    let cancelled = false;
+    void import('@/lib/productImages').then(({ imageSourceForProduct }) => {
+      if (cancelled) return;
+      setFloatSrcs(names.map((n) => imageSourceForProduct(n)));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [floatKey]);
+
   if (!t.isPremium) {
     return <>{children}</>;
   }
 
-  const floats = showFloats
-    ? floatNames.slice(0, 4).map((n, i) => ({
-        key: `${n}-${i}`,
-        src: imageSourceForProduct(n),
-        delay: i * 400,
-      }))
-    : [];
+  const floats = floatSrcs.map((src, i) => ({
+    key: `${floatNames[i] || i}-${i}`,
+    src,
+    delay: i * 400,
+  }));
 
   const panelTitle = subtitle || title;
 

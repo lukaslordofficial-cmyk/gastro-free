@@ -82,8 +82,9 @@ export function SettlementDocumentsSection({ order, isPremium }: Props) {
       <Text style={[styles.wait, { color: muted }]}>
         {uploaded
           ? 'Dokument od dostawcy jest gotowy — pobierz PDF w aplikacji.'
-          : 'Pobierz rachunek wygenerowany z danych sprzedawcy (przetwórcy) i zamówienia.'}
+          : 'Rachunek pojawi się tutaj, gdy lokalny dystrybutor wgra dokument w panelu.'}
       </Text>
+      {uploaded ? (
       <TouchableOpacity
         style={[styles.btn, { backgroundColor: accent, opacity: busy || !orderId ? 0.7 : 1 }]}
         onPress={downloadInvoice}
@@ -101,6 +102,7 @@ export function SettlementDocumentsSection({ order, isPremium }: Props) {
           {busy ? 'Pobieranie…' : 'Pobierz rachunek'}
         </Text>
       </TouchableOpacity>
+      ) : null}
     </View>
   );
 }

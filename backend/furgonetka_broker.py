@@ -71,6 +71,19 @@ def _use_mock() -> bool:
     return False
 
 
+def _is_client_auth_error(exc: BaseException | str) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "client authentication failed",
+            "invalid_client",
+            "unauthorized_client",
+            "invalid client",
+        )
+    )
+
+
 def _has_oauth_secrets() -> bool:
     if (os.getenv("FURGONETKA_API_KEY") or os.getenv("FURGONETKA_ACCESS_TOKEN") or "").strip():
         return True
@@ -259,29 +272,41 @@ async def calculate_courier_quotes(
         quotes = mock_quotes_for_parcels(parcels)
         return {"ok": True, "source": "sandbox", "quotes": quotes}
 
-    services = await list_account_services()
-    ids = [s.get("id") for s in services if s.get("id") is not None]
-    if not ids:
-        raise RuntimeError("Brak usług kurierskich na koncie Furgonetka (GET /account/services).")
-    by_id = {s.get("id"): s for s in services}
-    by_id.update({str(s.get("id")): s for s in services})
-    body = {
-        "package": {
-            "pickup": pickup,
-            "receiver": receiver,
-            "service_id": ids[0],
-            "parcels": parcels,
-        },
-        "services": {"service_id": ids},
-    }
-    data = await _api(
-        "POST",
-        "/packages/calculate-price",
-        json_body=body,
-        accept=ACCEPT_V2,
-    )
-    quotes = normalize_services_prices(data, services_by_id=by_id)
-    return {"ok": True, "source": "furgonetka", "quotes": quotes}
+    try:
+        services = await list_account_services()
+        ids = [s.get("id") for s in services if s.get("id") is not None]
+        if not ids:
+            raise RuntimeError("Brak usług kurierskich na koncie Furgonetka (GET /account/services).")
+        by_id = {s.get("id"): s for s in services}
+        by_id.update({str(s.get("id")): s for s in services})
+        body = {
+            "package": {
+                "pickup": pickup,
+                "receiver": receiver,
+                "service_id": ids[0],
+                "parcels": parcels,
+            },
+            "services": {"service_id": ids},
+        }
+        data = await _api(
+            "POST",
+            "/packages/calculate-price",
+            json_body=body,
+            accept=ACCEPT_V2,
+        )
+        quotes = normalize_services_prices(data, services_by_id=by_id)
+        return {"ok": True, "source": "furgonetka", "quotes": quotes}
+    except Exception as exc:
+        if _is_client_auth_error(exc):
+            logger.warning("Furgonetka OAuth failed, using sandbox quotes: %s", exc)
+            quotes = mock_quotes_for_parcels(parcels)
+            return {
+                "ok": True,
+                "source": "sandbox",
+                "quotes": quotes,
+                "auth_error": str(exc)[:240],
+            }
+        raise
 
 
 def _parse_lp_courier(notes: Optional[str]) -> Optional[dict[str, Any]]:

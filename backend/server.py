@@ -15425,6 +15425,18 @@ async def local_producers_courier_quotes(req: LpCourierQuoteRequest):
 
     quotes = quoted.get("quotes") or []
     cheapest = next((q for q in quotes if q.get("available") and q.get("price_gross")), None)
+    auth_error = quoted.get("auth_error")
+    if quoted.get("source") == "sandbox" and auth_error:
+        note = (
+            "Furgonetka odrzuciła logowanie OAuth (Client authentication failed). "
+            "Na Railway wgraj FURGONETKA_CLIENT_ID i FURGONETKA_CLIENT_SECRET z tego samego środowiska "
+            "co API (sandbox.furgonetka.pl → Integracje / OAuth2), albo ustaw FURGONETKA_MOCK=1. "
+            "Poniżej stawki testowe, żeby dało się złożyć zamówienie."
+        )
+    elif quoted.get("source") == "sandbox":
+        note = "Stawki testowe (sandbox) — ustaw FURGONETKA_* z konta, żeby dostać żywe ceny."
+    else:
+        note = "Ceny brutto z kalkulatora Furgonetka dla podanej wagi i wymiarów."
     return {
         "ok": True,
         "source": quoted.get("source"),
@@ -15435,11 +15447,8 @@ async def local_producers_courier_quotes(req: LpCourierQuoteRequest):
         "parcels": len(parcels),
         "quotes": quotes,
         "cheapest": cheapest,
-        "note": (
-            "Stawki testowe (sandbox) — ustaw FURGONETKA_* z konta, żeby dostać żywe ceny."
-            if quoted.get("source") == "sandbox"
-            else "Ceny brutto z kalkulatora Furgonetka dla podanej wagi i wymiarów."
-        ),
+        "note": note,
+        "auth_error": auth_error,
     }
 
 
@@ -16062,17 +16071,10 @@ async def producer_order_invoice_url(order_id: str, request: Request):
 @app.get("/api/local-producers/orders/{order_id}/invoice")
 async def producer_order_invoice_file(order_id: str, request: Request):
     """
-    Rachunek / faktura PDF: wgrany dokument ze Storage albo wygenerowany w locie.
-    Sprzedawca = profil przetwórcy. Content-Disposition: attachment.
+    Rachunek / faktura PDF — tylko dokument wgrany przez dystrybutora.
     """
     from fastapi.responses import StreamingResponse
-    from lp_invoice_pdf import (
-        build_invoice_pdf,
-        fetch_stored_invoice_bytes,
-        invoice_filename,
-        load_order_invoice_items,
-        settlement_type_of,
-    )
+    from lp_invoice_pdf import fetch_stored_invoice_bytes
 
     oid = (order_id or "").strip()
     if not oid:
@@ -16081,22 +16083,6 @@ async def producer_order_invoice_file(order_id: str, request: Request):
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
         acc = await _lp_order_for_actor(client, oid, request)
         order = acc["order"]
-        pid = str(order.get("producer_id") or "").strip()
-        producers = []
-        if pid:
-            try:
-                producers = await sb_get(client, "local_producers", params={
-                    "select": "*",
-                    "id": f"eq.{pid}",
-                    "limit": "1",
-                }) or []
-            except Exception:
-                producers = await sb_get(client, "local_producers", params={
-                    "select": "id,company_name,owner_name,address,postal_code,city,voivodeship",
-                    "id": f"eq.{pid}",
-                    "limit": "1",
-                }) or []
-        producer = (producers or [{}])[0]
 
         stored = await fetch_stored_invoice_bytes(
             order, client=client, verify=_httpx_verify(),
@@ -16121,24 +16107,9 @@ async def producer_order_invoice_file(order_id: str, request: Request):
                 },
             )
 
-        items = await load_order_invoice_items(client, oid)
-        try:
-            pdf = build_invoice_pdf(producer=producer, order=order, items=items)
-        except Exception as e:
-            logger.exception("LP invoice PDF generate failed")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Nie udało się wygenerować rachunku: {str(e)[:200]}",
-            ) from e
-
-        filename = invoice_filename(settlement_type_of(producer), oid)
-        return StreamingResponse(
-            io.BytesIO(pdf),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Cache-Control": "no-store",
-            },
+        raise HTTPException(
+            status_code=404,
+            detail="Dystrybutor nie wgrał jeszcze rachunku dla tego zamówienia.",
         )
 
 

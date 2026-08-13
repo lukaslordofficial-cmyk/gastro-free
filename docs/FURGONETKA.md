@@ -17,6 +17,11 @@ FURGONETKA_PASSWORD=
 
 Opcjonalnie: `FURGONETKA_INPOST_SERVICE_ID`, `FURGONETKA_LABEL_PAGE=a6`, `FURGONETKA_SANDBOX=1` (tylko testy).
 
+**Kalkulator stawek / „Client authentication failed”:** Client ID i Secret muszą pochodzić z **tego samego** panelu co API.
+Sandbox: aplikacja OAuth z [sandbox.furgonetka.pl](https://sandbox.furgonetka.pl) + `FURGONETKA_SANDBOX=1`.
+Produkcja: aplikacja z furgonetka.pl, bez SANDBOX.
+Albo na testy: `FURGONETKA_MOCK=1` (stawki testowe, bez OAuth).
+
 ## Integracja „Własna” (Furgonetka woła nasz sklep)
 
 To **nie** jest REST OAuth (`/packages`). Po zapisaniu formularza Furgonetka odpytuje:

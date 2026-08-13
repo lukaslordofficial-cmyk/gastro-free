@@ -52,7 +52,6 @@ import {
   PremiumStatTile,
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
-import { assignUniqueDishImageSources, type DishThumbAssignment } from '@/lib/productImages';
 import {
   loadDishCustomImages,
   setDishCustomImage,
@@ -88,6 +87,16 @@ interface Dish {
   pos_id: string;
   recipe: RecipeIngredient[];
 }
+
+type DishThumbAssignment = {
+  source: number | { uri: string };
+  slug?: string;
+  matchTier?: 'exact' | 'tags' | 'category';
+  placeholderLabel?: string;
+};
+
+const MENU_THUMB_FALLBACK = require('@/assets/premium/dishes/dinners/dinner_04.webp');
+const MENU_LIST_CACHE = new Map<string, Dish[]>();
 
 type MenuListRow =
   | { type: 'header'; category: string; count: number }
@@ -930,96 +939,133 @@ export default function MenuScreen() {
 
   const fetchData = useCallback(async () => {
     if (!authReady || !isAuthenticated || !accountKey || accountKey === 'default') return;
+    const ak = accountKey;
+    const cached = MENU_LIST_CACHE.get(ak);
+    if (cached?.length) {
+      setDishes(cached);
+      setLoading(false);
+    }
     try {
-      const ak = accountKey;
-      const [dishesRes, utensilsRes, invRes, catsRes] = await Promise.all([
-        supabase
-          .from('menu_items')
-          .select('id, name, category, price_pln, pos_id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order, piece_weight_g)')
-          .eq('account_key', ak)
-          .eq('is_active', true)
-          .order('category')
-          .order('name')
-          .limit(1000),
-        supabase
-          .from('kitchen_utensils')
-          .select('id, name, utensil_type, capacity_value, capacity_unit')
-          .eq('account_key', ak)
-          .order('name'),
-        supabase
-          .from('inventory_items')
-          .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-          .eq('account_key', ak)
-          .eq('is_active', true)
-          .order('name')
-          .then(async (res) => {
-            if (res.error && /is_active/.test(res.error.message ?? '')) {
-              return supabase
-                .from('inventory_items')
-                .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-                .eq('account_key', ak)
-                .order('name');
-            }
-            return res;
-          }),
-        supabase
-          .from('inventory_categories')
-          .select('id, name')
-          .eq('account_key', ak)
-          .order('sort_order'),
-      ]);
+      const listRes = await supabase
+        .from('menu_items')
+        .select('id, name, category, price_pln, pos_id')
+        .eq('account_key', ak)
+        .eq('is_active', true)
+        .order('category')
+        .order('name')
+        .limit(1000);
+      if (listRes.error) throw listRes.error;
 
-      let dishesData = dishesRes.data;
-      if (dishesRes.error) {
-        if (/piece_weight_g/i.test(dishesRes.error.message ?? '')) {
-          const retry = await supabase
+      const byId = new Map<string, Dish>();
+      for (const row of listRes.data ?? []) {
+        const id = String((row as { id?: string }).id || '');
+        if (!id || byId.has(id)) continue;
+        byId.set(id, {
+          id,
+          name: String((row as { name?: string }).name || ''),
+          category: String((row as { category?: string }).category || ''),
+          price_pln: Number((row as { price_pln?: number }).price_pln) || 0,
+          pos_id: String((row as { pos_id?: string }).pos_id || ''),
+          recipe: [],
+        });
+      }
+      const list = Array.from(byId.values());
+      MENU_LIST_CACHE.set(ak, list);
+      setDishes(list);
+      setError(null);
+      setLoading(false);
+      setRefreshing(false);
+
+      void (async () => {
+        try {
+          let recipesRes = await supabase
             .from('menu_items')
-            .select('id, name, category, price_pln, pos_id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
+            .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order, piece_weight_g)')
             .eq('account_key', ak)
             .eq('is_active', true)
-            .order('category')
-            .order('name')
             .limit(1000);
-          if (retry.error) throw retry.error;
-          dishesData = retry.data;
-        } else {
-          throw dishesRes.error;
+          if (recipesRes.error && /piece_weight_g/i.test(recipesRes.error.message ?? '')) {
+            recipesRes = await supabase
+              .from('menu_items')
+              .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
+              .eq('account_key', ak)
+              .eq('is_active', true)
+              .limit(1000);
+          }
+          if (!recipesRes.error && recipesRes.data) {
+            const recipeById = new Map<string, RecipeIngredient[]>();
+            for (const row of recipesRes.data) {
+              const mapped = mapDbToDish(row);
+              recipeById.set(mapped.id, mapped.recipe);
+            }
+            setDishes((prev) => {
+              const next = prev.map((d) => ({
+                ...d,
+                recipe: recipeById.get(d.id) ?? d.recipe,
+              }));
+              MENU_LIST_CACHE.set(ak, next);
+              return next;
+            });
+          }
+
+          const [utensilsRes, invRes, catsRes] = await Promise.all([
+            supabase
+              .from('kitchen_utensils')
+              .select('id, name, utensil_type, capacity_value, capacity_unit')
+              .eq('account_key', ak)
+              .order('name'),
+            supabase
+              .from('inventory_items')
+              .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+              .eq('account_key', ak)
+              .eq('is_active', true)
+              .order('name')
+              .then(async (res) => {
+                if (res.error && /is_active/.test(res.error.message ?? '')) {
+                  return supabase
+                    .from('inventory_items')
+                    .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
+                    .eq('account_key', ak)
+                    .order('name');
+                }
+                return res;
+              }),
+            supabase
+              .from('inventory_categories')
+              .select('id, name')
+              .eq('account_key', ak)
+              .order('sort_order'),
+          ]);
+
+          if (utensilsRes.error) {
+            if (!/account_key|schema cache|column/i.test(utensilsRes.error.message ?? '')) {
+              if (__DEV__) console.warn('[menu] utensils', utensilsRes.error.message);
+            }
+            setUtensils([]);
+          } else {
+            setUtensils(utensilsRes.data ?? []);
+          }
+          if (!invRes.error) {
+            const invMapped = (invRes.data ?? []).map(mapInvDbRow);
+            const invById = new Map<string, InventoryItem>();
+            for (const i of invMapped) {
+              if (!invById.has(i.id)) invById.set(i.id, i);
+            }
+            setInventory(Array.from(invById.values()));
+          }
+          if (!catsRes.error) {
+            const map: Record<string, string> = {};
+            (catsRes.data ?? []).forEach((c: { id?: string; name?: string }) => {
+              if (c.name && c.id) map[c.name] = c.id;
+            });
+            setCategoryMap(map);
+          }
+        } catch (bgErr) {
+          if (__DEV__) console.warn('[menu] background', bgErr);
         }
-      }
-      if (utensilsRes.error) {
-        // account_key może jeszcze nie istnieć — nie blokuj całego Menu
-        if (!/account_key|schema cache|column/i.test(utensilsRes.error.message ?? '')) {
-          throw utensilsRes.error;
-        }
-        setUtensils([]);
-      } else {
-        setUtensils(utensilsRes.data ?? []);
-      }
-      if (invRes.error) throw invRes.error;
-      if (catsRes.error) throw catsRes.error;
-
-      const dishesMapped = (dishesData ?? []).map(mapDbToDish);
-      // Unikalne id — ochrona przed React „same key” gdy DB ma duplikaty nazw/id.
-      const byId = new Map<string, Dish>();
-      for (const d of dishesMapped) {
-        if (!byId.has(d.id)) byId.set(d.id, d);
-      }
-      setDishes(Array.from(byId.values()));
-      const invMapped = (invRes.data ?? []).map(mapInvDbRow);
-      const invById = new Map<string, InventoryItem>();
-      for (const i of invMapped) {
-        if (!invById.has(i.id)) invById.set(i.id, i);
-      }
-      setInventory(Array.from(invById.values()));
-
-      const map: Record<string, string> = {};
-      (catsRes.data ?? []).forEach((c: any) => { map[c.name] = c.id; });
-      setCategoryMap(map);
-
-      setError(null);
-    } catch (e: any) {
-      setError(e.message ?? 'Nieznany błąd');
-    } finally {
+      })();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Nieznany błąd');
       setLoading(false);
       setRefreshing(false);
     }
@@ -1143,10 +1189,18 @@ export default function MenuScreen() {
     return rows;
   }, [grouped]);
 
-  const dishThumbByName = useMemo(
-    () => assignUniqueDishImageSources(dishes.map((d) => ({ name: d.name, category: d.category }))),
-    [dishes],
-  );
+  const dishThumbByName = useMemo(() => {
+    const out = new Map<string, DishThumbAssignment>();
+    for (const d of dishes) {
+      if (out.has(d.name)) continue;
+      out.set(d.name, {
+        source: MENU_THUMB_FALLBACK,
+        matchTier: 'category',
+        placeholderLabel: d.category || 'Danie',
+      });
+    }
+    return out;
+  }, [dishes]);
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
@@ -1798,7 +1852,7 @@ export default function MenuScreen() {
   const handleMic = () => Alert.alert('Kreator Receptur AI — Głos', 'Funkcja rejestracji głosowej jest w trakcie implementacji.', [{ text: 'Rozumiem' }]);
   const handleScanMenu = () => setShowScanModal(true);
 
-  if (loading) return <LoadingScreen />;
+  if (loading && dishes.length === 0) return <LoadingScreen />;
   if (error) return <ErrorScreen message={error} />;
 
   const isEditing = editingDish !== null;
@@ -1847,8 +1901,42 @@ export default function MenuScreen() {
             </View>
           }
         >
+          <View style={{ flex: 1 }}>
+            <View style={{ paddingHorizontal: DS.space.screen, paddingBottom: 8 }}>
+              <View style={[styles.searchWrap, {
+                backgroundColor: DS.color.bgTertiary,
+                borderColor: DS.color.borderSubtle,
+                borderRadius: DS.radius.button,
+                marginBottom: 10,
+              }]}>
+                <View style={styles.searchIcon}>
+                  <Search size={16} color={DS.color.muted} strokeWidth={2} />
+                </View>
+                <TextInput
+                  style={[styles.searchInput, { color: DS.color.heading }]}
+                  placeholder="Szukaj dania..."
+                  placeholderTextColor={DS.color.muted}
+                  value={search}
+                  onChangeText={setSearch}
+                  returnKeyType="search"
+                  clearButtonMode="while-editing"
+                />
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {allCategories.map((cat) => (
+                  <PremiumCapsule
+                    key={cat}
+                    label={cat}
+                    active={activeCat === cat}
+                    onPress={() => setSelectedCat(cat)}
+                    dotColor={cat !== 'Wszystkie' ? (CATEGORY_COLORS[cat] ?? DS.color.muted) : undefined}
+                  />
+                ))}
+              </ScrollView>
+            </View>
           <FlashList
             data={menuRows}
+            extraData={activeCat}
             keyExtractor={(item) =>
               item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
             }
@@ -1878,38 +1966,6 @@ export default function MenuScreen() {
                     icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
                   />
                 </View>
-
-                <View style={[styles.searchWrap, {
-                  backgroundColor: DS.color.bgTertiary,
-                  borderColor: DS.color.borderSubtle,
-                  borderRadius: DS.radius.button,
-                  marginBottom: DS.space[16],
-                }]}>
-                  <View style={styles.searchIcon}>
-                    <Search size={16} color={DS.color.muted} strokeWidth={2} />
-                  </View>
-                  <TextInput
-                    style={[styles.searchInput, { color: DS.color.heading }]}
-                    placeholder="Szukaj dania..."
-                    placeholderTextColor={DS.color.muted}
-                    value={search}
-                    onChangeText={setSearch}
-                    returnKeyType="search"
-                    clearButtonMode="while-editing"
-                  />
-                </View>
-
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: DS.space[16] }}>
-                  {allCategories.map((cat) => (
-                    <PremiumCapsule
-                      key={cat}
-                      label={cat}
-                      active={activeCat === cat}
-                      onPress={() => setSelectedCat(cat)}
-                      dotColor={cat !== 'Wszystkie' ? (CATEGORY_COLORS[cat] ?? DS.color.muted) : undefined}
-                    />
-                  ))}
-                </ScrollView>
 
                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: DS.space[24] }}>
                   <PremiumStatTile
@@ -1943,6 +1999,7 @@ export default function MenuScreen() {
               </>
             }
           />
+          </View>
         </PremiumTabChrome>
       ) : (
       <ScrollView

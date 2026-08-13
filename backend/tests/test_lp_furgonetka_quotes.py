@@ -1,4 +1,5 @@
 from lp_furgonetka_quotes import mock_quotes_for_parcels, normalize_services_prices, service_label
+from furgonetka_broker import _is_client_auth_error
 
 
 def test_mock_quotes_scale_with_weight():
@@ -37,3 +38,9 @@ def test_normalize_services_prices():
     assert rows[0]["price_gross"] == 12.3
     assert rows[1]["available"] is False
     assert service_label("inpost") == "InPost Kurier"
+
+
+def test_client_auth_error_detection():
+    assert _is_client_auth_error("Client authentication failed")
+    assert _is_client_auth_error("invalid_client")
+    assert not _is_client_auth_error("package too heavy")

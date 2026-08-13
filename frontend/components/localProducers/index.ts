@@ -5,3 +5,4 @@ export { ProducerShipmentWatcher } from './ProducerShipmentWatcher';
 export { ProducerInvoiceWatcher } from './ProducerInvoiceWatcher';
 export { StripeOpeningOverlay } from './StripeOpeningOverlay';
 export { SettlementDocumentsSection } from './SettlementDocumentsSection';
+export { ShipmentTracker } from './ShipmentTracker';

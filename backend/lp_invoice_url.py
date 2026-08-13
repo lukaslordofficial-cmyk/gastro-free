@@ -80,6 +80,56 @@ async def create_storage_signed_url(
             await http.aclose()
 
 
+async def upload_private_bytes(
+    *,
+    bucket: str,
+    path: str,
+    content: bytes,
+    content_type: str,
+    client: Optional[httpx.AsyncClient] = None,
+    verify: Any = True,
+) -> str:
+    """PUT pliku do prywatnego bucketa. Zwraca ``bucket:path``."""
+    base = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
+    if not base or not key:
+        raise RuntimeError("Brak SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
+    enc_path = "/".join(quote(seg, safe="") for seg in path.strip("/").split("/"))
+    url = f"{base}/storage/v1/object/{quote(bucket, safe='')}/{enc_path}"
+    own = client is None
+    http = client or httpx.AsyncClient(timeout=60.0, verify=verify)
+    try:
+        r = await http.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "apikey": key,
+                "Content-Type": content_type,
+                "x-upsert": "true",
+            },
+            content=content,
+        )
+        if r.status_code >= 400:
+            # Niektóre instancje Storage wolą PUT
+            r = await http.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "apikey": key,
+                    "Content-Type": content_type,
+                    "x-upsert": "true",
+                },
+                content=content,
+            )
+        if r.status_code >= 400:
+            msg = (r.text or "")[:200]
+            raise RuntimeError(f"Storage upload failed: {msg}")
+        return f"{bucket}:{path.strip('/')}"
+    finally:
+        if own:
+            await http.aclose()
+
+
 def order_invoice_raw(order: dict[str, Any]) -> str:
     return str(
         order.get("invoice_url")

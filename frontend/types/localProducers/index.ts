@@ -135,6 +135,14 @@ export type ProducerOrder = {
   notes: string | null;
   delivery_tracking?: string | null;
   broker_package_id?: string | null;
+  pickup_date?: string | null;
+  pickup_min_time?: string | null;
+  pickup_max_time?: string | null;
+  courier_name?: string | null;
+  parcel_weight_kg?: number | null;
+  shipping_error?: string | null;
+  tracking_state?: string | null;
+  label_storage_path?: string | null;
   /** URL faktury/rachunku wgranego przez dystrybutora (panel WWW). */
   invoice_url?: string | null;
   settlement_invoice_url?: string | null;
@@ -160,8 +168,15 @@ export function deliveryBucketForOrder(order: {
 }): DeliveryBucket {
   const ship = String(order.shipment_status || '').toLowerCase();
   const ost = String(order.order_status || '').toLowerCase();
-  if (ship === 'delivered' || ost === 'delivered') return 'delivered';
-  if (ship === 'shipped' || ost === 'shipped') return 'in_transit';
+  const track = String((order as { tracking_state?: string }).tracking_state || '').toLowerCase();
+  if (ship === 'delivered' || ost === 'delivered' || track === 'delivered') return 'delivered';
+  if (
+    ship === 'shipped' ||
+    ost === 'shipped' ||
+    ['collected', 'transit', 'delivery'].includes(track)
+  ) {
+    return 'in_transit';
+  }
   return 'pending';
 }
 

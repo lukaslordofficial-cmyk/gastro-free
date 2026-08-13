@@ -15666,6 +15666,135 @@ async def local_producers_create_shipment(req: LpShipmentRequest):
     return result
 
 
+async def _lp_order_for_actor(client, order_id: str, request: Request) -> dict:
+    """Zamówienie LP + flaga is_owner / is_restaurant. 403 gdy brak dostępu."""
+    uid = await _auth_user_id_from_request(request)
+    account_key = get_account_key()
+    orders = await sb_get(client, "producer_orders", params={
+        "select": "*", "id": f"eq.{order_id}", "limit": "1",
+    })
+    if not orders:
+        raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+    order = orders[0]
+    producers = await sb_get(client, "local_producers", params={
+        "select": "id,auth_user_id",
+        "id": f"eq.{order.get('producer_id')}",
+        "limit": "1",
+    })
+    owner = ((producers or [{}])[0].get("auth_user_id") or "").strip()
+    is_owner = bool(uid and owner and uid == owner)
+    is_restaurant = bool(
+        order.get("restaurant_account_key")
+        and order.get("restaurant_account_key") == account_key
+        and account_key != "default"
+    )
+    if not (is_owner or is_restaurant):
+        raise HTTPException(status_code=403, detail="Brak dostępu do tego zamówienia")
+    return {"order": order, "is_owner": is_owner, "is_restaurant": is_restaurant}
+
+
+@app.get("/api/local-producers/orders/{order_id}/shipping")
+@app.post("/api/local-producers/orders/{order_id}/sync-tracking")
+async def producer_order_shipping(order_id: str, request: Request):
+    """Status kuriera + opcjonalne odświeżenie trackingu Furgonetka."""
+    from datetime import datetime, timezone, timedelta
+    from furgonetka_broker import furgonetka_configured, sync_order_tracking
+    from lp_tracking import timeline_index
+
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+
+    refresh = request.method == "POST" or (request.query_params.get("refresh") or "").lower() in (
+        "1", "true", "yes",
+    )
+
+    async with httpx.AsyncClient(timeout=45.0, verify=_httpx_verify()) as client:
+        acc = await _lp_order_for_actor(client, oid, request)
+        order = acc["order"]
+        synced = None
+        pid = (order.get("furgonetka_package_id") or order.get("broker_package_id") or "").strip()
+        last = order.get("tracking_synced_at")
+        stale = True
+        if last:
+            try:
+                ts = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+                stale = datetime.now(timezone.utc) - ts > timedelta(minutes=12)
+            except Exception:
+                stale = True
+        if refresh or (pid and furgonetka_configured() and stale):
+            try:
+                synced = await sync_order_tracking(
+                    oid, client=client, sb_get=sb_get, sb_patch=sb_patch, package_id=pid or None,
+                )
+                if synced.get("ok"):
+                    order = {**order, **{
+                        k: synced[k] for k in (
+                            "shipment_status", "tracking", "courier_name",
+                        ) if k in synced
+                    }}
+                    order["delivery_tracking"] = synced.get("tracking") or order.get("delivery_tracking")
+                    order["tracking_state"] = synced.get("state") or order.get("tracking_state")
+            except Exception as e:
+                logger.warning("LP tracking sync: %s", e)
+
+    pickup_date = order.get("pickup_date")
+    pickup_min = order.get("pickup_min_time")
+    pickup_max = order.get("pickup_max_time")
+    pickup_label = None
+    if pickup_date:
+        window = "–".join(x for x in (pickup_min, pickup_max) if x)
+        pickup_label = f"{pickup_date}" + (f" {window}" if window else "")
+
+    return {
+        "ok": True,
+        "order_id": oid,
+        "package_id": pid or None,
+        "courier_name": order.get("courier_name") or "inpost",
+        "tracking": order.get("delivery_tracking"),
+        "tracking_state": order.get("tracking_state"),
+        "shipment_status": order.get("shipment_status"),
+        "order_status": order.get("order_status"),
+        "pickup_date": pickup_date,
+        "pickup_min_time": pickup_min,
+        "pickup_max_time": pickup_max,
+        "pickup_label": pickup_label,
+        "parcel_weight_kg": order.get("parcel_weight_kg"),
+        "shipping_error": order.get("shipping_error"),
+        "label_ready": bool(order.get("broker_label_ready") or order.get("label_storage_path")),
+        "timeline_index": timeline_index(
+            order.get("tracking_state"),
+            has_pickup=bool(pickup_date),
+        ),
+        "events": (synced or {}).get("events") or [],
+        "refreshed": bool(synced and synced.get("ok")),
+    }
+
+
+@app.post("/api/local-producers/orders/{order_id}/retry-shipment")
+async def producer_order_retry_shipment(order_id: str, request: Request):
+    """Ponów utworzenie / dokończenie przesyłki (bez duplikatu gdy package_id już jest)."""
+    from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
+
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+    if not furgonetka_configured():
+        raise HTTPException(status_code=503, detail="Furgonetka nie skonfigurowana")
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        acc = await _lp_order_for_actor(client, oid, request)
+        order = acc["order"]
+        if str(order.get("payment_status") or "").lower() != "paid":
+            raise HTTPException(status_code=400, detail="Zamówienie nie jest opłacone")
+        result = await create_furgonetka_shipment(
+            oid, client=client, sb_get=sb_get, sb_patch=sb_patch,
+        )
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Nie udało się zlecić przesyłki")
+    return result
+
+
 @app.get("/api/local-producers/orders/{order_id}/invoice-url")
 async def producer_order_invoice_url(order_id: str, request: Request):
     """
@@ -15736,65 +15865,56 @@ async def producer_order_invoice_url(order_id: str, request: Request):
 @app.get("/api/local-producers/orders/{order_id}/label")
 async def producer_order_furgonetka_label(order_id: str, request: Request):
     """
-    Etykieta PDF z Furgonetki (InPost Kurier) — StreamingResponse do druku w panelu WWW.
+    Etykieta PDF — najpierw prywatny Storage, potem Furgonetka API.
     """
     import io
     from fastapi.responses import StreamingResponse
     from furgonetka_broker import download_label_pdf, furgonetka_configured
+    from lp_invoice_url import parse_invoice_storage_ref
 
     oid = (order_id or "").strip()
     if not oid:
         raise HTTPException(status_code=400, detail="Brak order_id")
-    if not furgonetka_configured():
-        raise HTTPException(status_code=503, detail="Furgonetka nie skonfigurowana")
-
-    uid = await _auth_user_id_from_request(request)
-    account_key = get_account_key()
 
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        orders = await sb_get(client, "producer_orders", params={
-            "select": "id,producer_id,restaurant_account_key,furgonetka_package_id,broker_package_id,payment_status",
-            "id": f"eq.{oid}",
-            "limit": "1",
-        })
-        if not orders:
-            # Kolumna furgonetka_package_id może jeszcze nie istnieć
-            orders = await sb_get(client, "producer_orders", params={
-                "select": "id,producer_id,restaurant_account_key,broker_package_id,payment_status",
-                "id": f"eq.{oid}",
-                "limit": "1",
-            })
-        if not orders:
-            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
-        order = orders[0]
+        acc = await _lp_order_for_actor(client, oid, request)
+        order = acc["order"]
         package_id = (
             (order.get("furgonetka_package_id") or order.get("broker_package_id") or "")
         ).strip()
-        if not package_id:
-            raise HTTPException(
-                status_code=404,
-                detail="Brak furgonetka_package_id — poczekaj na utworzenie przesyłki po płatności.",
-            )
+        label_ref = (order.get("label_storage_path") or "").strip()
 
-        producers = await sb_get(client, "local_producers", params={
-            "select": "id,auth_user_id",
-            "id": f"eq.{order.get('producer_id')}",
-            "limit": "1",
-        })
-        owner = ((producers or [{}])[0].get("auth_user_id") or "").strip()
-        is_owner = bool(uid and owner and uid == owner)
-        is_restaurant = bool(
-            order.get("restaurant_account_key")
-            and order.get("restaurant_account_key") == account_key
-            and account_key != "default"
-        )
-        if not (is_owner or is_restaurant):
-            raise HTTPException(status_code=403, detail="Brak dostępu do etykiety tego zamówienia")
+        pdf = None
+        if label_ref:
+            parsed = parse_invoice_storage_ref(label_ref)
+            if parsed and parsed.get("kind") == "storage":
+                try:
+                    from lp_invoice_url import create_storage_signed_url
+                    signed = await create_storage_signed_url(
+                        bucket=parsed["bucket"],
+                        path=parsed["path"],
+                        expires_in=120,
+                        client=client,
+                        verify=_httpx_verify(),
+                    )
+                    r = await client.get(signed)
+                    if r.status_code < 400 and r.content:
+                        pdf = r.content
+                except Exception as e:
+                    logger.info("label from storage failed: %s", e)
 
-        try:
-            pdf = await download_label_pdf(package_id)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e)[:300])
+        if pdf is None:
+            if not package_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Etykieta jeszcze niegotowa — poczekaj na zlecenie kuriera po płatności.",
+                )
+            if not furgonetka_configured():
+                raise HTTPException(status_code=503, detail="Furgonetka nie skonfigurowana")
+            try:
+                pdf = await download_label_pdf(package_id)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=str(e)[:300])
 
         try:
             await sb_patch(client, "producer_orders", {"id": f"eq.{oid}"}, {
@@ -15807,7 +15927,7 @@ async def producer_order_furgonetka_label(order_id: str, request: Request):
         io.BytesIO(pdf),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'inline; filename="etykieta-{package_id}.pdf"',
+            "Content-Disposition": f'inline; filename="etykieta-{oid[:8]}.pdf"',
         },
     )
 

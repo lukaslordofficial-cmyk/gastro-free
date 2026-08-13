@@ -32,6 +32,8 @@ export function shipmentStatusLabelPl(status?: string | null): string {
       return 'Potwierdzone';
     case 'preparing':
       return 'Przygotowywane';
+    case 'awaiting_courier':
+      return 'Kurier zamówiony';
     case 'shipped':
       return 'W drodze';
     case 'delivered':
@@ -53,6 +55,7 @@ export function deliverySummaryLabelPl(order: {
   const ship = String(order.shipment_status || '').toLowerCase();
   if (ship === 'delivered') return 'Doręczone';
   if (ship === 'shipped') return 'Kurier w drodze';
+  if (ship === 'awaiting_courier') return 'Kurier zamówiony po paczkę';
   if (ship === 'preparing') return 'Przygotowywane u przetwórcy';
   if (ship === 'confirmed') return 'Opłacono · Potwierdzone';
   return 'Opłacono';

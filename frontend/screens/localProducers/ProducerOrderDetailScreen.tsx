@@ -23,10 +23,12 @@ import {
 import type { ProducerOrderWithProducer } from '@/types/localProducers';
 import { formatPlnNumber } from '@/lib/format';
 import { SettlementDocumentsSection } from '@/components/localProducers/SettlementDocumentsSection';
+import { ShipmentTracker } from '@/components/localProducers/ShipmentTracker';
 import {
   paymentStatusLabelPl,
   shipmentStatusLabelPl,
 } from '@/lib/localProducers/orderStatusLabels';
+import { fetchProducerOrderShipping, type LpShippingView } from '@/services/localProducers/shippingClient';
 
 const DS_NEON = '#00FF88';
 
@@ -43,6 +45,7 @@ export default function ProducerOrderDetailScreen() {
 
   const [order, setOrder] = useState<ProducerOrderWithProducer | null>(null);
   const [lines, setLines] = useState<ProducerOrderLine[]>([]);
+  const [shipping, setShipping] = useState<LpShippingView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +63,8 @@ export default function ProducerOrderDetailScreen() {
       }
       const items = await listMyProducerOrderItems(String(id));
       setLines(items);
+      const ship = await fetchProducerOrderShipping(String(id), { refresh: true });
+      if (ship.ok) setShipping(ship);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Błąd ładowania');
     } finally {
@@ -116,6 +121,13 @@ export default function ProducerOrderDetailScreen() {
               </Text>
             ) : null}
           </View>
+
+          <Text style={[styles.section, { color: titleColor }]}>Dostawa</Text>
+          <ShipmentTracker
+            shipping={shipping}
+            fallbackTracking={order.delivery_tracking}
+            isPremium={isPremium}
+          />
 
           <Text style={[styles.section, { color: titleColor }]}>Zamówione produkty</Text>
           <View style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}>

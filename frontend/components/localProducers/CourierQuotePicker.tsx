@@ -225,9 +225,11 @@ export function CourierQuotePicker({
               },
             ]}
           >
-            <Text style={[styles.rowName, { color: colors.textPrimary }]}>{q.name}</Text>
+            <Text style={[styles.rowName, { color: colors.textPrimary }]}>
+              {String(q.name || q.service || 'Kurier')}
+            </Text>
             <Text style={[styles.rowPrice, { color: colors.accent }]}>
-              {disabled ? (q.error || 'niedostępny') : formatPln(q.price_gross || 0)}
+              {disabled ? String(q.error || 'niedostępny') : formatPln(q.price_gross || 0)}
             </Text>
           </TouchableOpacity>
         );

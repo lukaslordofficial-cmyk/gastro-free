@@ -27,13 +27,26 @@ const DAY_LABELS: Record<string, string> = {
   '6': 'Sob',
 };
 
-export function formatShippingDays(days: ProducerShippingDays | undefined): string {
-  if (!days) return 'Brak danych o dniach wysyłki';
+export function formatShippingDays(days: ProducerShippingDays | string | undefined | null): string {
+  if (days == null || days === '') return 'Brak danych o dniach wysyłki';
+  if (typeof days === 'string') {
+    const t = days.trim();
+    if (!t) return 'Brak danych o dniach wysyłki';
+    if (t.startsWith('[') || t.startsWith('{')) {
+      try {
+        return formatShippingDays(JSON.parse(t) as ProducerShippingDays);
+      } catch {
+        return t;
+      }
+    }
+    return t;
+  }
   if (Array.isArray(days)) {
     if (!days.length) return 'Brak danych o dniach wysyłki';
     return days.map((d) => DAY_LABELS[String(d).toLowerCase()] || String(d)).join(', ');
   }
-  const active = Object.entries(days)
+  if (typeof days !== 'object') return 'Brak danych o dniach wysyłki';
+  const active = Object.entries(days as Record<string, unknown>)
     .filter(([, v]) => !!v)
     .map(([k]) => DAY_LABELS[k.toLowerCase()] || k);
   return active.length ? active.join(', ') : 'Brak danych o dniach wysyłki';

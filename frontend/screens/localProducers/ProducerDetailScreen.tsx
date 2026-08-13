@@ -29,6 +29,7 @@ import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useProducerDetail } from '@/hooks/localProducers/useProducerDetail';
+import { useRestaurantShippingForm } from '@/hooks/localProducers/useRestaurantShippingForm';
 import { formatPlnNumber } from '@/lib/format';
 import { formatDistanceKm, estimateEtaMinutes } from '@/lib/localProducers/haversine';
 import {
@@ -46,6 +47,14 @@ import { StripeOpeningOverlay, CourierQuotePicker } from '@/components/localProd
 import type { SelectedCourierQuote } from '@/components/localProducers/CourierQuotePicker';
 
 const NEON = '#00FF88';
+
+function asText(value: unknown, fallback = ''): string {
+  if (value == null) return fallback;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return fallback;
+}
 
 export function ProducerDetailScreen() {
   const theme = useAppTheme();
@@ -69,15 +78,26 @@ export function ProducerDetailScreen() {
     categories,
   } = useProducerDetail(producerId);
 
+  const {
+    shipName,
+    setShipName,
+    shipPhone,
+    setShipPhone,
+    shipStreet,
+    setShipStreet,
+    shipBuilding,
+    setShipBuilding,
+    shipCity,
+    setShipCity,
+    shipPost,
+    setShipPost,
+    toDelivery,
+    missingMessage,
+  } = useRestaurantShippingForm();
+
   const [busy, setBusy] = useState(false);
   const [busyMsg, setBusyMsg] = useState('Przygotowywanie płatności…');
   const [checkoutOpen, setCheckoutOpen] = useState(false);
-  const [shipName, setShipName] = useState('');
-  const [shipPhone, setShipPhone] = useState('');
-  const [shipStreet, setShipStreet] = useState('');
-  const [shipBuilding, setShipBuilding] = useState('');
-  const [shipCity, setShipCity] = useState('');
-  const [shipPost, setShipPost] = useState('');
   const [courierPick, setCourierPick] = useState<SelectedCourierQuote | null>(null);
 
   const isPremium = !!theme.isPremium;
@@ -110,8 +130,8 @@ export function ProducerDetailScreen() {
   }, [cart, cartTotal, producer?.free_delivery_from, courierPick]);
 
   const productsByCategory = useMemo(() => {
-    const catName = (id: string | null) =>
-      categories.find((c) => c.id === id)?.name || 'Inne';
+    const catName = (cid: string | null) =>
+      asText(categories.find((c) => c.id === cid)?.name, 'Inne');
     const groups: { key: string; title: string; items: typeof products }[] = [];
     const seen = new Map<string, number>();
     for (const p of products) {
@@ -150,31 +170,18 @@ export function ProducerDetailScreen() {
   };
 
   const payAndOrder = () => {
-    const phone = shipPhone.trim();
-    const street = shipStreet.trim();
-    const city = shipCity.trim();
-    const post = shipPost.trim();
-    if (!phone || !street || !city || !post) {
-      premiumAlert(
-        'Adres dostawy',
-        'Uzupełnij telefon, ulicę, miasto i kod pocztowy — kurier musi wiedzieć, dokąd jechać.',
-        [{ text: 'OK', style: 'primary' }],
-      );
+    const missing = missingMessage();
+    if (missing) {
+      premiumAlert('Adres dostawy', missing, [{ text: 'OK', style: 'primary' }]);
       return;
     }
+    const delivery = toDelivery();
     setCheckoutOpen(false);
     void (async () => {
       setBusy(true);
       setBusyMsg('Składanie zamówienia…');
       try {
-        const order = await placeOrder({
-          name: shipName.trim() || 'Restauracja',
-          phone,
-          street,
-          building_number: shipBuilding.trim() || '1',
-          city,
-          post_code: post,
-        }, courierPick ? {
+        const order = await placeOrder(delivery, courierPick ? {
           serviceId: courierPick.serviceId,
           service: courierPick.service,
           name: courierPick.name,
@@ -221,7 +228,7 @@ export function ProducerDetailScreen() {
           <ArrowLeft size={22} color={titleColor} />
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: titleColor }]} numberOfLines={1}>
-          {producer?.company_name || 'Producent'}
+          {asText(producer?.company_name, 'Producent')}
         </Text>
         <View style={styles.cartBadge}>
           <ShoppingCart size={18} color={accent} />
@@ -255,9 +262,9 @@ export function ProducerDetailScreen() {
             ) : null}
 
             <View style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}>
-              <Text style={[styles.name, { color: titleColor }]}>{producer.company_name}</Text>
+              <Text style={[styles.name, { color: titleColor }]}>{asText(producer.company_name)}</Text>
               {producer.owner_name ? (
-                <Text style={{ color: muted, fontSize: 13 }}>{producer.owner_name}</Text>
+                <Text style={{ color: muted, fontSize: 13 }}>{asText(producer.owner_name)}</Text>
               ) : null}
 
               <View style={styles.row}>
@@ -285,7 +292,7 @@ export function ProducerDetailScreen() {
               </Text>
               {producer.next_ship_note ? (
                 <Text style={{ color: muted, fontSize: 12, marginTop: 4 }}>
-                  {producer.next_ship_note}
+                  {asText(producer.next_ship_note)}
                 </Text>
               ) : null}
               <Text style={{ color: muted, fontSize: 12, marginTop: 6 }}>
@@ -297,7 +304,7 @@ export function ProducerDetailScreen() {
               </Text>
 
               {producer.description ? (
-                <Text style={[styles.desc, { color: muted }]}>{producer.description}</Text>
+                <Text style={[styles.desc, { color: muted }]}>{asText(producer.description)}</Text>
               ) : null}
             </View>
 
@@ -329,11 +336,11 @@ export function ProducerDetailScreen() {
                         )}
                         <View style={styles.productBody}>
                           <Text style={[styles.productTitle, { color: titleColor }]} numberOfLines={2}>
-                            {p.title}
+                            {asText(p.title)}
                           </Text>
                           <Text style={{ color: muted, fontSize: 12 }}>
-                            {formatPlnNumber(Number(p.price))} zł / {p.unit}
-                            {p.stock != null ? ` · stan ${p.stock}` : ''}
+                            {formatPlnNumber(Number(p.price))} zł / {asText(p.unit, 'szt')}
+                            {p.stock != null ? ` · stan ${asText(p.stock)}` : ''}
                           </Text>
                           {line ? (
                             <View style={styles.qtyRow}>
@@ -427,7 +434,7 @@ export function ProducerDetailScreen() {
                     {`Razem: ${formatPlnNumber(feeBreakdown.total)} zł`}
                   </Text>
                   <Text style={{ color: muted, fontSize: 12, marginBottom: 8 }}>
-                    Adres dostawy do restauracji (kurier odbierze u producenta)
+                    Adres restauracji, na który kurier dowiezie paczkę. Przy pierwszym zamówieniu uzupełnij dane — zapiszemy je i podstawimy przy kolejnych przesyłkach.
                   </Text>
                   <View style={{ marginBottom: 8 }}>
                     <Text style={{ color: muted, fontSize: 11, marginBottom: 4 }}>Nazwa / restauracja</Text>

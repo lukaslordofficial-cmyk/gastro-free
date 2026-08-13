@@ -64,7 +64,7 @@ function ProducerCard({
         )}
         <View style={styles.cardBody}>
           <Text style={[styles.cardTitle, { color: titleColor }]} numberOfLines={2}>
-            {item.company_name}
+            {String(item.company_name || 'Dystrybutor')}
           </Text>
           {place ? (
             <Text style={[styles.cardMeta, { color: muted }]} numberOfLines={1}>

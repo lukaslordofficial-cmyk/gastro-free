@@ -2,7 +2,7 @@
  * Sheet „Zamów i zapłać” (Stripe) dla koszyka lokalnego przetwórcy z Łowcy Okazji.
  * Ten sam flow co ręcznie w Lokalni Przetwórcy — bez e-mail/SMS.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -29,6 +29,7 @@ import {
   PLATFORM_FEE_RATE,
 } from '@/types/localProducers';
 import { quoteCourier } from '@/lib/localProducers/courierQuote';
+import { useRestaurantShippingForm } from '@/hooks/localProducers/useRestaurantShippingForm';
 
 type Palette = {
   card: string;
@@ -51,13 +52,28 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
   const { alert: premiumAlert } = usePremiumAlert();
   const [busy, setBusy] = useState(false);
   const [busyMsg, setBusyMsg] = useState('Przygotowywanie płatności…');
-  const [shipName, setShipName] = useState('Restauracja');
-  const [shipPhone, setShipPhone] = useState('');
-  const [shipStreet, setShipStreet] = useState('');
-  const [shipBuilding, setShipBuilding] = useState('1');
-  const [shipCity, setShipCity] = useState('');
-  const [shipPost, setShipPost] = useState('');
+  const {
+    shipName,
+    setShipName,
+    shipPhone,
+    setShipPhone,
+    shipStreet,
+    setShipStreet,
+    shipBuilding,
+    setShipBuilding,
+    shipCity,
+    setShipCity,
+    shipPost,
+    setShipPost,
+    hydrate,
+    toDelivery,
+    missingMessage,
+  } = useRestaurantShippingForm();
   const [courierPick, setCourierPick] = useState<SelectedCourierQuote | null>(null);
+
+  useEffect(() => {
+    if (visible) void hydrate();
+  }, [visible, hydrate]);
 
   const producerAmount = useMemo(
     () => Math.round((group?.subtotal_pln ?? 0) * 100) / 100,
@@ -76,18 +92,12 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
 
   const pay = () => {
     if (!group?.supplier_id) return;
-    const phone = shipPhone.trim();
-    const street = shipStreet.trim();
-    const city = shipCity.trim();
-    const post = shipPost.trim();
-    if (!phone || !street || !city || !post) {
-      premiumAlert(
-        'Adres dostawy',
-        'Uzupełnij telefon, ulicę, miasto i kod pocztowy — kurier musi wiedzieć, dokąd jechać.',
-        [{ text: 'OK', style: 'primary' }],
-      );
+    const missing = missingMessage();
+    if (missing) {
+      premiumAlert('Adres dostawy', missing, [{ text: 'OK', style: 'primary' }]);
       return;
     }
+    const delivery = toDelivery();
 
     const items = (group.items ?? [])
       .map((it) => {
@@ -122,14 +132,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
         const order = await createProducerOrder({
           producerId: group.supplier_id!,
           items,
-          delivery: {
-            name: shipName.trim() || 'Restauracja',
-            phone,
-            street,
-            building_number: shipBuilding.trim() || '1',
-            city,
-            post_code: post,
-          },
+          delivery,
           notes: 'Zamów i zapłać · Łowca Okazji',
           courier: courierPick ? {
             serviceId: courierPick.serviceId,
@@ -197,7 +200,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
               {`Razem: ${formatPln(total)}`}
             </Text>
             <Text style={[styles.label, { color: colors.textSecondary }]}>
-              Adres dostawy do restauracji
+              Adres restauracji, na który kurier dowiezie paczkę. Przy pierwszym zamówieniu uzupełnij dane — zapiszemy je i podstawimy przy kolejnych przesyłkach.
             </Text>
             {(
               [

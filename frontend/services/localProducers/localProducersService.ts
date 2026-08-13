@@ -15,6 +15,7 @@ import type {
   ProducerOrder,
   ProducerProduct,
   ProducerReview,
+  ProducerDeliveryAddress,
   UpdateLocalProducerInput,
 } from '@/types/localProducers';
 import {
@@ -40,6 +41,143 @@ export function isLocalProducersBackendReady(): boolean {
 
 function asRows<T>(data: unknown): T[] {
   return Array.isArray(data) ? (data as T[]) : [];
+}
+
+function parseLpShipNote(notes: string | null | undefined): ProducerDeliveryAddress | null {
+  const raw = String(notes || '');
+  const marker = 'lp_ship:';
+  const idx = raw.indexOf(marker);
+  if (idx < 0) return null;
+  const after = raw.slice(idx + marker.length).trim();
+  const jsonPart = after.split(/\s\|\s*lp_/)[0]?.trim();
+  if (!jsonPart) return null;
+  try {
+    const obj = JSON.parse(jsonPart) as Record<string, unknown>;
+    const name = String(obj.name || '').trim();
+    const phone = String(obj.phone || '').trim();
+    const street = String(obj.street || '').trim();
+    const city = String(obj.city || '').trim();
+    const post_code = String(obj.post_code || '').trim();
+    if (!phone && !street && !city) return null;
+    return {
+      name,
+      phone,
+      street,
+      building_number: String(obj.building_number || '').trim(),
+      city,
+      post_code,
+      email: obj.email ? String(obj.email) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function shippingFromProfileRow(row: Record<string, unknown> | null): ProducerDeliveryAddress | null {
+  if (!row) return null;
+  const name = String(row.restaurant_name || '').trim();
+  const phone = String(row.shipping_phone || '').trim();
+  const street = String(row.shipping_street || '').trim();
+  const city = String(row.shipping_city || '').trim();
+  const post_code = String(row.shipping_post_code || '').trim();
+  if (!name && !phone && !street && !city && !post_code) return null;
+  return {
+    name,
+    phone,
+    street,
+    building_number: String(row.shipping_building || '').trim(),
+    city,
+    post_code,
+  };
+}
+
+/** Zapisany adres paczki restauracji (profil, ewentualnie ostatnie zamówienie). */
+export async function getRestaurantShippingProfile(): Promise<ProducerDeliveryAddress | null> {
+  if (!isSupabaseConfigured) return null;
+  const { data: auth } = await supabase.auth.getUser();
+  const uid = auth.user?.id;
+  if (!uid) return null;
+
+  const full = await supabase
+    .from('profiles')
+    .select('restaurant_name, shipping_phone, shipping_street, shipping_building, shipping_city, shipping_post_code')
+    .eq('id', uid)
+    .maybeSingle();
+
+  if (!full.error) {
+    const fromProfile = shippingFromProfileRow(full.data as Record<string, unknown> | null);
+    if (fromProfile && fromProfile.street && fromProfile.city && fromProfile.post_code && fromProfile.phone) {
+      return fromProfile;
+    }
+    if (fromProfile?.name && !fromProfile.street) {
+      // Mamy nazwę restauracji — dociągniemy adres z ostatniego zamówienia, jeśli jest.
+    } else if (fromProfile && fromProfile.street) {
+      return fromProfile;
+    }
+  } else if (!/shipping_|column|schema cache/i.test(full.error.message || '')) {
+    if (__DEV__) console.warn('[localProducers] shipping profile:', full.error.message);
+  }
+
+  const { data: last } = await supabase
+    .from(LOCAL_PRODUCERS_TABLES.orders)
+    .select('notes')
+    .eq('restaurant_id', uid)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const fromOrder = parseLpShipNote((last as { notes?: string } | null)?.notes);
+  if (fromOrder) {
+    const nameFallback = shippingFromProfileRow(
+      full.error ? null : (full.data as Record<string, unknown> | null),
+    )?.name;
+    return {
+      ...fromOrder,
+      name: fromOrder.name || nameFallback || '',
+    };
+  }
+
+  if (!full.error) {
+    return shippingFromProfileRow(full.data as Record<string, unknown> | null);
+  }
+
+  const nameOnly = await supabase
+    .from('profiles')
+    .select('restaurant_name')
+    .eq('id', uid)
+    .maybeSingle();
+  const n = String((nameOnly.data as { restaurant_name?: string } | null)?.restaurant_name || '').trim();
+  return n ? { name: n, phone: '', street: '', building_number: '', city: '', post_code: '' } : null;
+}
+
+export async function saveRestaurantShippingProfile(
+  delivery: ProducerDeliveryAddress,
+): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  const { data: auth } = await supabase.auth.getUser();
+  const uid = auth.user?.id;
+  if (!uid) return;
+
+  const payload: Record<string, unknown> = {
+    restaurant_name: delivery.name.trim() || null,
+    shipping_phone: delivery.phone.trim() || null,
+    shipping_street: delivery.street.trim() || null,
+    shipping_building: (delivery.building_number || '').trim() || null,
+    shipping_city: delivery.city.trim() || null,
+    shipping_post_code: delivery.post_code.trim() || null,
+  };
+
+  const { error } = await supabase.from('profiles').update(payload).eq('id', uid);
+  if (error && /shipping_|column|schema cache/i.test(error.message || '')) {
+    await supabase
+      .from('profiles')
+      .update({ restaurant_name: delivery.name.trim() || null })
+      .eq('id', uid);
+    return;
+  }
+  if (error && __DEV__) {
+    console.warn('[localProducers] save shipping:', error.message);
+  }
 }
 
 /** Filtr PostgREST — HARD RULE + Stripe Connect Express. */
@@ -295,6 +433,15 @@ export async function createProducerOrder(
     post_code: d.post_code.trim(),
     email: (d.email || (profile as { email?: string } | null)?.email || null),
   };
+  void saveRestaurantShippingProfile({
+    name: shipPayload.name,
+    phone: shipPayload.phone,
+    street: shipPayload.street,
+    building_number: shipPayload.building_number,
+    city: shipPayload.city,
+    post_code: shipPayload.post_code,
+    email: shipPayload.email,
+  });
   const shipNote = `lp_ship:${JSON.stringify(shipPayload)}`;
   const courierNote = selectedCourier
     ? `lp_courier:${JSON.stringify({

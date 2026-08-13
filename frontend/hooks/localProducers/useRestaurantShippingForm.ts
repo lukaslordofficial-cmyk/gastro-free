@@ -1,0 +1,75 @@
+/**
+ * Adres paczki restauracji — wczytanie z Supabase i pola formularza.
+ */
+import { useCallback, useEffect, useState } from 'react';
+import * as localProducersService from '@/services/localProducers';
+import type { ProducerDeliveryAddress } from '@/types/localProducers';
+
+export function useRestaurantShippingForm() {
+  const [shipName, setShipName] = useState('');
+  const [shipPhone, setShipPhone] = useState('');
+  const [shipStreet, setShipStreet] = useState('');
+  const [shipBuilding, setShipBuilding] = useState('');
+  const [shipCity, setShipCity] = useState('');
+  const [shipPost, setShipPost] = useState('');
+  const [hydrated, setHydrated] = useState(false);
+
+  const hydrate = useCallback(async () => {
+    try {
+      const saved = await localProducersService.getRestaurantShippingProfile();
+      if (saved) {
+        setShipName((v) => v || saved.name);
+        setShipPhone((v) => v || saved.phone);
+        setShipStreet((v) => v || saved.street);
+        setShipBuilding((v) => v || saved.building_number);
+        setShipCity((v) => v || saved.city);
+        setShipPost((v) => v || saved.post_code);
+      }
+    } catch (e) {
+      if (__DEV__) console.warn('[shipping form]', e);
+    } finally {
+      setHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
+
+  const toDelivery = useCallback((): ProducerDeliveryAddress => ({
+    name: shipName.trim(),
+    phone: shipPhone.trim(),
+    street: shipStreet.trim(),
+    building_number: shipBuilding.trim() || '1',
+    city: shipCity.trim(),
+    post_code: shipPost.trim(),
+  }), [shipName, shipPhone, shipStreet, shipBuilding, shipCity, shipPost]);
+
+  const missingMessage = useCallback((): string | null => {
+    const d = toDelivery();
+    if (!d.name) return 'Podaj nazwę restauracji — na nią jedzie paczka.';
+    if (!d.phone || !d.street || !d.city || !d.post_code) {
+      return 'Uzupełnij telefon, ulicę, miasto i kod pocztowy — kurier musi wiedzieć, dokąd jechać.';
+    }
+    return null;
+  }, [toDelivery]);
+
+  return {
+    shipName,
+    setShipName,
+    shipPhone,
+    setShipPhone,
+    shipStreet,
+    setShipStreet,
+    shipBuilding,
+    setShipBuilding,
+    shipCity,
+    setShipCity,
+    shipPost,
+    setShipPost,
+    hydrated,
+    hydrate,
+    toDelivery,
+    missingMessage,
+  };
+}

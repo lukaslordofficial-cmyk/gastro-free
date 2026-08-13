@@ -1,6 +1,5 @@
 /**
- * Sekcja „Dokumenty rozliczeniowe” — faktura/rachunek od dystrybutora.
- * Storage ref (bucket:path) → podpisany URL przez API, potem WebBrowser / Linking.
+ * Sekcja „Dokumenty rozliczeniowe” — rachunek/faktura ze strumienia API.
  */
 import React, { useState } from 'react';
 import {
@@ -8,18 +7,12 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
-  Linking,
   ActivityIndicator,
-  Platform,
 } from 'react-native';
-import * as WebBrowser from 'expo-web-browser';
 import { FileText, Download } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { usePremiumAlert } from '@/components/PremiumAlert';
-import {
-  fetchProducerOrderInvoiceUrl,
-  isDirectHttpInvoiceUrl,
-} from '@/services/localProducers/invoiceClient';
+import { downloadProducerOrderInvoice } from '@/services/localProducers/invoiceClient';
 
 const DS_NEON = '#00FF88';
 
@@ -46,7 +39,7 @@ type Props = {
 export function SettlementDocumentsSection({ order, isPremium }: Props) {
   const { alert } = usePremiumAlert();
   const [busy, setBusy] = useState(false);
-  const raw = orderInvoiceUrl(order);
+  const uploaded = Boolean(orderInvoiceUrl(order));
   const orderId = String(order.id || '').trim();
   const titleColor = isPremium ? '#F5F5F5' : Colors.textPrimary;
   const muted = isPremium ? 'rgba(255,255,255,0.55)' : Colors.textSecondary;
@@ -54,49 +47,21 @@ export function SettlementDocumentsSection({ order, isPremium }: Props) {
   const border = isPremium ? 'rgba(255,255,255,0.10)' : Colors.border;
   const accent = isPremium ? DS_NEON : Colors.accent;
 
-  const openInvoice = () => {
-    if (!raw || busy) return;
+  const downloadInvoice = () => {
+    if (!orderId || busy) return;
     void (async () => {
       setBusy(true);
       try {
-        let openUrl = raw;
-        if (!isDirectHttpInvoiceUrl(raw)) {
-          if (!orderId) {
-            alert('Dokument', 'Brak ID zamówienia — nie można pobrać faktury.', [
-              { text: 'OK', style: 'primary' },
-            ]);
-            return;
-          }
-          const resolved = await fetchProducerOrderInvoiceUrl(orderId);
-          if (!resolved.ok || !resolved.url) {
-            alert('Dokument', resolved.message || 'Nie udało się pobrać faktury.', [
-              { text: 'OK', style: 'primary' },
-            ]);
-            return;
-          }
-          openUrl = resolved.url;
+        const result = await downloadProducerOrderInvoice(orderId);
+        if (!result.ok) {
+          alert('Dokument', result.message || 'Nie udało się pobrać rachunku.', [
+            { text: 'OK', style: 'primary' },
+          ]);
         }
-
-        try {
-          await WebBrowser.openBrowserAsync(openUrl, {
-            enableBarCollapsing: true,
-            showTitle: true,
-          });
-          return;
-        } catch {
-          /* fallback Linking */
-        }
-
-        if (Platform.OS !== 'web') {
-          // Nie gate’uj canOpenURL — signed Storage URL czasem zwraca false na Androidzie.
-          await Linking.openURL(openUrl);
-          return;
-        }
-        await Linking.openURL(openUrl);
       } catch (e) {
         alert(
           'Dokument',
-          e instanceof Error ? e.message : 'Nie udało się otworzyć faktury.',
+          e instanceof Error ? e.message : 'Nie udało się pobrać rachunku.',
           [{ text: 'OK', style: 'primary' }],
         );
       } finally {
@@ -114,29 +79,28 @@ export function SettlementDocumentsSection({ order, isPremium }: Props) {
         <FileText size={16} color={accent} />
         <Text style={[styles.title, { color: titleColor }]}>Dokumenty rozliczeniowe</Text>
       </View>
-      {raw ? (
-        <TouchableOpacity
-          style={[styles.btn, { backgroundColor: accent, opacity: busy ? 0.7 : 1 }]}
-          onPress={openInvoice}
-          activeOpacity={0.85}
-          disabled={busy}
-          accessibilityRole="button"
-          accessibilityLabel="Pobierz Fakturę / Rachunek"
-        >
-          {busy ? (
-            <ActivityIndicator color={isPremium ? '#0A0A0A' : '#fff'} />
-          ) : (
-            <Download size={16} color={isPremium ? '#0A0A0A' : '#fff'} />
-          )}
-          <Text style={[styles.btnText, { color: isPremium ? '#0A0A0A' : '#fff' }]}>
-            {busy ? 'Otwieranie…' : 'Pobierz Fakturę / Rachunek'}
-          </Text>
-        </TouchableOpacity>
-      ) : (
-        <Text style={[styles.wait, { color: muted }]}>
-          Oczekiwanie na dokument od dostawcy
+      <Text style={[styles.wait, { color: muted }]}>
+        {uploaded
+          ? 'Dokument od dostawcy jest gotowy — pobierz PDF w aplikacji.'
+          : 'Pobierz rachunek wygenerowany z danych sprzedawcy (przetwórcy) i zamówienia.'}
+      </Text>
+      <TouchableOpacity
+        style={[styles.btn, { backgroundColor: accent, opacity: busy || !orderId ? 0.7 : 1 }]}
+        onPress={downloadInvoice}
+        activeOpacity={0.85}
+        disabled={busy || !orderId}
+        accessibilityRole="button"
+        accessibilityLabel="Pobierz rachunek"
+      >
+        {busy ? (
+          <ActivityIndicator color={isPremium ? '#0A0A0A' : '#fff'} />
+        ) : (
+          <Download size={16} color={isPremium ? '#0A0A0A' : '#fff'} />
+        )}
+        <Text style={[styles.btnText, { color: isPremium ? '#0A0A0A' : '#fff' }]}>
+          {busy ? 'Pobieranie…' : 'Pobierz rachunek'}
         </Text>
-      )}
+      </TouchableOpacity>
     </View>
   );
 }

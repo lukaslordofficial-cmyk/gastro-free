@@ -15859,6 +15859,90 @@ async def producer_order_invoice_url(order_id: str, request: Request):
     return {"ok": True, "url": url, "expires_in": 3600}
 
 
+@app.get("/api/orders/{order_id}/invoice")
+@app.get("/api/local-producers/orders/{order_id}/invoice")
+async def producer_order_invoice_file(order_id: str, request: Request):
+    """
+    Rachunek / faktura PDF: wgrany dokument ze Storage albo wygenerowany w locie.
+    Sprzedawca = profil przetwórcy. Content-Disposition: attachment.
+    """
+    from fastapi.responses import StreamingResponse
+    from lp_invoice_pdf import (
+        build_invoice_pdf,
+        fetch_stored_invoice_bytes,
+        invoice_filename,
+        load_order_invoice_items,
+        settlement_type_of,
+    )
+
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
+        acc = await _lp_order_for_actor(client, oid, request)
+        order = acc["order"]
+        pid = str(order.get("producer_id") or "").strip()
+        producers = []
+        if pid:
+            try:
+                producers = await sb_get(client, "local_producers", params={
+                    "select": "*",
+                    "id": f"eq.{pid}",
+                    "limit": "1",
+                }) or []
+            except Exception:
+                producers = await sb_get(client, "local_producers", params={
+                    "select": "id,company_name,owner_name,address,postal_code,city,voivodeship",
+                    "id": f"eq.{pid}",
+                    "limit": "1",
+                }) or []
+        producer = (producers or [{}])[0]
+
+        stored = await fetch_stored_invoice_bytes(
+            order, client=client, verify=_httpx_verify(),
+        )
+        if stored:
+            body, ctype = stored
+            ext = "pdf"
+            if ctype == "application/pdf" or body[:4] == b"%PDF":
+                ext = "pdf"
+                ctype = "application/pdf"
+            elif "jpeg" in ctype or "jpg" in ctype:
+                ext = "jpg"
+            elif "png" in ctype:
+                ext = "png"
+            filename = f"rachunek-{oid[:8]}.{ext}"
+            return StreamingResponse(
+                io.BytesIO(body),
+                media_type=ctype,
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Cache-Control": "no-store",
+                },
+            )
+
+        items = await load_order_invoice_items(client, oid)
+        try:
+            pdf = build_invoice_pdf(producer=producer, order=order, items=items)
+        except Exception as e:
+            logger.exception("LP invoice PDF generate failed")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Nie udało się wygenerować rachunku: {str(e)[:200]}",
+            ) from e
+
+        filename = invoice_filename(settlement_type_of(producer), oid)
+        return StreamingResponse(
+            io.BytesIO(pdf),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+
 @app.get("/api/orders/{order_id}/furgonetka-label")
 @app.get("/api/orders/{order_id}/label")
 @app.get("/api/producer-orders/{order_id}/label")

@@ -45,6 +45,7 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
+from furgonetka_shop import router as furgonetka_shop_router
 from url_safety import (
     assert_safe_redirect_url,
     checkout_redirect_public_base,
@@ -144,7 +145,13 @@ def _resend_api_key() -> str:
 
 
 def _resend_from_email() -> str:
-    return _env("RESEND_FROM_EMAIL", "asystent.dostaw@gastromanager.org")
+    fallback = "asystent.dostaw@gastromanager.org"
+    raw = _env("RESEND_FROM_EMAIL", fallback).strip()
+    blocked = ("gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "yahoo.com")
+    host = raw.rsplit("@", 1)[-1].lower() if "@" in raw else ""
+    if not raw or raw.lower() == "onboarding@resend.dev" or host in blocked:
+        return fallback
+    return raw
 
 logger = logging.getLogger("gastro")
 logging.basicConfig(level=logging.INFO)
@@ -163,11 +170,18 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
+app.include_router(furgonetka_shop_router)
 
 
 @app.middleware("http")
 async def account_key_middleware(request: Request, call_next):
     """Multi-tenant: X-Account-Key from logged-in app, else JWT→profiles, else ACCOUNT_KEY env."""
+    path = request.url.path or ""
+    # Furgonetka „Własna” wysyła Bearer {shop_token} — to NIE jest JWT użytkownika.
+    # Lookup w Supabase Auth mógłby wisieć i Furgonetka zgłasza „błąd API”.
+    skip_jwt = path == "/orders" or path.startswith("/orders/") or path.startswith(
+        "/api/furgonetka"
+    )
     raw = (request.headers.get("x-account-key") or "").strip()
     # Allow only safe slug chars (ak_<uuid> / default / custom deploy slugs)
     if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw):
@@ -176,7 +190,7 @@ async def account_key_middleware(request: Request, call_next):
         key = _ACCOUNT_KEY_DEFAULT
 
     # Jeśli klient wysłał „default” (race przed AuthProvider) — spróbuj odzyskać z JWT.
-    if key == "default" or not raw:
+    if not skip_jwt and (key == "default" or not raw):
         auth = (request.headers.get("authorization") or "").strip()
         if auth.lower().startswith("bearer ") and SUPABASE_URL:
             user_jwt = auth[7:].strip()

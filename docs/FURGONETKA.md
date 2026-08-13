@@ -17,6 +17,26 @@ FURGONETKA_PASSWORD=
 
 Opcjonalnie: `FURGONETKA_INPOST_SERVICE_ID`, `FURGONETKA_LABEL_PAGE=a6`, `FURGONETKA_SANDBOX=1` (tylko testy).
 
+## Integracja „Własna” (Furgonetka woła nasz sklep)
+
+To **nie** jest REST OAuth (`/packages`). Po zapisaniu formularza Furgonetka odpytuje:
+
+`GET {Adres URL}/orders`
+
+z tokenem w `Authorization: Bearer …` albo `?token=`.
+
+W sandbox.furgonetka.pl → Ustawienia → Integracje → Własne wklej:
+
+| Pole | Wartość |
+| --- | --- |
+| Nazwa wyświetlana | Gastro Manager |
+| Adres URL | `https://gastro-manager-api-production-21dd.up.railway.app/api/furgonetka` |
+| Token | `FURGONETKA_SHOP_TOKEN` albo token sandbox `gm_furg_shop_7c9e4a2b18f04d6e9a51c3b8d0e27f14` |
+| Synchronizacja zamówień | włącz |
+| Wysyłaj informacje o przesyłce | włącz (stub `PUT /orders/{id}` zwraca 200) |
+
+Na początek API zwraca `{ "orders": [] }` — test połączenia ma przejść. Alternatywny URL bazowy (gdy w formularzu jest sam host API): `https://gastro-manager-api-production-21dd.up.railway.app` (wtedy Furgonetka woła `/orders`). Strona WWW: `https://www.gastromanager.org/api/furgonetka`.
+
 Skąd wziąć:
 
 1. Konto firmowe na [furgonetka.pl](https://furgonetka.pl) + doładowanie skarbonki prepaid.

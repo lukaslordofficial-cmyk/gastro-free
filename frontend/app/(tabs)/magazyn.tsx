@@ -818,8 +818,13 @@ export default function MagazynScreen() {
     const ak = accountKey;
     const fast = !!opts?.fast;
     try {
-      await inventoryService.seedWarehouse(ak, fast);
-      const { items, categories, wasteLogs } = await inventoryService.fetchWarehouseData(ak);
+      const dataPromise = inventoryService.fetchWarehouseData(ak);
+      if (fast) {
+        void inventoryService.seedWarehouse(ak, true);
+      } else {
+        void inventoryService.seedWarehouse(ak, false);
+      }
+      const { items, categories, wasteLogs } = await dataPromise;
       setInventory(items.map(mapDbRow));
       setDbCategories(categories as CategoryRow[]);
       setWasteLogs(wasteLogs as WasteLogRow[]);

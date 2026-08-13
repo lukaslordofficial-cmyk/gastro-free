@@ -45,9 +45,18 @@ export function AdsProvider({ children }: { children: React.ReactNode }) {
           InterstitialAd,
           AdEventType,
         } = adsMod;
-        await AdsConsent.requestInfoUpdate();
-        await AdsConsent.loadAndShowConsentFormIfRequired();
-        await mobileAds().initialize();
+        const consent = Promise.race([
+          (async () => {
+            await AdsConsent.requestInfoUpdate();
+            await AdsConsent.loadAndShowConsentFormIfRequired();
+          })(),
+          new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+        ]);
+        await consent;
+        await Promise.race([
+          mobileAds().initialize(),
+          new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+        ]);
         if (cancelled) return;
 
         const interstitial = InterstitialAd.createForAdRequest(pickAdUnit('interstitial'));
@@ -68,15 +77,21 @@ export function AdsProvider({ children }: { children: React.ReactNode }) {
 
   const showInterstitial = useCallback(async () => {
     if (!hasAds || !adsMod || !interstitialRef.current) return;
-    const last = Number(await AsyncStorage.getItem(LAST_INTERSTITIAL_KEY) ?? '0');
-    if (Date.now() - last < INTERSTITIAL_MIN_INTERVAL_MS) return;
-    const ad = interstitialRef.current;
-    if (!ad.loaded) {
-      ad.load();
-      return;
+    try {
+      const last = Number(await AsyncStorage.getItem(LAST_INTERSTITIAL_KEY) ?? '0');
+      if (Date.now() - last < INTERSTITIAL_MIN_INTERVAL_MS) return;
+      const ad = interstitialRef.current;
+      if (!ad.loaded) {
+        ad.load();
+        return;
+      }
+      const shown = ad.show();
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 2500));
+      await Promise.race([shown, timeout]);
+      await AsyncStorage.setItem(LAST_INTERSTITIAL_KEY, String(Date.now()));
+    } catch {
+      /* reklama nie może blokować nawigacji */
     }
-    await ad.show();
-    await AsyncStorage.setItem(LAST_INTERSTITIAL_KEY, String(Date.now()));
   }, [adsMod, hasAds]);
 
   const value = useMemo(

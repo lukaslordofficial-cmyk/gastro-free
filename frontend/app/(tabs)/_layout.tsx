@@ -69,6 +69,8 @@ export default function TabLayout() {
   const screenOptions = useMemo(
     () => ({
       headerShown: false as const,
+      freezeOnBlur: true,
+      lazy: true,
       tabBarActiveTintColor: isPremiumUi ? PremiumTokens.color.neon : Colors.tabActive,
       tabBarInactiveTintColor: isPremiumUi ? PremiumTokens.color.textMuted : Colors.tabInactive,
       tabBarStyle: [

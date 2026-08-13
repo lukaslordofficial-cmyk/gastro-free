@@ -179,8 +179,11 @@ async def account_key_middleware(request: Request, call_next):
     path = request.url.path or ""
     # Furgonetka „Własna” wysyła Bearer {shop_token} — to NIE jest JWT użytkownika.
     # Lookup w Supabase Auth mógłby wisieć i Furgonetka zgłasza „błąd API”.
-    skip_jwt = path == "/orders" or path.startswith("/orders/") or path.startswith(
-        "/api/furgonetka"
+    skip_jwt = (
+        path == "/orders"
+        or path.rstrip("/") == "/orders"
+        or path.startswith("/orders/")
+        or path.startswith("/api/furgonetka")
     )
     raw = (request.headers.get("x-account-key") or "").strip()
     # Allow only safe slug chars (ak_<uuid> / default / custom deploy slugs)

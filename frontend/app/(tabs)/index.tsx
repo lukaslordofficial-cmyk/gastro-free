@@ -987,10 +987,11 @@ export default function FinanseScreen() {
     void fetchData();
   }, [fetchData, accountKey]);
 
-  // Po powrocie z Magazynu — zsynchronizuj licznik „wymaga uzupełnienia".
+  // Po powrocie z Magazynu — zsynchronizuj licznik tylko gdy jeszcze nie ma danych.
   useFocusEffect(
     useCallback(() => {
       if (!accountKey || accountKey === 'default') return;
+      if (hasFinanceDataRef.current) return;
       void fetchData();
     }, [accountKey, fetchData]),
   );

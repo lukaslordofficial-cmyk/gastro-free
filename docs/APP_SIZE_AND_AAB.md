@@ -2,7 +2,7 @@
 
 Data: 2026-07-25.
 
-## Co zrobiono
+## Co zrobiono.
 
 | Zmiana | Efekt |
 |--------|--------|

@@ -4,7 +4,7 @@ Data: 2026-07-25.
 
 ## Co zrobiono
 
-| Zmiana | Efekt |
+| Zmiana | Efekt |.
 |--------|--------|
 | Profile EAS `preview` + `production` → `buildType: "app-bundle"` | Dystrybucja jako **AAB** (Play / wewnętrzny share EAS) |
 | Profil `preview-apk` | Opcjonalny APK gdy tester potrzebuje bezpośredniej instalacji |

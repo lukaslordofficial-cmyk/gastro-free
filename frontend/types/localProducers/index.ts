@@ -213,9 +213,19 @@ export type CreateProducerOrderInput = {
     unit?: string | null;
     weight_g?: number | null;
   }[];
-  /** Adres dostawy do restauracji (kurier InPost). */
+  /** Adres dostawy do restauracji (kurier). */
   delivery: ProducerDeliveryAddress;
   notes?: string | null;
+  courier?: {
+    serviceId: number | string;
+    service: string;
+    name: string;
+    priceGross: number;
+    widthCm?: number;
+    heightCm?: number;
+    depthCm?: number;
+    weightKg?: number;
+  } | null;
 };
 
 export type ProducerReview = {

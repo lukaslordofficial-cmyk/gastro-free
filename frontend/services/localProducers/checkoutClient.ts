@@ -153,9 +153,11 @@ export function parseLpBillingDeepLink(url: string | null | undefined): {
   // Także billing-return z API (gdy OS otworzy http zamiast deep linku)
   const isSuccess =
     lower.includes('lp/success')
+    || (lower.includes('/success') && (lower.includes('session_id=') || lower.includes('lp')))
     || (lower.includes('billing-return') && lower.includes('status=success'));
   const isCancel =
     lower.includes('lp/cancel')
+    || (lower.includes('/cancel') && lower.includes('lp'))
     || (lower.includes('billing-return') && lower.includes('status=cancel'));
   if (!isSuccess && !isCancel) return { kind: null };
   const kind = isSuccess ? 'success' : 'cancel';

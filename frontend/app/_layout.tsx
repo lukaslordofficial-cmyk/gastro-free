@@ -48,8 +48,10 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!ready) return;
-    const inAuth = segments[0] === '(auth)';
-    if (!isAuthenticated && !inAuth) {
+    const root = String(segments[0] || '');
+    const inAuth = root === '(auth)';
+    const paymentReturn = root === 'lp' || root === 'success' || root === 'cancel';
+    if (!isAuthenticated && !inAuth && !paymentReturn) {
       router.replace('/(auth)/login');
     } else if (isAuthenticated && inAuth) {
       router.replace('/(tabs)');
@@ -88,6 +90,9 @@ function RootLayoutNav() {
               <Stack screenOptions={{ headerShown: false }}>
                 <Stack.Screen name="(auth)" options={{ headerShown: false }} />
                 <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen name="lp" options={{ headerShown: false }} />
+                <Stack.Screen name="success" options={{ headerShown: false }} />
+                <Stack.Screen name="cancel" options={{ headerShown: false }} />
                 <Stack.Screen name="+not-found" />
               </Stack>
               <StatusBarThemed />

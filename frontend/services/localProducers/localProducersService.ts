@@ -277,8 +277,13 @@ export async function createProducerOrder(
     unit: i.unit,
     weight_g: i.weight_g,
   })));
+  const selectedCourier = input.courier;
   const deliveryCost =
-    freeFrom != null && producerAmount >= freeFrom ? 0 : quote.pricePln;
+    freeFrom != null && producerAmount >= freeFrom
+      ? 0
+      : (selectedCourier?.priceGross != null
+        ? Math.round(Number(selectedCourier.priceGross) * 100) / 100
+        : quote.pricePln);
   const totalPrice = Math.round((producerAmount + deliveryCost + platformFee) * 100) / 100;
 
   const shipPayload = {
@@ -291,9 +296,23 @@ export async function createProducerOrder(
     email: (d.email || (profile as { email?: string } | null)?.email || null),
   };
   const shipNote = `lp_ship:${JSON.stringify(shipPayload)}`;
-  const notes = [input.notes?.trim() || 'Zamów i zapłać · kurier InPost', shipNote]
-    .filter(Boolean)
-    .join(' | ');
+  const courierNote = selectedCourier
+    ? `lp_courier:${JSON.stringify({
+      service_id: selectedCourier.serviceId,
+      service: selectedCourier.service,
+      name: selectedCourier.name,
+      price_gross: deliveryCost,
+      width: selectedCourier.widthCm,
+      height: selectedCourier.heightCm,
+      depth: selectedCourier.depthCm,
+      weight_kg: selectedCourier.weightKg ?? quote.weightKg,
+    })}`
+    : '';
+  const notes = [
+    input.notes?.trim() || 'Zamów i zapłać · kurier',
+    shipNote,
+    courierNote,
+  ].filter(Boolean).join(' | ');
 
   // order_status: 'pending' — zgodne z typowym CHECK WWW (nie 'pending_payment')
   const orderPayload: Record<string, unknown> = {
@@ -309,7 +328,8 @@ export async function createProducerOrder(
     shipment_status: 'draft',
     order_status: 'pending',
     notes,
-    parcel_weight_kg: quote.weightKg,
+    parcel_weight_kg: selectedCourier?.weightKg ?? quote.weightKg,
+    courier_name: selectedCourier?.name || selectedCourier?.service || null,
   };
 
   let { data: order, error: orderErr } = await supabase
@@ -328,6 +348,7 @@ export async function createProducerOrder(
     delete withoutStatus.delivery_cost;
     delete withoutStatus.producer_amount;
     delete withoutStatus.parcel_weight_kg;
+    delete withoutStatus.courier_name;
     let retry = await supabase
       .from(LOCAL_PRODUCERS_TABLES.orders)
       .insert(withoutStatus)

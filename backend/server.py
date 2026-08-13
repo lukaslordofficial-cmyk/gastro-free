@@ -15280,6 +15280,27 @@ class LpShipmentRequest(BaseModel):
     post_code: Optional[str] = None
 
 
+class LpCourierQuoteItem(BaseModel):
+    quantity: float = 0
+    unit: Optional[str] = None
+    weight_g: Optional[float] = None
+    product_id: Optional[str] = None
+
+
+class LpCourierQuoteRequest(BaseModel):
+    producer_id: str
+    items: list[LpCourierQuoteItem] = []
+    receiver_name: Optional[str] = None
+    receiver_phone: Optional[str] = None
+    street: Optional[str] = None
+    building_number: Optional[str] = None
+    city: Optional[str] = None
+    post_code: Optional[str] = None
+    width_cm: Optional[int] = None
+    height_cm: Optional[int] = None
+    depth_cm: Optional[int] = None
+
+
 @app.get("/api/local-producers/commerce-status")
 async def local_producers_commerce_status():
     from billing_stripe import stripe_configured
@@ -15301,6 +15322,107 @@ async def local_producers_commerce_status():
         "notify_sms": "smsapi",
         "connect_onboard": "POST /api/stripe/connect",
         "label_endpoint": "GET /api/orders/{order_id}/furgonetka-label",
+        "courier_quotes": "POST /api/local-producers/courier-quotes",
+    }
+
+
+@app.post("/api/local-producers/courier-quotes")
+async def local_producers_courier_quotes(req: LpCourierQuoteRequest):
+    """Oficjalna wycena Furgonetka: porównanie stawek kurierów (waga + wymiary cm)."""
+    from furgonetka_broker import (
+        _party,
+        _split_street,
+        calculate_courier_quotes,
+        furgonetka_configured,
+        _use_mock,
+    )
+    from lp_packaging import (
+        estimate_order_weight_kg,
+        furgonetka_parcels_payload,
+        parcels_for_weight_kg,
+    )
+
+    producer_id = (req.producer_id or "").strip()
+    if not producer_id:
+        raise HTTPException(status_code=400, detail="Brak producer_id")
+    post = (req.post_code or "").strip()
+    city = (req.city or "").strip()
+    street = " ".join(x for x in ((req.street or "").strip(), (req.building_number or "").strip()) if x)
+    if not post or not city or not street:
+        raise HTTPException(
+            status_code=400,
+            detail="Podaj ulicę, miasto i kod pocztowy, żeby policzyć stawki kurierów.",
+        )
+
+    async with httpx.AsyncClient(timeout=45.0, verify=_httpx_verify()) as client:
+        producers = await sb_get(client, "local_producers", params={
+            "select": "id,company_name,owner_name,email,invoice_email,phone,address,city,postal_code",
+            "id": f"eq.{producer_id}",
+            "limit": "1",
+        })
+        if not producers:
+            raise HTTPException(status_code=404, detail="Nie znaleziono dystrybutora")
+        producer = producers[0]
+        s_street, s_building = _split_street(producer.get("address"))
+        sender_street = " ".join(x for x in (s_street, s_building) if x).strip()
+        pickup = _party(
+            name=str(producer.get("owner_name") or producer.get("company_name") or "Nadawca"),
+            company=str(producer.get("company_name") or ""),
+            email=str(producer.get("invoice_email") or producer.get("email") or ""),
+            phone=str(producer.get("phone") or "500000000"),
+            street=sender_street or "ul. Magazynowa 1",
+            city=str(producer.get("city") or "Warszawa"),
+            postcode=str(producer.get("postal_code") or "00-001"),
+        )
+        receiver = _party(
+            name=str(req.receiver_name or "Restauracja"),
+            company=str(req.receiver_name or "Restauracja"),
+            email="",
+            phone=str(req.receiver_phone or "500000000"),
+            street=street,
+            city=city,
+            postcode=post,
+        )
+        items = [it.model_dump() for it in (req.items or [])]
+        weight_kg = estimate_order_weight_kg(items)
+        parcels_full = parcels_for_weight_kg(weight_kg)
+        if req.width_cm and req.height_cm and req.depth_cm and parcels_full:
+            parcels_full[0]["width"] = int(req.width_cm)
+            parcels_full[0]["height"] = int(req.height_cm)
+            parcels_full[0]["depth"] = int(req.depth_cm)
+        parcels = furgonetka_parcels_payload(parcels_full)
+        dims = parcels[0] if parcels else {"width": 20, "height": 15, "depth": 20, "weight": 1}
+
+        if not furgonetka_configured() and not _use_mock():
+            raise HTTPException(
+                status_code=503,
+                detail="Furgonetka nie jest skonfigurowana na serwerze (FURGONETKA_*).",
+            )
+        try:
+            quoted = await calculate_courier_quotes(
+                pickup=pickup, receiver=receiver, parcels=parcels,
+            )
+        except Exception as e:
+            logger.exception("LP courier quotes failed")
+            raise HTTPException(status_code=502, detail=str(e)[:280])
+
+    quotes = quoted.get("quotes") or []
+    cheapest = next((q for q in quotes if q.get("available") and q.get("price_gross")), None)
+    return {
+        "ok": True,
+        "source": quoted.get("source"),
+        "weight_kg": weight_kg,
+        "width_cm": dims.get("width"),
+        "height_cm": dims.get("height"),
+        "depth_cm": dims.get("depth"),
+        "parcels": len(parcels),
+        "quotes": quotes,
+        "cheapest": cheapest,
+        "note": (
+            "Stawki testowe (sandbox) — ustaw FURGONETKA_* z konta, żeby dostać żywe ceny."
+            if quoted.get("source") == "sandbox"
+            else "Ceny brutto z kalkulatora Furgonetka dla podanej wagi i wymiarów."
+        ),
     }
 
 
@@ -15448,12 +15570,13 @@ async def local_producers_billing_return(
     ok = (status or "").strip().lower() in ("success", "ok", "paid")
     sid = (session_id or "").strip()
     suffix = f"?session_id={quote(sid, safe='')}" if sid.startswith("cs_") else ""
+    # Trzy slashe: myapp:///lp/success → ścieżka /lp/success (nie host=lp → /success).
     if ok:
-        deep = f"myapp://lp/success{suffix}"
+        deep = f"myapp:///lp/success{suffix}"
         title = "Płatność zrealizowana"
         hint = "Wracamy do Gastro Manager. Jeśli nic się nie dzieje — kliknij przycisk poniżej."
     else:
-        deep = "myapp://lp/cancel"
+        deep = "myapp:///lp/cancel"
         title = "Płatność anulowana"
         hint = "Możesz wrócić do aplikacji i spróbować ponownie."
 
@@ -15465,6 +15588,10 @@ async def local_producers_billing_return(
         primary = app_url
     else:
         primary = deep
+
+    # Expo Go: NIE skacz automatycznie na myapp:// — to otwiera „This screen doesn't exist”.
+    expo_primary = primary.startswith("exp://") or primary.startswith("exp+")
+    auto_fallback = "" if expo_primary else deep
 
     safe_primary = escape(primary, quote=True)
     safe_deep = escape(deep, quote=True)
@@ -15489,15 +15616,18 @@ p{{opacity:.8;line-height:1.5;max-width:28rem}}
 </div>
 <script>
 (function(){{
-  var urls = [{json.dumps(primary)}, {json.dumps(deep)}];
-  function go(u){{ try {{ window.location.href = u; }} catch (e) {{}} }}
-  go(urls[0]);
-  setTimeout(function(){{ go(urls[0]); }}, 200);
-  setTimeout(function(){{ if (urls[1] && urls[1] !== urls[0]) go(urls[1]); }}, 900);
+  var primary = {json.dumps(primary)};
+  var fallback = {json.dumps(auto_fallback)};
+  function go(u){{ if (!u) return; try {{ window.location.href = u; }} catch (e) {{}} }}
+  go(primary);
+  setTimeout(function(){{ go(primary); }}, 250);
+  if (fallback && fallback !== primary) {{
+    setTimeout(function(){{ go(fallback); }}, 1600);
+  }}
   var a = document.getElementById('open-app');
   if (a) a.addEventListener('click', function(ev){{
     ev.preventDefault();
-    go(urls[0]);
+    go(primary);
   }});
 }})();
 </script>

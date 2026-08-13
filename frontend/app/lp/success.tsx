@@ -1,5 +1,6 @@
 /**
  * Deep link / Expo Go: exp://host/--/lp/success?session_id=cs_…
+ * myapp:///lp/success oraz myapp://lp/success (host=lp → /success).
  */
 import { useEffect } from 'react';
 import { ActivityIndicator, View } from 'react-native';
@@ -27,8 +28,7 @@ export default function LpSuccessScreen() {
         ]);
       }
       void tryConfirmPendingLpPayment({ sessionId: sid });
-      if (router.canGoBack()) router.back();
-      else router.replace('/(tabs)/dostawcy');
+      router.replace('/(tabs)/dostawcy');
     })();
   }, [alert, params.session_id, router]);
 

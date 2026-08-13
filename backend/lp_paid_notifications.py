@@ -26,11 +26,11 @@ def _restaurant_name(order: dict[str, Any]) -> str:
 
 
 def _producer_email(prod: dict[str, Any]) -> str:
-    return str(
-        prod.get("invoice_email")
-        or prod.get("email")
-        or ""
-    ).strip()
+    for key in ("invoice_email", "email", "contact_email", "notify_email_address"):
+        val = str(prod.get(key) or "").strip()
+        if val and "@" in val and val.lower() not in ("true", "false"):
+            return val
+    return ""
 
 
 def _email_copy(restaurant: str) -> dict[str, str]:

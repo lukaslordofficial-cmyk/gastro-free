@@ -47,7 +47,10 @@
         {
           "action": "VIEW",
           "category": ["BROWSABLE", "DEFAULT"],
-          "data": [{ "scheme": "myapp", "host": "lp" }]
+          "data": [
+            { "scheme": "myapp" },
+            { "scheme": "myapp", "host": "lp" }
+          ]
         }
       ]
     },

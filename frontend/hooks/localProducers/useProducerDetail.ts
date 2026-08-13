@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as localProducersService from '@/services/localProducers';
 import type {
+  CreateProducerOrderInput,
   LocalProducer,
   ProducerCartLine,
   ProducerCategory,
@@ -101,7 +102,7 @@ export function useProducerDetail(producerId: string | undefined) {
   const clearCart = useCallback(() => setCart([]), []);
 
   const placeOrder = useCallback(
-    async (delivery: ProducerDeliveryAddress): Promise<ProducerOrder> => {
+    async (delivery: ProducerDeliveryAddress, courier?: CreateProducerOrderInput['courier']): Promise<ProducerOrder> => {
       if (!producerId || !cart.length) {
         throw new Error('Dodaj produkty do koszyka.');
       }
@@ -110,6 +111,7 @@ export function useProducerDetail(producerId: string | undefined) {
         const order = await localProducersService.createProducerOrder({
           producerId,
           delivery,
+          courier: courier || null,
           items: cart.map((l) => ({
             productId: l.product.id,
             quantity: l.quantity,

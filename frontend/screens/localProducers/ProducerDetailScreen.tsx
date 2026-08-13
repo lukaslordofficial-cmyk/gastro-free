@@ -42,7 +42,8 @@ import { quoteCourier } from '@/lib/localProducers/courierQuote';
 import {
   openProducerOrderCheckout,
 } from '@/services/localProducers/checkoutClient';
-import { StripeOpeningOverlay } from '@/components/localProducers';
+import { StripeOpeningOverlay, CourierQuotePicker } from '@/components/localProducers';
+import type { SelectedCourierQuote } from '@/components/localProducers/CourierQuotePicker';
 
 const NEON = '#00FF88';
 
@@ -77,6 +78,7 @@ export function ProducerDetailScreen() {
   const [shipBuilding, setShipBuilding] = useState('');
   const [shipCity, setShipCity] = useState('');
   const [shipPost, setShipPost] = useState('');
+  const [courierPick, setCourierPick] = useState<SelectedCourierQuote | null>(null);
 
   const isPremium = !!theme.isPremium;
   const bg = isPremium ? '#0A0A0A' : Colors.background;
@@ -100,10 +102,12 @@ export function ProducerDetailScreen() {
       unit: l.product.unit,
       weight_g: l.product.weight_g,
     })));
-    const delivery = freeFrom != null && cartTotal >= freeFrom ? 0 : quote.pricePln;
+    const delivery = freeFrom != null && cartTotal >= freeFrom
+      ? 0
+      : (courierPick?.priceGross ?? quote.pricePln);
     const total = Math.round((cartTotal + fee + delivery) * 100) / 100;
-    return { fee, delivery, total, weightKg: quote.weightKg };
-  }, [cart, cartTotal, producer?.free_delivery_from]);
+    return { fee, delivery, total, weightKg: courierPick?.weightKg ?? quote.weightKg, courierName: courierPick?.name };
+  }, [cart, cartTotal, producer?.free_delivery_from, courierPick]);
 
   const productsByCategory = useMemo(() => {
     const catName = (id: string | null) =>
@@ -153,7 +157,7 @@ export function ProducerDetailScreen() {
     if (!phone || !street || !city || !post) {
       premiumAlert(
         'Adres dostawy',
-        'Uzupełnij telefon, ulicę, miasto i kod pocztowy — kurier InPost musi wiedzieć, dokąd jechać.',
+        'Uzupełnij telefon, ulicę, miasto i kod pocztowy — kurier musi wiedzieć, dokąd jechać.',
         [{ text: 'OK', style: 'primary' }],
       );
       return;
@@ -170,7 +174,16 @@ export function ProducerDetailScreen() {
           building_number: shipBuilding.trim() || '1',
           city,
           post_code: post,
-        });
+        }, courierPick ? {
+          serviceId: courierPick.serviceId,
+          service: courierPick.service,
+          name: courierPick.name,
+          priceGross: courierPick.priceGross,
+          widthCm: courierPick.widthCm,
+          heightCm: courierPick.heightCm,
+          depthCm: courierPick.depthCm,
+          weightKg: courierPick.weightKg,
+        } : null);
         setBusyMsg('Otwieranie Stripe…');
         const pay = await openProducerOrderCheckout(order.id, {
           onOpening: () => setBusyMsg('Otwieranie Stripe…'),
@@ -409,7 +422,7 @@ export function ProducerDetailScreen() {
                 <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
                   <Text style={{ color: muted, fontSize: 13, lineHeight: 19, marginBottom: 12 }}>
                     {`Produkty: ${formatPlnNumber(cartTotal)} zł\n`}
-                    {`Kurier InPost (~${feeBreakdown.weightKg} kg): ${formatPlnNumber(feeBreakdown.delivery)} zł\n`}
+                    {`Kurier${feeBreakdown.courierName ? ` (${feeBreakdown.courierName})` : ''} (~${feeBreakdown.weightKg} kg): ${formatPlnNumber(feeBreakdown.delivery)} zł\n`}
                     {`Opłata serwisu (5%): ${formatPlnNumber(feeBreakdown.fee)} zł\n`}
                     {`Razem: ${formatPlnNumber(feeBreakdown.total)} zł`}
                   </Text>
@@ -440,6 +453,32 @@ export function ProducerDetailScreen() {
                     <Text style={{ color: muted, fontSize: 11, marginBottom: 4 }}>Kod pocztowy</Text>
                     <TextInput value={shipPost} onChangeText={setShipPost} placeholder="00-001" placeholderTextColor={muted} style={[styles.input, { color: titleColor, borderColor: border, backgroundColor: inputBg }]} />
                   </View>
+                  {producer ? (
+                    <CourierQuotePicker
+                      producerId={producer.id}
+                      items={cart.map((l) => ({
+                        quantity: l.quantity,
+                        unit: l.product.unit,
+                        weight_g: l.product.weight_g,
+                        product_id: l.product.id,
+                      }))}
+                      receiverName={shipName}
+                      receiverPhone={shipPhone}
+                      street={shipStreet}
+                      buildingNumber={shipBuilding}
+                      city={shipCity}
+                      postCode={shipPost}
+                      colors={{
+                        textPrimary: titleColor,
+                        textSecondary: muted,
+                        border,
+                        accent,
+                        background: inputBg,
+                      }}
+                      selected={courierPick}
+                      onSelect={setCourierPick}
+                    />
+                  ) : null}
                   <TouchableOpacity
                     style={[styles.cta, { backgroundColor: accent, marginTop: 8, marginBottom: 8 }]}
                     disabled={busy || ordering}

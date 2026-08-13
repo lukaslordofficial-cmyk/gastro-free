@@ -23,7 +23,8 @@ import { createProducerOrder } from '@/services/localProducers/localProducersSer
 import {
   openProducerOrderCheckout,
 } from '@/services/localProducers/checkoutClient';
-import { StripeOpeningOverlay } from '@/components/localProducers';
+import { StripeOpeningOverlay, CourierQuotePicker } from '@/components/localProducers';
+import type { SelectedCourierQuote } from '@/components/localProducers/CourierQuotePicker';
 import {
   PLATFORM_FEE_RATE,
 } from '@/types/localProducers';
@@ -56,6 +57,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
   const [shipBuilding, setShipBuilding] = useState('1');
   const [shipCity, setShipCity] = useState('');
   const [shipPost, setShipPost] = useState('');
+  const [courierPick, setCourierPick] = useState<SelectedCourierQuote | null>(null);
 
   const producerAmount = useMemo(
     () => Math.round((group?.subtotal_pln ?? 0) * 100) / 100,
@@ -69,7 +71,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
     }))),
     [group?.items],
   );
-  const delivery = courierQuote.pricePln;
+  const delivery = courierPick?.priceGross ?? courierQuote.pricePln;
   const total = Math.round((producerAmount + delivery + platformFee) * 100) / 100;
 
   const pay = () => {
@@ -129,6 +131,16 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
             post_code: post,
           },
           notes: 'Zamów i zapłać · Łowca Okazji',
+          courier: courierPick ? {
+            serviceId: courierPick.serviceId,
+            service: courierPick.service,
+            name: courierPick.name,
+            priceGross: courierPick.priceGross,
+            widthCm: courierPick.widthCm,
+            heightCm: courierPick.heightCm,
+            depthCm: courierPick.depthCm,
+            weightKg: courierPick.weightKg,
+          } : null,
         });
         setBusyMsg('Otwieranie Stripe…');
         const payRes = await openProducerOrderCheckout(order.id, {
@@ -180,7 +192,7 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
             </Text>
             <Text style={[styles.breakdown, { color: colors.textSecondary }]}>
               {`Produkty: ${formatPln(producerAmount)}\n`}
-              {`Kurier InPost: ${formatPln(delivery)}\n`}
+              {`Kurier${courierPick?.name ? ` (${courierPick.name})` : ''}: ${formatPln(delivery)}\n`}
               {`Opłata serwisu (5%): ${formatPln(platformFee)}\n`}
               {`Razem: ${formatPln(total)}`}
             </Text>
@@ -216,6 +228,31 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
                 />
               </View>
             ))}
+            {group?.supplier_id ? (
+              <CourierQuotePicker
+                producerId={group.supplier_id}
+                items={(group.items ?? []).map((it) => ({
+                  quantity: Number(it.quantity) || 0,
+                  unit: it.unit,
+                  product_id: String(it.catalog_product_id || ''),
+                }))}
+                receiverName={shipName}
+                receiverPhone={shipPhone}
+                street={shipStreet}
+                buildingNumber={shipBuilding}
+                city={shipCity}
+                postCode={shipPost}
+                colors={{
+                  textPrimary: colors.textPrimary,
+                  textSecondary: colors.textSecondary,
+                  border: colors.border,
+                  accent: colors.accent,
+                  background: inputBg,
+                }}
+                selected={courierPick}
+                onSelect={setCourierPick}
+              />
+            ) : null}
             <TouchableOpacity
               style={[styles.cta, { backgroundColor: colors.accent, opacity: busy ? 0.6 : 1 }]}
               disabled={busy}

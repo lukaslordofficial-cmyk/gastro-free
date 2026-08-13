@@ -47,6 +47,7 @@ logger = logging.getLogger("furgonetka.broker")
 ACCEPT_V1 = "application/vnd.furgonetka.v1+json"
 ACCEPT_V2 = "application/vnd.furgonetka.v2+json"
 LP_SHIP_PREFIX = "lp_ship:"
+LP_COURIER_PREFIX = "lp_courier:"
 
 _token_cache: dict[str, Any] = {
     "access": None,
@@ -237,6 +238,66 @@ async def resolve_inpost_service_id() -> Any:
             "Włącz InPost Kurier w panelu lub ustaw FURGONETKA_INPOST_SERVICE_ID."
         )
     return inpost["id"]
+
+
+async def list_account_services() -> list[dict[str, Any]]:
+    data = await _api("GET", "/account/services", accept=ACCEPT_V1)
+    services = (data or {}).get("services") or []
+    return [s for s in services if isinstance(s, dict) and s.get("id")]
+
+
+async def calculate_courier_quotes(
+    *,
+    pickup: dict[str, Any],
+    receiver: dict[str, Any],
+    parcels: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Oficjalna wycena Furgonetka — porównanie wszystkich usług na koncie."""
+    from lp_furgonetka_quotes import mock_quotes_for_parcels, normalize_services_prices
+
+    if _use_mock() and not _has_oauth_secrets():
+        quotes = mock_quotes_for_parcels(parcels)
+        return {"ok": True, "source": "sandbox", "quotes": quotes}
+
+    services = await list_account_services()
+    ids = [s.get("id") for s in services if s.get("id") is not None]
+    if not ids:
+        raise RuntimeError("Brak usług kurierskich na koncie Furgonetka (GET /account/services).")
+    by_id = {s.get("id"): s for s in services}
+    by_id.update({str(s.get("id")): s for s in services})
+    body = {
+        "package": {
+            "pickup": pickup,
+            "receiver": receiver,
+            "service_id": ids[0],
+            "parcels": parcels,
+        },
+        "services": {"service_id": ids},
+    }
+    data = await _api(
+        "POST",
+        "/packages/calculate-price",
+        json_body=body,
+        accept=ACCEPT_V2,
+    )
+    quotes = normalize_services_prices(data, services_by_id=by_id)
+    return {"ok": True, "source": "furgonetka", "quotes": quotes}
+
+
+def _parse_lp_courier(notes: Optional[str]) -> Optional[dict[str, Any]]:
+    if not notes:
+        return None
+    idx = notes.find(LP_COURIER_PREFIX)
+    if idx < 0:
+        return None
+    raw = notes[idx + len(LP_COURIER_PREFIX) :].strip()
+    if " |" in raw:
+        raw = raw.split(" |", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def _parse_lp_ship(notes: Optional[str]) -> Optional[dict[str, Any]]:
@@ -932,9 +993,27 @@ async def _create_new_shipment(
     items, products = await _load_order_products(client, sb_get, oid)
     weight_kg = estimate_order_weight_kg(items, products)
     parcels_full = parcels_for_weight_kg(weight_kg)
+    courier_sel = _parse_lp_courier(order.get("notes")) or {}
+    try:
+        w = int(courier_sel.get("width") or 0)
+        h = int(courier_sel.get("height") or 0)
+        d = int(courier_sel.get("depth") or 0)
+    except (TypeError, ValueError):
+        w = h = d = 0
+    if w > 0 and h > 0 and d > 0 and parcels_full:
+        parcels_full[0]["width"] = w
+        parcels_full[0]["height"] = h
+        parcels_full[0]["depth"] = d
     parcels = furgonetka_parcels_payload(parcels_full)
 
-    service_id = await resolve_inpost_service_id()
+    service_id = courier_sel.get("service_id")
+    if service_id in (None, "", 0, "0"):
+        service_id = await resolve_inpost_service_id()
+    else:
+        try:
+            service_id = int(service_id)
+        except (TypeError, ValueError):
+            pass
     payload = {
         "pickup": pickup,
         "receiver": receiver,

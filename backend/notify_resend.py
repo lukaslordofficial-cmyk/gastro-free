@@ -23,8 +23,10 @@ def is_resend_configured() -> bool:
 def resend_from_header() -> str:
     raw = (os.getenv("RESEND_FROM_EMAIL") or "").strip()
     name = (os.getenv("RESEND_FROM_NAME") or "Gastro Manager").strip()
-    # Domyślnie domena testowa Resend — Gmail jako From zwykle odpada (weryfikacja domeny).
-    if not raw:
+    # Resend odrzuca Gmail/Outlook jako From, jeśli domena nie jest zweryfikowana.
+    blocked = ("gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "yahoo.com")
+    host = raw.rsplit("@", 1)[-1].lower() if "@" in raw else ""
+    if not raw or host in blocked:
         raw = "onboarding@resend.dev"
     if "<" in raw:
         return raw

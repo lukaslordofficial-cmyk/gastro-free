@@ -43,6 +43,10 @@ def test_outbound_allows_https_public(monkeypatch):
 
 def test_redirect_allows_deep_link():
     assert assert_safe_redirect_url("myapp://billing/success").startswith("myapp://")
+    from url_safety import is_safe_app_return_url
+    assert is_safe_app_return_url("exp://10.0.0.1:8081/--/lp/success")
+    assert is_safe_app_return_url("myapp://lp/success")
+    assert not is_safe_app_return_url("https://evil.example/phish")
 
 
 def test_redirect_allows_localhost_http():

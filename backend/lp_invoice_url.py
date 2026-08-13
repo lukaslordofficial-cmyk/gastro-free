@@ -45,36 +45,42 @@ async def create_storage_signed_url(
         raise RuntimeError("Brak SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
 
     # Storage sign API: POST /storage/v1/object/sign/{bucket}/{path}
-    enc_path = "/".join(quote(seg, safe="") for seg in path.split("/"))
-    sign_url = f"{base}/storage/v1/object/sign/{quote(bucket, safe='')}/{enc_path}"
-
+    attempts = [
+        "/".join(quote(seg, safe="") for seg in path.split("/")),
+        "/".join(quote(seg, safe="/") for seg in path.split("/")),
+        path.lstrip("/"),
+    ]
     own = client is None
     http = client or httpx.AsyncClient(timeout=30.0, verify=verify)
+    last_msg = "Storage nie zwrócił signedURL"
     try:
-        r = await http.post(
-            sign_url,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "apikey": key,
-                "Content-Type": "application/json",
-            },
-            json={"expiresIn": int(expires_in)},
-        )
-        data = r.json() if r.content else {}
-        if r.status_code >= 400:
-            msg = data.get("message") or data.get("error") or r.text[:200]
-            raise RuntimeError(f"Storage sign failed: {msg}")
-        signed = data.get("signedURL") or data.get("signedUrl") or data.get("url")
-        if not signed:
-            raise RuntimeError("Storage nie zwrócił signedURL")
-        signed = str(signed)
-        if signed.startswith("http"):
-            return signed
-        if not signed.startswith("/"):
-            signed = "/" + signed
-        if signed.startswith("/storage/v1"):
-            return f"{base}{signed}"
-        return f"{base}/storage/v1{signed}"
+        for enc_path in attempts:
+            sign_url = f"{base}/storage/v1/object/sign/{quote(bucket, safe='')}/{enc_path}"
+            r = await http.post(
+                sign_url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "apikey": key,
+                    "Content-Type": "application/json",
+                },
+                json={"expiresIn": int(expires_in)},
+            )
+            data = r.json() if r.content else {}
+            if r.status_code >= 400:
+                last_msg = data.get("message") or data.get("error") or r.text[:200]
+                continue
+            signed = data.get("signedURL") or data.get("signedUrl") or data.get("url")
+            if not signed:
+                continue
+            signed = str(signed)
+            if signed.startswith("http"):
+                return signed
+            if not signed.startswith("/"):
+                signed = "/" + signed
+            if signed.startswith("/storage/v1"):
+                return f"{base}{signed}"
+            return f"{base}/storage/v1{signed}"
+        raise RuntimeError(f"Storage sign failed: {last_msg}")
     finally:
         if own:
             await http.aclose()

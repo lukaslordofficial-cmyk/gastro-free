@@ -25,9 +25,9 @@ import {
 } from '@/services/localProducers/checkoutClient';
 import { StripeOpeningOverlay } from '@/components/localProducers';
 import {
-  COURIER_DELIVERY_STUB_PLN,
   PLATFORM_FEE_RATE,
 } from '@/types/localProducers';
+import { quoteCourier } from '@/lib/localProducers/courierQuote';
 
 type Palette = {
   card: string;
@@ -62,7 +62,14 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
     [group?.subtotal_pln],
   );
   const platformFee = Math.round(producerAmount * PLATFORM_FEE_RATE * 100) / 100;
-  const delivery = COURIER_DELIVERY_STUB_PLN;
+  const courierQuote = useMemo(
+    () => quoteCourier((group?.items ?? []).map((it) => ({
+      quantity: Number(it.quantity) || 0,
+      unit: it.unit,
+    }))),
+    [group?.items],
+  );
+  const delivery = courierQuote.pricePln;
   const total = Math.round((producerAmount + delivery + platformFee) * 100) / 100;
 
   const pay = () => {
@@ -88,9 +95,10 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
           productId,
           quantity: Number(it.quantity) || 0,
           unitPrice: Number(it.unit_price_base) || 0,
+          unit: it.unit,
         };
       })
-      .filter((x): x is { productId: string; quantity: number; unitPrice: number } => !!x);
+      .filter((x): x is { productId: string; quantity: number; unitPrice: number; unit: string } => !!x);
 
     if (!items.length) {
       premiumAlert(

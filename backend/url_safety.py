@@ -227,7 +227,23 @@ def _allowed_redirect_hosts() -> set[str]:
     return hosts
 
 
-def assert_safe_redirect_url(url: str, *, allow_deep_link_schemes: tuple[str, ...] = ("myapp",)) -> str:
+def is_safe_app_return_url(url: str) -> bool:
+    """Deep link powrotu do apki (Expo Go / standalone) — nie http do obcych hostów."""
+    cleaned = (url or "").strip()
+    if not cleaned or len(cleaned) > 1024:
+        return False
+    parsed = urlparse(cleaned)
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "myapp":
+        return True
+    if scheme == "exp" or scheme.startswith("exp+"):
+        return True
+    if scheme in ("gastro-manager", "gastromanager"):
+        return True
+    return False
+
+
+def assert_safe_redirect_url(url: str, *, allow_deep_link_schemes: tuple[str, ...] = ("myapp", "exp")) -> str:
     """
     Allowlist dla Stripe success/cancel/return.
     Akceptuje deep linki aplikacji oraz http(s) na znanych hostach.

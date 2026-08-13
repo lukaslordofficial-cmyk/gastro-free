@@ -18,9 +18,9 @@ import type {
   UpdateLocalProducerInput,
 } from '@/types/localProducers';
 import {
-  COURIER_DELIVERY_STUB_PLN,
   PLATFORM_FEE_RATE,
 } from '@/types/localProducers';
+import { quoteCourier } from '@/lib/localProducers/courierQuote';
 
 export const LOCAL_PRODUCERS_TABLES = {
   producers: 'local_producers',
@@ -272,8 +272,13 @@ export async function createProducerOrder(
   const freeFrom = producer.free_delivery_from != null
     ? Number(producer.free_delivery_from)
     : null;
+  const quote = quoteCourier(input.items.map((i) => ({
+    quantity: i.quantity,
+    unit: i.unit,
+    weight_g: i.weight_g,
+  })));
   const deliveryCost =
-    freeFrom != null && producerAmount >= freeFrom ? 0 : COURIER_DELIVERY_STUB_PLN;
+    freeFrom != null && producerAmount >= freeFrom ? 0 : quote.pricePln;
   const totalPrice = Math.round((producerAmount + deliveryCost + platformFee) * 100) / 100;
 
   const shipPayload = {
@@ -304,6 +309,7 @@ export async function createProducerOrder(
     shipment_status: 'draft',
     order_status: 'pending',
     notes,
+    parcel_weight_kg: quote.weightKg,
   };
 
   let { data: order, error: orderErr } = await supabase
@@ -321,6 +327,7 @@ export async function createProducerOrder(
     delete withoutStatus.order_status;
     delete withoutStatus.delivery_cost;
     delete withoutStatus.producer_amount;
+    delete withoutStatus.parcel_weight_kg;
     let retry = await supabase
       .from(LOCAL_PRODUCERS_TABLES.orders)
       .insert(withoutStatus)

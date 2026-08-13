@@ -60,6 +60,26 @@ def _use_sandbox() -> bool:
     return raw in ("1", "true", "yes", "on", "sandbox", "test")
 
 
+def _use_mock() -> bool:
+    raw = (os.getenv("FURGONETKA_MOCK") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on", "mock"):
+        return True
+    # Sandbox bez danych OAuth — pełny flow testowy bez konta firmowego.
+    if _use_sandbox() and not _has_oauth_secrets():
+        return True
+    return False
+
+
+def _has_oauth_secrets() -> bool:
+    if (os.getenv("FURGONETKA_API_KEY") or os.getenv("FURGONETKA_ACCESS_TOKEN") or "").strip():
+        return True
+    email = (os.getenv("FURGONETKA_EMAIL") or os.getenv("FURGONETKA_USERNAME") or "").strip()
+    password = (os.getenv("FURGONETKA_PASSWORD") or "").strip()
+    cid = (os.getenv("FURGONETKA_CLIENT_ID") or "").strip()
+    secret = (os.getenv("FURGONETKA_CLIENT_SECRET") or "").strip()
+    return bool(email and password and cid and secret)
+
+
 def api_base() -> str:
     custom = (os.getenv("FURGONETKA_API_URL") or "").strip().rstrip("/")
     if custom:
@@ -73,13 +93,9 @@ def api_base() -> str:
 
 
 def furgonetka_configured() -> bool:
-    if (os.getenv("FURGONETKA_API_KEY") or os.getenv("FURGONETKA_ACCESS_TOKEN") or "").strip():
+    if _use_mock():
         return True
-    email = (os.getenv("FURGONETKA_EMAIL") or os.getenv("FURGONETKA_USERNAME") or "").strip()
-    password = (os.getenv("FURGONETKA_PASSWORD") or "").strip()
-    cid = (os.getenv("FURGONETKA_CLIENT_ID") or "").strip()
-    secret = (os.getenv("FURGONETKA_CLIENT_SECRET") or "").strip()
-    return bool(email and password and cid and secret)
+    return _has_oauth_secrets()
 
 
 def _basic_auth() -> str:
@@ -315,6 +331,15 @@ def _missing_party_fields(party: dict[str, Any], *, who: str) -> list[str]:
 
 
 async def download_label_pdf(package_id: str) -> bytes:
+    if str(package_id).startswith("mock-") or _use_mock():
+        return (
+            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+            b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>endobj\n"
+            b"xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n"
+            b"0000000058 00000 n \n0000000115 00000 n \ntrailer<</Size 4/Root 1 0 R>>\n"
+            b"startxref\n190\n%%EOF\n"
+        )
     page = (os.getenv("FURGONETKA_LABEL_PAGE") or "a6").lower()
     content = await _api(
         "GET",
@@ -549,6 +574,20 @@ async def sync_order_tracking(
         patch["shipping_error"] = None
 
     await _patch_order(client, sb_patch, oid, patch)
+    new_ship = str(patch.get("shipment_status") or "")
+    old_ship = str(order.get("shipment_status") or "")
+    if new_ship == "shipped" and old_ship != "shipped":
+        try:
+            from lp_stock import decrement_stock_for_shipped_order
+            await decrement_stock_for_shipped_order(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                order_id=oid,
+                producer_id=str(order.get("producer_id") or ""),
+            )
+        except Exception:
+            logger.exception("LP stock decrement on tracking shipped failed")
     return {
         "ok": True,
         "package_id": pid,
@@ -681,15 +720,16 @@ async def create_furgonetka_shipment(
     if not oid:
         raise ValueError("Brak order_id")
 
-    if not furgonetka_configured():
+    if not furgonetka_configured() and not _use_mock():
         await _save_shipping_error(
             client, sb_patch, oid,
-            "Furgonetka nie skonfigurowana (CLIENT_ID/SECRET + EMAIL/PASSWORD na Railway).",
+            "Furgonetka nie skonfigurowana (CLIENT_ID/SECRET + EMAIL/PASSWORD na Railway) "
+            "albo ustaw FURGONETKA_SANDBOX=1 i FURGONETKA_MOCK=1 do testów.",
         )
         return {
             "ok": False,
             "stub": True,
-            "error": "Furgonetka nie skonfigurowana (FURGONETKA_EMAIL + PASSWORD + CLIENT_*).",
+            "error": "Furgonetka nie skonfigurowana — sandbox: FURGONETKA_SANDBOX=1 FURGONETKA_MOCK=1.",
         }
 
     rows = await sb_get(
@@ -718,6 +758,10 @@ async def create_furgonetka_shipment(
             return {"ok": False, "already": True, "package_id": existing, "error": str(e)[:300]}
 
     try:
+        if _use_mock():
+            return await _create_mock_shipment(
+                client=client, sb_get=sb_get, sb_patch=sb_patch, order=order,
+            )
         return await _create_new_shipment(
             client=client, sb_get=sb_get, sb_patch=sb_patch, order=order,
         )
@@ -725,6 +769,87 @@ async def create_furgonetka_shipment(
         logger.exception("create_furgonetka_shipment failed")
         await _save_shipping_error(client, sb_patch, oid, str(e)[:500])
         return {"ok": False, "error": str(e)[:400]}
+
+
+async def _create_mock_shipment(
+    *,
+    client: httpx.AsyncClient,
+    sb_get,
+    sb_patch,
+    order: dict[str, Any],
+) -> dict[str, Any]:
+    """Pełny flow bez konta firmowego Furgonetka — etykieta + tracking testowy."""
+    from datetime import datetime, timezone, timedelta
+
+    oid = str(order.get("id"))
+    items, products = await _load_order_products(client, sb_get, oid)
+    weight_kg = estimate_order_weight_kg(items, products)
+    parcels_full = parcels_for_weight_kg(weight_kg)
+    package_id = f"mock-{oid[:8]}-{uuid.uuid4().hex[:8]}"
+    tracking = f"MOCK{oid[:8].upper()}PL"
+    pickup_day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    label_ref = None
+    try:
+        from lp_invoice_url import DEFAULT_DOCS_BUCKET, upload_private_bytes
+
+        pdf = (
+            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+            b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>endobj\n"
+            b"xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n"
+            b"0000000058 00000 n \n0000000115 00000 n \ntrailer<</Size 4/Root 1 0 R>>\n"
+            b"startxref\n190\n%%EOF\n"
+        )
+        path = f"labels/{order.get('producer_id') or 'unknown'}/{oid}.pdf"
+        label_ref = await upload_private_bytes(
+            bucket=DEFAULT_DOCS_BUCKET,
+            path=path,
+            content=pdf,
+            content_type="application/pdf",
+            verify=_ssl_verify(),
+        )
+    except Exception as e:
+        logger.info("mock label upload skipped: %s", e)
+
+    patch = {
+        "furgonetka_package_id": package_id,
+        "broker_package_id": package_id,
+        "broker_name": "furgonetka-sandbox",
+        "broker_label_ready": True,
+        "shipment_status": "preparing",
+        "order_status": "awaiting_courier",
+        "tracking_state": "ordered",
+        "parcel_weight_kg": weight_kg,
+        "courier_name": "inpost",
+        "delivery_tracking": tracking,
+        "pickup_date": pickup_day,
+        "pickup_min_time": "10:00",
+        "pickup_max_time": "18:00",
+        "shipping_error": None,
+    }
+    if label_ref:
+        patch["label_storage_path"] = label_ref
+    await _patch_order(client, sb_patch, oid, patch)
+    return {
+        "ok": True,
+        "stub": False,
+        "mock": True,
+        "sandbox": True,
+        "furgonetka_package_id": package_id,
+        "package_id": package_id,
+        "tracking": tracking,
+        "ordered": True,
+        "weight_kg": weight_kg,
+        "parcels": parcels_full,
+        "pickup": {
+            "pickup_date": pickup_day,
+            "pickup_min_time": "10:00",
+            "pickup_max_time": "18:00",
+        },
+        "label_storage_path": label_ref,
+        "courier_name": "inpost",
+        "prepaid_note": "Tryb testowy (FURGONETKA_MOCK / SANDBOX) — kurier nie jedzie na serio.",
+    }
 
 
 async def _create_new_shipment(

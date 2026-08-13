@@ -51,6 +51,7 @@ from url_safety import (
     build_supabase_auth_admin_url,
     build_supabase_auth_user_url,
     build_supabase_rest_url,
+    is_safe_app_return_url,
 )
 from supabase_rest import (
     configure as _configure_supabase_rest,
@@ -15260,6 +15261,7 @@ class LpCheckoutRequest(BaseModel):
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
     idempotency_key: Optional[str] = None
+    app_return_url: Optional[str] = None
 
 
 class LpConfirmRequest(BaseModel):
@@ -15282,11 +15284,13 @@ class LpShipmentRequest(BaseModel):
 async def local_producers_commerce_status():
     from billing_stripe import stripe_configured
     from local_producers_commerce import inpost_configured
-    from furgonetka_broker import furgonetka_configured
+    from furgonetka_broker import furgonetka_configured, _use_mock, _use_sandbox
     return {
         "ok": True,
         "stripe_configured": stripe_configured(),
         "furgonetka_configured": furgonetka_configured(),
+        "furgonetka_sandbox": _use_sandbox() or _use_mock(),
+        "furgonetka_mock": _use_mock(),
         "inpost_configured": inpost_configured(),
         "courier_broker": "furgonetka" if furgonetka_configured() else ("inpost_shipx" if inpost_configured() else None),
         "payment_methods": ["card", "blik"],
@@ -15313,33 +15317,37 @@ async def local_producers_checkout(req: LpCheckoutRequest):
         raise HTTPException(status_code=400, detail="Brak order_id")
 
     account_key = get_account_key()
-    # Stripe wymaga http(s). Strona na API robi deep link myapp:// — NIE Expo localhost:8081.
+    # Stripe wymaga http(s). Strona na API robi deep link — NIE Expo localhost:8081.
     public = checkout_redirect_public_base()
+    app_ret = (req.app_return_url or "").strip()
+    app_q = ""
+    if app_ret and is_safe_app_return_url(app_ret):
+        from urllib.parse import quote as _q
+        app_q = f"&app={_q(app_ret, safe='')}"
     success = (
         req.success_url
         or os.getenv("LP_BILLING_SUCCESS_URL")
-        or f"{public}/api/local-producers/billing-return?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+        or f"{public}/api/local-producers/billing-return?status=success&session_id={{CHECKOUT_SESSION_ID}}{app_q}"
     ).strip()
     cancel = (
         req.cancel_url
         or os.getenv("LP_BILLING_CANCEL_URL")
         or f"{public}/api/local-producers/billing-return?status=cancel"
     ).strip()
-    if success.startswith("myapp://"):
-        success = (
-            f"{public}/api/local-producers/billing-return"
-            f"?status=success&session_id={{CHECKOUT_SESSION_ID}}"
-        )
-    if cancel.startswith("myapp://"):
-        cancel = f"{public}/api/local-producers/billing-return?status=cancel"
+    billing_ok = (
+        f"{public}/api/local-producers/billing-return"
+        f"?status=success&session_id={{CHECKOUT_SESSION_ID}}{app_q}"
+    )
+    billing_cancel = f"{public}/api/local-producers/billing-return?status=cancel{app_q}"
+    if success.startswith("myapp://") or success.startswith("exp://") or success.startswith("exp+"):
+        success = billing_ok
+    if cancel.startswith("myapp://") or cancel.startswith("exp://") or cancel.startswith("exp+"):
+        cancel = billing_cancel
     # Env czasem ma PUBLIC_APP_URL=http://localhost:8081 — na telefonie pada.
     if "localhost" in success or "127.0.0.1" in success:
-        success = (
-            f"{public}/api/local-producers/billing-return"
-            f"?status=success&session_id={{CHECKOUT_SESSION_ID}}"
-        )
+        success = billing_ok
     if "localhost" in cancel or "127.0.0.1" in cancel:
-        cancel = f"{public}/api/local-producers/billing-return?status=cancel"
+        cancel = billing_cancel
     success = assert_safe_redirect_url(success)
     cancel = assert_safe_redirect_url(cancel)
 
@@ -15427,51 +15435,70 @@ async def local_producers_checkout(req: LpCheckoutRequest):
 async def local_producers_billing_return(
     status: str = "success",
     session_id: str = "",
+    app: str = "",
 ):
     """
-    Stripe success/cancel (http/https) → HTML z deep linkiem myapp://lp/...
-    Bez tej strony telefon ląduje na localhost Expo i pokazuje „witryna nieosiągalna”.
+    Stripe success/cancel (http/https) → HTML z deep linkiem.
+    Expo Go nie obsługuje myapp:// — wtedy używamy `app` z Linking.createURL.
     """
     from html import escape
-    from urllib.parse import quote
+    from urllib.parse import quote, unquote
     from fastapi.responses import HTMLResponse
 
     ok = (status or "").strip().lower() in ("success", "ok", "paid")
     sid = (session_id or "").strip()
+    suffix = f"?session_id={quote(sid, safe='')}" if sid.startswith("cs_") else ""
     if ok:
-        deep = "myapp://lp/success"
-        if sid.startswith("cs_"):
-            deep = f"{deep}?session_id={quote(sid, safe='')}"
+        deep = f"myapp://lp/success{suffix}"
         title = "Płatność zrealizowana"
-        hint = "Wracamy do aplikacji Gastro Manager…"
+        hint = "Wracamy do Gastro Manager. Jeśli nic się nie dzieje — kliknij przycisk poniżej."
     else:
         deep = "myapp://lp/cancel"
         title = "Płatność anulowana"
         hint = "Możesz wrócić do aplikacji i spróbować ponownie."
 
+    app_url = unquote((app or "").strip())
+    if app_url and is_safe_app_return_url(app_url):
+        joiner = "&" if "?" in app_url else "?"
+        if ok and sid.startswith("cs_") and "session_id=" not in app_url:
+            app_url = f"{app_url}{joiner}session_id={quote(sid, safe='')}"
+        primary = app_url
+    else:
+        primary = deep
+
+    safe_primary = escape(primary, quote=True)
     safe_deep = escape(deep, quote=True)
     html = f"""<!DOCTYPE html>
 <html lang="pl"><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<meta http-equiv="refresh" content="0;url={safe_deep}"/>
 <title>{escape(title)}</title>
 <style>
 body{{font-family:system-ui,sans-serif;background:#0A120E;color:#F5F5F5;
 display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:24px;text-align:center}}
-a{{color:#00FF88;font-weight:700;display:inline-block;margin:8px}}
-p{{opacity:.75;line-height:1.45}}
+a.btn{{color:#0A120E;background:#00FF88;font-weight:800;display:inline-block;margin:12px 0;
+padding:14px 22px;border-radius:12px;text-decoration:none}}
+a.alt{{color:#00FF88;display:inline-block;margin:8px}}
+p{{opacity:.8;line-height:1.5;max-width:28rem}}
 </style></head><body>
 <div>
 <h1 style="font-size:1.35rem;margin:0 0 12px">{escape(title)}</h1>
 <p>{escape(hint)}</p>
-<p style="margin-top:20px"><a href="{safe_deep}">Otwórz aplikację</a></p>
+<p style="margin-top:20px"><a class="btn" id="open-app" href="{safe_primary}">Wróć do aplikacji</a></p>
+<p><a class="alt" href="{safe_deep}">Otwórz zainstalowaną aplikację</a></p>
 </div>
 <script>
 (function(){{
-  var deep = {json.dumps(deep)};
-  try {{ window.location.replace(deep); }} catch (e) {{}}
-  setTimeout(function(){{ try {{ window.location.href = deep; }} catch (e) {{}} }}, 250);
+  var urls = [{json.dumps(primary)}, {json.dumps(deep)}];
+  function go(u){{ try {{ window.location.href = u; }} catch (e) {{}} }}
+  go(urls[0]);
+  setTimeout(function(){{ go(urls[0]); }}, 200);
+  setTimeout(function(){{ if (urls[1] && urls[1] !== urls[0]) go(urls[1]); }}, 900);
+  var a = document.getElementById('open-app');
+  if (a) a.addEventListener('click', function(ev){{
+    ev.preventDefault();
+    go(urls[0]);
+  }});
 }})();
 </script>
 </body></html>"""
@@ -15553,6 +15580,17 @@ async def local_producers_mark_handed_to_courier(order_id: str, request: Request
                 "shipment_status": "shipped",
                 "order_status": "shipped",
             })
+            try:
+                from lp_stock import decrement_stock_for_shipped_order
+                await decrement_stock_for_shipped_order(
+                    client=client,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
+                    order_id=oid,
+                    producer_id=str(order.get("producer_id") or ""),
+                )
+            except Exception:
+                logger.exception("LP stock decrement on mark-handed failed")
 
         tracking = (order.get("delivery_tracking") or "").strip()
         company = (producer.get("company_name") or "Lokalny przetwórca").strip()
@@ -15799,8 +15837,7 @@ async def producer_order_retry_shipment(order_id: str, request: Request):
 async def producer_order_invoice_url(order_id: str, request: Request):
     """
     Podpisany HTTPS URL do faktury.
-    WWW zapisuje invoice_url jako ``producer-documents:path`` (prywatny Storage) —
-    apka nie może tego otworzyć przez Linking.openURL bez podpisu.
+    WWW zapisuje invoice_url jako ``producer-documents:path`` (prywatny Storage).
     """
     from lp_invoice_url import resolve_order_invoice_url
 
@@ -15812,36 +15849,48 @@ async def producer_order_invoice_url(order_id: str, request: Request):
     account_key = get_account_key()
 
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        orders = await sb_get(client, "producer_orders", params={
-            "select": (
-                "id,producer_id,restaurant_account_key,"
-                "invoice_url,settlement_invoice_url,invoice_file_url"
-            ),
-            "id": f"eq.{oid}",
-            "limit": "1",
-        })
-        if not orders:
-            # Starszy schemat bez settlement_invoice_url
-            orders = await sb_get(client, "producer_orders", params={
-                "select": "id,producer_id,restaurant_account_key,invoice_url",
-                "id": f"eq.{oid}",
+        order = None
+        last_err = None
+        for select in (
+            "id,producer_id,restaurant_account_key,restaurant_id,invoice_url,settlement_invoice_url,invoice_file_url",
+            "id,producer_id,restaurant_account_key,restaurant_id,invoice_url",
+            "id,producer_id,restaurant_account_key,invoice_url",
+            "*",
+        ):
+            try:
+                orders = await sb_get(client, "producer_orders", params={
+                    "select": select,
+                    "id": f"eq.{oid}",
+                    "limit": "1",
+                })
+                if orders:
+                    order = orders[0]
+                    break
+            except Exception as e:
+                last_err = e
+                continue
+        if not order:
+            logger.warning("LP invoice order fetch failed: %s", last_err)
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+
+        producers = []
+        try:
+            producers = await sb_get(client, "local_producers", params={
+                "select": "id,auth_user_id",
+                "id": f"eq.{order.get('producer_id')}",
                 "limit": "1",
             })
-        if not orders:
-            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
-        order = orders[0]
-
-        producers = await sb_get(client, "local_producers", params={
-            "select": "id,auth_user_id",
-            "id": f"eq.{order.get('producer_id')}",
-            "limit": "1",
-        })
+        except Exception:
+            producers = []
         owner = ((producers or [{}])[0].get("auth_user_id") or "").strip()
         is_owner = bool(uid and owner and uid == owner)
         is_restaurant = bool(
-            order.get("restaurant_account_key")
-            and order.get("restaurant_account_key") == account_key
-            and account_key != "default"
+            (
+                order.get("restaurant_account_key")
+                and order.get("restaurant_account_key") == account_key
+                and account_key != "default"
+            )
+            or (uid and order.get("restaurant_id") and str(order.get("restaurant_id")) == str(uid))
         )
         if not (is_owner or is_restaurant):
             raise HTTPException(status_code=403, detail="Brak dostępu do faktury tego zamówienia")
@@ -15852,7 +15901,10 @@ async def producer_order_invoice_url(order_id: str, request: Request):
             )
         except Exception as e:
             logger.exception("LP invoice signed URL failed")
-            raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+            raise HTTPException(
+                status_code=502,
+                detail=f"Nie udało się otworzyć faktury: {str(e)[:240]}",
+            ) from e
 
     if not url:
         raise HTTPException(status_code=404, detail="Brak faktury dla tego zamówienia")

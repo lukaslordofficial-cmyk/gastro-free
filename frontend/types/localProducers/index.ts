@@ -206,7 +206,13 @@ export type ProducerDeliveryAddress = {
 
 export type CreateProducerOrderInput = {
   producerId: string;
-  items: { productId: string; quantity: number; unitPrice: number }[];
+  items: {
+    productId: string;
+    quantity: number;
+    unitPrice: number;
+    unit?: string | null;
+    weight_g?: number | null;
+  }[];
   /** Adres dostawy do restauracji (kurier InPost). */
   delivery: ProducerDeliveryAddress;
   notes?: string | null;
@@ -280,5 +286,5 @@ export const LOCAL_PRODUCERS_STORAGE_BUCKETS = {
 
 /** Opłata serwisu platformy (5% od wartości produktów). */
 export const PLATFORM_FEE_RATE = 0.05;
-/** Koszt kuriera InPost (PLN) — w Checkout jako osobna pozycja. */
-export const COURIER_DELIVERY_STUB_PLN = 15;
+/** Fallback gdy brak wagi produktów (nie używaj do checkoutu). */
+export const COURIER_DELIVERY_STUB_PLN = 15.99;

@@ -737,40 +737,11 @@ async def apply_paid_producer_checkout_session(
             return {"ok": False, "error": str(e)[:300]}
 
     async def _run_fulfillment(http: httpx.AsyncClient) -> tuple[Any, Any]:
-        receiver = await _resolve_receiver(
-            client=http,
-            sb_get=sb_get,
-            order=order,
-            account_key=account_key,
-        )
-        ship_res = None
-        try:
-            from furgonetka_broker import create_furgonetka_shipment, furgonetka_configured
-
-            if furgonetka_configured():
-                ship_res = await create_furgonetka_shipment(
-                    str(order.get("id") or order_id),
-                    client=http,
-                    sb_get=sb_get,
-                    sb_patch=sb_patch,
-                )
-            else:
-                ship_res = await create_inpost_shipment(
-                    client=http,
-                    sb_get=sb_get,
-                    sb_patch=sb_patch,
-                    order=order,
-                    producer=producer,
-                    receiver=receiver,
-                )
-        except Exception as e:
-            logger.exception("Courier broker after pay failed")
-            ship_res = {"ok": False, "error": str(e)[:300]}
-
+        # Kurier dopiero gdy przetwórca kliknie „gotowe” w panelu WWW.
         notify_res = await _run_notify(http)
-        return ship_res, notify_res
+        return {"ok": True, "deferred_until_ready": True}, notify_res
 
-    # Jedna ścieżka: kurier po pierwszym paid; notify zawsze (idempotentny).
+    # Powiadom dystrybutora po paid; przesyłkę zleca panel („Oznacz jako gotowe”).
     if not paid.get("already_paid"):
         if defer_fulfillment:
             import asyncio

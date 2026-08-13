@@ -36,9 +36,9 @@ import {
   formatShippingDays,
 } from '@/lib/localProducers/formatProducer';
 import {
-  COURIER_DELIVERY_STUB_PLN,
   PLATFORM_FEE_RATE,
 } from '@/types/localProducers';
+import { quoteCourier } from '@/lib/localProducers/courierQuote';
 import {
   openProducerOrderCheckout,
 } from '@/services/localProducers/checkoutClient';
@@ -65,6 +65,7 @@ export function ProducerDetailScreen() {
     addToCart,
     setQty,
     placeOrder,
+    categories,
   } = useProducerDetail(producerId);
 
   const [busy, setBusy] = useState(false);
@@ -94,10 +95,39 @@ export function ProducerDetailScreen() {
     const freeFrom = producer?.free_delivery_from != null
       ? Number(producer.free_delivery_from)
       : null;
-    const delivery = freeFrom != null && cartTotal >= freeFrom ? 0 : COURIER_DELIVERY_STUB_PLN;
+    const quote = quoteCourier(cart.map((l) => ({
+      quantity: l.quantity,
+      unit: l.product.unit,
+      weight_g: l.product.weight_g,
+    })));
+    const delivery = freeFrom != null && cartTotal >= freeFrom ? 0 : quote.pricePln;
     const total = Math.round((cartTotal + fee + delivery) * 100) / 100;
-    return { fee, delivery, total };
-  }, [cartTotal, producer?.free_delivery_from]);
+    return { fee, delivery, total, weightKg: quote.weightKg };
+  }, [cart, cartTotal, producer?.free_delivery_from]);
+
+  const productsByCategory = useMemo(() => {
+    const catName = (id: string | null) =>
+      categories.find((c) => c.id === id)?.name || 'Inne';
+    const groups: { key: string; title: string; items: typeof products }[] = [];
+    const seen = new Map<string, number>();
+    for (const p of products) {
+      const title = catName(p.category_id);
+      const key = p.category_id || '_inne';
+      const idx = seen.get(key);
+      if (idx == null) {
+        seen.set(key, groups.length);
+        groups.push({ key, title, items: [p] });
+      } else {
+        groups[idx].items.push(p);
+      }
+    }
+    groups.sort((a, b) => {
+      const sa = categories.find((c) => c.id === a.key)?.sort_order ?? 999;
+      const sb = categories.find((c) => c.id === b.key)?.sort_order ?? 999;
+      return sa - sb || a.title.localeCompare(b.title, 'pl');
+    });
+    return groups;
+  }, [products, categories]);
 
   const openCheckoutSheet = () => {
     if (!cart.length) {
@@ -267,58 +297,63 @@ export function ProducerDetailScreen() {
                 Brak dostępnych produktów (available = true).
               </Text>
             ) : (
-              products.map((p) => {
-                const line = cart.find((c) => c.product.id === p.id);
-                return (
-                  <View
-                    key={p.id}
-                    style={[styles.productCard, { backgroundColor: cardBg, borderColor: border }]}
-                  >
-                    {p.image_url ? (
-                      <Image source={{ uri: p.image_url }} style={styles.productImg} />
-                    ) : (
-                      <View style={[styles.productImg, styles.productImgPlaceholder]}>
-                        <Package size={22} color={muted} />
-                      </View>
-                    )}
-                    <View style={styles.productBody}>
-                      <Text style={[styles.productTitle, { color: titleColor }]} numberOfLines={2}>
-                        {p.title}
-                      </Text>
-                      <Text style={{ color: muted, fontSize: 12 }}>
-                        {formatPlnNumber(Number(p.price))} zł / {p.unit}
-                        {p.stock != null ? ` · stan ${p.stock}` : ''}
-                      </Text>
-                      {line ? (
-                        <View style={styles.qtyRow}>
-                          <TouchableOpacity
-                            onPress={() => setQty(p.id, line.quantity - 1)}
-                            style={[styles.qtyBtn, { borderColor: border }]}
-                          >
-                            <Text style={{ color: titleColor, fontWeight: '700' }}>−</Text>
-                          </TouchableOpacity>
-                          <Text style={{ color: titleColor, fontWeight: '700', minWidth: 24, textAlign: 'center' }}>
-                            {line.quantity}
+              productsByCategory.map((group) => (
+                <View key={group.key}>
+                  <Text style={[styles.catTitle, { color: accent }]}>{group.title}</Text>
+                  {group.items.map((p) => {
+                    const line = cart.find((c) => c.product.id === p.id);
+                    return (
+                      <View
+                        key={p.id}
+                        style={[styles.productCard, { backgroundColor: cardBg, borderColor: border }]}
+                      >
+                        {p.image_url ? (
+                          <Image source={{ uri: p.image_url }} style={styles.productImg} />
+                        ) : (
+                          <View style={[styles.productImg, styles.productImgPlaceholder]}>
+                            <Package size={22} color={muted} />
+                          </View>
+                        )}
+                        <View style={styles.productBody}>
+                          <Text style={[styles.productTitle, { color: titleColor }]} numberOfLines={2}>
+                            {p.title}
                           </Text>
-                          <TouchableOpacity
-                            onPress={() => setQty(p.id, line.quantity + 1)}
-                            style={[styles.qtyBtn, { borderColor: border }]}
-                          >
-                            <Text style={{ color: titleColor, fontWeight: '700' }}>+</Text>
-                          </TouchableOpacity>
+                          <Text style={{ color: muted, fontSize: 12 }}>
+                            {formatPlnNumber(Number(p.price))} zł / {p.unit}
+                            {p.stock != null ? ` · stan ${p.stock}` : ''}
+                          </Text>
+                          {line ? (
+                            <View style={styles.qtyRow}>
+                              <TouchableOpacity
+                                onPress={() => setQty(p.id, line.quantity - 1)}
+                                style={[styles.qtyBtn, { borderColor: border }]}
+                              >
+                                <Text style={{ color: titleColor, fontWeight: '700' }}>−</Text>
+                              </TouchableOpacity>
+                              <Text style={{ color: titleColor, fontWeight: '700', minWidth: 24, textAlign: 'center' }}>
+                                {line.quantity}
+                              </Text>
+                              <TouchableOpacity
+                                onPress={() => setQty(p.id, line.quantity + 1)}
+                                style={[styles.qtyBtn, { borderColor: border }]}
+                              >
+                                <Text style={{ color: titleColor, fontWeight: '700' }}>+</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ) : (
+                            <TouchableOpacity
+                              onPress={() => addToCart(p, 1)}
+                              style={[styles.addBtn, { backgroundColor: accent }]}
+                            >
+                              <Text style={styles.addBtnText}>Do koszyka</Text>
+                            </TouchableOpacity>
+                          )}
                         </View>
-                      ) : (
-                        <TouchableOpacity
-                          onPress={() => addToCart(p, 1)}
-                          style={[styles.addBtn, { backgroundColor: accent }]}
-                        >
-                          <Text style={styles.addBtnText}>Do koszyka</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  </View>
-                );
-              })
+                      </View>
+                    );
+                  })}
+                </View>
+              ))
             )}
           </ScrollView>
 
@@ -374,7 +409,7 @@ export function ProducerDetailScreen() {
                 <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
                   <Text style={{ color: muted, fontSize: 13, lineHeight: 19, marginBottom: 12 }}>
                     {`Produkty: ${formatPlnNumber(cartTotal)} zł\n`}
-                    {`Kurier InPost: ${formatPlnNumber(feeBreakdown.delivery)} zł\n`}
+                    {`Kurier InPost (~${feeBreakdown.weightKg} kg): ${formatPlnNumber(feeBreakdown.delivery)} zł\n`}
                     {`Opłata serwisu (5%): ${formatPlnNumber(feeBreakdown.fee)} zł\n`}
                     {`Razem: ${formatPlnNumber(feeBreakdown.total)} zł`}
                   </Text>
@@ -477,6 +512,14 @@ const styles = StyleSheet.create({
   sectionLabel: { marginTop: 10, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
   desc: { marginTop: 8, fontSize: 13, lineHeight: 18 },
   productsTitle: { fontSize: 16, fontWeight: '800', marginTop: 4 },
+  catTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    marginTop: 14,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
   productCard: {
     flexDirection: 'row',
     gap: 12,

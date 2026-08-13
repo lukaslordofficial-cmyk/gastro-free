@@ -6,6 +6,7 @@ import * as localProducersService from '@/services/localProducers';
 import type {
   LocalProducer,
   ProducerCartLine,
+  ProducerCategory,
   ProducerDeliveryAddress,
   ProducerOrder,
   ProducerProduct,
@@ -17,6 +18,7 @@ export function useProducerDetail(producerId: string | undefined) {
   const { coords } = useRestaurantLocation();
   const [producer, setProducer] = useState<LocalProducer | null>(null);
   const [products, setProducts] = useState<ProducerProduct[]>([]);
+  const [categories, setCategories] = useState<ProducerCategory[]>([]);
   const [cart, setCart] = useState<ProducerCartLine[]>([]);
   const [loading, setLoading] = useState(true);
   const [ordering, setOrdering] = useState(false);
@@ -27,12 +29,14 @@ export function useProducerDetail(producerId: string | undefined) {
     setLoading(true);
     setError(null);
     try {
-      const [p, prods] = await Promise.all([
+      const [p, prods, cats] = await Promise.all([
         localProducersService.getLocalProducer(producerId),
         localProducersService.listLocalProducerProducts(producerId),
+        localProducersService.listProducerCategories().catch(() => []),
       ]);
       setProducer(p);
       setProducts(prods);
+      setCategories(cats);
       if (!p) setError('Producent niedostępny (niezatwierdzony lub nieaktywny).');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Błąd ładowania producenta');
@@ -110,6 +114,8 @@ export function useProducerDetail(producerId: string | undefined) {
             productId: l.product.id,
             quantity: l.quantity,
             unitPrice: Number(l.product.price),
+            unit: l.product.unit,
+            weight_g: l.product.weight_g,
           })),
         });
         clearCart();
@@ -124,6 +130,7 @@ export function useProducerDetail(producerId: string | undefined) {
   return {
     producer,
     products,
+    categories,
     cart,
     cartTotal,
     cartCount: cart.reduce((s, l) => s + l.quantity, 0),

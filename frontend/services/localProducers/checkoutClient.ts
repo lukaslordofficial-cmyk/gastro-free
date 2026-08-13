@@ -50,6 +50,7 @@ export async function openProducerOrderCheckout(
     body: JSON.stringify({
       order_id: orderId,
       idempotency_key: `lp_${orderId}_${Date.now()}`,
+      app_return_url: Linking.createURL('/lp/success'),
     }),
   });
   const data = await res.json().catch(() => ({}));

@@ -42,7 +42,14 @@
         "android.permission.VIBRATE",
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
-      "package": "com.emergent.gastrovision.pkqz88"
+      "package": "com.emergent.gastrovision.pkqz88",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [{ "scheme": "myapp", "host": "lp" }]
+        }
+      ]
     },
     "web": {
       "bundler": "metro",

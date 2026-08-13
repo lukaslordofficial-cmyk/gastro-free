@@ -1144,8 +1144,8 @@ export default function MenuScreen() {
   }, [grouped]);
 
   const dishThumbByName = useMemo(
-    () => assignUniqueDishImageSources(filtered.map((d) => ({ name: d.name, category: d.category }))),
-    [filtered],
+    () => assignUniqueDishImageSources(dishes.map((d) => ({ name: d.name, category: d.category }))),
+    [dishes],
   );
 
   const [customImageTick, setCustomImageTick] = useState(0);
@@ -1854,8 +1854,7 @@ export default function MenuScreen() {
             }
             renderItem={renderMenuRow}
             getItemType={(item) => item.type}
-            drawDistance={320}
-            extraData={dishThumbByName}
+            drawDistance={180}
             style={styles.scroll}
             contentContainerStyle={[styles.content, { paddingTop: 0, paddingHorizontal: DS.space.screen, flexGrow: 1 }]}
             keyboardShouldPersistTaps="handled"

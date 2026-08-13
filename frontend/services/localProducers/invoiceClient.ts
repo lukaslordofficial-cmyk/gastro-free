@@ -1,9 +1,8 @@
 /**
- * Rachunek / faktura LP — strumień z API (nie otwieranie pliku z dysku / signed URL).
+ * Rachunek / faktura LP — strumień z API.
+ * Native FileSystem/Sharing ładujemy dopiero przy pobraniu (nie przy wejściu w marketplace).
  */
 import { Platform } from 'react-native';
-import * as FileSystem from 'expo-file-system/legacy';
-import * as Sharing from 'expo-sharing';
 import { getAccountKey } from '@/lib/accountKey';
 import { supabase } from '@/lib/supabase';
 
@@ -38,7 +37,6 @@ function filenameFromDisposition(header: string | null, fallback: string): strin
   return (plain?.[1] || fallback).trim();
 }
 
-/** Czy surowy ref da się otworzyć bez API (tylko prawdziwy http/https). */
 export function isDirectHttpInvoiceUrl(raw: string): boolean {
   const u = (raw || '').trim().toLowerCase();
   return u.startsWith('https://') || u.startsWith('http://');
@@ -80,10 +78,34 @@ export async function fetchProducerOrderInvoiceUrl(orderId: string): Promise<{
   }
 }
 
-/**
- * Pobiera PDF z GET /api/local-producers/orders/{id}/invoice
- * (wygenerowany w locie albo z prywatnego Storage).
- */
+function triggerBrowserDownload(blob: Blob, filename: string) {
+  const g = globalThis as typeof globalThis & {
+    document?: {
+      createElement: (tag: string) => {
+        href: string;
+        download: string;
+        rel: string;
+        click: () => void;
+        remove: () => void;
+      };
+      body?: { appendChild: (el: unknown) => void };
+    };
+    URL?: { createObjectURL: (b: Blob) => string; revokeObjectURL: (u: string) => void };
+  };
+  if (!g.document?.createElement || !g.URL?.createObjectURL) {
+    throw new Error('Pobieranie PDF niedostępne w tej przeglądarce.');
+  }
+  const url = g.URL.createObjectURL(blob);
+  const a = g.document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  g.document.body?.appendChild(a);
+  a.click();
+  a.remove();
+  g.URL.revokeObjectURL(url);
+}
+
 export async function downloadProducerOrderInvoice(orderId: string): Promise<{
   ok: boolean;
   message: string;
@@ -111,18 +133,20 @@ export async function downloadProducerOrderInvoice(orderId: string): Promise<{
               : data.message || `Nie udało się pobrać rachunku (${res.status})`,
         };
       }
-      const blob = await res.blob();
-      const name = filenameFromDisposition(res.headers.get('content-disposition'), fallbackName);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = name;
-      a.rel = 'noopener';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      triggerBrowserDownload(
+        await res.blob(),
+        filenameFromDisposition(res.headers.get('content-disposition'), fallbackName),
+      );
       return { ok: true, message: 'OK' };
+    }
+
+    let FileSystem: typeof import('expo-file-system/legacy');
+    let Sharing: typeof import('expo-sharing');
+    try {
+      FileSystem = require('expo-file-system/legacy');
+      Sharing = require('expo-sharing');
+    } catch {
+      return { ok: false, message: 'Brak modułu zapisu plików na tym urządzeniu.' };
     }
 
     const dest = `${FileSystem.cacheDirectory || ''}${fallbackName}`;

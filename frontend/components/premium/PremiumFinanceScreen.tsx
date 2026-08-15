@@ -627,9 +627,9 @@ export function PremiumFinanceScreen(props: Props) {
             >
               <FileDown size={16} color={PremiumColors.neon} strokeWidth={2.4} />
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={styles.pdfExportTitle}>Pobierz raport PDF</Text>
+                <Text style={styles.pdfExportTitle}>Pobierz raport (PDF / Excel)</Text>
                 <Text style={styles.pdfExportSub}>
-                  Zyski albo dostawy/zakupy · wybór zakresu dat
+                  Zbiorczy, zyski lub dostawy · wybór zakresu dat
                 </Text>
               </View>
               <ChevronRight size={16} color={PremiumColors.textMuted} />

@@ -1,5 +1,5 @@
 /**
- * Modal eksportu PDF z Finanse: typ raportu + zakres dat.
+ * Modal eksportu raportów Finanse: typ + zakres dat + PDF / Excel.
  */
 import React, { useMemo, useState } from 'react';
 import {
@@ -11,14 +11,16 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  ScrollView,
 } from 'react-native';
-import { FileDown, X } from 'lucide-react-native';
+import { FileDown, FileSpreadsheet, X } from 'lucide-react-native';
 import { PremiumColors, PremiumTokens, DS } from '@/constants/premiumTheme';
 import { ExpiryDateField } from '@/components/ExpiryDateField';
 import {
   generateAndShareFinancePdf,
   type FinancePdfReportKind,
 } from '@/services/financeReportPdf';
+import { generateAndShareFinanceExcel } from '@/services/financeReportExcel';
 
 type Props = {
   visible: boolean;
@@ -26,6 +28,8 @@ type Props = {
   /** Domyślny miesiąc panelu YYYY-MM — ustawia zakres na cały ten miesiąc. */
   defaultMonth?: string;
 };
+
+type ExportFormat = 'pdf' | 'excel';
 
 function monthBounds(ym: string | undefined): { from: string; to: string } {
   const m = /^(\d{4})-(\d{2})$/.exec(ym || '');
@@ -40,6 +44,12 @@ function monthBounds(ym: string | undefined): { from: string; to: string } {
 
 const KINDS: { key: FinancePdfReportKind; title: string; subtitle: string }[] = [
   {
+    key: 'comprehensive',
+    title: 'Raport zbiorczy',
+    subtitle:
+      'P&L, top/najsłabsze dania, zużycie magazynu, straty w zł, najlepsze i najgorsze dni, dostawy',
+  },
+  {
     key: 'pnl',
     title: 'Koszty, przychody i zyski',
     subtitle: 'Podsumowanie KPI + listy pozycji w okresie',
@@ -53,12 +63,12 @@ const KINDS: { key: FinancePdfReportKind; title: string; subtitle: string }[] = 
 
 export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props) {
   const initial = useMemo(() => monthBounds(defaultMonth), [defaultMonth]);
-  const [kind, setKind] = useState<FinancePdfReportKind>('pnl');
+  const [kind, setKind] = useState<FinancePdfReportKind>('comprehensive');
+  const [format, setFormat] = useState<ExportFormat>('pdf');
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
   const [busy, setBusy] = useState(false);
 
-  // Reset zakresu przy otwarciu / zmianie miesiąca
   React.useEffect(() => {
     if (!visible) return;
     const b = monthBounds(defaultMonth);
@@ -78,15 +88,33 @@ export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props)
     }
     setBusy(true);
     try {
-      await generateAndShareFinancePdf(kind, { from, to });
+      if (format === 'excel') {
+        await generateAndShareFinanceExcel(kind, { from, to });
+      } else {
+        await generateAndShareFinancePdf(kind, { from, to });
+      }
       onClose();
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Nie udało się wygenerować PDF.';
-      Alert.alert('Eksport PDF', msg);
+      const msg =
+        e instanceof Error
+          ? e.message
+          : format === 'excel'
+            ? 'Nie udało się wygenerować Excela.'
+            : 'Nie udało się wygenerować PDF.';
+      Alert.alert(format === 'excel' ? 'Eksport Excel' : 'Eksport PDF', msg);
     } finally {
       setBusy(false);
     }
   };
+
+  const ctaLabel =
+    format === 'excel'
+      ? Platform.OS === 'web'
+        ? 'Pobierz Excel'
+        : 'Generuj i udostępnij Excel'
+      : Platform.OS === 'web'
+        ? 'Generuj i drukuj PDF'
+        : 'Generuj i udostępnij PDF';
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -95,14 +123,53 @@ export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props)
           <View style={styles.head}>
             <View style={styles.headTitleRow}>
               <FileDown size={18} color={PremiumColors.neon} strokeWidth={2.4} />
-              <Text style={styles.title}>Pobierz raport PDF</Text>
+              <Text style={styles.title}>Pobierz raport</Text>
             </View>
             <TouchableOpacity onPress={onClose} hitSlop={10} disabled={busy}>
               <X size={20} color={PremiumColors.textMuted} />
             </TouchableOpacity>
           </View>
 
-          <Text style={styles.sectionLabel}>Typ raportu</Text>
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+          <Text style={styles.sectionLabel}>Format</Text>
+          <View style={styles.formatRow}>
+            <TouchableOpacity
+              style={[styles.formatBtn, format === 'pdf' && styles.formatBtnActive]}
+              onPress={() => setFormat('pdf')}
+              disabled={busy}
+              activeOpacity={0.85}
+            >
+              <FileDown
+                size={16}
+                color={format === 'pdf' ? PremiumColors.neon : PremiumColors.textMuted}
+              />
+              <Text style={[styles.formatText, format === 'pdf' && styles.formatTextActive]}>
+                PDF
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.formatBtn, format === 'excel' && styles.formatBtnActive]}
+              onPress={() => setFormat('excel')}
+              disabled={busy}
+              activeOpacity={0.85}
+              testID="finance-export-format-excel"
+            >
+              <FileSpreadsheet
+                size={16}
+                color={format === 'excel' ? PremiumColors.neon : PremiumColors.textMuted}
+              />
+              <Text style={[styles.formatText, format === 'excel' && styles.formatTextActive]}>
+                Excel
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={[styles.sectionLabel, { marginTop: 14 }]}>Typ raportu</Text>
           {KINDS.map((k) => {
             const active = kind === k.key;
             return (
@@ -161,11 +228,10 @@ export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props)
             {busy ? (
               <ActivityIndicator color="#04140C" />
             ) : (
-              <Text style={styles.ctaText}>
-                {Platform.OS === 'web' ? 'Generuj i drukuj PDF' : 'Generuj i udostępnij PDF'}
-              </Text>
+              <Text style={styles.ctaText}>{ctaLabel}</Text>
             )}
           </TouchableOpacity>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -185,7 +251,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: PremiumColors.border,
     padding: 18,
+    maxHeight: '92%',
   },
+  scroll: { flexGrow: 0 },
+  scrollContent: { paddingBottom: 4 },
   head: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -202,6 +271,25 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: 8,
   },
+  formatRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },
+  formatBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: PremiumColors.border,
+    backgroundColor: PremiumTokens.color.bgMid,
+    borderRadius: 12,
+    paddingVertical: 12,
+  },
+  formatBtnActive: {
+    borderColor: PremiumColors.neon,
+    backgroundColor: PremiumColors.neonSoft,
+  },
+  formatText: { color: PremiumColors.textMuted, fontSize: 14, fontWeight: '700' },
+  formatTextActive: { color: PremiumColors.neon },
   kindBtn: {
     borderWidth: 1,
     borderColor: PremiumColors.border,

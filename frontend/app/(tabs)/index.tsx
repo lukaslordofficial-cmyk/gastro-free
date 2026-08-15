@@ -1321,10 +1321,10 @@ export default function FinanseScreen() {
               <FileDown size={18} color={Colors.accent} strokeWidth={2.4} />
               <View style={{ flex: 1 }}>
                 <Text style={{ color: theme.text, fontWeight: '700', fontSize: 14 }}>
-                  Pobierz raport PDF
+                  Pobierz raport (PDF / Excel)
                 </Text>
                 <Text style={{ color: theme.textMuted, fontSize: 12, marginTop: 2 }}>
-                  Zyski albo dostawy/zakupy · zakres dat
+                  Zbiorczy, zyski lub dostawy · zakres dat
                 </Text>
               </View>
             </TouchableOpacity>

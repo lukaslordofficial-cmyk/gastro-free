@@ -10,11 +10,56 @@ import { getAccountKey } from '@/lib/accountKey';
 import { parseInvoiceCostNote } from '@/lib/invoiceCostNote';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
 
-export type FinancePdfReportKind = 'pnl' | 'purchases';
+export type FinancePdfReportKind = 'pnl' | 'purchases' | 'comprehensive';
 
 export type FinancePdfRange = {
   from: string; // YYYY-MM-DD
   to: string; // YYYY-MM-DD
+};
+
+export type ComprehensiveApiPayload = {
+  ok?: boolean;
+  from_date?: string;
+  to_date?: string;
+  period_label?: string;
+  top_n?: number;
+  pnl?: {
+    total_revenue?: number;
+    fixed_costs_allocated?: number;
+    variable_costs_gross?: number;
+    variable_costs_allocated?: number;
+    variable_costs_net?: number;
+    total_waste_cost?: number;
+    net_profit?: number;
+    operating_profit?: number;
+    days_count?: number;
+    revenue_source?: string;
+  };
+  top_dishes?: Array<{ name?: string; category?: string; qty_sold?: number; revenue_pln?: number }>;
+  worst_dishes?: Array<{ name?: string; category?: string; qty_sold?: number; revenue_pln?: number }>;
+  inventory_usage_top?: Array<{
+    inventory_name?: string;
+    ingredient_name?: string;
+    qty_used?: number;
+    unit?: string;
+    category?: string;
+    current_stock?: number;
+  }>;
+  waste?: {
+    items?: Array<{ name?: string; qty?: number; unit?: string; cost_pln?: number; unit_cost?: number }>;
+    total_cost_pln?: number;
+    events_count?: number;
+    missing_unit_cost_rows?: number;
+  };
+  daily_profits?: Array<{
+    date?: string;
+    revenue_pln?: number;
+    waste_pln?: number;
+    costs_pln?: number;
+    net_pln?: number;
+  }>;
+  best_days?: Array<{ date?: string; net_pln?: number; revenue_pln?: number; costs_pln?: number; waste_pln?: number }>;
+  worst_days?: Array<{ date?: string; net_pln?: number; revenue_pln?: number; costs_pln?: number; waste_pln?: number }>;
 };
 
 type OrderRow = {
@@ -132,7 +177,7 @@ function statusLabel(s: string): string {
   }
 }
 
-async function fetchFinanceForRange(from: string, to: string): Promise<{
+export async function fetchFinanceForRange(from: string, to: string): Promise<{
   revenue: RevenueEntry[];
   fixed: FixedCost[];
   variable: VariableCostEntry[];
@@ -182,7 +227,7 @@ async function fetchFinanceForRange(from: string, to: string): Promise<{
   return { revenue, fixed, variable };
 }
 
-async function fetchOrdersForRange(from: string, to: string): Promise<OrderRow[]> {
+export async function fetchOrdersForRange(from: string, to: string): Promise<OrderRow[]> {
   const ak = getAccountKey();
   let q = supabase
     .from('supplier_orders')
@@ -419,6 +464,208 @@ function buildPurchasesHtml(
   return htmlShell('Raport: dostawy i zakupy', range, body);
 }
 
+export async function fetchComprehensiveReport(
+  range: FinancePdfRange,
+  topN = 10,
+): Promise<ComprehensiveApiPayload> {
+  const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
+  if (!BACKEND_URL) {
+    throw new Error('Brak EXPO_PUBLIC_BACKEND_URL — nie mogę pobrać raportu zbiorczego.');
+  }
+  const res = await fetch(`${BACKEND_URL}/api/reports/comprehensive`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Account-Key': getAccountKey(),
+    },
+    body: JSON.stringify({
+      from_date: range.from,
+      to_date: range.to,
+      top_n: topN,
+    }),
+  });
+  const data = (await res.json().catch(() => ({}))) as ComprehensiveApiPayload & {
+    detail?: string;
+    message?: string;
+  };
+  if (!res.ok) {
+    throw new Error(
+      (typeof data.detail === 'string' && data.detail) ||
+        data.message ||
+        `Błąd raportu zbiorczego (${res.status}).`,
+    );
+  }
+  return data;
+}
+
+function buildComprehensiveHtml(
+  range: FinancePdfRange,
+  data: ComprehensiveApiPayload,
+  revenue: RevenueEntry[],
+  fixed: FixedCost[],
+  variable: VariableCostEntry[],
+  orders: OrderRow[],
+): string {
+  const pnl = data.pnl || {};
+  const sumRev = Number(pnl.total_revenue ?? revenue.reduce((s, r) => s + Number(r.amount_pln || 0), 0));
+  const sumFix = Number(pnl.fixed_costs_allocated ?? fixed.reduce((s, r) => s + Number(r.amount_pln || 0), 0));
+  const sumVar = Number(
+    pnl.variable_costs_gross ??
+      pnl.variable_costs_allocated ??
+      variable.reduce((s, r) => s + Number(r.amount_pln || 0), 0),
+  );
+  const sumWaste = Number(pnl.total_waste_cost ?? data.waste?.total_cost_pln ?? 0);
+  const profit = Number(pnl.net_profit ?? sumRev - sumFix - sumVar);
+  const profitClass = profit >= 0 ? 'profit' : 'loss';
+
+  const topDishes = (data.top_dishes || []).map((r, i) => [
+    String(i + 1),
+    escapeHtml(r.name || '—'),
+    escapeHtml(r.category || '—'),
+    escapeHtml(String(r.qty_sold ?? 0)),
+    escapeHtml(formatPLN(Number(r.revenue_pln || 0))),
+  ]);
+  const worstDishes = (data.worst_dishes || []).map((r, i) => [
+    String(i + 1),
+    escapeHtml(r.name || '—'),
+    escapeHtml(r.category || '—'),
+    escapeHtml(String(r.qty_sold ?? 0)),
+    escapeHtml(formatPLN(Number(r.revenue_pln || 0))),
+  ]);
+  const invRows = (data.inventory_usage_top || []).map((r, i) => [
+    String(i + 1),
+    escapeHtml(r.inventory_name || r.ingredient_name || '—'),
+    escapeHtml(r.category || '—'),
+    escapeHtml(`${r.qty_used ?? 0} ${r.unit || ''}`.trim()),
+    escapeHtml(String(r.current_stock ?? '—')),
+  ]);
+  const wasteRows = (data.waste?.items || []).map((r, i) => [
+    String(i + 1),
+    escapeHtml(r.name || '—'),
+    escapeHtml(`${r.qty ?? 0} ${r.unit || ''}`.trim()),
+    escapeHtml(formatPLN(Number(r.cost_pln || 0))),
+  ]);
+  const bestDays = (data.best_days || []).map((r, i) => [
+    String(i + 1),
+    escapeHtml(formatPlDate(String(r.date || ''))),
+    escapeHtml(formatPLN(Number(r.revenue_pln || 0))),
+    escapeHtml(formatPLN(Number(r.costs_pln || 0) + Number(r.waste_pln || 0))),
+    escapeHtml(formatPLN(Number(r.net_pln || 0))),
+  ]);
+  const worstDays = (data.worst_days || []).map((r, i) => [
+    String(i + 1),
+    escapeHtml(formatPlDate(String(r.date || ''))),
+    escapeHtml(formatPLN(Number(r.revenue_pln || 0))),
+    escapeHtml(formatPLN(Number(r.costs_pln || 0) + Number(r.waste_pln || 0))),
+    escapeHtml(formatPLN(Number(r.net_pln || 0))),
+  ]);
+
+  const materials = variable.filter((v) => v.type === 'materials');
+  let orderSum = 0;
+  for (const o of orders) {
+    for (const it of o.supplier_order_items || []) {
+      orderSum += (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0);
+    }
+  }
+
+  const body = `
+    <div class="kpi">
+      <div class="kpi-card"><div class="label">Przychody</div><div class="value">${escapeHtml(formatPLN(sumRev))}</div></div>
+      <div class="kpi-card"><div class="label">Koszty stałe (pro-rata)</div><div class="value">${escapeHtml(formatPLN(sumFix))}</div></div>
+      <div class="kpi-card"><div class="label">Koszty zmienne</div><div class="value">${escapeHtml(formatPLN(sumVar))}</div></div>
+      <div class="kpi-card"><div class="label">Straty (PLN)</div><div class="value">${escapeHtml(formatPLN(sumWaste))}</div></div>
+      <div class="kpi-card ${profitClass}"><div class="label">Zysk netto</div><div class="value">${escapeHtml(formatPLN(profit))}</div></div>
+      <div class="kpi-card"><div class="label">Zamówienia dostawców</div><div class="value">${escapeHtml(formatPLN(orderSum))}</div></div>
+    </div>
+    <p class="muted">Źródło przychodu (P&amp;L): ${escapeHtml(pnl.revenue_source || '—')} · dni w okresie: ${pnl.days_count ?? '—'}</p>
+
+    <h2>Top ${data.top_n ?? 10} najlepiej sprzedających się dań</h2>
+    ${rowsTable(['#', 'Danie', 'Kategoria', 'Ilość', 'Przychód'], topDishes, 'Brak sprzedaży POS w okresie.')}
+
+    <h2>Top ${data.top_n ?? 10} najsłabiej sprzedających się dań</h2>
+    ${rowsTable(['#', 'Danie', 'Kategoria', 'Ilość', 'Przychód'], worstDishes, 'Brak danych sprzedaży do rankingu najsłabszych.')}
+
+    <h2>Top ${data.top_n ?? 10} zużycia produktów z magazynu</h2>
+    ${rowsTable(['#', 'Produkt', 'Kategoria', 'Zużycie', 'Stan'], invRows, 'Brak zmapowanego zużycia (receptury × POS).')}
+
+    <h2>Wyrzucone produkty / potrawy (koszt w PLN)</h2>
+    <p class="muted">Suma strat: ${escapeHtml(formatPLN(Number(data.waste?.total_cost_pln || sumWaste)))} · zdarzeń: ${data.waste?.events_count ?? 0}</p>
+    ${rowsTable(['#', 'Pozycja', 'Ilość', 'Koszt'], wasteRows, 'Brak wpisów strat w okresie.')}
+
+    <h2>Dni z największym zyskiem</h2>
+    ${rowsTable(['#', 'Data', 'Przychód', 'Koszty+straty', 'Zysk'], bestDays, 'Brak dziennych raportów / wpisów.')}
+
+    <h2>Dni z najmniejszym zyskiem</h2>
+    ${rowsTable(['#', 'Data', 'Przychód', 'Koszty+straty', 'Zysk'], worstDays, 'Brak dziennych raportów / wpisów.')}
+
+    <h2>Przychody (ewidencja, ${revenue.length})</h2>
+    ${rowsTable(
+      ['Data', 'Opis', 'Kwota'],
+      revenue.map((r) => [
+        escapeHtml(formatPlDate(r.created_at?.slice(0, 10) || r.year_month)),
+        escapeHtml(r.description || 'Przychód'),
+        escapeHtml(formatPLN(Number(r.amount_pln))),
+      ]),
+      'Brak przychodów w ewidencji.',
+    )}
+
+    <h2>Koszty stałe (${fixed.length})</h2>
+    ${rowsTable(
+      ['Miesiąc', 'Typ', 'Nazwa', 'Kwota'],
+      fixed.map((r) => [
+        escapeHtml(r.year_month),
+        escapeHtml(typeLabelFixed(r.type)),
+        escapeHtml(r.name || '—'),
+        escapeHtml(formatPLN(Number(r.amount_pln))),
+      ]),
+      'Brak kosztów stałych.',
+    )}
+
+    <h2>Koszty zmienne (${variable.length})</h2>
+    ${rowsTable(
+      ['Data', 'Typ', 'Nazwa', 'Kwota'],
+      variable.map((r) => [
+        escapeHtml(formatPlDate(r.created_at?.slice(0, 10) || r.year_month)),
+        escapeHtml(typeLabelVariable(r.type)),
+        escapeHtml(r.name || '—'),
+        escapeHtml(formatPLN(Number(r.amount_pln))),
+      ]),
+      'Brak kosztów zmiennych.',
+    )}
+
+    <h2>Zakupy materiałowe (${materials.length})</h2>
+    ${rowsTable(
+      ['Data', 'Nazwa', 'Kwota'],
+      materials.map((r) => [
+        escapeHtml(formatPlDate(r.created_at?.slice(0, 10) || r.year_month)),
+        escapeHtml(r.name || 'Zakup'),
+        escapeHtml(formatPLN(Number(r.amount_pln))),
+      ]),
+      'Brak zakupów materiałowych.',
+    )}
+
+    <h2>Zamówienia do dostawców (${orders.length})</h2>
+    ${
+      orders.length
+        ? orders
+            .map((o) => {
+              const supplier = o.suppliers?.name || 'Dostawca';
+              const items = o.supplier_order_items || [];
+              const total = items.reduce(
+                (s, it) => s + (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0),
+                0,
+              );
+              return `<div class="order-block">
+                <div class="order-head">${escapeHtml(formatPlDate(o.created_at.slice(0, 10)))} — ${escapeHtml(supplier)} · ${escapeHtml(statusLabel(o.status))} · ${escapeHtml(formatPLN(total))}</div>
+              </div>`;
+            })
+            .join('')
+        : '<p class="empty">Brak zamówień do dostawców w okresie.</p>'
+    }
+  `;
+  return htmlShell('Raport zbiorczy', range, body);
+}
+
 export async function generateAndShareFinancePdf(
   kind: FinancePdfReportKind,
   range: FinancePdfRange,
@@ -427,22 +674,35 @@ export async function generateAndShareFinancePdf(
   if (range.from > range.to) throw new Error('Data „od” nie może być późniejsza niż „do”.');
 
   let html: string;
+  let fileName: string;
   if (kind === 'pnl') {
     const { revenue, fixed, variable } = await fetchFinanceForRange(range.from, range.to);
     html = buildPnlHtml(range, revenue, fixed, variable);
-  } else {
+    fileName = `gastro-raport-zyski_${range.from}_${range.to}.pdf`;
+  } else if (kind === 'purchases') {
     const [{ variable }, orders] = await Promise.all([
       fetchFinanceForRange(range.from, range.to),
       fetchOrdersForRange(range.from, range.to),
     ]);
     const materials = variable.filter((v) => v.type === 'materials');
     html = buildPurchasesHtml(range, materials, orders);
+    fileName = `gastro-raport-zakupy_${range.from}_${range.to}.pdf`;
+  } else {
+    const [comp, finance, orders] = await Promise.all([
+      fetchComprehensiveReport(range, 10),
+      fetchFinanceForRange(range.from, range.to),
+      fetchOrdersForRange(range.from, range.to),
+    ]);
+    html = buildComprehensiveHtml(
+      range,
+      comp,
+      finance.revenue,
+      finance.fixed,
+      finance.variable,
+      orders,
+    );
+    fileName = `gastro-raport-zbiorczy_${range.from}_${range.to}.pdf`;
   }
-
-  const fileName =
-    kind === 'pnl'
-      ? `gastro-raport-zyski_${range.from}_${range.to}.pdf`
-      : `gastro-raport-zakupy_${range.from}_${range.to}.pdf`;
 
   const { uri } = await Print.printToFileAsync({ html, base64: false });
 

@@ -14700,6 +14700,318 @@ async def reports_compare_periods(req: ComparePeriodsRequest):
     return await _run_compare_periods(req.period_1, req.period_2)
 
 
+class ComprehensiveReportRequest(BaseModel):
+    """Raport zbiorczy za dokładny zakres dat (YYYY-MM-DD)."""
+    from_date: str
+    to_date: str
+    top_n: Optional[int] = 10
+
+
+def _parse_ymd_or_400(raw: str, field: str) -> str:
+    s = (raw or "").strip()[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        raise HTTPException(status_code=400, detail=f"Nieprawidłowa data {field} (oczekiwano YYYY-MM-DD).")
+    try:
+        from datetime import date as _date
+        _date.fromisoformat(s)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Nieprawidłowa data {field}.") from e
+    return s
+
+
+async def _daily_profit_series(
+    client: httpx.AsyncClient,
+    since_d: str,
+    until_d: str,
+) -> list[dict]:
+    """Dni z zyskiem: daily_reports, potem fallback z revenue/variable/waste."""
+    from collections import defaultdict
+
+    days: dict[str, dict] = {}
+    try:
+        dr = await sb_get(client, "daily_reports", params={
+            "select": "date,total_revenue,total_waste_cost,total_invoice_cost",
+            "date": f"gte.{since_d}",
+            "order": "date.asc",
+            "limit": "800",
+        }) or []
+        for r in dr:
+            d = str(r.get("date") or "")[:10]
+            if not d or d < since_d or d > until_d:
+                continue
+            rev = float(r.get("total_revenue") or 0)
+            waste = float(r.get("total_waste_cost") or 0)
+            inv = float(r.get("total_invoice_cost") or 0)
+            days[d] = {
+                "date": d,
+                "revenue_pln": round(rev, 2),
+                "waste_pln": round(waste, 2),
+                "costs_pln": round(inv, 2),
+                "net_pln": round(rev - waste - inv, 2),
+                "source": "daily_reports",
+            }
+    except Exception:
+        pass
+
+    if days:
+        return sorted(days.values(), key=lambda x: x["date"])
+
+    rev_by: dict[str, float] = defaultdict(float)
+    cost_by: dict[str, float] = defaultdict(float)
+    waste_by: dict[str, float] = defaultdict(float)
+    since_iso = _pg_ts(f"{since_d}T00:00:00+00:00")
+    until_iso = _pg_ts(f"{until_d}T23:59:59+00:00")
+    try:
+        revs = await sb_get(client, "revenue_entries", params={
+            "select": "amount_pln,created_at",
+            "created_at": f"gte.{since_iso}",
+            "limit": "20000",
+        }) or []
+        for r in revs:
+            ca = str(r.get("created_at") or "")[:10]
+            if since_d <= ca <= until_d:
+                rev_by[ca] += float(r.get("amount_pln") or 0)
+    except Exception:
+        pass
+    try:
+        vars_ = await sb_get(client, "variable_cost_entries", params={
+            "select": "amount_pln,type,created_at",
+            "created_at": f"gte.{since_iso}",
+            "limit": "20000",
+        }) or []
+        for r in vars_:
+            ca = str(r.get("created_at") or "")[:10]
+            if not (since_d <= ca <= until_d):
+                continue
+            amt = float(r.get("amount_pln") or 0)
+            if (r.get("type") or "") == "waste":
+                waste_by[ca] += amt
+            else:
+                cost_by[ca] += amt
+    except Exception:
+        pass
+    try:
+        wmeta = await _sum_waste_logs_cost_pln(
+            client,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            d0_iso=since_d,
+            d1_iso=until_d,
+        )
+        # brak rozbicia dziennego w meta — zostaw waste_by z variable type=waste
+        _ = wmeta
+    except Exception:
+        pass
+
+    all_dates = sorted(set(rev_by) | set(cost_by) | set(waste_by))
+    out = []
+    for d in all_dates:
+        rev = round(rev_by.get(d, 0.0), 2)
+        costs = round(cost_by.get(d, 0.0), 2)
+        waste = round(waste_by.get(d, 0.0), 2)
+        out.append({
+            "date": d,
+            "revenue_pln": rev,
+            "waste_pln": waste,
+            "costs_pln": costs,
+            "net_pln": round(rev - waste - costs, 2),
+            "source": "entries",
+        })
+    return out
+
+
+async def _inventory_usage_for_window(
+    client: httpx.AsyncClient,
+    since_iso: str,
+    until_iso: str,
+    *,
+    top_n: int = 10,
+) -> list[dict]:
+    """Top zużycia magazynu = sprzedaż × receptury (to samo co ranking głosowy)."""
+    from datetime import date as _date
+    d0 = _date.fromisoformat(since_iso[:10])
+    d1 = _date.fromisoformat(until_iso[:10])
+    days = max(1, (d1 - d0).days + 1)
+    dish_sales = await _aggregate_menu_sales(
+        client, days, since_iso=since_iso, until_iso=until_iso,
+    )
+    if not dish_sales:
+        return []
+    ri = await sb_get(client, "recipe_ingredients", params={
+        "select": "menu_item_id,ingredient_name,quantity,unit",
+        "limit": "30000",
+    }) or []
+    by_menu: dict[str, list] = {}
+    for r in ri:
+        by_menu.setdefault(r["menu_item_id"], []).append(r)
+    inv = await sb_get(client, "inventory_items", params={
+        "select": "id,name,quantity,unit,inventory_categories(name)",
+        "limit": "5000",
+    }) or []
+    inv_norm = {_norm_pl(r["name"]): r for r in inv if r.get("name")}
+    usage: dict[str, dict] = {}
+    for d in dish_sales:
+        sold = float(d.get("qty_sold") or 0)
+        if sold <= 0:
+            continue
+        for ing in by_menu.get(d["menu_item_id"], []):
+            iname = (ing.get("ingredient_name") or "").strip()
+            key = _norm_pl(iname)
+            if not key:
+                continue
+            used = float(ing.get("quantity") or 0) * sold
+            if key not in usage:
+                matched = inv_norm.get(key)
+                if not matched:
+                    hit, _ = _fuzzy_match(key, list(inv_norm.keys()), threshold=78)
+                    matched = inv_norm.get(hit) if hit else None
+                cat_name = None
+                if matched:
+                    cats = matched.get("inventory_categories")
+                    if isinstance(cats, dict):
+                        cat_name = cats.get("name")
+                    elif isinstance(cats, list) and cats:
+                        cat_name = cats[0].get("name")
+                usage[key] = {
+                    "ingredient_name": iname,
+                    "unit": ing.get("unit") or "g",
+                    "qty_used": 0.0,
+                    "inventory_id": (matched or {}).get("id"),
+                    "inventory_name": (matched or {}).get("name") or iname,
+                    "category": cat_name,
+                    "current_stock": float((matched or {}).get("quantity") or 0),
+                }
+            usage[key]["qty_used"] = round(usage[key]["qty_used"] + used, 3)
+    rows = sorted(usage.values(), key=lambda r: r["qty_used"], reverse=True)
+    return rows[: max(1, min(int(top_n or 10), 30))]
+
+
+async def _waste_ranking_for_window(
+    client: httpx.AsyncClient,
+    since_iso: str,
+    until_iso: str,
+    *,
+    top_n: int = 10,
+) -> dict:
+    """Straty w PLN za okno (jak rank_waste_cost, ale bez okresu względnego)."""
+    logs = await sb_get(client, "waste_logs", params={
+        "select": "item_name,quantity,unit,created_at,item_id,item_type,related_id",
+        "created_at": f"gte.{_pg_ts(since_iso)}",
+        "order": "created_at.desc",
+        "limit": "5000",
+    }) or []
+    until_s = _pg_ts(until_iso) if until_iso else None
+    if until_s:
+        logs = [r for r in logs if str(r.get("created_at") or "") <= until_s]
+
+    inv = await sb_get(client, "inventory_items", params={
+        "select": "id,name,unit_cost,unit",
+        "limit": "5000",
+    }) or []
+    by_id = {str(i["id"]): i for i in inv if i.get("id")}
+    by_name = {_norm_name_key(i.get("name") or ""): i for i in inv if i.get("name")}
+
+    totals: dict[str, dict] = {}
+    missing_cost = 0
+    for w in logs:
+        name = (w.get("item_name") or "Nieznany").strip()
+        qty = float(w.get("quantity") or 0)
+        if qty <= 0:
+            continue
+        ca = str(w.get("created_at") or "") or since_iso
+        cost, unit_cost = await _waste_log_event_cost_pln(
+            client, w, by_id=by_id, by_name=by_name, around_iso=ca,
+        )
+        inv_row = None
+        iid = w.get("item_id") or w.get("related_id")
+        if iid and str(iid) in by_id:
+            inv_row = by_id[str(iid)]
+        else:
+            inv_row = by_name.get(_norm_name_key(name))
+        if cost <= 0:
+            missing_cost += 1
+        key = _norm_name_key(name) or name
+        slot = totals.setdefault(key, {
+            "name": name,
+            "qty": 0.0,
+            "unit": w.get("unit") or (inv_row or {}).get("unit") or "",
+            "cost_pln": 0.0,
+            "unit_cost": unit_cost,
+        })
+        slot["qty"] = round(slot["qty"] + qty, 2)
+        slot["cost_pln"] = round(slot["cost_pln"] + cost, 2)
+        if unit_cost > 0:
+            slot["unit_cost"] = unit_cost
+
+    rows = sorted(totals.values(), key=lambda r: r["cost_pln"], reverse=True)
+    n = max(1, min(int(top_n or 10), 30))
+    return {
+        "items": rows[:n],
+        "all_items": rows,
+        "total_cost_pln": round(sum(r["cost_pln"] for r in rows), 2),
+        "missing_unit_cost_rows": missing_cost,
+        "events_count": len(logs),
+    }
+
+
+@app.post("/api/reports/comprehensive")
+async def reports_comprehensive(req: ComprehensiveReportRequest):
+    """Raport zbiorczy: P&L, rankingi dań, zużycie magazynu, straty, dni zysku/straty."""
+    from_d = _parse_ymd_or_400(req.from_date, "from_date")
+    to_d = _parse_ymd_or_400(req.to_date, "to_date")
+    if from_d > to_d:
+        raise HTTPException(status_code=400, detail="from_date nie może być późniejsza niż to_date.")
+    try:
+        top_n = max(1, min(int(req.top_n or 10), 30))
+    except (TypeError, ValueError):
+        top_n = 10
+
+    since_iso = f"{from_d}T00:00:00Z"
+    until_iso = f"{to_d}T23:59:59Z"
+    from datetime import date as _date
+    days = max(1, (_date.fromisoformat(to_d) - _date.fromisoformat(from_d)).days + 1)
+
+    async with httpx.AsyncClient(timeout=120.0, verify=_httpx_verify()) as client:
+        pnl = await _compute_true_pnl(client, from_d, to_d)
+        menu = await _aggregate_menu_sales(
+            client, days, since_iso=since_iso, until_iso=until_iso,
+        )
+        menu_sorted_best = sorted(
+            menu, key=lambda r: (float(r.get("qty_sold") or 0), float(r.get("revenue_pln") or 0)), reverse=True,
+        )
+        menu_with_sales = [r for r in menu if float(r.get("qty_sold") or 0) > 0]
+        menu_sorted_worst = sorted(
+            menu_with_sales,
+            key=lambda r: (float(r.get("qty_sold") or 0), float(r.get("revenue_pln") or 0)),
+        )
+        inventory_top = await _inventory_usage_for_window(
+            client, since_iso, until_iso, top_n=top_n,
+        )
+        waste = await _waste_ranking_for_window(
+            client, since_iso, until_iso, top_n=top_n,
+        )
+        daily = await _daily_profit_series(client, from_d, to_d)
+
+    best_days = sorted(daily, key=lambda r: float(r.get("net_pln") or 0), reverse=True)[:top_n]
+    worst_days = sorted(daily, key=lambda r: float(r.get("net_pln") or 0))[:top_n]
+
+    return {
+        "ok": True,
+        "from_date": from_d,
+        "to_date": to_d,
+        "period_label": f"{from_d} – {to_d}",
+        "top_n": top_n,
+        "pnl": pnl,
+        "top_dishes": menu_sorted_best[:top_n],
+        "worst_dishes": menu_sorted_worst[:top_n],
+        "inventory_usage_top": inventory_top,
+        "waste": waste,
+        "daily_profits": daily,
+        "best_days": best_days,
+        "worst_days": worst_days,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Subskrypcje i Portfel Kredytowy — API
 # ─────────────────────────────────────────────────────────────────────────────

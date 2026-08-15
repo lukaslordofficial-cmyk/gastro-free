@@ -15813,6 +15813,65 @@ async def local_producers_mark_handed_to_courier(order_id: str, request: Request
     }
 
 
+@app.post("/api/local-producers/orders/{order_id}/mark-received")
+async def local_producers_mark_received(order_id: str):
+    """
+    Restauracja: „Odebrałem paczkę” → delivered + produkty do magazynu + koszt zmienny.
+    Idempotentne (warehouse_received_at / tag w notes).
+    """
+    oid = (order_id or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="Brak order_id")
+    account_key = require_tenant_account_key()
+
+    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
+        orders = await sb_get(client, "producer_orders", params={
+            "select": (
+                "id,restaurant_account_key,payment_status,shipment_status,"
+                "notes,warehouse_received_at"
+            ),
+            "id": f"eq.{oid}",
+            "limit": "1",
+        })
+        if not orders:
+            orders = await sb_get(client, "producer_orders", params={
+                "select": "id,restaurant_account_key,payment_status,shipment_status,notes",
+                "id": f"eq.{oid}",
+                "limit": "1",
+            })
+        if not orders:
+            raise HTTPException(status_code=404, detail="Zamówienie nie istnieje")
+        order = orders[0]
+        if str(order.get("restaurant_account_key") or "") != account_key:
+            raise HTTPException(status_code=403, detail="To zamówienie należy do innego konta")
+        if str(order.get("payment_status") or "").lower() != "paid":
+            raise HTTPException(status_code=400, detail="Zamówienie nie jest opłacone")
+
+        from lp_receive import receive_producer_order_into_warehouse
+
+        result = await receive_producer_order_into_warehouse(
+            client=client,
+            sb_get=sb_get,
+            sb_patch=sb_patch,
+            order_id=oid,
+            mark_delivered=True,
+            source="manual",
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "Nie udało się przyjąć paczki")
+        return {
+            **result,
+            "message": (
+                "Paczka już była przyjęta wcześniej."
+                if result.get("already")
+                else (
+                    f"Przyjęto {result.get('received', 0)} poz. do magazynu "
+                    f"i dopisano koszt zmienny ({result.get('total_pln', 0)} zł)."
+                )
+            ),
+        }
+
+
 @app.post("/api/local-producers/create-shipment")
 async def local_producers_create_shipment(req: LpShipmentRequest):
     """Ręczne utworzenie przesyłki przez Furgonetkę (InPost Kurier) po paid."""

@@ -17,6 +17,7 @@ import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { listMyProducerOrders } from '@/services/localProducers/localProducersService';
+import { markProducerOrderReceived } from '@/services/localProducers/shippingClient';
 import {
   deliveryBucketForOrder,
   type DeliveryBucket,
@@ -29,6 +30,7 @@ import {
   paymentStatusLabelPl,
   shipmentStatusLabelPl,
 } from '@/lib/localProducers/orderStatusLabels';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 
 const DS_NEON = '#00FF88';
 
@@ -42,10 +44,14 @@ function OrderCard({
   order,
   isPremium,
   onPress,
+  onMarkReceived,
+  receiving,
 }: {
   order: ProducerOrderWithProducer;
   isPremium: boolean;
   onPress: () => void;
+  onMarkReceived?: () => void;
+  receiving?: boolean;
 }) {
   const titleColor = isPremium ? '#F5F5F5' : Colors.textPrimary;
   const muted = isPremium ? 'rgba(255,255,255,0.55)' : Colors.textSecondary;
@@ -62,6 +68,7 @@ function OrderCard({
         minute: '2-digit',
       })
     : '—';
+  const inTransit = deliveryBucketForOrder(order) === 'in_transit';
 
   return (
     <TouchableOpacity
@@ -91,10 +98,37 @@ function OrderCard({
           Przesyłka: {tracking}
         </Text>
       ) : null}
-      {deliveryBucketForOrder(order) === 'in_transit' ? (
+      {inTransit ? (
         <Text style={[styles.eta, { color: muted }]}>
-          Spodziewane doręczenie: zwykle 1–2 dni robocze.
+          Spodziewane doręczenie: zwykle 1–2 dni robocze. Po odbiorze produkty trafią do magazynu,
+          a koszt zakupu do finansów.
         </Text>
+      ) : null}
+      {inTransit && onMarkReceived ? (
+        <TouchableOpacity
+          style={[
+            styles.receiveBtn,
+            {
+              backgroundColor: isPremium ? DS_NEON : Colors.accent,
+              opacity: receiving ? 0.7 : 1,
+            },
+          ]}
+          onPress={(e) => {
+            e?.stopPropagation?.();
+            onMarkReceived();
+          }}
+          disabled={!!receiving}
+          activeOpacity={0.85}
+          testID={`lp-mark-received-${order.id}`}
+        >
+          {receiving ? (
+            <ActivityIndicator color={isPremium ? '#0A0A0A' : '#fff'} />
+          ) : (
+            <Text style={[styles.receiveBtnText, { color: isPremium ? '#0A0A0A' : '#fff' }]}>
+              Odebrałem paczkę
+            </Text>
+          )}
+        </TouchableOpacity>
       ) : null}
       <SettlementDocumentsSection order={order} isPremium={isPremium} />
     </TouchableOpacity>
@@ -105,12 +139,14 @@ function OrderCard({
 export function DeliveriesPanel() {
   const theme = useAppTheme();
   const router = useRouter();
+  const { alert } = usePremiumAlert();
   const isPremium = !!theme.isPremium;
   const [bucket, setBucket] = useState<DeliveryBucket>('pending');
   const [orders, setOrders] = useState<ProducerOrderWithProducer[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [receivingId, setReceivingId] = useState<string | null>(null);
 
   const load = useCallback(async (soft?: boolean) => {
     if (!soft) setLoading(true);
@@ -146,6 +182,40 @@ export function DeliveriesPanel() {
   const emptyIcon =
     bucket === 'delivered' ? CheckCircle2 : bucket === 'in_transit' ? Truck : Package;
   const EmptyIcon = emptyIcon;
+
+  const handleMarkReceived = useCallback(
+    (order: ProducerOrderWithProducer) => {
+      alert(
+        'Odebrałem paczkę',
+        'Potwierdzasz odbiór? Produkty zostaną dodane do magazynu, a koszt zakupu — do kosztów zmiennych w finansach.',
+        [
+          { text: 'Anuluj', style: 'cancel' },
+          {
+            text: 'Potwierdź',
+            style: 'primary',
+            onPress: () => {
+              void (async () => {
+                setReceivingId(order.id);
+                try {
+                  const res = await markProducerOrderReceived(order.id);
+                  alert(res.ok ? 'Gotowe' : 'Błąd', res.message, [
+                    { text: 'OK', style: 'primary' },
+                  ]);
+                  if (res.ok) {
+                    setBucket('delivered');
+                    await load(true);
+                  }
+                } finally {
+                  setReceivingId(null);
+                }
+              })();
+            },
+          },
+        ],
+      );
+    },
+    [alert, load],
+  );
 
   return (
     <View style={styles.root}>
@@ -248,6 +318,10 @@ export function DeliveriesPanel() {
               key={o.id}
               order={o}
               isPremium={isPremium}
+              receiving={receivingId === o.id}
+              onMarkReceived={
+                bucket === 'in_transit' ? () => handleMarkReceived(o) : undefined
+              }
               onPress={() =>
                 router.push({
                   pathname: '/(tabs)/dostawcy/zamowienie/[id]',
@@ -306,7 +380,16 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 15, fontWeight: '800', marginBottom: 4 },
   meta: { fontSize: 12, marginTop: 2 },
   tracking: { fontSize: 12, fontWeight: '700', marginTop: 8 },
-  eta: { fontSize: 12, marginTop: 6, fontStyle: 'italic' },
+  eta: { fontSize: 12, marginTop: 6, fontStyle: 'italic', lineHeight: 17 },
+  receiveBtn: {
+    marginTop: 12,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+  },
+  receiveBtnText: { fontSize: 14, fontWeight: '800' },
   emptyWrap: { alignItems: 'center', marginTop: 40, gap: 10 },
   empty: { fontSize: 14, textAlign: 'center' },
 });

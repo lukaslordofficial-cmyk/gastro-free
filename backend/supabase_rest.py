@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Callable
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 import httpx
@@ -36,6 +37,7 @@ _TENANT_TABLES = frozenset({
 
 _GetAccountKey = Callable[[], str]
 _get_account_key: _GetAccountKey | None = None
+_account_key_override: ContextVar[str | None] = ContextVar("sb_account_key_override", default=None)
 
 
 def configure(*, get_account_key: _GetAccountKey) -> None:
@@ -44,7 +46,19 @@ def configure(*, get_account_key: _GetAccountKey) -> None:
     _get_account_key = get_account_key
 
 
+def push_account_key(account_key: str):
+    """Tymczasowo nadpisz tenant (np. odbiór paczki LP na konto restauracji)."""
+    return _account_key_override.set((account_key or "").strip() or None)
+
+
+def reset_account_key(token) -> None:
+    _account_key_override.reset(token)
+
+
 def _account_key() -> str:
+    override = _account_key_override.get()
+    if override:
+        return override
     if _get_account_key is None:
         return (os.environ.get("ACCOUNT_KEY") or "default").strip() or "default"
     return _get_account_key()

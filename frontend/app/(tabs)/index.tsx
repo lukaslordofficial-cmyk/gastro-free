@@ -53,10 +53,10 @@ import { FinancePdfExportModal } from '@/components/FinancePdfExportModal';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
-  formatInvoiceLineLabel,
   humanizeInvoiceNotePreview,
   parseInvoiceCostNote,
 } from '@/lib/invoiceCostNote';
+import { InvoiceCostPreviewModal } from '@/components/InvoiceCostPreviewModal';
 import { DS } from '@/constants/premiumTheme';
 
 const _now = new Date();
@@ -819,6 +819,11 @@ export default function FinanseScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [view, setView] = useState<'panel' | 'raporty' | 'subskrypcja'>('panel');
   const [pdfOpen, setPdfOpen] = useState(false);
+  const [invoicePreview, setInvoicePreview] = useState<{
+    title: string;
+    amount: number;
+    note?: string | null;
+  } | null>(null);
   const [showUsageHistory, setShowUsageHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revenueEntries, setRevenueEntries] = useState<RevenueEntry[]>([]);
@@ -1617,7 +1622,19 @@ export default function FinanseScreen() {
                         <View style={styles.costNameCol}>
                           <TouchableOpacity
                             activeOpacity={0.75}
-                            onPress={() => toggleNote(entry.id, (entry as any).note)}
+                            onPress={() => {
+                              const note = (entry as any).note as string | undefined;
+                              const invoice = parseInvoiceCostNote(note);
+                              if (invoice?.lines?.length) {
+                                setInvoicePreview({
+                                  title: entry.name,
+                                  amount: Number(entry.amount_pln) || 0,
+                                  note,
+                                });
+                              } else {
+                                toggleNote(entry.id, note);
+                              }
+                            }}
                           >
                             <Text style={[styles.costName, { color: theme.text }]}>{entry.name}</Text>
                             {!isExpanded ? (
@@ -1666,16 +1683,20 @@ export default function FinanseScreen() {
                             const invoice = parseInvoiceCostNote((entry as any).note);
                             if (!invoice?.lines?.length) return null;
                             return (
-                              <View style={{ gap: 4, marginBottom: 10 }}>
-                                <Text style={[styles.costName, { color: theme.text, marginBottom: 2 }]}>
-                                  Pozycje faktury
+                              <TouchableOpacity
+                                onPress={() =>
+                                  setInvoicePreview({
+                                    title: entry.name,
+                                    amount: Number(entry.amount_pln) || 0,
+                                    note: (entry as any).note,
+                                  })
+                                }
+                                style={{ marginBottom: 10 }}
+                              >
+                                <Text style={[styles.costName, { color: theme.accent }]}>
+                                  Otwórz podgląd pozycji ({invoice.lines.length})
                                 </Text>
-                                {invoice.lines.map((line, i) => (
-                                  <Text key={`${entry.id}-line-${i}`} style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 16 }}>
-                                    • {formatInvoiceLineLabel(line)}
-                                  </Text>
-                                ))}
-                              </View>
+                              </TouchableOpacity>
                             );
                           })()}
                           <TextInput
@@ -1756,6 +1777,13 @@ export default function FinanseScreen() {
         visible={pdfOpen}
         onClose={() => setPdfOpen(false)}
         defaultMonth={CURRENT_MONTH}
+      />
+      <InvoiceCostPreviewModal
+        visible={!!invoicePreview}
+        onClose={() => setInvoicePreview(null)}
+        title={invoicePreview?.title || 'Podgląd faktury'}
+        amountPln={invoicePreview?.amount}
+        note={invoicePreview?.note}
       />
     </SafeAreaView>
   );

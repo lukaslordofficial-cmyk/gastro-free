@@ -674,6 +674,20 @@ async def sync_order_tracking(
             )
         except Exception:
             logger.exception("LP stock decrement on tracking shipped failed")
+    warehouse = None
+    if new_ship == "delivered" and old_ship != "delivered":
+        try:
+            from lp_receive import receive_producer_order_into_warehouse
+            warehouse = await receive_producer_order_into_warehouse(
+                client=client,
+                sb_get=sb_get,
+                sb_patch=sb_patch,
+                order_id=oid,
+                mark_delivered=True,
+                source="furgonetka",
+            )
+        except Exception:
+            logger.exception("LP warehouse receive on tracking delivered failed")
     return {
         "ok": True,
         "package_id": pid,
@@ -685,6 +699,7 @@ async def sync_order_tracking(
         "pickup_date": order.get("pickup_date"),
         "pickup_min_time": order.get("pickup_min_time"),
         "pickup_max_time": order.get("pickup_max_time"),
+        "warehouse": warehouse,
     }
 
 

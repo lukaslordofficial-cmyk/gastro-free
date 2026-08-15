@@ -62,7 +62,7 @@ export function humanizeInvoiceNotePreview(note: string | null | undefined): str
   if (invoice) {
     const n = invoice.lines.length;
     const supplier = invoice.supplier_name ? ` · ${invoice.supplier_name}` : '';
-    return `Faktura${supplier} · ${n} poz. · dotknij → szczegóły`;
+    return `Faktura${supplier} · ${n} poz. · dotknij → podgląd`;
   }
   const marker = 'GM_INVOICE_LINES:';
   const idx = raw.indexOf(marker);

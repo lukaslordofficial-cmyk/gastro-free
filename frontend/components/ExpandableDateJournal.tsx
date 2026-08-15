@@ -3,8 +3,16 @@
  * Wspólne dla dziennika przychodów (free + premium) i podobnych list.
  */
 import React, { useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { ChevronDown, ChevronRight } from 'lucide-react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Modal,
+  ScrollView,
+  Pressable,
+} from 'react-native';
+import { ChevronDown, ChevronRight, X } from 'lucide-react-native';
 import {
   buildUsageTree,
   fmtDayLabel,
@@ -14,6 +22,7 @@ import {
   type UsageTree,
 } from '@/lib/creditsUsage';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 export type JournalLeaf = {
   id: string;
@@ -23,7 +32,7 @@ export type JournalLeaf = {
   meta?: string;
   /** Gdy podane — pokazywane zamiast formatAmount(amount) (np. „−5 l”). */
   amountLabel?: string;
-  /** Szczegóły faktury (pozycje) — widoczne po rozwinięciu dnia. */
+  /** Szczegóły faktury (pozycje) — otwierane w czytelnym modalu. */
   detailLines?: string[];
 };
 
@@ -64,8 +73,8 @@ export function ExpandableDateJournal({
   const [openMonth, setOpenMonth] = useState<string | null>(null);
   const [openWeek, setOpenWeek] = useState<string | null>(null);
   const [openDay, setOpenDay] = useState<string | null>(null);
-  /** Rozwinięte pozycje faktury (produkty / ilości / kwoty). */
-  const [openLeafId, setOpenLeafId] = useState<string | null>(null);
+  /** Podgląd faktury w osobnym oknie. */
+  const [previewLeaf, setPreviewLeaf] = useState<JournalLeaf | null>(null);
 
   const tree: UsageTree = useMemo(() => buildUsageTree(toPseudoUsage(items) as any), [items]);
   const years = Array.from(tree.keys()).sort((a, b) => b - a);
@@ -196,7 +205,6 @@ export function ExpandableDateJournal({
                                         if (!leaf) return null;
                                         const hasDetails =
                                           !!leaf.detailLines && leaf.detailLines.length > 0;
-                                        const leafOpen = openLeafId === leaf.id;
                                         const main = (
                                           <>
                                             <View style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
@@ -208,20 +216,8 @@ export function ExpandableDateJournal({
                                               >
                                                 {entry.time}
                                                 {leaf.meta ? ` · ${leaf.meta}` : ''}
-                                                {hasDetails && !leafOpen ? ' · dotknij → pozycje' : ''}
+                                                {hasDetails ? ' · podgląd pozycji' : ''}
                                               </Text>
-                                              {hasDetails && leafOpen ? (
-                                                <View style={styles.detailBox}>
-                                                  {leaf.detailLines!.map((line, i) => (
-                                                    <Text
-                                                      key={`${leaf.id}-d-${i}`}
-                                                      style={[styles.detailLine, { color: t.textSecondary }]}
-                                                    >
-                                                      • {line}
-                                                    </Text>
-                                                  ))}
-                                                </View>
-                                              ) : null}
                                             </View>
                                             <Text
                                               style={[
@@ -243,9 +239,7 @@ export function ExpandableDateJournal({
                                             {hasDetails ? (
                                               <TouchableOpacity
                                                 style={{ flex: 1, flexDirection: 'row', alignItems: 'flex-start', minWidth: 0 }}
-                                                onPress={() =>
-                                                  setOpenLeafId(leafOpen ? null : leaf.id)
-                                                }
+                                                onPress={() => setPreviewLeaf(leaf)}
                                                 activeOpacity={0.75}
                                                 testID={`journal-invoice-${leaf.id}`}
                                               >
@@ -272,6 +266,56 @@ export function ExpandableDateJournal({
           </View>
         );
       })}
+
+      <Modal
+        visible={!!previewLeaf}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setPreviewLeaf(null)}
+      >
+        <SafeAreaView style={[styles.modalSafe, { backgroundColor: t.bg }]} edges={['top', 'bottom']}>
+          <View style={[styles.modalHeader, { borderBottomColor: t.border }]}>
+            <View style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
+              <Text style={[styles.modalTitle, { color: t.text }]} numberOfLines={2}>
+                {previewLeaf?.title || 'Podgląd faktury'}
+              </Text>
+              {previewLeaf?.meta ? (
+                <Text style={{ color: t.textMuted, fontSize: 13, marginTop: 4 }}>
+                  {previewLeaf.meta}
+                </Text>
+              ) : null}
+            </View>
+            <Pressable
+              onPress={() => setPreviewLeaf(null)}
+              hitSlop={12}
+              style={[styles.modalClose, { backgroundColor: t.border }]}
+            >
+              <X size={18} color={t.text} strokeWidth={2.2} />
+            </Pressable>
+          </View>
+          <View style={[styles.modalAmountRow, { borderBottomColor: t.border }]}>
+            <Text style={{ color: t.textSecondary, fontSize: 13, fontWeight: '600' }}>Kwota</Text>
+            <Text style={{ color: t.text, fontSize: 18, fontWeight: '800' }}>
+              {previewLeaf
+                ? previewLeaf.amountLabel ?? formatAmount(previewLeaf.amount)
+                : ''}
+            </Text>
+          </View>
+          <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
+            <Text style={[styles.modalSection, { color: t.textSecondary }]}>
+              Pozycje ({previewLeaf?.detailLines?.length ?? 0})
+            </Text>
+            {(previewLeaf?.detailLines || []).map((line, i) => (
+              <View
+                key={`inv-line-${i}`}
+                style={[styles.modalLine, { borderBottomColor: t.border }]}
+              >
+                <Text style={[styles.modalLineText, { color: t.text }]}>{line}</Text>
+              </View>
+            ))}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 }
@@ -336,12 +380,42 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     marginTop: 1,
   },
-  detailBox: { marginTop: 6, gap: 3, paddingRight: 8, width: '100%' },
-  detailLine: {
-    fontSize: 11,
-    lineHeight: 16,
-    fontWeight: '500',
-    flexShrink: 1,
-    flexWrap: 'wrap',
+  modalSafe: { flex: 1 },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  modalTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.2 },
+  modalClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalAmountRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  modalBody: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40 },
+  modalSection: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+  },
+  modalLine: {
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  modalLineText: { fontSize: 15, lineHeight: 22, fontWeight: '500' },
 });

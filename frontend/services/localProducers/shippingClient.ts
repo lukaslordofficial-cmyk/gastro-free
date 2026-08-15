@@ -81,3 +81,38 @@ export async function fetchProducerOrderShipping(
     };
   }
 }
+
+export async function markProducerOrderReceived(
+  orderId: string,
+): Promise<{ ok: boolean; message: string; already?: boolean; received?: number }> {
+  const oid = (orderId || '').trim();
+  if (!oid) return { ok: false, message: 'Brak ID zamówienia.' };
+  if (!BACKEND_URL) return { ok: false, message: 'Brak EXPO_PUBLIC_BACKEND_URL.' };
+  try {
+    const res = await fetch(
+      `${BACKEND_URL}/api/local-producers/orders/${encodeURIComponent(oid)}/mark-received`,
+      { method: 'POST', headers: await authHeaders() },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        message:
+          typeof data.detail === 'string'
+            ? data.detail
+            : `Nie udało się potwierdzić odbioru (${res.status})`,
+      };
+    }
+    return {
+      ok: true,
+      already: !!data.already,
+      received: Number(data.received) || 0,
+      message: typeof data.message === 'string' ? data.message : 'Paczka przyjęta.',
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : 'Błąd sieci przy potwierdzeniu odbioru.',
+    };
+  }
+}

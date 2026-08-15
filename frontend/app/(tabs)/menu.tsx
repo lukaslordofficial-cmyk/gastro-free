@@ -16,6 +16,7 @@ import {
   Pressable,
   DeviceEventEmitter,
   ActivityIndicator,
+  InteractionManager,
 } from 'react-native';
 import {
   emitRecipeIngredientsChanged,
@@ -1189,9 +1190,46 @@ export default function MenuScreen() {
     return rows;
   }, [grouped]);
 
-  // Miniatury: tylko zdjęcia własne (bez dishImagesCatalog — require setek WebP
-  // blokowało JS ~1 min przy pierwszym wejściu / przełączaniu kategorii).
-  const dishThumbByName = useMemo(() => new Map<string, DishThumbAssignment>(), []);
+  const [dishThumbByName, setDishThumbByName] = useState<Map<string, DishThumbAssignment>>(
+    () => new Map(),
+  );
+  const dishNamesKey = useMemo(
+    () => dishes.map((d) => `${d.name}\u0001${d.category}`).join('|'),
+    [dishes],
+  );
+
+  // Obrazki: lekki JSON + tylko URL-e pasujące do dań z Supabase (nie 1000 WebP).
+  useEffect(() => {
+    if (!dishes.length) {
+      setDishThumbByName(new Map());
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const handle = InteractionManager.runAfterInteractions(() => {
+      timer = setTimeout(() => {
+        void import('@/lib/menuDishThumbs')
+          .then(({ assignMenuDishThumbs, prefetchMenuDishThumbs }) => {
+            if (cancelled) return;
+            const assigned = assignMenuDishThumbs(
+              dishes.map((d) => ({ name: d.name, category: d.category })),
+            );
+            if (cancelled) return;
+            setDishThumbByName(assigned);
+            prefetchMenuDishThumbs(assigned);
+          })
+          .catch(() => {
+            /* ignore — lista działa bez miniaturek */
+          });
+      }, 80);
+    });
+    return () => {
+      cancelled = true;
+      handle.cancel?.();
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey covers identity
+  }, [dishNamesKey]);
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
@@ -1434,7 +1472,7 @@ export default function MenuScreen() {
         />
       );
     },
-    [handleChangeDishPhoto, customImageTick],
+    [dishThumbByName, handleChangeDishPhoto, customImageTick],
   );
 
   // ── Save / update dish ────────────────────────────────────────────────────
@@ -1950,7 +1988,7 @@ export default function MenuScreen() {
           <FlashList
             data={menuRows}
             estimatedItemSize={96}
-            extraData={customImageTick}
+            extraData={`${customImageTick}:${dishThumbByName.size}`}
             keyExtractor={(item) =>
               item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
             }

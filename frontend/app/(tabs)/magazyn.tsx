@@ -1622,6 +1622,7 @@ export default function MagazynScreen() {
       {/* Main content — FlashList recycles rows + images stay on disk cache */}
       <FlashList
         data={magRows}
+        estimatedItemSize={88}
         extraData={expandedCategories}
         keyExtractor={(row, index) => {
           switch (row.type) {

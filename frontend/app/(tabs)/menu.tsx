@@ -36,10 +36,7 @@ import { MenuScanModal } from '@/components/MenuScanModal';
 import { BatchPrepModal, type BatchPrepDish } from '@/components/BatchPrepModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 
-/** Ciężkie katalogi dań — osobny chunk Metro, nie przy cold start Menu. */
-const InspirationsModal = lazy(() =>
-  import('@/components/InspirationsModal').then((m) => ({ default: m.InspirationsModal })),
-);
+/** Ciężki modal receptur — osobny chunk Metro, nie przy cold start Menu. */
 const RecipesModal = lazy(() =>
   import('@/components/RecipesModal').then((m) => ({ default: m.RecipesModal })),
 );
@@ -61,7 +58,7 @@ import {
   getDishCustomImageSync,
 } from '@/lib/dishCustomImages';
 import * as ImagePicker from 'expo-image-picker';
-import { Bell, Box, Sparkles, BookOpen } from 'lucide-react-native';
+import { Bell, Box, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { ingredientDedupeKey, normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
@@ -214,7 +211,7 @@ function mapInvDbRow(row: any): InventoryItem {
 
 // ─── DishCard ─────────────────────────────────────────────────────────────────
 
-function DishCard({
+const DishCard = React.memo(function DishCard({
   dish,
   onEdit,
   onDelete,
@@ -412,7 +409,7 @@ function DishCard({
       )}
     </View>
   );
-}
+});
 
 const dishStyles = StyleSheet.create({
   container: {
@@ -1196,6 +1193,7 @@ export default function MenuScreen() {
   const [dishThumbByName, setDishThumbByName] = useState<Map<string, DishThumbAssignment>>(
     () => new Map(),
   );
+  const dishNamesKey = useMemo(() => dishes.map((d) => d.name).join('|'), [dishes]);
 
   useEffect(() => {
     if (!dishes.length) {
@@ -1204,7 +1202,6 @@ export default function MenuScreen() {
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    setDishThumbByName(new Map());
     const handle = InteractionManager.runAfterInteractions(() => {
       timer = setTimeout(() => {
         void import('@/lib/productImages').then(({ assignUniqueDishImageSources }) => {
@@ -1212,33 +1209,17 @@ export default function MenuScreen() {
           const assigned = assignUniqueDishImageSources(
             dishes.map((d) => ({ name: d.name, category: d.category })),
           );
-          const entries = [...assigned.entries()];
-          if (!entries.length) return;
-          let i = 0;
-          const chunk = 8;
-          const pump = () => {
-            if (cancelled) return;
-            const part = entries.slice(i, i + chunk);
-            if (!part.length) return;
-            setDishThumbByName((prev) => {
-              const next = new Map(prev);
-              for (const [k, v] of part) next.set(k, v);
-              return next;
-            });
-            i += chunk;
-            if (i < entries.length) requestAnimationFrame(pump);
-          };
-          pump();
+          if (!cancelled) setDishThumbByName(assigned);
         });
-      }, 60);
+      }, 40);
     });
     return () => {
       cancelled = true;
       handle.cancel?.();
       if (timer) clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dishes.map((d) => d.name).join('|')]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey covers identity
+  }, [dishNamesKey]);
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
@@ -1878,7 +1859,6 @@ export default function MenuScreen() {
   }
 
   const [showScanModal, setShowScanModal] = useState(false);
-  const [showInspirations, setShowInspirations] = useState(false);
   const [showRecipes, setShowRecipes] = useState(false);
 
   const handleMic = () => Alert.alert('Kreator Receptur AI — Głos', 'Funkcja rejestracji głosowej jest w trakcie implementacji.', [{ text: 'Rozumiem' }]);
@@ -1965,10 +1945,40 @@ export default function MenuScreen() {
                   />
                 ))}
               </ScrollView>
+              <View style={{ marginTop: 10, marginBottom: DS.space[16], gap: 10 }}>
+                <PremiumGlowCta
+                  label="Receptury"
+                  onPress={() => setShowRecipes(true)}
+                  icon={<BookOpen size={16} color="#0A0A0A" strokeWidth={2.5} />}
+                />
+                <PremiumGlowCta
+                  label="Zgłoś informację"
+                  onPress={() => openVoiceReport()}
+                  icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
+                />
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: DS.space[16] }}>
+                <PremiumStatTile
+                  value={filtered.length}
+                  label="Dań"
+                  icon={<Bell size={14} color={DS.color.greenEnd} strokeWidth={2} />}
+                />
+                <PremiumStatTile
+                  value={Object.keys(grouped).length}
+                  label="Kategorii"
+                  icon={<Box size={14} color={DS.color.greenEnd} strokeWidth={2} />}
+                />
+                <PremiumStatTile
+                  value={filtered.reduce((s, d) => s + d.recipe.length, 0)}
+                  label="Składników"
+                  icon={<Trash2 size={14} color={DS.color.greenEnd} strokeWidth={2} />}
+                />
+              </View>
             </View>
           <FlashList
             data={menuRows}
-            extraData={activeCat}
+            estimatedItemSize={96}
+            extraData={dishThumbByName}
             keyExtractor={(item) =>
               item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
             }
@@ -1979,45 +1989,6 @@ export default function MenuScreen() {
             contentContainerStyle={[styles.content, { paddingTop: 0, paddingHorizontal: DS.space.screen, flexGrow: 1 }]}
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.accent} />}
-            ListHeaderComponent={
-              <>
-                <View style={{ marginBottom: DS.space[16], gap: 10 }}>
-                  <PremiumGlowCta
-                    label="Inspiracje Kulinarne"
-                    onPress={() => setShowInspirations(true)}
-                    icon={<Sparkles size={16} color="#0A0A0A" strokeWidth={2.5} />}
-                  />
-                  <PremiumGlowCta
-                    label="Receptury"
-                    onPress={() => setShowRecipes(true)}
-                    icon={<BookOpen size={16} color="#0A0A0A" strokeWidth={2.5} />}
-                  />
-                  <PremiumGlowCta
-                    label="Zgłoś informację"
-                    onPress={() => openVoiceReport()}
-                    icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
-                  />
-                </View>
-
-                <View style={{ flexDirection: 'row', gap: 8, marginBottom: DS.space[24] }}>
-                  <PremiumStatTile
-                    value={filtered.length}
-                    label="Dań"
-                    icon={<Bell size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                  />
-                  <PremiumStatTile
-                    value={Object.keys(grouped).length}
-                    label="Kategorii"
-                    icon={<Box size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                  />
-                  <PremiumStatTile
-                    value={filtered.reduce((s, d) => s + d.recipe.length, 0)}
-                    label="Składników"
-                    icon={<Trash2 size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                  />
-                </View>
-              </>
-            }
             ListEmptyComponent={
               <View style={styles.empty}>
                 <UtensilsCrossed size={32} color={DS.color.muted} strokeWidth={1.5} />
@@ -2214,15 +2185,6 @@ export default function MenuScreen() {
               <Text style={styles.aiBtnText}>Rejestruj głosem</Text>
             </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={[styles.aiBtn, { backgroundColor: '#0F172A', marginTop: 10, width: '100%' }]}
-            onPress={() => setShowInspirations(true)}
-            activeOpacity={0.85}
-            testID="menu-inspirations-open"
-          >
-            <Sparkles size={18} color={Colors.white} strokeWidth={2} />
-            <Text style={styles.aiBtnText}>Inspiracje Kulinarne</Text>
-          </TouchableOpacity>
         </View>
 
         <View style={{ height: 32 }} />
@@ -2628,32 +2590,6 @@ export default function MenuScreen() {
         onClose={() => setBatchPrepDish(null)}
       />
       <Suspense fallback={<ActivityIndicator style={{ position: 'absolute', opacity: 0 }} />}>
-        {showInspirations ? (
-          <InspirationsModal
-            visible={showInspirations}
-            onClose={() => setShowInspirations(false)}
-            onApplyToMenu={({ dishName, ingredients: ings }) => {
-              setEditingDish(null);
-              setForm({
-                name: dishName,
-                category: FORM_CATEGORIES[0],
-                price: '',
-              });
-              setIngredients(
-                ings.length > 0
-                  ? ings.map((ing) => ({
-                      key: secureId('ing'),
-                      name: ing.name,
-                      quantity: String(normalizeRecipeQuantity(ing.quantity)),
-                      unit: normalizeMenuUnit(ing.unit),
-                      pieceWeightG: '',
-                    }))
-                  : [newDraftIngredient()],
-              );
-              setShowAddModal(true);
-            }}
-          />
-        ) : null}
         {showRecipes ? (
           <RecipesModal
             visible={showRecipes}

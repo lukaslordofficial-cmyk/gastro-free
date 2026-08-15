@@ -1346,11 +1346,9 @@ function toImageSource(r: ResolvedProductImage | null, preferDishes = false): nu
 }
 
 /**
- * Podgrzej indeksy katalogów po starcie UI (po InteractionManager).
- * - składniki: Magazyn
- * - dania: Menu (lazy require setek WebP — nie przy cold splash)
- * Nie dekodujemy bitmap wszystkich zdjęć do RAM — tylko rejestrujemy assety JS,
- * żeby pierwsze wejście w zakładkę nie zamrażało wątku.
+ * Podgrzej lekki katalog składników (Magazyn) po starcie UI.
+ * Katalog dań (setki require(WebP)) NIE jest tu ładowany — zamrażał Menu na ~1 min.
+ * Grafiki dań w Menu: tylko zdjęcia własne użytkownika (placeholdery bez matchingu).
  */
 export function warmProductImageIndexes(): void {
   try {
@@ -1358,14 +1356,6 @@ export function warmProductImageIndexes(): void {
   } catch {
     /* ignore */
   }
-  // Odłóż ciężki dishCatalog, żeby nie kolidował z pierwszym ekranem.
-  setTimeout(() => {
-    try {
-      void dishCatalog();
-    } catch {
-      /* ignore */
-    }
-  }, 1200);
 }
 
 function isPackagingEntry(entry: ProductImageEntry): boolean {

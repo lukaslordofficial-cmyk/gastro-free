@@ -16,7 +16,6 @@ import {
   Pressable,
   DeviceEventEmitter,
   ActivityIndicator,
-  InteractionManager,
 } from 'react-native';
 import {
   emitRecipeIngredientsChanged,
@@ -1190,36 +1189,9 @@ export default function MenuScreen() {
     return rows;
   }, [grouped]);
 
-  const [dishThumbByName, setDishThumbByName] = useState<Map<string, DishThumbAssignment>>(
-    () => new Map(),
-  );
-  const dishNamesKey = useMemo(() => dishes.map((d) => d.name).join('|'), [dishes]);
-
-  useEffect(() => {
-    if (!dishes.length) {
-      setDishThumbByName(new Map());
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const handle = InteractionManager.runAfterInteractions(() => {
-      timer = setTimeout(() => {
-        void import('@/lib/productImages').then(({ assignUniqueDishImageSources }) => {
-          if (cancelled) return;
-          const assigned = assignUniqueDishImageSources(
-            dishes.map((d) => ({ name: d.name, category: d.category })),
-          );
-          if (!cancelled) setDishThumbByName(assigned);
-        });
-      }, 40);
-    });
-    return () => {
-      cancelled = true;
-      handle.cancel?.();
-      if (timer) clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey covers identity
-  }, [dishNamesKey]);
+  // Miniatury: tylko zdjęcia własne (bez dishImagesCatalog — require setek WebP
+  // blokowało JS ~1 min przy pierwszym wejściu / przełączaniu kategorii).
+  const dishThumbByName = useMemo(() => new Map<string, DishThumbAssignment>(), []);
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
@@ -1462,7 +1434,7 @@ export default function MenuScreen() {
         />
       );
     },
-    [dishThumbByName, handleChangeDishPhoto, customImageTick],
+    [handleChangeDishPhoto, customImageTick],
   );
 
   // ── Save / update dish ────────────────────────────────────────────────────
@@ -1978,7 +1950,7 @@ export default function MenuScreen() {
           <FlashList
             data={menuRows}
             estimatedItemSize={96}
-            extraData={dishThumbByName}
+            extraData={customImageTick}
             keyExtractor={(item) =>
               item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
             }

@@ -128,7 +128,7 @@ export default function RootLayout() {
     return () => clearTimeout(t);
   }, [loaded, error]);
 
-  // Po starcie UI: indeks składników od razu, katalog dań chwilę później (w tle).
+  // Po starcie UI: lekki indeks składników (Magazyn). Bez katalogu dań.
   useEffect(() => {
     const task = InteractionManager.runAfterInteractions(() => {
       try {

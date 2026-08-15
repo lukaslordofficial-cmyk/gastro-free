@@ -40,6 +40,35 @@ def _map_lp_category_hint(raw: Optional[str], title: str) -> str:
     return "Inne"
 
 
+def order_paid_total_pln(order: dict[str, Any], materials_total: float = 0.0) -> float:
+    """Cała kwota zapłacona przez restaurację (produkty + kurier + opłata platformy)."""
+    try:
+        total_paid = float(order.get("total_price") or 0)
+    except (TypeError, ValueError):
+        total_paid = 0.0
+    try:
+        delivery_cost = float(order.get("delivery_cost") or order.get("shipping_cost") or 0)
+    except (TypeError, ValueError):
+        delivery_cost = 0.0
+    try:
+        platform_fee = float(order.get("platform_fee") or 0)
+    except (TypeError, ValueError):
+        platform_fee = 0.0
+    try:
+        producer_amount = float(order.get("producer_amount") or 0)
+    except (TypeError, ValueError):
+        producer_amount = 0.0
+
+    total = round(total_paid, 2)
+    if total <= 0:
+        total = round(materials_total + delivery_cost + platform_fee, 2)
+    if total <= 0 and producer_amount > 0:
+        total = round(producer_amount + delivery_cost + platform_fee, 2)
+    if total <= 0:
+        total = round(materials_total, 2)
+    return total
+
+
 async def receive_producer_order_into_warehouse(
     *,
     client,
@@ -151,14 +180,21 @@ async def receive_producer_order_into_warehouse(
     if not invoice_products:
         return {"ok": False, "error": "Brak poprawnych pozycji do przyjęcia"}
 
-    # Preferuj producer_amount (bez prowizji/kuriera), inaczej suma linii
+    try:
+        delivery_cost = float(order.get("delivery_cost") or order.get("shipping_cost") or 0)
+    except (TypeError, ValueError):
+        delivery_cost = 0.0
+    try:
+        platform_fee = float(order.get("platform_fee") or 0)
+    except (TypeError, ValueError):
+        platform_fee = 0.0
     try:
         producer_amount = float(order.get("producer_amount") or 0)
     except (TypeError, ValueError):
         producer_amount = 0.0
-    total = producer_amount if producer_amount > 0 else round(materials_total, 2)
-    if total <= 0:
-        total = round(materials_total, 2)
+
+    # Cała kwota zapłacona przez restaurację (produkty + kurier + opłata platformy)
+    total = order_paid_total_pln(order, materials_total)
 
     from supabase_rest import push_account_key, reset_account_key
 
@@ -181,26 +217,61 @@ async def receive_producer_order_into_warehouse(
     finally:
         reset_account_key(token)
 
-    # Popraw notatkę kosztu — oznacz źródło LP (best-effort)
+    # Popraw notatkę kosztu — pełna kwota + linie kurier / platforma
     cost_id = (saved or {}).get("cost_id")
     if cost_id:
         token2 = push_account_key(account_key)
         try:
+            import json as _json
+
             note_rows = await sb_get(client, "variable_cost_entries", params={
-                "select": "id,note,name",
+                "select": "id,note,name,amount_pln",
                 "id": f"eq.{cost_id}",
                 "limit": "1",
             })
             if note_rows:
-                old_note = str(note_rows[0].get("note") or "")
-                prefix = f"Dostawa LP ({source}) · {company}"
-                if "GM_INVOICE_LINES:" in old_note:
-                    _, _, rest = old_note.partition("GM_INVOICE_LINES:")
-                    new_note = f"{prefix}\nGM_INVOICE_LINES:{rest}"
-                else:
-                    new_note = f"{prefix}\n{old_note}".strip()
+                prefix = (
+                    f"Dostawa LP ({source}) · {company} · zapłacono łącznie {total:.2f} zł "
+                    f"(produkty {round(producer_amount or materials_total, 2):.2f} zł"
+                    + (f" + kurier {delivery_cost:.2f} zł" if delivery_cost > 0 else "")
+                    + (f" + opłata platformy {platform_fee:.2f} zł" if platform_fee > 0 else "")
+                    + ")"
+                )
+                lines = [
+                    {
+                        "name": p["product_name"],
+                        "qty": p["quantity"],
+                        "unit": p["unit"],
+                        "price_netto": p["price_netto"],
+                    }
+                    for p in invoice_products
+                ]
+                if delivery_cost > 0:
+                    lines.append({
+                        "name": "Kurier / dostawa",
+                        "qty": 1,
+                        "unit": "szt",
+                        "price_netto": round(delivery_cost, 2),
+                    })
+                if platform_fee > 0:
+                    lines.append({
+                        "name": "Opłata serwisu platformy (5%)",
+                        "qty": 1,
+                        "unit": "szt",
+                        "price_netto": round(platform_fee, 2),
+                    })
+                line_payload = {
+                    "v": 1,
+                    "kind": "invoice_lines",
+                    "supplier_id": "",
+                    "supplier_name": str(company),
+                    "total": float(total),
+                    "lines": lines,
+                }
+                new_note = f"{prefix}\nGM_INVOICE_LINES:{_json.dumps(line_payload, ensure_ascii=False)}"
                 await sb_patch(client, "variable_cost_entries", {"id": f"eq.{cost_id}"}, {
                     "name": f"Zakup LP — {company}"[:120],
+                    "amount_pln": float(total),
                     "note": new_note,
                 })
         except Exception:

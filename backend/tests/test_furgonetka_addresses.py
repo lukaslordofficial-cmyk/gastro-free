@@ -32,6 +32,19 @@ def test_party_single_word_restaurant_gets_two_part_name():
     assert p["company"] == "alkor"
 
 
+def test_api_base_normalizes_sandbox_host():
+    from furgonetka_broker import api_base
+    import os
+
+    os.environ.pop("FURGONETKA_API_URL", None)
+    assert api_base() == "https://api.furgonetka.pl"
+    os.environ["FURGONETKA_API_URL"] = "https://api.sandbox.furgonetka.pl"
+    assert api_base() == "https://api.furgonetka.pl"
+    os.environ["FURGONETKA_API_URL"] = "https://api.furgonetka.pl"
+    assert api_base() == "https://api.furgonetka.pl"
+    os.environ.pop("FURGONETKA_API_URL", None)
+
+
 def test_missing_dummy_warsaw_not_injected():
     p = _party(
         name="",

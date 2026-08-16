@@ -57,7 +57,18 @@ _token_cache: dict[str, Any] = {
 
 
 def _use_sandbox() -> bool:
+    """
+    Tryb testowy (konto sandbox.furgonetka.pl).
+    Domyślnie WŁĄCZONY — wyłącz przez FURGONETKA_SANDBOX=0 lub FURGONETKA_PRODUCTION=1.
+    """
+    prod = (os.getenv("FURGONETKA_PRODUCTION") or "").strip().lower()
+    if prod in ("1", "true", "yes", "on"):
+        return False
     raw = (os.getenv("FURGONETKA_SANDBOX") or "").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if not raw:
+        return True
     return raw in ("1", "true", "yes", "on", "sandbox", "test")
 
 
@@ -95,14 +106,17 @@ def _has_oauth_secrets() -> bool:
 
 
 def api_base() -> str:
+    """
+    OAuth / REST dla kont sandbox i produkcji: ten sam host api.furgonetka.pl.
+    Nie używaj api.sandbox.furgonetka.pl — OAuth tam nie działa.
+    """
     custom = (os.getenv("FURGONETKA_API_URL") or "").strip().rstrip("/")
     if custom:
+        # Częsty błąd konfiguracji — normalizuj sandbox host na produkcyjny API.
+        lowered = custom.lower()
+        if "api.sandbox.furgonetka.pl" in lowered or "://sandbox.furgonetka.pl" in lowered:
+            return "https://api.furgonetka.pl"
         return custom
-    if _use_sandbox():
-        return (
-            (os.getenv("FURGONETKA_SANDBOX_API_URL") or "").strip().rstrip("/")
-            or "https://api.sandbox.furgonetka.pl"
-        )
     return "https://api.furgonetka.pl"
 
 

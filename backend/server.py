@@ -16022,6 +16022,108 @@ async def local_producers_confirm_payment(req: LpConfirmRequest):
     return result
 
 
+
+class LpProductCreateRequest(BaseModel):
+    title: str
+    category_id: str
+    description: Optional[str] = None
+    price: float
+    unit: Optional[str] = "szt"
+    stock: Optional[float] = 0
+    weight_g: Optional[float] = None
+    available: Optional[bool] = True
+    vat_rate_override: Optional[str] = None
+
+
+@app.post("/producer/products/nowy")
+@app.post("/api/producer/products/nowy")
+@app.post("/api/local-producers/products")
+async def producer_products_create(req: LpProductCreateRequest, request: Request):
+    """
+    Tworzy produkt dystrybutora z automatyczną stawką VAT
+    (billing_type + kategoria). Kategoria jest wymagana.
+    """
+    from product_vat import (
+        resolve_billing_type,
+        resolve_product_vat_rate,
+        require_category_id,
+    )
+
+    uid = await _auth_user_id_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Wymagane logowanie dystrybutora")
+
+    try:
+        category_id = require_category_id(req.category_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Podaj nazwę produktu.")
+    try:
+        price = float(req.price)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Podaj poprawną cenę.")
+    if price < 0:
+        raise HTTPException(status_code=400, detail="Podaj poprawną cenę.")
+    try:
+        stock = float(req.stock if req.stock is not None else 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Podaj poprawny stan.")
+    if stock < 0:
+        raise HTTPException(status_code=400, detail="Podaj poprawny stan.")
+
+    async with httpx.AsyncClient(timeout=45.0, verify=_httpx_verify()) as client:
+        producers = await sb_get(client, "local_producers", params={
+            "select": "id,auth_user_id,billing_type,settlement_document_type",
+            "auth_user_id": f"eq.{uid}",
+            "limit": "1",
+        })
+        if not producers:
+            raise HTTPException(status_code=404, detail="Brak profilu dystrybutora")
+        producer = producers[0]
+
+        cats = await sb_get(client, "producer_categories", params={
+            "select": "id,name,slug",
+            "id": f"eq.{category_id}",
+            "limit": "1",
+        })
+        if not cats:
+            raise HTTPException(status_code=400, detail="Nieprawidłowa kategoria.")
+        category = cats[0]
+
+        billing = resolve_billing_type(producer)
+        vat_rate = resolve_product_vat_rate(
+            billing_type=billing,
+            category_slug=category.get("slug"),
+            category_name=category.get("name"),
+            override_rate=req.vat_rate_override,
+        )
+
+        payload = {
+            "producer_id": producer["id"],
+            "title": title,
+            "category_id": category_id,
+            "description": (req.description or "").strip() or None,
+            "price": price,
+            "unit": (req.unit or "szt").strip() or "szt",
+            "stock": stock,
+            "weight_g": req.weight_g,
+            "available": True if req.available is None else bool(req.available),
+            "vat_rate": vat_rate,
+        }
+        rows = await sb_post(client, "producer_products", payload)
+        row = rows[0] if isinstance(rows, list) and rows else rows
+        return {
+            "ok": True,
+            "product": row,
+            "vat_rate": vat_rate,
+            "billing_type": billing,
+            "auto_vat": True,
+        }
+
+
 @app.post("/api/local-producers/orders/{order_id}/mark-handed-to-courier")
 async def local_producers_mark_handed_to_courier(order_id: str, request: Request):
     """
@@ -16074,6 +16176,33 @@ async def local_producers_mark_handed_to_courier(order_id: str, request: Request
                 )
             except Exception:
                 logger.exception("LP stock decrement on mark-handed failed")
+
+            # VAT-RR auto document for flat-rate farmers
+            try:
+                producers_full = await sb_get(client, "local_producers", params={
+                    "select": "id,auth_user_id,company_name,settlement_document_type,billing_type,tax_identifier,bank_account,address,city,postal_code,billing_city,billing_address,billing_zip,billing_first_name,billing_last_name,owner_name",
+                    "id": f"eq.{order.get('producer_id')}",
+                    "limit": "1",
+                })
+                prod_full = (producers_full or [producer])[0]
+                orders_full = await sb_get(client, "producer_orders", params={
+                    "select": "*",
+                    "id": f"eq.{oid}",
+                    "limit": "1",
+                })
+                order_full = (orders_full or [order])[0]
+                from vat_rr_settlement import maybe_issue_vat_rr_after_ship
+                vat_rr_result = await maybe_issue_vat_rr_after_ship(
+                    client,
+                    producer=prod_full,
+                    order=order_full,
+                    sb_get=sb_get,
+                    sb_patch=sb_patch,
+                )
+                if not vat_rr_result.get("ok") and not vat_rr_result.get("skipped"):
+                    logger.warning("VAT-RR after ship: %s", vat_rr_result.get("error"))
+            except Exception:
+                logger.exception("VAT-RR after mark-handed failed")
 
         tracking = (order.get("delivery_tracking") or "").strip()
         company = (producer.get("company_name") or "Lokalny przetwórca").strip()

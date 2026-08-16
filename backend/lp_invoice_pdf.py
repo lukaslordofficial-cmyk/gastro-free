@@ -81,10 +81,37 @@ def seller_from_producer(producer: Optional[dict[str, Any]]) -> dict[str, Option
 
 
 def settlement_type_of(producer: Optional[dict[str, Any]]) -> str:
-    raw = str((producer or {}).get("settlement_document_type") or "vat_invoice").strip()
-    if raw in ("receipt", "non_vat_invoice", "vat_invoice"):
+    raw = str((producer or {}).get("settlement_document_type") or "").strip()
+    if raw in ("receipt", "non_vat_invoice", "vat_invoice", "vat_rr"):
         return raw
+    billing = str((producer or {}).get("billing_type") or "").strip().lower()
+    if billing == "vat_rr":
+        return "vat_rr"
+    if billing == "vat_exempt":
+        return "non_vat_invoice"
+    if billing == "unregistered":
+        return "receipt"
+    if billing == "vat":
+        return "vat_invoice"
     return "vat_invoice"
+
+
+def round_money(amount: Any) -> float:
+    try:
+        n = float(amount or 0)
+    except (TypeError, ValueError):
+        n = 0.0
+    return round(n + 1e-9, 2)
+
+
+def vat_rate_to_percent(rate: Any, *, default: float = 5.0) -> float:
+    raw = str(rate or "").strip().lower()
+    if raw in ("", "zw", "0"):
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def invoice_filename(settlement_type: str, order_id: str) -> str:
@@ -92,6 +119,7 @@ def invoice_filename(settlement_type: str, order_id: str) -> str:
     prefix = {
         "receipt": "rachunek",
         "non_vat_invoice": "faktura",
+        "vat_rr": "faktura-vat-rr",
     }.get(settlement_type, "faktura-vat")
     return f"{prefix}-{short}.pdf"
 
@@ -101,6 +129,8 @@ def _doc_title(kind: str) -> str:
         return "FAKTURA"
     if kind == "receipt":
         return "RACHUNEK"
+    if kind == "vat_rr":
+        return "FAKTURA VAT-RR"
     return "FAKTURA VAT"
 
 
@@ -109,6 +139,8 @@ def _doc_subtitle(kind: str) -> Optional[str]:
         return "Dokument bez VAT — sprzedawca zwolniony"
     if kind == "receipt":
         return "Działalność nierejestrowana"
+    if kind == "vat_rr":
+        return "Wystawca: nabywca (restauracja) · Dostawca: rolnik ryczałtowy"
     return None
 
 
@@ -153,14 +185,29 @@ def _item_name(item: dict[str, Any]) -> str:
     prod = item.get("producer_products") or {}
     if isinstance(prod, list):
         prod = prod[0] if prod else {}
-    return _clean(prod.get("title") or item.get("title") or item.get("name")) or "Produkt"
+    raw = _clean(prod.get("title") or item.get("title") or item.get("name")) or "Produkt"
+    return re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip() or "Produkt"
 
 
 def _item_unit(item: dict[str, Any]) -> str:
     prod = item.get("producer_products") or {}
     if isinstance(prod, list):
         prod = prod[0] if prod else {}
-    return _clean(prod.get("unit") or item.get("unit"))
+    unit = _clean(prod.get("unit") or item.get("unit"))
+    if unit:
+        return unit
+    raw = _clean(prod.get("title") or item.get("title") or item.get("name"))
+    m = re.search(r"\(([^)]+)\)\s*$", raw)
+    return _clean(m.group(1)) if m else "szt"
+
+
+def _item_vat_rate(item: dict[str, Any], *, kind: str) -> float:
+    if kind == "vat_rr":
+        return 7.0
+    prod = item.get("producer_products") or {}
+    if isinstance(prod, list):
+        prod = prod[0] if prod else {}
+    return vat_rate_to_percent(prod.get("vat_rate"), default=5.0)
 
 
 def build_invoice_pdf(
@@ -172,15 +219,20 @@ def build_invoice_pdf(
     regular, bold = _fonts()
     kind = settlement_type_of(producer)
     seller = seller_from_producer(producer)
-    show_vat = kind == "vat_invoice"
+    show_vat = kind in ("vat_invoice", "vat_rr")
+    is_vat_rr = kind == "vat_rr"
+    hide_seller_nip = kind == "receipt"
 
     shipping = 0.0
     try:
         shipping = float(order.get("delivery_cost") or order.get("shipping_cost") or 0) or 0.0
     except (TypeError, ValueError):
         shipping = 0.0
+    shipping = round_money(shipping)
 
-    products_total = 0.0
+    products_gross = 0.0
+    sum_net = 0.0
+    sum_vat = 0.0
     line_rows: list[dict[str, str]] = []
     for it in items or []:
         try:
@@ -188,25 +240,63 @@ def build_invoice_pdf(
         except (TypeError, ValueError):
             qty = 0.0
         try:
-            unit_price = float(it.get("unit_price") or 0) or 0.0
+            unit_gross = float(it.get("unit_price") or 0) or 0.0
         except (TypeError, ValueError):
-            unit_price = 0.0
-        products_total += qty * unit_price
+            unit_gross = 0.0
+        products_gross = round_money(products_gross + round_money(qty * unit_gross))
         name = _item_name(it)
-        unit = _item_unit(it)
-        line_rows.append({
-            "name": f"{name} ({unit})" if unit else name,
-            "qty": str(int(qty) if qty == int(qty) else qty),
-            "unit_price": format_pln(unit_price),
-            "line_total": format_pln(qty * unit_price),
-            "vat": "23%" if show_vat else "",
-        })
+        unit = _item_unit(it) or "szt"
+        if show_vat:
+            rate = _item_vat_rate(it, kind=kind)
+            factor = 1.0 + (rate / 100.0)
+            unit_net = round_money(unit_gross / factor) if factor else round_money(unit_gross)
+            line_net = round_money(qty * unit_net)
+            line_vat = round_money(line_net * (rate / 100.0))
+            sum_net = round_money(sum_net + line_net)
+            sum_vat = round_money(sum_vat + line_vat)
+            line_rows.append({
+                "name": name,
+                "unit": unit,
+                "qty": str(int(qty) if qty == int(qty) else qty),
+                "unit_price": format_pln(unit_net),
+                "line_total": format_pln(line_net),
+                "vat": f"{int(rate) if rate == int(rate) else rate}%",
+            })
+        else:
+            line_gross = round_money(qty * unit_gross)
+            line_rows.append({
+                "name": name,
+                "unit": unit,
+                "qty": str(int(qty) if qty == int(qty) else qty),
+                "unit_price": format_pln(round_money(unit_gross)),
+                "line_total": format_pln(line_gross),
+                "vat": "",
+            })
 
-    grand = products_total + shipping
-    doc_no = _clean(order.get("invoice_number")) or (
-        f"{'R' if kind == 'receipt' else 'FZ' if kind == 'non_vat_invoice' else 'FV'}"
-        f"/{__import__('datetime').datetime.now().year}/{(order.get('id') or '')[:8].upper()}"
-    )
+    if show_vat and shipping > 0:
+        ship_rate = 7.0 if is_vat_rr else 5.0
+        factor = 1.0 + (ship_rate / 100.0)
+        ship_net = round_money(shipping / factor)
+        ship_vat = round_money(ship_net * (ship_rate / 100.0))
+        sum_net = round_money(sum_net + ship_net)
+        sum_vat = round_money(sum_vat + ship_vat)
+        shipping_display = ship_net
+        grand = round_money(sum_net + sum_vat)
+    elif show_vat:
+        shipping_display = 0.0
+        grand = round_money(sum_net + sum_vat)
+    else:
+        shipping_display = shipping
+        grand = round_money(products_gross + shipping)
+
+    year = __import__("datetime").datetime.now().year
+    short = (order.get("id") or "")[:8].upper()
+    default_no = {
+        "receipt": f"R/{year}/{short}",
+        "non_vat_invoice": f"FZ/{year}/{short}",
+        "vat_rr": f"RR/{year}/{short}",
+    }.get(kind, f"FV/{year}/{short}")
+    doc_no = _clean(order.get("invoice_number")) or default_no
     issue_place = (
         _clean(producer.get("billing_city"))
         or _clean(producer.get("city"))
@@ -286,8 +376,16 @@ def build_invoice_pdf(
     hline(y, MARGIN, right, 1.4, accent)
     y += 22
 
+    sale_raw = _clean(order.get("courier_pickup_at")) or _clean(order.get("updated_at")) or created
+    if sale_raw and len(sale_raw) >= 10:
+        sale_date = f"{sale_raw[8:10]}.{sale_raw[5:7]}.{sale_raw[0:4]}"
+    else:
+        sale_date = issue_date
+
     draw(f"Numer: {doc_no}", MARGIN, y, 10, bold_t=True)
-    draw(f"Data: {issue_date}", right, y, 10, color=muted, align="right")
+    y += 14
+    draw(f"Data wystawienia: {issue_date}", MARGIN, y, 9)
+    draw(f"Data sprzedaży: {sale_date}", right, y, 9, align="right")
     y += 16
     draw(f"Miejsce wystawienia: {issue_place}", MARGIN, y, 9, color=muted)
     y += 18
@@ -297,18 +395,28 @@ def build_invoice_pdf(
     col_w = (content_w - 24) / 2
     left_x = MARGIN
     right_x = MARGIN + col_w + 24
-    draw("SPRZEDAWCA", left_x, y, 8, bold_t=True, color=accent)
-    draw("NABYWCA", right_x, y, 8, bold_t=True, color=accent)
+    left_label = "WYSTAWCA (NABYWCA)" if is_vat_rr else "SPRZEDAWCA"
+    right_label = "DOSTAWCA (ROLNIK RYCZAŁTOWY)" if is_vat_rr else "NABYWCA"
+    draw(left_label, left_x, y, 8, bold_t=True, color=accent)
+    draw(right_label, right_x, y, 8, bold_t=True, color=accent)
     y += 14
 
-    seller_lines = [seller["name"] or "—"]
+    farmer_lines = [seller["name"] or "—"]
     if seller.get("address"):
-        seller_lines.append(str(seller["address"]))
-    if seller.get("tax_id"):
-        seller_lines.append(f"NIP: {seller['tax_id']}")
+        farmer_lines.append(str(seller["address"]))
+    if seller.get("tax_id") and not hide_seller_nip:
+        farmer_lines.append(f"NIP: {seller['tax_id']}")
     if seller.get("bank_account"):
-        seller_lines.append(f"Konto: {seller['bank_account']}")
-    buyer_lines = [buyer_name, buyer_address] if buyer_address else [buyer_name]
+        farmer_lines.append(f"Konto: {seller['bank_account']}")
+    restaurant_lines = [buyer_name, buyer_address] if buyer_address else [buyer_name]
+    buyer_nip = _clean(order.get("buyer_tax_id") or order.get("restaurant_nip"))
+    # lp_ship may be only in notes — keep optional
+    if buyer_nip:
+        restaurant_lines.append(f"NIP: {buyer_nip}")
+    if is_vat_rr:
+        seller_lines, buyer_lines = restaurant_lines, farmer_lines
+    else:
+        seller_lines, buyer_lines = farmer_lines, restaurant_lines
     sw = [w for line in seller_lines for w in _wrap(regular, line, 9, col_w - 4)]
     bw = [w for line in buyer_lines for w in _wrap(regular, line, 9, col_w - 4)]
     for i in range(max(len(sw), len(bw), 1)):
@@ -318,7 +426,9 @@ def build_invoice_pdf(
             draw(bw[i], right_x, y, 9)
         y += 12
 
-    y += 8
+    y += 6
+    draw("Metoda płatności: Stripe (Płatność online) · Status: ZAPŁACONO", MARGIN, y, 9, bold_t=True, color=accent)
+    y += 14
     hline(y, MARGIN, right, 0.5)
     y += 20
     draw("POZYCJE", MARGIN, y, 10, bold_t=True)
@@ -326,24 +436,38 @@ def build_invoice_pdf(
     hline(y, MARGIN, right, 0.8, accent)
     y += 14
 
-    col_lp, col_name, col_qty, col_price, col_vat = MARGIN, MARGIN + 28, MARGIN + 340, MARGIN + 410, MARGIN + 470
+    col_lp = MARGIN
+    col_name = MARGIN + 22
+    col_qty = MARGIN + 250
+    col_unit = MARGIN + 290
+    col_price = MARGIN + 360
+    col_vat = MARGIN + 430
     draw("Lp", col_lp, y, 8, bold_t=True, color=muted)
     draw("Nazwa", col_name, y, 8, bold_t=True, color=muted)
     draw("Ilość", col_qty, y, 8, bold_t=True, color=muted, align="right")
+    draw("Jm.", col_unit, y, 8, bold_t=True, color=muted)
     draw("Cena", col_price, y, 8, bold_t=True, color=muted, align="right")
     if show_vat:
         draw("VAT", col_vat, y, 8, bold_t=True, color=muted, align="right")
     draw("Wartość", right, y, 8, bold_t=True, color=muted, align="right")
     y += 10
     hline(y, MARGIN, right, 0.4)
+    # border between Ilość and Jm.
+    page.draw_line(
+        fitz.Point(col_unit - 6, PAGE_H - (y - 10)),
+        fitz.Point(col_unit - 6, PAGE_H - y),
+        color=(0.55, 0.58, 0.6),
+        width=0.7,
+    )
     y += 14
 
     for i, row in enumerate(line_rows, start=1):
         new_page_if_needed(48)
-        names = _wrap(regular, row["name"], 9, 250)
+        names = _wrap(regular, row["name"], 9, 200)
         draw(str(i), col_lp, y, 9)
         draw(names[0], col_name, y, 9)
         draw(row["qty"], col_qty, y, 9, align="right")
+        draw(row.get("unit") or "szt", col_unit, y, 9)
         draw(row["unit_price"], col_price, y, 9, align="right")
         if show_vat:
             draw(row["vat"], col_vat, y, 9, align="right")
@@ -357,19 +481,18 @@ def build_invoice_pdf(
     if shipping > 0:
         new_page_if_needed(24)
         draw("Dostawa", col_name, y, 9)
-        draw(format_pln(shipping), right, y, 9, bold_t=True, align="right")
+        draw(format_pln(shipping_display if show_vat else shipping), right, y, 9, bold_t=True, align="right")
         y += 16
 
     y += 4
     hline(y, MARGIN, right, 0.8, accent)
     y += 20
     if show_vat:
-        net = grand / 1.23
         draw("Netto:", right - 130, y, 10, color=muted)
-        draw(format_pln(net), right, y, 10, align="right")
+        draw(format_pln(sum_net), right, y, 10, align="right")
         y += 14
-        draw("VAT:", right - 130, y, 10, color=muted)
-        draw(format_pln(grand - net), right, y, 10, align="right")
+        draw("VAT:" if not is_vat_rr else "Zwrot VAT:", right - 130, y, 10, color=muted)
+        draw(format_pln(sum_vat), right, y, 10, align="right")
         y += 14
     draw("Do zapłaty:", right - 130, y, 12, bold_t=True)
     draw(format_pln(grand), right, y, 12, bold_t=True, align="right")
@@ -386,7 +509,13 @@ def build_invoice_pdf(
     elif kind == "receipt":
         notes.append(
             "Rachunek wystawiony w ramach działalności nierejestrowanej "
-            "(art. 5 ust. 1 ustawy Prawo przedsiębiorców). Dokument nie jest fakturą VAT."
+            "(art. 5 ust. 1 ustawy Prawo przedsiębiorców). Dokument nie jest fakturą VAT. "
+            "Sprzedawca nie posługuje się NIP."
+        )
+    elif kind == "vat_rr":
+        notes.append(
+            "Faktura VAT-RR wystawiona przez nabywcę produktów rolnych (restaurację) "
+            "na rzecz rolnika ryczałtowego. Zryczałtowany zwrot podatku — art. 115–118 ustawy o VAT."
         )
     else:
         notes.append("Dokument wystawiony elektronicznie. Zachowaj kopię zgodnie z przepisami.")
@@ -461,7 +590,7 @@ async def load_order_invoice_items(client, order_id: str) -> list[dict[str, Any]
 
     try:
         rows = await sb_get(client, "producer_order_items", params={
-            "select": "quantity,unit_price,product_id,producer_products(title,unit)",
+            "select": "quantity,unit_price,product_id,producer_products(title,unit,vat_rate)",
             "order_id": f"eq.{order_id}",
         }) or []
         if rows:
@@ -486,5 +615,5 @@ async def load_order_invoice_items(client, order_id: str) -> list[dict[str, Any]
             products = {}
     for r in rows:
         p = products.get(str(r.get("product_id"))) or {}
-        r["producer_products"] = {"title": p.get("title"), "unit": p.get("unit")}
+        r["producer_products"] = {"title": p.get("title"), "unit": p.get("unit"), "vat_rate": p.get("vat_rate")}
     return rows

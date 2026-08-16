@@ -13,39 +13,34 @@ Nie budujemy osobnego OAuth per dystrybutor i nie trzymamy sekretów w Expo / WW
 | `/producent/zamowienia` → etykieta / kurier | **gastro-manager-landing** (Vercel) | `FURGONETKA_*` na Vercel |
 | Wyceny kuriera w Expo | **gastro-18** (Railway) | `FURGONETKA_*` na Railway |
 
-Instrukcja sandbox (klucze testowe):  
-`gastro-manager-landing` → `docs/FURGONETKA_SANDBOX.md`
+**Sandbox.furgonetka.pl nie ma OAuth2.** Integracje → Własne = token sklepu (Furgonetka → Railway).  
+Tworzenie paczek wymaga OAuth produkcyjnego albo `FURGONETKA_MOCK=1`.  
+Instrukcja: `gastro-manager-landing` → `docs/FURGONETKA_SANDBOX.md`
 
 ## Co musi być na Railway (backend gastro-18)
 
-**Testy (zalecane na start):**
+**Testy (bez prawdziwego kuriera):**
 
 ```
 FURGONETKA_SANDBOX=1
-FURGONETKA_MOCK=0
-FURGONETKA_CLIENT_ID=   # z https://sandbox.furgonetka.pl → OAuth2
-FURGONETKA_CLIENT_SECRET=
-FURGONETKA_EMAIL=       # login sandbox
-FURGONETKA_PASSWORD=
+FURGONETKA_MOCK=1
 ```
 
-**NIE ustawiaj** `FURGONETKA_API_URL=https://api.sandbox.furgonetka.pl` — OAuth nie działa.  
-Host API: zawsze `https://api.furgonetka.pl` (sandbox i produkcja).
-
-Opcjonalnie: `FURGONETKA_INPOST_SERVICE_ID`, `FURGONETKA_LABEL_PAGE=a6`.
-
-**Szybki mock bez konta:** `FURGONETKA_MOCK=1` (etykieta awaryjna, bez prawdziwego API).
-
-**Produkcja później:**
+**Prawdziwe etykiety (produkcja + prepaid):**
 
 ```
 FURGONETKA_SANDBOX=0
 FURGONETKA_PRODUCTION=1
-FURGONETKA_CLIENT_ID=   # z furgonetka.pl
-…
+FURGONETKA_MOCK=0
+FURGONETKA_CLIENT_ID=   # z furgonetka.pl → OAuth2
+FURGONETKA_CLIENT_SECRET=
+FURGONETKA_EMAIL=
+FURGONETKA_PASSWORD=
 ```
 
-Błąd „Cena przesyłek > saldo” = klucze z konta **produkcyjnego** bez środków. Podmień na sandbox albo doładuj prepaid.
+Host API: zawsze `https://api.furgonetka.pl`. Nie używaj `api.sandbox.furgonetka.pl`.
+
+Błąd „Cena przesyłek > saldo” = produkcyjne OAuth bez środków w skarbonce. Do testów: `FURGONETKA_MOCK=1`.
 
 ## Integracja „Własna” (Furgonetka woła nasz sklep)
 

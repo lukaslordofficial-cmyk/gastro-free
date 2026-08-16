@@ -367,6 +367,20 @@ def _normalize_phone(raw: Optional[str]) -> str:
     return digits[:20]
 
 
+def _ensure_person_name(raw: str, *, fallback_last: str = "Kontakt") -> str:
+    """
+    Furgonetka wymaga imienia i nazwiska (min. 2 człony) w polu ``name``.
+    Nazwa restauracji typu „alkor” dostaje drugi człon, żeby walidacja przeszła.
+    """
+    cleaned = re.sub(r"\s+", " ", (raw or "").strip())
+    if not cleaned:
+        return f"Odbiorca {fallback_last}"[:70]
+    parts = [p for p in cleaned.split(" ") if p]
+    if len(parts) >= 2:
+        return cleaned[:70]
+    return f"{parts[0]} {fallback_last}"[:70]
+
+
 def _party(
     *,
     name: str,
@@ -378,8 +392,9 @@ def _party(
     postcode: str,
 ) -> dict[str, Any]:
     street_full = (street or "").strip()[:70]
+    contact = _ensure_person_name(name or company or "")
     return {
-        "name": (name or company or "")[:70],
+        "name": contact,
         "company": (company or name or "")[:70],
         "email": (
             (email or "").strip()

@@ -202,6 +202,10 @@ export type ProducerDeliveryAddress = {
   city: string;
   post_code: string;
   email?: string | null;
+  /** NIP firmy restauracji (opcjonalnie, do faktury). */
+  nip?: string | null;
+  /** REGON firmy restauracji (opcjonalnie). */
+  regon?: string | null;
 };
 
 export type CreateProducerOrderInput = {

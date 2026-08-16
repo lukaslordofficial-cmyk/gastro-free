@@ -78,26 +78,38 @@ export function useProducerDetail(producerId: string | undefined) {
     [cart],
   );
 
+  const stockCap = useCallback((product: ProducerProduct) => {
+    const n = Number(product.stock);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    // Stan magazynowy LP jest w jednostce produktu (szt/kg/l) — qty koszyka to ta sama jednostka.
+    return Math.floor(n);
+  }, []);
+
   const addToCart = useCallback((product: ProducerProduct, qty = 1) => {
+    const max = stockCap(product);
+    if (max <= 0) return;
     setCart((prev) => {
       const i = prev.findIndex((l) => l.product.id === product.id);
       if (i >= 0) {
         const next = [...prev];
-        next[i] = { ...next[i], quantity: next[i].quantity + qty };
+        const desired = next[i].quantity + qty;
+        next[i] = { ...next[i], quantity: Math.min(desired, max), product };
         return next;
       }
-      return [...prev, { product, quantity: qty }];
+      return [...prev, { product, quantity: Math.min(Math.max(1, qty), max) }];
     });
-  }, []);
+  }, [stockCap]);
 
   const setQty = useCallback((productId: string, quantity: number) => {
     setCart((prev) => {
       if (quantity <= 0) return prev.filter((l) => l.product.id !== productId);
-      return prev.map((l) =>
-        (l.product.id === productId ? { ...l, quantity } : l),
-      );
+      return prev.map((l) => {
+        if (l.product.id !== productId) return l;
+        const max = stockCap(l.product);
+        return { ...l, quantity: Math.min(quantity, Math.max(0, max)) };
+      }).filter((l) => l.quantity > 0);
     });
-  }, []);
+  }, [stockCap]);
 
   const clearCart = useCallback(() => setCart([]), []);
 

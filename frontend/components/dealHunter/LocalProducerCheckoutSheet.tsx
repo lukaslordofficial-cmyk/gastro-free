@@ -65,6 +65,10 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
     setShipCity,
     shipPost,
     setShipPost,
+    shipNip,
+    setShipNip,
+    shipRegon,
+    setShipRegon,
     hydrate,
     toDelivery,
     missingMessage,
@@ -204,14 +208,16 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
             </Text>
             {(
               [
-                ['Nazwa', shipName, setShipName, 'Moja Restauracja'],
-                ['Telefon', shipPhone, setShipPhone, '500600700'],
-                ['Ulica', shipStreet, setShipStreet, 'ul. Przykładowa'],
-                ['Nr budynku', shipBuilding, setShipBuilding, '12'],
-                ['Miasto', shipCity, setShipCity, 'Warszawa'],
-                ['Kod pocztowy', shipPost, setShipPost, '00-001'],
+                ['Nazwa', shipName, setShipName, 'Moja Restauracja', 'default' as const],
+                ['Telefon', shipPhone, setShipPhone, '500600700', 'phone-pad' as const],
+                ['Ulica', shipStreet, setShipStreet, 'ul. Przykładowa', 'default' as const],
+                ['Nr budynku', shipBuilding, setShipBuilding, '12', 'default' as const],
+                ['Miasto', shipCity, setShipCity, 'Warszawa', 'default' as const],
+                ['Kod pocztowy', shipPost, setShipPost, '00-001', 'default' as const],
+                ['NIP firmy (opcjonalnie)', shipNip, setShipNip, '1234567890', 'number-pad' as const],
+                ['REGON (opcjonalnie)', shipRegon, setShipRegon, '123456789', 'number-pad' as const],
               ] as const
-            ).map(([label, value, setter, ph]) => (
+            ).map(([label, value, setter, ph, kb]) => (
               <View key={label} style={styles.field}>
                 <Text style={[styles.fieldLabel, { color: colors.textSecondary }]}>{label}</Text>
                 <TextInput
@@ -219,7 +225,8 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
                   onChangeText={setter}
                   placeholder={ph}
                   placeholderTextColor={colors.textSecondary}
-                  keyboardType={label === 'Telefon' ? 'phone-pad' : 'default'}
+                  keyboardType={kb}
+                  maxLength={label.startsWith('REGON') ? 14 : label.startsWith('NIP') ? 13 : undefined}
                   style={[
                     styles.input,
                     {

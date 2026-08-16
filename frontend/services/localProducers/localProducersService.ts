@@ -67,6 +67,8 @@ function parseLpShipNote(notes: string | null | undefined): ProducerDeliveryAddr
       city,
       post_code,
       email: obj.email ? String(obj.email) : null,
+      nip: obj.nip ? String(obj.nip).replace(/\D/g, '') : null,
+      regon: obj.regon ? String(obj.regon).replace(/\D/g, '') : null,
     };
   } catch {
     return null;
@@ -88,6 +90,8 @@ function shippingFromProfileRow(row: Record<string, unknown> | null): ProducerDe
     building_number: String(row.shipping_building || '').trim(),
     city,
     post_code,
+    nip: row.shipping_nip ? String(row.shipping_nip).replace(/\D/g, '') : null,
+    regon: row.shipping_regon ? String(row.shipping_regon).replace(/\D/g, '') : null,
   };
 }
 
@@ -100,9 +104,20 @@ export async function getRestaurantShippingProfile(): Promise<ProducerDeliveryAd
 
   const full = await supabase
     .from('profiles')
-    .select('restaurant_name, shipping_phone, shipping_street, shipping_building, shipping_city, shipping_post_code')
+    .select('restaurant_name, shipping_phone, shipping_street, shipping_building, shipping_city, shipping_post_code, shipping_nip, shipping_regon')
     .eq('id', uid)
     .maybeSingle();
+
+  if (full.error && /shipping_nip|shipping_regon|column|schema cache/i.test(full.error.message || '')) {
+    const legacy = await supabase
+      .from('profiles')
+      .select('restaurant_name, shipping_phone, shipping_street, shipping_building, shipping_city, shipping_post_code')
+      .eq('id', uid)
+      .maybeSingle();
+    if (!legacy.error) {
+      Object.assign(full, legacy);
+    }
+  }
 
   if (!full.error) {
     const fromProfile = shippingFromProfileRow(full.data as Record<string, unknown> | null);
@@ -165,9 +180,25 @@ export async function saveRestaurantShippingProfile(
     shipping_building: (delivery.building_number || '').trim() || null,
     shipping_city: delivery.city.trim() || null,
     shipping_post_code: delivery.post_code.trim() || null,
+    shipping_nip: (delivery.nip || '').replace(/\D/g, '') || null,
+    shipping_regon: (delivery.regon || '').replace(/\D/g, '') || null,
   };
 
   const { error } = await supabase.from('profiles').update(payload).eq('id', uid);
+  if (error && /shipping_nip|shipping_regon|column|schema cache/i.test(error.message || '')) {
+    const withoutTax = { ...payload };
+    delete withoutTax.shipping_nip;
+    delete withoutTax.shipping_regon;
+    const retry = await supabase.from('profiles').update(withoutTax).eq('id', uid);
+    if (retry.error && /shipping_|column|schema cache/i.test(retry.error.message || '')) {
+      await supabase
+        .from('profiles')
+        .update({ restaurant_name: delivery.name.trim() || null })
+        .eq('id', uid);
+      return;
+    }
+    return;
+  }
   if (error && /shipping_|column|schema cache/i.test(error.message || '')) {
     await supabase
       .from('profiles')
@@ -382,6 +413,42 @@ export async function createProducerOrder(
     throw new Error('Podaj adres dostawy: ulica, miasto, kod pocztowy i telefon.');
   }
 
+  // Hard limit: nie pozwól zamówić więcej niż stan magazynowy produktu.
+  const productIds = [...new Set(input.items.map((i) => i.productId).filter(Boolean))];
+  if (productIds.length) {
+    const { data: stockRows, error: stockErr } = await supabase
+      .from(LOCAL_PRODUCERS_TABLES.products)
+      .select('id, title, stock, available, producer_id')
+      .in('id', productIds);
+    if (stockErr) throw new Error(stockErr.message);
+    const byId = new Map(
+      asRows<{
+        id: string;
+        title?: string | null;
+        stock?: number | null;
+        available?: boolean | null;
+        producer_id?: string | null;
+      }>(stockRows).map((r) => [r.id, r]),
+    );
+    for (const item of input.items) {
+      const row = byId.get(item.productId);
+      if (!row || row.producer_id !== input.producerId) {
+        throw new Error('Jeden z produktów nie należy do tego dystrybutora.');
+      }
+      if (row.available === false) {
+        throw new Error(`Produkt „${row.title || item.productId}” jest niedostępny.`);
+      }
+      const stock = Math.floor(Number(row.stock) || 0);
+      const qty = Number(item.quantity) || 0;
+      if (qty <= 0) throw new Error('Ilość produktu musi być większa od zera.');
+      if (qty > stock) {
+        throw new Error(
+          `Za mało na stanie: „${row.title || 'produkt'}” — dostępne ${stock}, w koszyku ${qty}.`,
+        );
+      }
+    }
+  }
+
   const { data: auth } = await supabase.auth.getUser();
   const uid = auth.user?.id;
   if (!uid) throw new Error('Zaloguj się jako restauracja.');
@@ -432,6 +499,8 @@ export async function createProducerOrder(
     city: d.city.trim(),
     post_code: d.post_code.trim(),
     email: (d.email || (profile as { email?: string } | null)?.email || null),
+    nip: (d.nip || '').replace(/\D/g, '') || null,
+    regon: (d.regon || '').replace(/\D/g, '') || null,
   };
   void saveRestaurantShippingProfile({
     name: shipPayload.name,
@@ -441,6 +510,8 @@ export async function createProducerOrder(
     city: shipPayload.city,
     post_code: shipPayload.post_code,
     email: shipPayload.email,
+    nip: shipPayload.nip,
+    regon: shipPayload.regon,
   });
   const shipNote = `lp_ship:${JSON.stringify(shipPayload)}`;
   const courierNote = selectedCourier

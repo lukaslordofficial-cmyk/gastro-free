@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
-import { ArrowLeft } from 'lucide-react-native';
+import { ArrowLeft, CreditCard } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import {
@@ -27,8 +27,12 @@ import { ShipmentTracker } from '@/components/localProducers/ShipmentTracker';
 import {
   paymentStatusLabelPl,
   shipmentStatusLabelPl,
+  isAwaitingLpPayment,
 } from '@/lib/localProducers/orderStatusLabels';
 import { fetchProducerOrderShipping, type LpShippingView } from '@/services/localProducers/shippingClient';
+import { openProducerOrderCheckout } from '@/services/localProducers/checkoutClient';
+import { StripeOpeningOverlay } from '@/components/localProducers';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 
 const DS_NEON = '#00FF88';
 
@@ -36,6 +40,7 @@ export default function ProducerOrderDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const theme = useAppTheme();
+  const { alert: premiumAlert } = usePremiumAlert();
   const isPremium = !!theme.isPremium;
   const bg = isPremium ? '#0A0A0A' : Colors.background;
   const titleColor = isPremium ? '#F5F5F5' : Colors.textPrimary;
@@ -48,6 +53,7 @@ export default function ProducerOrderDetailScreen() {
   const [shipping, setShipping] = useState<LpShippingView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [paying, setPaying] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -86,6 +92,28 @@ export default function ProducerOrderDetailScreen() {
   const delivery = Number(order?.delivery_cost ?? order?.shipping_cost ?? 0) || 0;
   const platformFee = Number(order?.platform_fee ?? 0) || 0;
   const total = Number(order?.total_price ?? 0) || productsSum + delivery + platformFee;
+  const awaitingPay = order ? isAwaitingLpPayment(order.payment_status) : false;
+
+  const resumePayment = useCallback(() => {
+    if (!order?.id || paying) return;
+    void (async () => {
+      setPaying(true);
+      try {
+        const pay = await openProducerOrderCheckout(order.id);
+        if (!pay.ok) {
+          premiumAlert('Płatność', pay.message, [{ text: 'OK', style: 'primary' }]);
+        }
+      } catch (e) {
+        premiumAlert(
+          'Płatność',
+          e instanceof Error ? e.message : 'Nie udało się otworzyć Stripe',
+          [{ text: 'OK', style: 'primary' }],
+        );
+      } finally {
+        setPaying(false);
+      }
+    })();
+  }, [order?.id, paying, premiumAlert]);
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: bg }]} edges={['top', 'bottom']}>
@@ -115,6 +143,31 @@ export default function ProducerOrderDetailScreen() {
             <Text style={[styles.meta, { color: muted }]}>
               Wysyłka: {shipmentStatusLabelPl(order.shipment_status)}
             </Text>
+            {awaitingPay ? (
+              <TouchableOpacity
+                style={[
+                  styles.payBtn,
+                  {
+                    backgroundColor: isPremium ? DS_NEON : Colors.accent,
+                    opacity: paying ? 0.7 : 1,
+                  },
+                ]}
+                onPress={resumePayment}
+                disabled={paying}
+                testID="lp-resume-payment"
+              >
+                {paying ? (
+                  <ActivityIndicator color={isPremium ? '#0A0A0A' : '#fff'} />
+                ) : (
+                  <>
+                    <CreditCard size={16} color={isPremium ? '#0A0A0A' : '#fff'} />
+                    <Text style={[styles.payBtnText, { color: isPremium ? '#0A0A0A' : '#fff' }]}>
+                      Dokończ płatność
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            ) : null}
             {order.delivery_tracking ? (
               <Text style={[styles.meta, { color: isPremium ? DS_NEON : Colors.accent }]}>
                 Numer przesyłki: {order.delivery_tracking}
@@ -190,6 +243,7 @@ export default function ProducerOrderDetailScreen() {
           <SettlementDocumentsSection order={order} isPremium={isPremium} />
         </ScrollView>
       )}
+      <StripeOpeningOverlay visible={paying} message="Otwieranie Stripe…" />
     </SafeAreaView>
   );
 }
@@ -239,5 +293,16 @@ const styles = StyleSheet.create({
   },
   totalLabel: { fontSize: 14, fontWeight: '800' },
   totalValue: { fontSize: 16, fontWeight: '800' },
+  payBtn: {
+    marginTop: 10,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  payBtnText: { fontSize: 14, fontWeight: '800' },
   error: { textAlign: 'center', marginTop: 40, paddingHorizontal: 24 },
 });

@@ -91,6 +91,10 @@ export function ProducerDetailScreen() {
     setShipCity,
     shipPost,
     setShipPost,
+    shipNip,
+    setShipNip,
+    shipRegon,
+    setShipRegon,
     toDelivery,
     missingMessage,
   } = useRestaurantShippingForm();
@@ -322,6 +326,8 @@ export function ProducerDetailScreen() {
                   <Text style={[styles.catTitle, { color: accent }]}>{group.title}</Text>
                   {group.items.map((p) => {
                     const line = cart.find((c) => c.product.id === p.id);
+                    const stockMax = Math.max(0, Math.floor(Number(p.stock) || 0));
+                    const atMax = !!line && line.quantity >= stockMax;
                     return (
                       <View
                         key={p.id}
@@ -340,7 +346,7 @@ export function ProducerDetailScreen() {
                           </Text>
                           <Text style={{ color: muted, fontSize: 12 }}>
                             {formatPlnNumber(Number(p.price))} zł / {asText(p.unit, 'szt')}
-                            {p.stock != null ? ` · stan ${asText(p.stock)}` : ''}
+                            {` · stan ${stockMax}`}
                           </Text>
                           {line ? (
                             <View style={styles.qtyRow}>
@@ -354,12 +360,27 @@ export function ProducerDetailScreen() {
                                 {line.quantity}
                               </Text>
                               <TouchableOpacity
-                                onPress={() => setQty(p.id, line.quantity + 1)}
-                                style={[styles.qtyBtn, { borderColor: border }]}
+                                onPress={() => {
+                                  if (atMax) {
+                                    premiumAlert(
+                                      'Brak na stanie',
+                                      `Maksymalnie ${stockMax} ${asText(p.unit, 'szt')} — tyle jest u dystrybutora.`,
+                                      [{ text: 'OK', style: 'primary' }],
+                                    );
+                                    return;
+                                  }
+                                  setQty(p.id, line.quantity + 1);
+                                }}
+                                style={[styles.qtyBtn, { borderColor: border, opacity: atMax ? 0.4 : 1 }]}
+                                disabled={atMax}
                               >
                                 <Text style={{ color: titleColor, fontWeight: '700' }}>+</Text>
                               </TouchableOpacity>
                             </View>
+                          ) : stockMax <= 0 ? (
+                            <Text style={{ color: Colors.danger, fontSize: 12, fontWeight: '600', marginTop: 6 }}>
+                              Brak na stanie
+                            </Text>
                           ) : (
                             <TouchableOpacity
                               onPress={() => addToCart(p, 1)}
@@ -459,6 +480,30 @@ export function ProducerDetailScreen() {
                   <View style={{ marginBottom: 8 }}>
                     <Text style={{ color: muted, fontSize: 11, marginBottom: 4 }}>Kod pocztowy</Text>
                     <TextInput value={shipPost} onChangeText={setShipPost} placeholder="00-001" placeholderTextColor={muted} style={[styles.input, { color: titleColor, borderColor: border, backgroundColor: inputBg }]} />
+                  </View>
+                  <View style={{ marginBottom: 8 }}>
+                    <Text style={{ color: muted, fontSize: 11, marginBottom: 4 }}>NIP firmy (opcjonalnie)</Text>
+                    <TextInput
+                      value={shipNip}
+                      onChangeText={setShipNip}
+                      placeholder="1234567890"
+                      placeholderTextColor={muted}
+                      keyboardType="number-pad"
+                      maxLength={13}
+                      style={[styles.input, { color: titleColor, borderColor: border, backgroundColor: inputBg }]}
+                    />
+                  </View>
+                  <View style={{ marginBottom: 8 }}>
+                    <Text style={{ color: muted, fontSize: 11, marginBottom: 4 }}>REGON (opcjonalnie)</Text>
+                    <TextInput
+                      value={shipRegon}
+                      onChangeText={setShipRegon}
+                      placeholder="123456789"
+                      placeholderTextColor={muted}
+                      keyboardType="number-pad"
+                      maxLength={14}
+                      style={[styles.input, { color: titleColor, borderColor: border, backgroundColor: inputBg }]}
+                    />
                   </View>
                   {producer ? (
                     <CourierQuotePicker

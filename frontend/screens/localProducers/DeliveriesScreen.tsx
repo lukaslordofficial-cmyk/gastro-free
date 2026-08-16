@@ -12,7 +12,7 @@ import {
   ScrollView,
   TouchableOpacity,
 } from 'react-native';
-import { Package, Truck, CheckCircle2 } from 'lucide-react-native';
+import { Package, Truck, CheckCircle2, CreditCard } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -29,8 +29,11 @@ import {
   deliverySummaryLabelPl,
   paymentStatusLabelPl,
   shipmentStatusLabelPl,
+  isAwaitingLpPayment,
 } from '@/lib/localProducers/orderStatusLabels';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import { openProducerOrderCheckout } from '@/services/localProducers/checkoutClient';
+import { StripeOpeningOverlay } from '@/components/localProducers';
 
 const DS_NEON = '#00FF88';
 
@@ -46,12 +49,16 @@ function OrderCard({
   onPress,
   onMarkReceived,
   receiving,
+  onResumePayment,
+  paying,
 }: {
   order: ProducerOrderWithProducer;
   isPremium: boolean;
   onPress: () => void;
   onMarkReceived?: () => void;
   receiving?: boolean;
+  onResumePayment?: () => void;
+  paying?: boolean;
 }) {
   const titleColor = isPremium ? '#F5F5F5' : Colors.textPrimary;
   const muted = isPremium ? 'rgba(255,255,255,0.55)' : Colors.textSecondary;
@@ -69,6 +76,7 @@ function OrderCard({
       })
     : '—';
   const inTransit = deliveryBucketForOrder(order) === 'in_transit';
+  const awaitingPay = isAwaitingLpPayment(order.payment_status);
 
   return (
     <TouchableOpacity
@@ -97,6 +105,35 @@ function OrderCard({
         <Text style={[styles.tracking, { color: isPremium ? DS_NEON : Colors.accent }]}>
           Przesyłka: {tracking}
         </Text>
+      ) : null}
+      {awaitingPay && onResumePayment ? (
+        <TouchableOpacity
+          style={[
+            styles.receiveBtn,
+            {
+              backgroundColor: isPremium ? DS_NEON : Colors.accent,
+              opacity: paying ? 0.7 : 1,
+            },
+          ]}
+          onPress={(e) => {
+            e?.stopPropagation?.();
+            onResumePayment();
+          }}
+          disabled={!!paying}
+          activeOpacity={0.85}
+          testID={`lp-resume-payment-${order.id}`}
+        >
+          {paying ? (
+            <ActivityIndicator color={isPremium ? '#0A0A0A' : '#fff'} />
+          ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <CreditCard size={16} color={isPremium ? '#0A0A0A' : '#fff'} />
+              <Text style={[styles.receiveBtnText, { color: isPremium ? '#0A0A0A' : '#fff' }]}>
+                Dokończ płatność
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
       ) : null}
       {inTransit ? (
         <Text style={[styles.eta, { color: muted }]}>
@@ -147,6 +184,7 @@ export function DeliveriesPanel() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [receivingId, setReceivingId] = useState<string | null>(null);
+  const [payingId, setPayingId] = useState<string | null>(null);
 
   const load = useCallback(async (soft?: boolean) => {
     if (!soft) setLoading(true);
@@ -215,6 +253,30 @@ export function DeliveriesPanel() {
       );
     },
     [alert, load],
+  );
+
+  const handleResumePayment = useCallback(
+    (order: ProducerOrderWithProducer) => {
+      if (payingId) return;
+      void (async () => {
+        setPayingId(order.id);
+        try {
+          const pay = await openProducerOrderCheckout(order.id);
+          if (!pay.ok) {
+            alert('Płatność', pay.message, [{ text: 'OK', style: 'primary' }]);
+          }
+        } catch (e) {
+          alert(
+            'Płatność',
+            e instanceof Error ? e.message : 'Nie udało się otworzyć Stripe',
+            [{ text: 'OK', style: 'primary' }],
+          );
+        } finally {
+          setPayingId(null);
+        }
+      })();
+    },
+    [alert, payingId],
   );
 
   return (
@@ -319,8 +381,14 @@ export function DeliveriesPanel() {
               order={o}
               isPremium={isPremium}
               receiving={receivingId === o.id}
+              paying={payingId === o.id}
               onMarkReceived={
                 bucket === 'in_transit' ? () => handleMarkReceived(o) : undefined
+              }
+              onResumePayment={
+                isAwaitingLpPayment(o.payment_status)
+                  ? () => handleResumePayment(o)
+                  : undefined
               }
               onPress={() =>
                 router.push({
@@ -332,6 +400,7 @@ export function DeliveriesPanel() {
           ))}
         </ScrollView>
       )}
+      <StripeOpeningOverlay visible={!!payingId} message="Otwieranie Stripe…" />
     </View>
   );
 }

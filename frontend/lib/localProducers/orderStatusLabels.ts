@@ -23,6 +23,12 @@ export function paymentStatusLabelPl(status?: string | null): string {
   }
 }
 
+/** Zamówienie LP czekające na dokończenie Stripe (anulowane okno / przerwana płatność). */
+export function isAwaitingLpPayment(status?: string | null): boolean {
+  const s = String(status || '').toLowerCase();
+  return s === 'pending' || s === 'awaiting_payment' || s === 'pending_payment';
+}
+
 export function shipmentStatusLabelPl(status?: string | null): string {
   const s = String(status || '').toLowerCase();
   switch (s) {

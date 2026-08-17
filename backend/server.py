@@ -4949,23 +4949,42 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                     "min_quantity": 0, "unit_cost": price, "category_id": cat_id,
                     "is_combo_polprodukt": False, "safety_buffer_percent": 20,
                     "default_alert_days": alert_days,
+                    "is_active": True,
                 }
                 try:
                     row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e:
                     body = e.response.text or ""
-                    if "default_alert_days" in body or "safety_buffer_percent" in body:
-                        payload.pop("default_alert_days", None)
-                        if "safety_buffer_percent" in body:
-                            payload.pop("safety_buffer_percent", None)
+                    drop_keys = (
+                        "default_alert_days", "safety_buffer_percent",
+                        "is_combo_polprodukt", "min_quantity",
+                    )
+                    dropped = False
+                    for key in drop_keys:
+                        if key in payload and key in body:
+                            payload.pop(key, None)
+                            dropped = True
+                    if dropped:
                         try:
                             row = await sb_post(client, "inventory_items", payload)
                         except httpx.HTTPStatusError as e2:
-                            warnings.append(f"{name}: nie dodano do magazynu ({e2.response.text[:80]}).")
-                            continue
+                            try:
+                                row = await sb_post(client, "inventory_items", {
+                                    "name": name, "quantity": qty, "unit": unit,
+                                    "is_active": True,
+                                })
+                            except httpx.HTTPStatusError as e3:
+                                warnings.append(f"{name}: nie dodano do magazynu ({e3.response.text[:80]}).")
+                                continue
                     else:
-                        warnings.append(f"{name}: nie dodano do magazynu ({body[:80]}).")
-                        continue
+                        try:
+                            row = await sb_post(client, "inventory_items", {
+                                "name": name, "quantity": qty, "unit": unit,
+                                "unit_cost": price, "is_active": True,
+                            })
+                        except httpx.HTTPStatusError:
+                            warnings.append(f"{name}: nie dodano do magazynu ({body[:80]}).")
+                            continue
                 item_id = str((row[0] if isinstance(row, list) else row).get("id"))
                 created.append({"name": name, "quantity": qty, "unit": unit, "category": category})
                 new_row = {"id": item_id, "name": name, "quantity": qty, "unit": unit, "category_id": cat_id, "unit_cost": price}
@@ -5057,7 +5076,16 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                 })
                 cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
             except httpx.HTTPStatusError as e:
-                warnings.append(f"Nie udało się dopisać kosztu: {e.response.text[:80]}")
+                try:
+                    cost_row = await sb_post(client, "variable_cost_entries", {
+                        "year_month": _current_year_month(),
+                        "type": "other",
+                        "name": cost_name,
+                        "amount_pln": total,
+                    })
+                    cost_id = (cost_row[0] if isinstance(cost_row, list) else cost_row)["id"]
+                except httpx.HTTPStatusError:
+                    warnings.append(f"Nie udało się dopisać kosztu: {e.response.text[:80]}")
 
         # Katalog własny dostawcy — produkty z faktury (nowy lub istniejący dostawca)
         if supplier_id and (updated or created or products):
@@ -16302,7 +16330,7 @@ async def local_producers_mark_received(order_id: str):
             raise HTTPException(status_code=400, detail=result.get("error") or "Nie udało się przyjąć paczki")
         return {
             **result,
-            "message": (
+            "message": result.get("message") or (
                 "Paczka już była przyjęta wcześniej."
                 if result.get("already")
                 else (

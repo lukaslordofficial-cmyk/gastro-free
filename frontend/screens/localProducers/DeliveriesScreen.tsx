@@ -34,6 +34,7 @@ import {
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { openProducerOrderCheckout } from '@/services/localProducers/checkoutClient';
 import { StripeOpeningOverlay } from '@/components/localProducers';
+import { useUiOverlay } from '@/contexts/UiOverlayContext';
 
 const DS_NEON = '#00FF88';
 
@@ -76,6 +77,7 @@ function OrderCard({
       })
     : '—';
   const inTransit = deliveryBucketForOrder(order) === 'in_transit';
+  const delivered = deliveryBucketForOrder(order) === 'delivered';
   const awaitingPay = isAwaitingLpPayment(order.payment_status);
 
   return (
@@ -141,7 +143,7 @@ function OrderCard({
           a koszt zakupu do finansów.
         </Text>
       ) : null}
-      {inTransit && onMarkReceived ? (
+      {(inTransit || delivered) && onMarkReceived ? (
         <TouchableOpacity
           style={[
             styles.receiveBtn,
@@ -162,7 +164,7 @@ function OrderCard({
             <ActivityIndicator color={isPremium ? '#0A0A0A' : '#fff'} />
           ) : (
             <Text style={[styles.receiveBtnText, { color: isPremium ? '#0A0A0A' : '#fff' }]}>
-              Odebrałem paczkę
+              {delivered ? 'Uzupełnij magazyn i koszt' : 'Odebrałem paczkę'}
             </Text>
           )}
         </TouchableOpacity>
@@ -177,6 +179,7 @@ export function DeliveriesPanel() {
   const theme = useAppTheme();
   const router = useRouter();
   const { alert } = usePremiumAlert();
+  const { notifyDocumentScanComplete } = useUiOverlay();
   const isPremium = !!theme.isPremium;
   const [bucket, setBucket] = useState<DeliveryBucket>('pending');
   const [orders, setOrders] = useState<ProducerOrderWithProducer[]>([]);
@@ -222,10 +225,12 @@ export function DeliveriesPanel() {
   const EmptyIcon = emptyIcon;
 
   const handleMarkReceived = useCallback(
-    (order: ProducerOrderWithProducer) => {
+    (order: ProducerOrderWithProducer, opts?: { repair?: boolean }) => {
       alert(
-        'Odebrałem paczkę',
-        'Potwierdzasz odbiór? Produkty zostaną dodane do magazynu, a koszt zakupu — do kosztów zmiennych w finansach.',
+        opts?.repair ? 'Uzupełnij magazyn i koszt' : 'Odebrałem paczkę',
+        opts?.repair
+          ? 'Jeśli przy odbiorze nic nie trafiło do magazynu lub finansów, dopiszemy brakujące pozycje i koszt zakupu — bez podwajania stanu, który już jest.'
+          : 'Potwierdzasz odbiór? Produkty zostaną dodane do magazynu, a koszt zakupu — do kosztów zmiennych w finansach.',
         [
           { text: 'Anuluj', style: 'cancel' },
           {
@@ -240,6 +245,7 @@ export function DeliveriesPanel() {
                     { text: 'OK', style: 'primary' },
                   ]);
                   if (res.ok) {
+                    notifyDocumentScanComplete('invoice');
                     setBucket('delivered');
                     await load(true);
                   }
@@ -252,7 +258,7 @@ export function DeliveriesPanel() {
         ],
       );
     },
-    [alert, load],
+    [alert, load, notifyDocumentScanComplete],
   );
 
   const handleResumePayment = useCallback(
@@ -383,7 +389,9 @@ export function DeliveriesPanel() {
               receiving={receivingId === o.id}
               paying={payingId === o.id}
               onMarkReceived={
-                bucket === 'in_transit' ? () => handleMarkReceived(o) : undefined
+                bucket === 'in_transit' || bucket === 'delivered'
+                  ? () => handleMarkReceived(o, { repair: bucket === 'delivered' })
+                  : undefined
               }
               onResumePayment={
                 isAwaitingLpPayment(o.payment_status)

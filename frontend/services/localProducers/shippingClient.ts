@@ -84,7 +84,7 @@ export async function fetchProducerOrderShipping(
 
 export async function markProducerOrderReceived(
   orderId: string,
-): Promise<{ ok: boolean; message: string; already?: boolean; received?: number }> {
+): Promise<{ ok: boolean; message: string; already?: boolean; received?: number; cost_id?: string }> {
   const oid = (orderId || '').trim();
   if (!oid) return { ok: false, message: 'Brak ID zamówienia.' };
   if (!BACKEND_URL) return { ok: false, message: 'Brak EXPO_PUBLIC_BACKEND_URL.' };
@@ -107,6 +107,7 @@ export async function markProducerOrderReceived(
       ok: true,
       already: !!data.already,
       received: Number(data.received) || 0,
+      cost_id: typeof data.cost_id === 'string' ? data.cost_id : undefined,
       message: typeof data.message === 'string' ? data.message : 'Paczka przyjęta.',
     };
   } catch (e) {

@@ -16,7 +16,6 @@ import {
   Pressable,
   DeviceEventEmitter,
   ActivityIndicator,
-  InteractionManager,
 } from 'react-native';
 import {
   emitRecipeIngredientsChanged,
@@ -261,9 +260,9 @@ const DishCard = React.memo(function DishCard({
                 source={thumbSrc as any}
                 style={dishStyles.premThumb}
                 contentFit="contain"
-                cachePolicy="disk"
-                transition={180}
-                recyclingKey={dish.id}
+                cachePolicy="memory-disk"
+                transition={0}
+                recyclingKey={customUri || thumb?.slug || dish.id}
               />
             ) : (
               <View style={dishStyles.premThumb} />
@@ -1198,35 +1197,38 @@ export default function MenuScreen() {
     [dishes],
   );
 
-  // Obrazki: lekki JSON + tylko URL-e pasujące do dań z Supabase (nie 1000 WebP).
+  // Obrazki: najpierw lokalny cache (file://), match + download w tle — nie blokuje kategorii.
   useEffect(() => {
     if (!dishes.length) {
       setDishThumbByName(new Map());
       return;
     }
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const handle = InteractionManager.runAfterInteractions(() => {
-      timer = setTimeout(() => {
-        void import('@/lib/menuDishThumbs')
-          .then(({ assignMenuDishThumbs, prefetchMenuDishThumbs }) => {
-            if (cancelled) return;
-            const assigned = assignMenuDishThumbs(
-              dishes.map((d) => ({ name: d.name, category: d.category })),
-            );
-            if (cancelled) return;
-            setDishThumbByName(assigned);
-            prefetchMenuDishThumbs(assigned);
-          })
-          .catch(() => {
-            /* ignore — lista działa bez miniaturek */
-          });
-      }, 80);
-    });
+    const items = dishes.map((d) => ({ name: d.name, category: d.category }));
+    void (async () => {
+      try {
+        const { hydrateMenuThumbsFromDisk } = await import('@/lib/menuThumbCache');
+        if (cancelled) return;
+        const seed = await hydrateMenuThumbsFromDisk(items);
+        if (cancelled) return;
+        if (seed.size) setDishThumbByName(seed);
+
+        const { assignAndCacheMenuThumbs } = await import('@/lib/menuDishThumbs');
+        if (cancelled) return;
+        const assigned = await assignAndCacheMenuThumbs(items, {
+          seed,
+          cancelled: () => cancelled,
+          onUpdate: (map) => {
+            if (!cancelled) setDishThumbByName(map);
+          },
+        });
+        if (!cancelled) setDishThumbByName(assigned);
+      } catch {
+        /* lista działa bez miniaturek */
+      }
+    })();
     return () => {
       cancelled = true;
-      handle.cancel?.();
-      if (timer) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey covers identity
   }, [dishNamesKey]);

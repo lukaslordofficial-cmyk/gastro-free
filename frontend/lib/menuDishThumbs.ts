@@ -122,16 +122,82 @@ export function assignMenuDishThumbs(
 
 /** Prefetch tylko dopasowanych URL-i (nie całego katalogu). */
 export function prefetchMenuDishThumbs(thumbs: Map<string, MenuDishThumb>): void {
-  const urls = [...thumbs.values()].map((t) => t.source.uri).filter(Boolean);
+  const urls = [...thumbs.values()]
+    .map((t) => t.source.uri)
+    .filter((u) => u && !u.startsWith('file:'));
   if (!urls.length) return;
   let i = 0;
-  const chunk = 12;
+  const chunk = 8;
   const pump = () => {
     const slice = urls.slice(i, i + chunk);
     if (!slice.length) return;
     void Image.prefetch(slice).catch(() => {});
     i += chunk;
-    if (i < urls.length) setTimeout(pump, 40);
+    if (i < urls.length) setTimeout(pump, 80);
   };
   pump();
+}
+
+function yieldFrame(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Dopasuj brakujące dania porcjami (nie blokuje przełączania kategorii),
+ * potem zapisz mapę i ściągnij pliki lokalnie.
+ */
+export async function assignAndCacheMenuThumbs(
+  items: ReadonlyArray<{ name: string; category?: string }>,
+  opts?: {
+    seed?: Map<string, MenuDishThumb>;
+    onUpdate?: (map: Map<string, MenuDishThumb>) => void;
+    cancelled?: () => boolean;
+  },
+): Promise<Map<string, MenuDishThumb>> {
+  const {
+    hydrateMenuThumbsFromDisk,
+    persistMenuThumbMatches,
+    downloadMenuThumbsLocally,
+  } = await import('@/lib/menuThumbCache');
+
+  const out = new Map(opts?.seed || (await hydrateMenuThumbsFromDisk(items)));
+  if (opts?.cancelled?.()) return out;
+
+  const missing = items.filter((it) => it.name && !out.has(it.name));
+  if (missing.length) {
+    const catalog = getLightDishCatalog();
+    const used = new Set([...out.values()].map((t) => t.slug));
+    let n = 0;
+    for (const item of missing) {
+      if (opts?.cancelled?.()) return out;
+      const match = findDishImageMatch(item.name, catalog as any, {
+        menuCategory: item.category,
+        excludeSlugs: used,
+      });
+      if (match && !(match.tier === 'category' && match.score < 70)) {
+        const uri = publicDishUrl(match.entry.storagePath);
+        if (uri) {
+          used.add(match.slug);
+          out.set(item.name, {
+            source: { uri },
+            slug: match.slug,
+            matchTier: match.tier,
+            placeholderLabel: match.placeholderLabel,
+            score: match.score,
+          });
+        }
+      }
+      n += 1;
+      if (n % 4 === 0) {
+        opts?.onUpdate?.(new Map(out));
+        await yieldFrame();
+      }
+    }
+    opts?.onUpdate?.(new Map(out));
+    await persistMenuThumbMatches(items, out);
+  }
+
+  const localized = await downloadMenuThumbsLocally(items, out, opts?.onUpdate);
+  prefetchMenuDishThumbs(localized);
+  return localized;
 }

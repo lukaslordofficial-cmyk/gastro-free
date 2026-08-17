@@ -138,13 +138,13 @@ export function prefetchMenuDishThumbs(thumbs: Map<string, MenuDishThumb>): void
   pump();
 }
 
-function yieldFrame(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+function yieldFrame(ms = 40): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Dopasuj brakujące dania porcjami (nie blokuje przełączania kategorii),
- * potem zapisz mapę i ściągnij pliki lokalnie.
+ * Dopasuj brakujące dania po 1 sztuce (JS zostaje responsywny),
+ * zapisz mapę i ściągnij pliki lokalnie.
  */
 export async function assignAndCacheMenuThumbs(
   items: ReadonlyArray<{ name: string; category?: string }>,
@@ -156,19 +156,25 @@ export async function assignAndCacheMenuThumbs(
 ): Promise<Map<string, MenuDishThumb>> {
   const {
     hydrateMenuThumbsFromDisk,
-    persistMenuThumbMatches,
+    persistOneMenuThumb,
     downloadMenuThumbsLocally,
   } = await import('@/lib/menuThumbCache');
 
   const out = new Map(opts?.seed || (await hydrateMenuThumbsFromDisk(items)));
   if (opts?.cancelled?.()) return out;
+  opts?.onUpdate?.(out);
 
   const missing = items.filter((it) => it.name && !out.has(it.name));
   if (missing.length) {
+    await yieldFrame(80);
+    if (opts?.cancelled?.()) return out;
     const catalog = getLightDishCatalog();
+    await yieldFrame(40);
+    if (opts?.cancelled?.()) return out;
     const used = new Set([...out.values()].map((t) => t.slug));
-    let n = 0;
     for (const item of missing) {
+      if (opts?.cancelled?.()) return out;
+      await yieldFrame(48);
       if (opts?.cancelled?.()) return out;
       const match = findDishImageMatch(item.name, catalog as any, {
         menuCategory: item.category,
@@ -178,23 +184,19 @@ export async function assignAndCacheMenuThumbs(
         const uri = publicDishUrl(match.entry.storagePath);
         if (uri) {
           used.add(match.slug);
-          out.set(item.name, {
+          const thumb: MenuDishThumb = {
             source: { uri },
             slug: match.slug,
             matchTier: match.tier,
             placeholderLabel: match.placeholderLabel,
             score: match.score,
-          });
+          };
+          out.set(item.name, thumb);
+          await persistOneMenuThumb(item.name, item.category, thumb);
         }
-      }
-      n += 1;
-      if (n % 4 === 0) {
-        opts?.onUpdate?.(new Map(out));
-        await yieldFrame();
       }
     }
     opts?.onUpdate?.(new Map(out));
-    await persistMenuThumbMatches(items, out);
   }
 
   const localized = await downloadMenuThumbsLocally(items, out, opts?.onUpdate);

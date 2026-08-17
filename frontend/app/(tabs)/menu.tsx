@@ -56,6 +56,7 @@ import {
   subscribeDishCustomImages,
   getDishCustomImageSync,
 } from '@/lib/dishCustomImages';
+import { getMenuThumbSync, subscribeMenuThumbs } from '@/lib/menuThumbCache';
 import * as ImagePicker from 'expo-image-picker';
 import { Bell, Box, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
@@ -231,9 +232,10 @@ const DishCard = React.memo(function DishCard({
   const anim = useRef(new Animated.Value(0)).current;
   const catColor = CATEGORY_COLORS[dish.category] ?? Colors.textSecondary;
   const customUri = getDishCustomImageSync(dish.id);
-  const thumbSrc = customUri ? { uri: customUri } : thumb?.source;
+  const liveThumb = thumb ?? getMenuThumbSync(dish.name);
+  const thumbSrc = customUri ? { uri: customUri } : liveThumb?.source;
   const showPlaceholderBadge =
-    !customUri && !!thumb && (thumb.matchTier === 'category' || thumb.matchTier === 'tags') && !!thumb.placeholderLabel;
+    !customUri && !!liveThumb && (liveThumb.matchTier === 'category' || liveThumb.matchTier === 'tags') && !!liveThumb.placeholderLabel;
 
   const toggle = () => {
     const toValue = expanded ? 0 : 1;
@@ -262,15 +264,15 @@ const DishCard = React.memo(function DishCard({
                 contentFit="contain"
                 cachePolicy="memory-disk"
                 transition={0}
-                recyclingKey={customUri || thumb?.slug || dish.id}
+                recyclingKey={customUri || liveThumb?.slug || dish.id}
               />
             ) : (
-              <View style={dishStyles.premThumb} />
+              <View style={dishStyles.premThumbPh} />
             )}
             {showPlaceholderBadge && (
               <View style={dishStyles.thumbBadge}>
                 <Text style={dishStyles.thumbBadgeText} numberOfLines={1} allowFontScaling={false}>
-                  {thumb.placeholderLabel}
+                  {liveThumb.placeholderLabel}
                 </Text>
               </View>
             )}
@@ -442,6 +444,14 @@ const dishStyles = StyleSheet.create({
     height: 68,
     borderRadius: DS.radius.image,
     backgroundColor: DS.color.bgTertiary,
+  },
+  premThumbPh: {
+    width: 68,
+    height: 68,
+    borderRadius: DS.radius.image,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.10)',
   },
   premThumbWrap: {
     width: 68,
@@ -1189,40 +1199,28 @@ export default function MenuScreen() {
     return rows;
   }, [grouped]);
 
-  const [dishThumbByName, setDishThumbByName] = useState<Map<string, DishThumbAssignment>>(
-    () => new Map(),
-  );
+  const [thumbTick, setThumbTick] = useState(0);
   const dishNamesKey = useMemo(
     () => dishes.map((d) => `${d.name}\u0001${d.category}`).join('|'),
     [dishes],
   );
 
-  // Obrazki: najpierw lokalny cache (file://), match + download w tle — nie blokuje kategorii.
+  useEffect(() => subscribeMenuThumbs(() => setThumbTick((t) => t + 1)), []);
+
+  // Obrazki w tle: lista dań jest niezależna i zawsze klikalna.
   useEffect(() => {
-    if (!dishes.length) {
-      setDishThumbByName(new Map());
-      return;
-    }
+    if (!dishes.length) return;
     let cancelled = false;
     const items = dishes.map((d) => ({ name: d.name, category: d.category }));
     void (async () => {
       try {
         const { hydrateMenuThumbsFromDisk } = await import('@/lib/menuThumbCache');
         if (cancelled) return;
-        const seed = await hydrateMenuThumbsFromDisk(items);
+        await hydrateMenuThumbsFromDisk(items);
         if (cancelled) return;
-        if (seed.size) setDishThumbByName(seed);
-
         const { assignAndCacheMenuThumbs } = await import('@/lib/menuDishThumbs');
         if (cancelled) return;
-        const assigned = await assignAndCacheMenuThumbs(items, {
-          seed,
-          cancelled: () => cancelled,
-          onUpdate: (map) => {
-            if (!cancelled) setDishThumbByName(map);
-          },
-        });
-        if (!cancelled) setDishThumbByName(assigned);
+        await assignAndCacheMenuThumbs(items, { cancelled: () => cancelled });
       } catch {
         /* lista działa bez miniaturek */
       }
@@ -1469,12 +1467,11 @@ export default function MenuScreen() {
             })
           }
           premium
-          thumb={dishThumbByName.get(item.dish.name)}
           onChangePhoto={handleChangeDishPhoto}
         />
       );
     },
-    [dishThumbByName, handleChangeDishPhoto, customImageTick],
+    [handleChangeDishPhoto, customImageTick, thumbTick],
   );
 
   // ── Save / update dish ────────────────────────────────────────────────────
@@ -1946,17 +1943,41 @@ export default function MenuScreen() {
                   clearButtonMode="while-editing"
                 />
               </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled
+              >
                 {allCategories.map((cat) => (
                   <PremiumCapsule
                     key={cat}
                     label={cat}
                     active={activeCat === cat}
-                    onPress={() => setSelectedCat(cat)}
+                    onPress={() => {
+                      requestAnimationFrame(() => setSelectedCat(cat));
+                    }}
                     dotColor={cat !== 'Wszystkie' ? (CATEGORY_COLORS[cat] ?? DS.color.muted) : undefined}
                   />
                 ))}
               </ScrollView>
+            </View>
+          <FlashList
+            data={menuRows}
+            estimatedItemSize={104}
+            extraData={`${customImageTick}:${thumbTick}`}
+            keyExtractor={(item) =>
+              item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
+            }
+            renderItem={renderMenuRow}
+            getItemType={(item) => item.type}
+            drawDistance={4000}
+            removeClippedSubviews={false}
+            style={styles.scroll}
+            contentContainerStyle={[styles.content, { paddingTop: 8, paddingHorizontal: DS.space.screen, flexGrow: 1 }]}
+            keyboardShouldPersistTaps="handled"
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.accent} />}
+            ListHeaderComponent={
               <View style={{ marginTop: 10, marginBottom: DS.space[16], gap: 10 }}>
                 <PremiumGlowCta
                   label="Receptury"
@@ -1968,39 +1989,25 @@ export default function MenuScreen() {
                   onPress={() => openVoiceReport()}
                   icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
                 />
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+                  <PremiumStatTile
+                    value={filtered.length}
+                    label="Dań"
+                    icon={<Bell size={14} color={DS.color.greenEnd} strokeWidth={2} />}
+                  />
+                  <PremiumStatTile
+                    value={Object.keys(grouped).length}
+                    label="Kategorii"
+                    icon={<Box size={14} color={DS.color.greenEnd} strokeWidth={2} />}
+                  />
+                  <PremiumStatTile
+                    value={filtered.reduce((s, d) => s + d.recipe.length, 0)}
+                    label="Składników"
+                    icon={<Trash2 size={14} color={DS.color.greenEnd} strokeWidth={2} />}
+                  />
+                </View>
               </View>
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: DS.space[16] }}>
-                <PremiumStatTile
-                  value={filtered.length}
-                  label="Dań"
-                  icon={<Bell size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                />
-                <PremiumStatTile
-                  value={Object.keys(grouped).length}
-                  label="Kategorii"
-                  icon={<Box size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                />
-                <PremiumStatTile
-                  value={filtered.reduce((s, d) => s + d.recipe.length, 0)}
-                  label="Składników"
-                  icon={<Trash2 size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                />
-              </View>
-            </View>
-          <FlashList
-            data={menuRows}
-            estimatedItemSize={96}
-            extraData={`${customImageTick}:${dishThumbByName.size}`}
-            keyExtractor={(item) =>
-              item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
             }
-            renderItem={renderMenuRow}
-            getItemType={(item) => item.type}
-            drawDistance={180}
-            style={styles.scroll}
-            contentContainerStyle={[styles.content, { paddingTop: 0, paddingHorizontal: DS.space.screen, flexGrow: 1 }]}
-            keyboardShouldPersistTaps="handled"
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.accent} />}
             ListEmptyComponent={
               <View style={styles.empty}>
                 <UtensilsCrossed size={32} color={DS.color.muted} strokeWidth={1.5} />
@@ -2128,7 +2135,6 @@ export default function MenuScreen() {
                 dish={dish}
                 onEdit={handleOpenEdit}
                 onDelete={handleDeleteDish}
-                thumb={dishThumbByName.get(dish.name)}
                 onChangePhoto={handleChangeDishPhoto}
               />
             ))}

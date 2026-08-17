@@ -808,6 +808,21 @@ async def apply_paid_producer_checkout_session(
         else:
             notify = await _run_notify(client)
 
+    vat_rr = None
+    try:
+        from vat_rr_settlement import maybe_issue_vat_rr_after_pay
+
+        vat_rr = await maybe_issue_vat_rr_after_pay(
+            client,
+            producer=producer,
+            order=order,
+            sb_get=sb_get,
+            sb_patch=sb_patch,
+        )
+    except Exception as e:
+        logger.exception("VAT RR after pay failed")
+        vat_rr = {"ok": False, "error": str(e)[:300]}
+
     return {
         "ok": True,
         "paid": True,
@@ -815,6 +830,7 @@ async def apply_paid_producer_checkout_session(
         **paid,
         "shipment": shipment,
         "notify": notify,
+        "vat_rr": vat_rr,
         "settlement": {
             "producer": meta.get("producer_amount"),
             "platform_fee_5pct": meta.get("platform_fee"),

@@ -30,6 +30,13 @@ from typing import Any, Optional
 import httpx
 
 from billing_stripe import _ssl_verify
+from pl_phone import (
+    assign_courier_phones,
+    courier_requires_mobile_message,
+    humanize_courier_phone_error,
+    is_pl_mobile,
+    pl_phone_digits,
+)
 from lp_packaging import (
     estimate_order_weight_kg,
     furgonetka_parcels_payload,
@@ -213,7 +220,9 @@ async def _api(
             if r.status_code == 204:
                 return None
             if r.status_code >= 400:
-                raise RuntimeError(f"Furgonetka {r.status_code}: {r.text[:400]}")
+                raise RuntimeError(
+                    humanize_courier_phone_error(f"Furgonetka {r.status_code}: {r.text[:400]}")
+                )
             return r.content
         if r.status_code == 204:
             return None
@@ -236,11 +245,15 @@ def _fmt_api_error(status: int, data: Any, text: str) -> str:
                 else:
                     parts.append(str(e)[:180])
             if parts:
-                return f"Furgonetka {status}: " + "; ".join(parts)
+                return humanize_courier_phone_error(
+                    f"Furgonetka {status}: " + "; ".join(parts)
+                )
         msg = data.get("message") or data.get("error_description")
         if msg:
-            return f"Furgonetka {status}: {msg}"
-    return f"Furgonetka {status}: {(text or str(data))[:300]}"
+            return humanize_courier_phone_error(f"Furgonetka {status}: {msg}")
+    return humanize_courier_phone_error(
+        f"Furgonetka {status}: {(text or str(data))[:300]}"
+    )
 
 
 async def resolve_inpost_service_id() -> Any:
@@ -373,12 +386,10 @@ def _normalize_postcode(raw: Optional[str]) -> str:
 
 
 def _normalize_phone(raw: Optional[str]) -> str:
-    digits = re.sub(r"\D", "", str(raw or ""))
-    if digits.startswith("48") and len(digits) == 11:
+    digits = pl_phone_digits(raw)
+    if digits:
         return digits
-    if len(digits) == 9:
-        return digits
-    return digits[:20]
+    return re.sub(r"\D", "", str(raw or ""))[:20]
 
 
 def _ensure_person_name(raw: str, *, fallback_last: str = "Kontakt") -> str:
@@ -512,9 +523,11 @@ async def _poll_command(kind: str, cmd: str, *, rounds: int = 16) -> dict[str, A
             err0 = errs[0] if errs else {}
             if isinstance(err0, dict):
                 raise RuntimeError(
-                    err0.get("details") or err0.get("message") or f"{kind} error"
+                    humanize_courier_phone_error(
+                        str(err0.get("details") or err0.get("message") or f"{kind} error")
+                    )
                 )
-            raise RuntimeError(f"{kind} error")
+            raise RuntimeError(humanize_courier_phone_error(f"{kind} error"))
     raise RuntimeError(f"{kind} timeout (status={last.get('status')})")
 
 
@@ -1007,6 +1020,7 @@ async def _create_new_shipment(
         or "Restauracja"
     )
     restaurant_email = ship.get("email") or order.get("delivery_email")
+    profile_phone = ""
     account_key = order.get("restaurant_account_key")
     if account_key:
         try:
@@ -1014,7 +1028,7 @@ async def _create_new_shipment(
                 client,
                 "profiles",
                 params={
-                    "select": "restaurant_name,email",
+                    "select": "restaurant_name,email,phone",
                     "account_key": f"eq.{account_key}",
                     "limit": "1",
                 },
@@ -1022,8 +1036,23 @@ async def _create_new_shipment(
             if profiles:
                 restaurant_name = ship.get("name") or profiles[0].get("restaurant_name") or restaurant_name
                 restaurant_email = ship.get("email") or profiles[0].get("email") or restaurant_email
+                profile_phone = str(profiles[0].get("phone") or "")
         except Exception:
-            pass
+            try:
+                profiles = await sb_get(
+                    client,
+                    "profiles",
+                    params={
+                        "select": "restaurant_name,email",
+                        "account_key": f"eq.{account_key}",
+                        "limit": "1",
+                    },
+                )
+                if profiles:
+                    restaurant_name = ship.get("name") or profiles[0].get("restaurant_name") or restaurant_name
+                    restaurant_email = ship.get("email") or profiles[0].get("email") or restaurant_email
+            except Exception:
+                pass
 
     s_street, s_building = _split_street(producer.get("address"))
     sender_street = " ".join(x for x in (s_street, s_building) if x).strip()
@@ -1034,11 +1063,21 @@ async def _create_new_shipment(
         ) if x
     ).strip()
 
+    pickup_phone, receiver_phone = assign_courier_phones(
+        str(producer.get("phone") or ""),
+        str(ship.get("phone") or order.get("delivery_phone") or ""),
+        extra_phones=[
+            profile_phone,
+            ship.get("phone"),
+            order.get("delivery_phone"),
+            producer.get("phone"),
+        ],
+    )
     pickup = _party(
         name=str(producer.get("owner_name") or producer.get("company_name") or ""),
         company=str(producer.get("company_name") or ""),
         email=str(producer.get("email") or producer.get("invoice_email") or ""),
-        phone=str(producer.get("phone") or ""),
+        phone=pickup_phone,
         street=sender_street,
         city=str(producer.get("city") or ""),
         postcode=str(producer.get("postal_code") or ""),
@@ -1047,7 +1086,7 @@ async def _create_new_shipment(
         name=str(restaurant_name),
         company=str(restaurant_name),
         email=str(restaurant_email or ""),
-        phone=str(ship.get("phone") or order.get("delivery_phone") or ""),
+        phone=receiver_phone,
         street=recv_street,
         city=str(ship.get("city") or order.get("delivery_city") or ""),
         postcode=str(ship.get("post_code") or order.get("delivery_postal_code") or ""),
@@ -1058,6 +1097,11 @@ async def _create_new_shipment(
     )
     if missing:
         raise RuntimeError("Niekompletny adres: " + "; ".join(missing))
+
+    if not is_pl_mobile(pickup.get("phone")) and not is_pl_mobile(receiver.get("phone")):
+        raise RuntimeError(
+            courier_requires_mobile_message(receiver.get("phone") or pickup.get("phone"))
+        )
 
     items, products = await _load_order_products(client, sb_get, oid)
     weight_kg = estimate_order_weight_kg(items, products)

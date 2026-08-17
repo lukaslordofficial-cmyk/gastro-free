@@ -130,7 +130,7 @@ def _doc_title(kind: str) -> str:
     if kind == "receipt":
         return "RACHUNEK"
     if kind == "vat_rr":
-        return "FAKTURA VAT-RR"
+        return "FAKTURA VAT RR"
     return "FAKTURA VAT"
 
 
@@ -376,7 +376,9 @@ def build_invoice_pdf(
     hline(y, MARGIN, right, 1.4, accent)
     y += 22
 
-    sale_raw = _clean(order.get("courier_pickup_at")) or _clean(order.get("updated_at")) or created
+    sale_raw = _clean(order.get("created_at")) or created
+    if kind != "vat_rr":
+        sale_raw = _clean(order.get("courier_pickup_at")) or _clean(order.get("updated_at")) or created
     if sale_raw and len(sale_raw) >= 10:
         sale_date = f"{sale_raw[8:10]}.{sale_raw[5:7]}.{sale_raw[0:4]}"
     else:
@@ -405,7 +407,9 @@ def build_invoice_pdf(
     if seller.get("address"):
         farmer_lines.append(str(seller["address"]))
     if seller.get("tax_id") and not hide_seller_nip:
-        farmer_lines.append(f"NIP: {seller['tax_id']}")
+        digits = re.sub(r"\D", "", str(seller["tax_id"]))
+        tax_label = "PESEL" if len(digits) == 11 else "NIP"
+        farmer_lines.append(f"{tax_label}: {seller['tax_id']}")
     if seller.get("bank_account"):
         farmer_lines.append(f"Konto: {seller['bank_account']}")
     restaurant_lines = [buyer_name, buyer_address] if buyer_address else [buyer_name]
@@ -448,7 +452,7 @@ def build_invoice_pdf(
     draw("Jm.", col_unit, y, 8, bold_t=True, color=muted)
     draw("Cena", col_price, y, 8, bold_t=True, color=muted, align="right")
     if show_vat:
-        draw("VAT", col_vat, y, 8, bold_t=True, color=muted, align="right")
+        draw("VAT" if not is_vat_rr else "Zwrot 7%", col_vat, y, 8, bold_t=True, color=muted, align="right")
     draw("Wartość", right, y, 8, bold_t=True, color=muted, align="right")
     y += 10
     hline(y, MARGIN, right, 0.4)
@@ -491,10 +495,10 @@ def build_invoice_pdf(
         draw("Netto:", right - 130, y, 10, color=muted)
         draw(format_pln(sum_net), right, y, 10, align="right")
         y += 14
-        draw("VAT:" if not is_vat_rr else "Zwrot VAT:", right - 130, y, 10, color=muted)
+        draw("Kwota zwrotu 7%:" if is_vat_rr else "VAT:", right - 130, y, 10, color=muted)
         draw(format_pln(sum_vat), right, y, 10, align="right")
         y += 14
-    draw("Do zapłaty:", right - 130, y, 12, bold_t=True)
+    draw("Wartość brutto:" if is_vat_rr else "Do zapłaty:", right - 130, y, 12, bold_t=True)
     draw(format_pln(grand), right, y, 12, bold_t=True, align="right")
     y += 28
     hline(y, MARGIN, right, 0.5)
@@ -514,8 +518,24 @@ def build_invoice_pdf(
         )
     elif kind == "vat_rr":
         notes.append(
-            "Faktura VAT-RR wystawiona przez nabywcę produktów rolnych (restaurację) "
-            "na rzecz rolnika ryczałtowego. Zryczałtowany zwrot podatku — art. 115–118 ustawy o VAT."
+            "Oświadczenie rolnika ryczałtowego: „Oświadczam, że jestem rolnikiem ryczałtowym "
+            "zwolnionym od podatku od towarów i usług na podstawie art. 43 ust. 1 pkt 3 "
+            "ustawy o podatku od towarów i usług.”"
+        )
+        notes.append(
+            "Faktura VAT RR wystawiona przez nabywcę produktów rolnych (restaurację) "
+            "na rzecz rolnika ryczałtowego. Zryczałtowany zwrot podatku 7% — art. 115–116 ustawy o VAT."
+        )
+        notes.append(
+            "Warunek odliczenia zwrotu: zapłata na rachunek bankowy rolnika w terminie 14 dni "
+            "od wystawienia faktury (chyba że strony ustaliły dłuższy termin). "
+            "W tytule przelewu podaj numer i datę tej faktury VAT RR. "
+            "Płatność online (Stripe) na konto rolnika spełnia wymóg zapłaty na rachunek, "
+            "o ile środki trafią na konto wskazane powyżej."
+        )
+        notes.append(
+            "Dokument wystawiany elektronicznie jako PDF poza KSeF. W 2026 r. faktury VAT RR w KSeF "
+            "(FA_RR) są dobrowolne i wymagają zgody rolnika."
         )
     else:
         notes.append("Dokument wystawiony elektronicznie. Zachowaj kopię zgodnie z przepisami.")

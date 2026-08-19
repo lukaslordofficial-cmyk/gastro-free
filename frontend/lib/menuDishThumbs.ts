@@ -1,17 +1,11 @@
 /**
- * Miniatury Menu — tylko obrazki pasujące do dań użytkownika z Supabase.
- *
- * Strategia:
- * 1) Lekki indeks (imageLibrary.json) — metadane bez require(WebP)
- * 2) Match nazwy dania → storagePath (batch, nie po 1 w pętli)
- * 3) expo-image ładuje URL-e z Supabase (cache memory-disk)
+ * Miniatury Menu — dopasowanie nazwy dania → obraz z Supabase (imageLibrary.json).
  */
 import { Image } from 'expo-image';
+import type { DishImageEntry } from '@/lib/dishImagesCatalog';
 import { findDishImageMatch } from '@/lib/dishImageMatch';
 import { loadImageLibrary } from '@/lib/imageLibrary';
-
-const SUPABASE_URL = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').replace(/\/$/, '');
-const PRODUCT_ICONS_BUCKET = 'product-icons';
+import { publicIconUrl } from '@/lib/productImages';
 
 export type MenuDishThumb = {
   source: { uri: string };
@@ -21,74 +15,29 @@ export type MenuDishThumb = {
   score?: number;
 };
 
-type LightDishEntry = {
-  slug: string;
-  category: string;
-  labelPl: string;
-  aliases: string[];
-  storagePath: string;
-  localAsset: number;
-  cooked: boolean;
-  menuFamily: string;
-};
+let lightCatalog: DishImageEntry[] | null = null;
 
-function publicDishUrl(storagePath: string): string | null {
-  if (!SUPABASE_URL || !storagePath) return null;
-  return `${SUPABASE_URL}/storage/v1/object/public/${PRODUCT_ICONS_BUCKET}/${storagePath}`;
-}
-
-function inferFamily(storagePath: string, slug = ''): string {
-  const p = `${storagePath} ${slug}`.toLowerCase();
-  if (/soup|zupa/.test(p)) return 'zupy';
-  if (/burger|sandwich/.test(p)) return 'burgery';
-  if (/pasta|makaron/.test(p)) return 'makarony';
-  if (/pizza/.test(p)) return 'pizze';
-  if (/salad|salatk/.test(p)) return 'salatki';
-  if (/starter|app|przystawk|bruschett/.test(p)) return 'przystawki';
-  if (/side|dodatk|surowk|coleslaw|warzywa_grill/.test(p)) return 'sides';
-  if (/kebab|shawarma/.test(p)) return 'kebab';
-  if (/sushi|nigiri|maki/.test(p)) return 'sushi';
-  if (/bbq|ribs|grill|steak|roast|mieso|kotlet|schab/.test(p)) return 'bbq';
-  if (/asian|pad_thai|ramen|wok|stir/.test(p)) return 'azjatycka';
-  if (/indian|curry|tikka|butter_chicken/.test(p)) return 'indyjska';
-  if (/mexican|taco|burrito/.test(p)) return 'meksykanska';
-  if (/mediterr|paella|caucas|chaczapuri/.test(p)) return 'srodziemnomorska';
-  if (/fish|ryb|losos|seafood/.test(p)) return 'rybne';
-  if (/vegan|wege|tofu/.test(p)) return 'wege';
-  if (/breakfast|sniadan|jajeczn/.test(p)) return 'sniadania';
-  if (/sauce|sos|dip/.test(p)) return 'sosy';
-  if (/dessert|cake|ice_cream|pancake|pastr|coffee|tea|lemonad|juice|cocktail|beer|wine|spirit|energy|napoj/.test(p)) {
-    if (/coffee|tea|lemonad|juice|cocktail|beer|wine|spirit|energy/.test(p)) return 'napoje';
-    return 'desery';
-  }
-  if (/dinner|obiad|polish|roast/.test(p)) return 'miesa';
-  return 'inne';
-}
-
-let lightCatalog: LightDishEntry[] | null = null;
-
-function getLightDishCatalog(): LightDishEntry[] {
+function getLightDishCatalog(): DishImageEntry[] {
   if (lightCatalog) return lightCatalog;
-  const library = loadImageLibrary();
-  lightCatalog = library.map((lib) => {
-    const family = inferFamily(lib.storagePath, lib.slug);
-    return {
-      slug: lib.slug,
-      category: family,
-      labelPl: lib.primaryName,
-      aliases: [...(lib.aliases || [])],
-      storagePath: lib.storagePath,
-      localAsset: 0,
-      cooked: true,
-      menuFamily: family,
-    };
-  });
+  lightCatalog = loadImageLibrary().map((lib) => ({
+    slug: lib.slug,
+    category: lib.category || 'inne',
+    labelPl: lib.primaryName,
+    aliases: [...(lib.aliases || [])],
+    storagePath: lib.storagePath,
+    localAsset: 0,
+    cooked: true,
+    menuFamily: lib.category || 'inne',
+  })) as DishImageEntry[];
   return lightCatalog;
 }
 
-/**
- * Dopasuj miniatury tylko do listy dań użytkownika (np. 40 pozycji z Supabase).
- */
+/** Publiczny URL miniatury (zawsze http/https gdy bucket skonfigurowany). */
+export function menuDishThumbUrl(storagePath: string): string | null {
+  return publicIconUrl(storagePath);
+}
+
+/** Dopasuj miniatury do listy dań użytkownika (batch, bez blokowania UI). */
 export function assignMenuDishThumbs(
   items: ReadonlyArray<{ name: string; category?: string }>,
   opts?: { excludeSlugs?: Set<string> },
@@ -99,13 +48,13 @@ export function assignMenuDishThumbs(
 
   for (const item of items) {
     if (!item.name || out.has(item.name)) continue;
-    const match = findDishImageMatch(item.name, catalog as any, {
+    const match = findDishImageMatch(item.name, catalog, {
       menuCategory: item.category,
       excludeSlugs: used,
     });
     if (!match) continue;
     if (match.tier === 'category' && match.score < 70) continue;
-    const uri = publicDishUrl(match.entry.storagePath);
+    const uri = menuDishThumbUrl(match.entry.storagePath);
     if (!uri) continue;
     used.add(match.slug);
     out.set(item.name, {
@@ -119,20 +68,19 @@ export function assignMenuDishThumbs(
   return out;
 }
 
-/** Prefetch tylko dopasowanych URL-i (nie całego katalogu). */
 export function prefetchMenuDishThumbs(thumbs: Map<string, MenuDishThumb>): void {
   const urls = [...thumbs.values()]
     .map((t) => t.source.uri)
-    .filter((u) => u && u.startsWith('http'));
+    .filter((u) => u.startsWith('http'));
   if (!urls.length) return;
   let i = 0;
-  const chunk = 10;
+  const chunk = 12;
   const pump = () => {
     const slice = urls.slice(i, i + chunk);
     if (!slice.length) return;
     void Image.prefetch(slice).catch(() => {});
     i += chunk;
-    if (i < urls.length) setTimeout(pump, 60);
+    if (i < urls.length) setTimeout(pump, 50);
   };
   pump();
 }
@@ -142,8 +90,9 @@ function yieldFrame(ms = 16): Promise<void> {
 }
 
 /**
- * Szybka ścieżka: cache z dysku → batch match brakujących → prefetch URL.
- * Pobieranie plików lokalnie leci w tle (nie blokuje UI).
+ * 1) Synchroniczne dopasowanie (natychmiastowe URL-e)
+ * 2) Cache z dysku (AsyncStorage)
+ * 3) Prefetch + opcjonalny zapis lokalny w tle
  */
 export async function assignAndCacheMenuThumbs(
   items: ReadonlyArray<{ name: string; category?: string }>,
@@ -160,15 +109,37 @@ export async function assignAndCacheMenuThumbs(
     notifyMenuThumbsNow,
   } = await import('@/lib/menuThumbCache');
 
-  const out = new Map(opts?.seed || (await hydrateMenuThumbsFromDisk(items)));
+  const out = new Map<string, MenuDishThumb>(opts?.seed);
+
+  // Natychmiastowe dopasowanie — bez czekania na AsyncStorage
+  const quick = assignMenuDishThumbs(items, {
+    excludeSlugs: new Set([...out.values()].map((t) => t.slug)),
+  });
+  if (quick.size) {
+    for (const [name, thumb] of quick) {
+      if (!out.has(name)) out.set(name, thumb);
+    }
+    notifyMenuThumbsNow();
+    opts?.onUpdate?.(new Map(out));
+  }
+
   if (opts?.cancelled?.()) return out;
-  opts?.onUpdate?.(out);
+
+  const fromDisk = await hydrateMenuThumbsFromDisk(items);
+  for (const [name, thumb] of fromDisk) {
+    if (!out.has(name)) out.set(name, thumb);
+  }
+  if (fromDisk.size) {
+    notifyMenuThumbsNow();
+    opts?.onUpdate?.(new Map(out));
+  }
+
+  if (opts?.cancelled?.()) return out;
 
   const missing = items.filter((it) => it.name && !out.has(it.name));
   if (missing.length) {
-    await yieldFrame(24);
+    await yieldFrame(16);
     if (opts?.cancelled?.()) return out;
-
     const used = new Set([...out.values()].map((t) => t.slug));
     const batch = assignMenuDishThumbs(missing, { excludeSlugs: used });
     if (batch.size) {
@@ -182,7 +153,7 @@ export async function assignAndCacheMenuThumbs(
   prefetchMenuDishThumbs(out);
 
   if (!opts?.cancelled?.()) {
-    void downloadMenuThumbsLocally(items, out, opts?.onUpdate, { maxJobs: 20 }).catch(() => {});
+    void downloadMenuThumbsLocally(items, out, opts?.onUpdate, { maxJobs: 16 }).catch(() => {});
   }
 
   return out;

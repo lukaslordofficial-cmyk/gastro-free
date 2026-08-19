@@ -13,7 +13,6 @@ import { formatTrialDaysLeft, trialDaysRemaining } from '@/lib/subscriptionClien
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { DS } from '@/constants/premiumTheme';
-import { formatTrialDaysLeft, trialDaysRemaining } from '@/lib/subscriptionClient';
 
 export function SubscriptionPanel() {
   const theme = useAppTheme();

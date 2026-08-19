@@ -234,13 +234,17 @@ const DishCard = React.memo(function DishCard({
   const catColor = CATEGORY_COLORS[dish.category] ?? Colors.textSecondary;
   const customUri = getDishCustomImageSync(dish.id);
   const liveThumb = thumb ?? getMenuThumbSync(dish.name);
-  const thumbSrc = customUri ? { uri: customUri } : liveThumb?.source;
+  const liveThumbUri =
+    liveThumb?.source && typeof liveThumb.source === 'object' && 'uri' in liveThumb.source
+      ? liveThumb.source.uri
+      : undefined;
+  const thumbSrc = customUri ? { uri: customUri } : liveThumbUri ? { uri: liveThumbUri } : undefined;
   const [imgFailed, setImgFailed] = useState(false);
   const showThumb = !!thumbSrc && !imgFailed;
 
   useEffect(() => {
     setImgFailed(false);
-  }, [dish.id, customUri, liveThumb?.slug, liveThumb?.source?.uri]);
+  }, [dish.id, customUri, liveThumb?.slug, liveThumbUri]);
   const showPlaceholderBadge =
     !customUri && !!liveThumb && (liveThumb.matchTier === 'category' || liveThumb.matchTier === 'tags') && !!liveThumb.placeholderLabel;
 
@@ -360,23 +364,19 @@ const DishCard = React.memo(function DishCard({
   return (
     <View style={dishStyles.container}>
       <TouchableOpacity style={dishStyles.header} onPress={toggle} activeOpacity={0.7}>
-        {(() => {
-          const liveThumb = thumb ?? getMenuThumbSync(dish.name);
-          const customUri = getDishCustomImageSync(dish.id);
-          const src = customUri ? { uri: customUri } : liveThumb?.source;
-          return src ? (
-            <Image
-              source={src as any}
-              style={dishStyles.stdThumb}
-              contentFit="cover"
-              cachePolicy="memory-disk"
-              transition={120}
-              recyclingKey={customUri || liveThumb?.slug || dish.id}
-            />
-          ) : (
-            <View style={[dishStyles.catDot, { backgroundColor: catColor }]} />
-          );
-        })()}
+        {showThumb ? (
+          <Image
+            source={thumbSrc!}
+            style={dishStyles.stdThumb}
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={120}
+            recyclingKey={customUri || liveThumb?.slug || dish.id}
+            onError={() => setImgFailed(true)}
+          />
+        ) : (
+          <View style={[dishStyles.catDot, { backgroundColor: catColor }]} />
+        )}
         <View style={dishStyles.headerText}>
           <Text style={dishStyles.name}>{dish.name}</Text>
           <View style={dishStyles.meta}>
@@ -1238,7 +1238,7 @@ export default function MenuScreen() {
 
   useEffect(() => subscribeMenuThumbs(() => setThumbTick((t) => t + 1)), []);
 
-  // Obrazki w tle — lista i kategorie działają od razu; miniatury dochodzą partiami.
+  // Obrazki w tle — lista działa od razu; miniatury dochodzą partiami (sync match → cache → prefetch).
   useEffect(() => {
     if (!dishes.length) return;
     let cancelled = false;
@@ -1246,12 +1246,6 @@ export default function MenuScreen() {
     const task = InteractionManager.runAfterInteractions(() => {
       void (async () => {
         try {
-          const { hydrateMenuThumbsFromDisk } = await import('@/lib/menuThumbCache');
-          if (cancelled) return;
-          await hydrateMenuThumbsFromDisk(items);
-          if (cancelled) return;
-          setThumbTick((t) => t + 1);
-
           const { assignAndCacheMenuThumbs } = await import('@/lib/menuDishThumbs');
           if (cancelled) return;
           await assignAndCacheMenuThumbs(items, {
@@ -1260,8 +1254,8 @@ export default function MenuScreen() {
               if (!cancelled) setThumbTick((t) => t + 1);
             },
           });
-        } catch {
-          /* lista działa bez miniaturek */
+        } catch (err) {
+          if (__DEV__) console.warn('[menu] thumb assign failed', err);
         }
       })();
     });

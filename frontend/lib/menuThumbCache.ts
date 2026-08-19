@@ -96,13 +96,15 @@ function isSuspiciousLocalUri(uri: string | undefined): boolean {
   return lower.endsWith('.bin') || lower.endsWith('.tmp') || lower.endsWith('.download');
 }
 
-function toThumb(row: StoredThumb, preferRemote = false): MenuDishThumb | null {
+function toThumb(row: StoredThumb): MenuDishThumb | null {
   const remote = (row.remoteUrl || '').trim();
   const local = (row.localUri || '').trim();
-  let uri = remote;
-  if (!preferRemote && local && !isSuspiciousLocalUri(local)) {
-    uri = local;
-  }
+  // Zawsze preferuj URL z Supabase — lokalne pliki bywały uszkodzone (.bin).
+  const uri = remote.startsWith('http')
+    ? remote
+    : local && !isSuspiciousLocalUri(local)
+      ? local
+      : remote || local;
   if (!uri) return null;
   return {
     source: { uri },
@@ -194,11 +196,11 @@ export async function hydrateMenuThumbsFromDisk(
     const row = rowForItem(item.name, item.category);
     if (!row?.remoteUrl && !row?.localUri) continue;
 
-    let useRemote = true;
+    let useRemote = !row.localUri || isSuspiciousLocalUri(row.localUri);
     if (Platform.OS !== 'web' && row.localUri && !isSuspiciousLocalUri(row.localUri)) {
       if (await localFileUsable(row.localUri)) {
-        useRemote = false;
-      } else if (row.localUri) {
+        useRemote = !row.remoteUrl?.startsWith('http');
+      } else {
         delete row.localUri;
         const key = dishKey(item.name, item.category);
         store[key] = row;
@@ -207,7 +209,7 @@ export async function hydrateMenuThumbsFromDisk(
       }
     }
 
-    const thumb = toThumb(row, useRemote);
+    const thumb = toThumb(row);
     if (!thumb) continue;
     out.set(item.name, thumb);
     putMemory(item.name, thumb);
@@ -239,7 +241,7 @@ function mergeThumbIntoStore(
     score: thumb.score,
   };
   store[name] = store[key];
-  const resolved = toThumb(store[key], !store[key].localUri) || thumb;
+  const resolved = toThumb(store[key]) || thumb;
   putMemory(name, resolved);
 }
 

@@ -3,10 +3,8 @@
  *
  * Strategia:
  * 1) Lekki indeks (imageLibrary.json) — metadane bez require(WebP)
- * 2) Match nazwy dania → storagePath
- * 3) expo-image ładuje wyłącznie te URL-e (np. 40 zamiast 1000)
- *
- * Świadomie NIE importujemy dishImagesCatalog / productImages (setki require).
+ * 2) Match nazwy dania → storagePath (batch, nie po 1 w pętli)
+ * 3) expo-image ładuje URL-e z Supabase (cache memory-disk)
  */
 import { Image } from 'expo-image';
 import { findDishImageMatch } from '@/lib/dishImageMatch';
@@ -93,9 +91,10 @@ function getLightDishCatalog(): LightDishEntry[] {
  */
 export function assignMenuDishThumbs(
   items: ReadonlyArray<{ name: string; category?: string }>,
+  opts?: { excludeSlugs?: Set<string> },
 ): Map<string, MenuDishThumb> {
   const catalog = getLightDishCatalog();
-  const used = new Set<string>();
+  const used = new Set(opts?.excludeSlugs || []);
   const out = new Map<string, MenuDishThumb>();
 
   for (const item of items) {
@@ -124,27 +123,27 @@ export function assignMenuDishThumbs(
 export function prefetchMenuDishThumbs(thumbs: Map<string, MenuDishThumb>): void {
   const urls = [...thumbs.values()]
     .map((t) => t.source.uri)
-    .filter((u) => u && !u.startsWith('file:'));
+    .filter((u) => u && u.startsWith('http'));
   if (!urls.length) return;
   let i = 0;
-  const chunk = 8;
+  const chunk = 10;
   const pump = () => {
     const slice = urls.slice(i, i + chunk);
     if (!slice.length) return;
     void Image.prefetch(slice).catch(() => {});
     i += chunk;
-    if (i < urls.length) setTimeout(pump, 80);
+    if (i < urls.length) setTimeout(pump, 60);
   };
   pump();
 }
 
-function yieldFrame(ms = 40): Promise<void> {
+function yieldFrame(ms = 16): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Dopasuj brakujące dania po 1 sztuce (JS zostaje responsywny),
- * zapisz mapę i ściągnij pliki lokalnie.
+ * Szybka ścieżka: cache z dysku → batch match brakujących → prefetch URL.
+ * Pobieranie plików lokalnie leci w tle (nie blokuje UI).
  */
 export async function assignAndCacheMenuThumbs(
   items: ReadonlyArray<{ name: string; category?: string }>,
@@ -156,8 +155,9 @@ export async function assignAndCacheMenuThumbs(
 ): Promise<Map<string, MenuDishThumb>> {
   const {
     hydrateMenuThumbsFromDisk,
-    persistOneMenuThumb,
+    persistMenuThumbMatches,
     downloadMenuThumbsLocally,
+    notifyMenuThumbsNow,
   } = await import('@/lib/menuThumbCache');
 
   const out = new Map(opts?.seed || (await hydrateMenuThumbsFromDisk(items)));
@@ -166,40 +166,24 @@ export async function assignAndCacheMenuThumbs(
 
   const missing = items.filter((it) => it.name && !out.has(it.name));
   if (missing.length) {
-    await yieldFrame(80);
+    await yieldFrame(24);
     if (opts?.cancelled?.()) return out;
-    const catalog = getLightDishCatalog();
-    await yieldFrame(40);
-    if (opts?.cancelled?.()) return out;
+
     const used = new Set([...out.values()].map((t) => t.slug));
-    for (const item of missing) {
-      if (opts?.cancelled?.()) return out;
-      await yieldFrame(48);
-      if (opts?.cancelled?.()) return out;
-      const match = findDishImageMatch(item.name, catalog as any, {
-        menuCategory: item.category,
-        excludeSlugs: used,
-      });
-      if (match && !(match.tier === 'category' && match.score < 70)) {
-        const uri = publicDishUrl(match.entry.storagePath);
-        if (uri) {
-          used.add(match.slug);
-          const thumb: MenuDishThumb = {
-            source: { uri },
-            slug: match.slug,
-            matchTier: match.tier,
-            placeholderLabel: match.placeholderLabel,
-            score: match.score,
-          };
-          out.set(item.name, thumb);
-          await persistOneMenuThumb(item.name, item.category, thumb);
-        }
-      }
+    const batch = assignMenuDishThumbs(missing, { excludeSlugs: used });
+    if (batch.size) {
+      for (const [name, thumb] of batch) out.set(name, thumb);
+      await persistMenuThumbMatches(missing, batch);
+      notifyMenuThumbsNow();
+      opts?.onUpdate?.(new Map(out));
     }
-    opts?.onUpdate?.(new Map(out));
   }
 
-  const localized = await downloadMenuThumbsLocally(items, out, opts?.onUpdate);
-  prefetchMenuDishThumbs(localized);
-  return localized;
+  prefetchMenuDishThumbs(out);
+
+  if (!opts?.cancelled?.()) {
+    void downloadMenuThumbsLocally(items, out, opts?.onUpdate, { maxJobs: 20 }).catch(() => {});
+  }
+
+  return out;
 }

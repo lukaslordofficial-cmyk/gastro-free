@@ -1,6 +1,6 @@
 /**
  * Lokalny cache miniaturek dań (Supabase → plik na urządzeniu).
- * Nazwy dań w liście NIE zależą od tego modułu — tylko obrazki.
+ * Lista dań jest niezależna — ten moduł dotyczy tylko obrazków.
  */
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -8,7 +8,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Image } from 'expo-image';
 import type { MenuDishThumb } from '@/lib/menuDishThumbs';
 
-const MAP_KEY = '@gm/menu_thumbs_v3';
+const MAP_KEY = '@gm/menu_thumbs_v4';
 
 export type StoredThumb = {
   slug: string;
@@ -27,7 +27,7 @@ const thumbsByName = new Map<string, MenuDishThumb>();
 const listeners = new Set<() => void>();
 let notifyTimer: ReturnType<typeof setTimeout> | null = null;
 
-function notifySoon() {
+function notifySoon(delayMs = 120) {
   if (notifyTimer) return;
   notifyTimer = setTimeout(() => {
     notifyTimer = null;
@@ -38,7 +38,21 @@ function notifySoon() {
         /* ignore */
       }
     }
-  }, 280);
+  }, delayMs);
+}
+
+export function notifyMenuThumbsNow() {
+  if (notifyTimer) {
+    clearTimeout(notifyTimer);
+    notifyTimer = null;
+  }
+  for (const fn of listeners) {
+    try {
+      fn();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function subscribeMenuThumbs(fn: () => void): () => void {
@@ -76,8 +90,20 @@ function destForSlug(slug: string, remoteUrl: string): string {
   return `${cacheDir()}${safeSlug(slug)}.${extFromUrl(remoteUrl)}`;
 }
 
-function toThumb(row: StoredThumb): MenuDishThumb {
-  const uri = row.localUri || row.remoteUrl;
+function isSuspiciousLocalUri(uri: string | undefined): boolean {
+  if (!uri || !uri.startsWith('file:')) return true;
+  const lower = uri.toLowerCase();
+  return lower.endsWith('.bin') || lower.endsWith('.tmp') || lower.endsWith('.download');
+}
+
+function toThumb(row: StoredThumb, preferRemote = false): MenuDishThumb | null {
+  const remote = (row.remoteUrl || '').trim();
+  const local = (row.localUri || '').trim();
+  let uri = remote;
+  if (!preferRemote && local && !isSuspiciousLocalUri(local)) {
+    uri = local;
+  }
+  if (!uri) return null;
   return {
     source: { uri },
     slug: row.slug,
@@ -111,6 +137,23 @@ export async function loadMenuThumbStore(): Promise<StoredMap> {
   try {
     const raw = await AsyncStorage.getItem(MAP_KEY);
     store = raw ? (JSON.parse(raw) as StoredMap) : {};
+    // Migruj stare wpisy v3 — usuń podejrzane pliki lokalne.
+    let dirty = false;
+    for (const [key, row] of Object.entries(store)) {
+      if (!row || typeof row !== 'object') continue;
+      if (row.localUri && isSuspiciousLocalUri(row.localUri)) {
+        delete row.localUri;
+        store[key] = row;
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      try {
+        await AsyncStorage.setItem(MAP_KEY, JSON.stringify(store));
+      } catch {
+        /* ignore */
+      }
+    }
   } catch {
     store = {};
   }
@@ -130,36 +173,48 @@ function rowForItem(name: string, category?: string): StoredThumb | undefined {
   return store[dishKey(name, category)] || store[name];
 }
 
+async function localFileUsable(uri: string): Promise<boolean> {
+  if (isSuspiciousLocalUri(uri)) return false;
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return !!(info.exists && (info.size ?? 0) > 200);
+  } catch {
+    return false;
+  }
+}
+
 export async function hydrateMenuThumbsFromDisk(
   items: ReadonlyArray<{ name: string; category?: string }>,
 ): Promise<Map<string, MenuDishThumb>> {
   await loadMenuThumbStore();
   const out = new Map<string, MenuDishThumb>();
+  let dirty = false;
 
   for (const item of items) {
     const row = rowForItem(item.name, item.category);
     if (!row?.remoteUrl && !row?.localUri) continue;
 
-    if (Platform.OS !== 'web' && row.localUri) {
-      try {
-        const info = await FileSystem.getInfoAsync(row.localUri);
-        if (info.exists && (info.size ?? 0) > 64) {
-          const thumb = toThumb(row);
-          out.set(item.name, thumb);
-          putMemory(item.name, thumb);
-          continue;
-        }
-      } catch {
-        /* use remote */
+    let useRemote = true;
+    if (Platform.OS !== 'web' && row.localUri && !isSuspiciousLocalUri(row.localUri)) {
+      if (await localFileUsable(row.localUri)) {
+        useRemote = false;
+      } else if (row.localUri) {
+        delete row.localUri;
+        const key = dishKey(item.name, item.category);
+        store[key] = row;
+        store[item.name] = row;
+        dirty = true;
       }
     }
 
-    const thumb = toThumb({ ...row, localUri: undefined });
+    const thumb = toThumb(row, useRemote);
+    if (!thumb) continue;
     out.set(item.name, thumb);
     putMemory(item.name, thumb);
   }
 
-  notifySoon();
+  if (dirty) await persistStore();
+  notifyMenuThumbsNow();
   return out;
 }
 
@@ -174,16 +229,18 @@ function mergeThumbIntoStore(
   const remote = thumb.source.uri.startsWith('file:')
     ? prev?.remoteUrl || ''
     : thumb.source.uri;
+  if (!remote) return;
   store[key] = {
     slug: thumb.slug,
     remoteUrl: remote,
-    localUri: localUri || prev?.localUri,
+    localUri: localUri && !isSuspiciousLocalUri(localUri) ? localUri : prev?.localUri,
     matchTier: thumb.matchTier,
     placeholderLabel: thumb.placeholderLabel,
     score: thumb.score,
   };
   store[name] = store[key];
-  putMemory(name, toThumb(store[key]));
+  const resolved = toThumb(store[key], !store[key].localUri) || thumb;
+  putMemory(name, resolved);
 }
 
 export async function persistMenuThumbMatches(
@@ -215,14 +272,14 @@ export async function persistOneMenuThumb(
 async function downloadOne(remoteUrl: string, dest: string): Promise<string | null> {
   try {
     const existing = await FileSystem.getInfoAsync(dest);
-    if (existing.exists && (existing.size ?? 0) > 64) return dest;
+    if (existing.exists && (existing.size ?? 0) > 200) return dest;
     const result = await FileSystem.downloadAsync(remoteUrl, dest);
     if (result.status >= 200 && result.status < 300) {
       const info = await FileSystem.getInfoAsync(dest);
-      if ((info.size ?? 0) > 64) return dest;
+      if ((info.size ?? 0) > 200) return dest;
     }
   } catch {
-    /* try expo-image cache */
+    /* fallback below */
   }
   try {
     await Image.prefetch(remoteUrl);
@@ -238,7 +295,7 @@ async function downloadOne(remoteUrl: string, dest: string): Promise<string | nu
         await FileSystem.downloadAsync(cached.startsWith('file:') ? cached : remoteUrl, dest);
       });
       const info = await FileSystem.getInfoAsync(dest);
-      if (info.exists && (info.size ?? 0) > 64) return dest;
+      if (info.exists && (info.size ?? 0) > 200) return dest;
     }
   } catch {
     /* ignore */
@@ -246,10 +303,12 @@ async function downloadOne(remoteUrl: string, dest: string): Promise<string | nu
   return null;
 }
 
+/** Tło: zapis plików lokalnie (UI już pokazuje remote URL). */
 export async function downloadMenuThumbsLocally(
   items: ReadonlyArray<{ name: string; category?: string }>,
   thumbs: Map<string, MenuDishThumb>,
   onProgress?: (next: Map<string, MenuDishThumb>) => void,
+  opts?: { maxJobs?: number },
 ): Promise<Map<string, MenuDishThumb>> {
   if (Platform.OS === 'web') return thumbs;
   const ok = await ensureDir();
@@ -258,8 +317,10 @@ export async function downloadMenuThumbsLocally(
   await loadMenuThumbStore();
   const next = new Map(thumbs);
   const jobs: { name: string; category?: string; thumb: MenuDishThumb }[] = [];
+  const maxJobs = opts?.maxJobs ?? 16;
 
   for (const item of items) {
+    if (jobs.length >= maxJobs) break;
     const thumb = thumbs.get(item.name) || thumbsByName.get(item.name);
     if (!thumb?.slug) continue;
     if (thumb.source.uri.startsWith('file:')) continue;
@@ -275,15 +336,16 @@ export async function downloadMenuThumbsLocally(
     if (local) {
       const updated: MenuDishThumb = { ...job.thumb, source: { uri: local } };
       next.set(job.name, updated);
-      await persistOneMenuThumb(job.name, job.category, job.thumb, local);
-    } else {
-      await persistOneMenuThumb(job.name, job.category, job.thumb);
+      mergeThumbIntoStore(job.name, job.category, job.thumb, local);
     }
-    if (i < jobs.length - 1) {
-      await new Promise((r) => setTimeout(r, 40));
+    if (i > 0 && i % 4 === 0) {
+      onProgress?.(new Map(next));
+      notifySoon(80);
+      await new Promise((r) => setTimeout(r, 12));
     }
   }
 
+  if (jobs.length) await persistStore();
   onProgress?.(next);
   notifySoon();
   return next;

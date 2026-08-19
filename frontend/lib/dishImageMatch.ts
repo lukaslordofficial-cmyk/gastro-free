@@ -52,6 +52,13 @@ export type DishMatchResult = {
   placeholderLabel?: string;
 };
 
+let libraryCache: ImageLibraryEntry[] | null = null;
+
+function getImageLibraryCached(): ImageLibraryEntry[] {
+  if (!libraryCache) libraryCache = loadImageLibrary();
+  return libraryCache;
+}
+
 export function normalizeDishName(raw: string): string {
   return raw
     .toLowerCase()
@@ -567,7 +574,7 @@ export function findDishImageMatch(
   const contextTags = extractDishContextTags(name, opts?.extraTags || []);
   const guards = dishDietaryGuards(name, contextTags);
   const catalogBySlug = new Map(catalog.map((e) => [e.slug, e]));
-  const library = loadImageLibrary();
+  const library = getImageLibraryCached();
   const excluded =
     opts?.excludeSlugs == null
       ? null

@@ -8,6 +8,7 @@ import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { formatTrialDaysLeft, trialDaysRemaining } from '@/lib/subscriptionClient';
 
 type Props = {
   onPress?: () => void;
@@ -47,6 +48,8 @@ export function CreditsWalletCard({ onPress, testID = 'wallet-widget' }: Props) 
   const periodEnd = data.current_period_end
     ? new Date(data.current_period_end).toLocaleDateString('pl-PL')
     : null;
+  const trialDays = data.trial_active ? trialDaysRemaining(data.trial_ends_at) : null;
+  const trialLabel = data.trial_active ? formatTrialDaysLeft(trialDays) : null;
 
   const inner = (
     <>
@@ -76,6 +79,11 @@ export function CreditsWalletCard({ onPress, testID = 'wallet-widget' }: Props) 
           <Text style={styles.lowWarnText}>Brak kredytów — AI zablokowane.</Text>
         </View>
       )}
+      {trialLabel ? (
+        <Text style={styles.trialText} testID="trial-days-left">
+          {trialLabel}
+        </Text>
+      ) : null}
       {periodEnd && data.status === 'active' && data.tier_level >= 1 && (
         <Text style={styles.periodText}>Doładowanie: {periodEnd}</Text>
       )}
@@ -163,5 +171,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(220,38,38,0.18)', borderRadius: 8, padding: 8,
   },
   lowWarnText: { flex: 1, fontSize: 11, color: '#7F1D1D', fontWeight: '600' },
+  trialText: {
+    fontSize: 11,
+    color: 'rgba(10,10,10,0.72)',
+    marginTop: 8,
+    fontWeight: '700',
+  },
   periodText: { fontSize: 10, color: 'rgba(10,10,10,0.55)', marginTop: 6, fontWeight: '600' },
 });

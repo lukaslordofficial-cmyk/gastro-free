@@ -9,9 +9,11 @@ import { Lock, Check, Crown, Sparkles, RefreshCw, Info } from 'lucide-react-nati
 import { Colors } from '@/constants/colors';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
 import { TIER_PLANS } from '@/lib/subscriptionCatalog';
+import { formatTrialDaysLeft, trialDaysRemaining } from '@/lib/subscriptionClient';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { DS } from '@/constants/premiumTheme';
+import { formatTrialDaysLeft, trialDaysRemaining } from '@/lib/subscriptionClient';
 
 export function SubscriptionPanel() {
   const theme = useAppTheme();
@@ -70,6 +72,9 @@ export function SubscriptionPanel() {
 
   const activePaid = data.tier_level >= 1 && data.status === 'active';
   const onFreeTier = data.tier_level === 0;
+  const trialLabel = data.trial_active
+    ? formatTrialDaysLeft(trialDaysRemaining(data.trial_ends_at))
+    : null;
 
   return (
     <ScrollView
@@ -85,6 +90,13 @@ export function SubscriptionPanel() {
       testID="subscription-panel"
     >
       <CreditsWalletCard />
+
+      {trialLabel ? (
+        <View style={styles.trialBanner} testID="subscription-trial-banner">
+          <Sparkles size={16} color={theme.accent} strokeWidth={2.2} />
+          <Text style={styles.trialBannerText}>{trialLabel}</Text>
+        </View>
+      ) : null}
 
       {toast && (
         <View style={styles.toast} testID="subscription-toast">
@@ -306,6 +318,24 @@ function makeSubStyles(theme: ReturnType<typeof useAppTheme>) {
     retryText: { color: Colors.white, fontWeight: '700', fontSize: 13 },
     toast: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: successSoft, borderRadius: 12, borderWidth: 1, borderColor: theme.isPremium ? 'rgba(0,255,136,0.3)' : '#A7F3D0', padding: 12, marginTop: 14 },
     toastText: { flex: 1, fontSize: 12.5, color: theme.isPremium ? DS.color.greenEnd : '#065F46', fontWeight: '600', lineHeight: 18 },
+    trialBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: theme.isPremium ? 'rgba(0,255,136,0.08)' : '#ECFDF5',
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.isPremium ? 'rgba(0,255,136,0.25)' : '#A7F3D0',
+      padding: 12,
+      marginTop: 12,
+    },
+    trialBannerText: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: '700',
+      color: theme.isPremium ? DS.color.greenEnd : '#065F46',
+      lineHeight: 18,
+    },
     sectionTitle: { fontSize: 14, fontWeight: '800', color: text, marginTop: 24, marginBottom: 12 },
     card: { backgroundColor: card, borderRadius: 16, borderWidth: 1, borderColor: border, paddingHorizontal: 16 },
     featureRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14 },

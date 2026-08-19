@@ -14,6 +14,8 @@ from typing import Any, Optional
 
 import httpx
 
+from inventory_name_match import find_inventory_match
+
 logger = logging.getLogger("lp.receive")
 
 RECEIVED_TAG = "warehouse_received:1"
@@ -164,16 +166,6 @@ async def _post_dropping_optional(sb_post, client, table: str, payload: dict[str
         except httpx.HTTPStatusError:
             logger.warning("LP post %s failed: %s", table, body[:240])
             raise
-
-
-def _find_inventory_by_name(name: str, inv_rows: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    n = _norm_name(name)
-    if not n:
-        return None
-    for row in inv_rows:
-        if _norm_name(str(row.get("name") or "")) == n:
-            return row
-    return None
 
 
 async def _resolve_category_id(client, sb_get, sb_post, cat_name: str, cache: dict[str, Any]) -> Optional[str]:
@@ -364,7 +356,7 @@ async def apply_lp_inventory_and_cost(
             price = 0.0
         category = str(p.get("category") or "Inne").strip() or "Inne"
         cat_id = await _resolve_category_id(client, sb_get, sb_post, category, cat_cache)
-        match = _find_inventory_by_name(name, inv_rows)
+        match = find_inventory_match(name, inv_rows)
 
         if match and match.get("id"):
             item_id = str(match["id"])
@@ -489,7 +481,7 @@ async def apply_lp_inventory_and_cost(
                 warnings.append(f"Nie udało się dopisać kosztu zmiennego: {_http_body(e)[:120]}")
 
     found_all = all(
-        _find_inventory_by_name(str(p.get("product_name") or ""), inv_rows)
+        find_inventory_match(str(p.get("product_name") or ""), inv_rows)
         for p in invoice_products
         if str(p.get("product_name") or "").strip()
     )

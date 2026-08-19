@@ -4342,6 +4342,15 @@ def _find_inventory_duplicate(
         if len(stem_hits) > 1:
             # najkrótsza kanoniczna nazwa
             return min(stem_hits, key=lambda r: len(r.get("name") or ""))
+    # 2b) odmiany PL / synonimy (marchew ↔ marchewka, bakłażan ↔ bakłażany)
+    compat_hits = [
+        r for r in inv_rows
+        if _food_names_compatible(name, str(r.get("name") or ""))
+    ]
+    if len(compat_hits) == 1:
+        return compat_hits[0]
+    if len(compat_hits) > 1:
+        return min(compat_hits, key=lambda r: len(r.get("name") or ""))
     # 3) rapidfuzz
     hit, score = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=threshold)
     if hit and score >= threshold:

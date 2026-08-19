@@ -28,6 +28,29 @@ export function isPremiumTrialActive(trialEndsAt: string | null | undefined): bo
   return Number.isFinite(t) && t > Date.now();
 }
 
+/** Pełne dni kalendarzowe do końca trialu (0 = ostatni dzień). null gdy brak daty. */
+export function trialDaysRemaining(trialEndsAt: string | null | undefined): number | null {
+  if (!trialEndsAt) return null;
+  const end = Date.parse(trialEndsAt);
+  if (!Number.isFinite(end)) return null;
+  const diffMs = end - Date.now();
+  if (diffMs <= 0) return 0;
+  return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+}
+
+/** Tekst PL: „Zostało X dni trialu” / „Został 1 dzień trialu”. */
+export function formatTrialDaysLeft(days: number | null | undefined): string | null {
+  if (days == null || !Number.isFinite(days)) return null;
+  if (days <= 0) return 'Trial Premium kończy się dziś';
+  if (days === 1) return 'Został 1 dzień trialu Premium';
+  const mod10 = days % 10;
+  const mod100 = days % 100;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    return `Zostały ${days} dni trialu Premium`;
+  }
+  return `Zostało ${days} dni trialu Premium`;
+}
+
 /** Tier efektywny do feature-gate: aktywny trial = min. poziom Profesjonalny (2). */
 export function effectiveFeatureTier(
   tierLevel: number,

@@ -32,7 +32,8 @@ Przegląd całej aplikacji vs dekalog `.agentrules`. Ten branch **nie** tnie mon
 - Health nie wycieka `ACCOUNT_KEY` / nazw modeli.
 - Token sandbox Furgonetki tylko poza `FURGONETKA_PRODUCTION=1`.
 - Moduł `backend/cron_auth.py` + testy.
-- `POS_WEBHOOK_SECRET` na `POST /api/pos/webhook`; VAT RR WWW tylko `INTERNAL_API_SECRET`.
+- JWT z profilu wygrywa z `X-Account-Key` (anti-spoof). `actions/apply` i `waste/apply` wymagają tenanta.
+- POS: link z HMAC (`GET /api/pos/webhook-config`) — master `POS_WEBHOOK_SECRET` zostaje na serwerze.
 - Stripe Price ID z env (testowe fallbacki tylko z `ALLOW_STRIPE_TEST_PRICE_FALLBACK`).
 - Komunikaty UI bez nazw SQL / `STRIPE_SECRET_KEY`; usunięty martwy `PremiumDashboard`.
 

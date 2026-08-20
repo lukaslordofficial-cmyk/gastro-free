@@ -44,7 +44,9 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
-from cron_auth import require_cron_secret, require_env_secret
+from cron_auth import require_cron_secret
+from pos_webhook_auth import build_pos_webhook_path, require_pos_webhook_tenant
+from tenant_auth import prefer_jwt_account_key
 from furgonetka_shop import router as furgonetka_shop_router
 from url_safety import (
     assert_safe_redirect_url,
@@ -192,20 +194,18 @@ async def account_key_middleware(request: Request, call_next):
         or path.rstrip("/") == "/orders"
         or path.startswith("/orders/")
         or path.startswith("/api/furgonetka")
+        or path.split("?")[0].rstrip("/") == "/api/pos/webhook"
     )
     raw = (request.headers.get("x-account-key") or "").strip()
-    # Allow only safe slug chars (ak_<uuid> / default / custom deploy slugs)
-    if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw):
-        key = raw
-    else:
-        key = _ACCOUNT_KEY_DEFAULT
+    header_key = raw if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw) else ""
 
-    # Jeśli klient wysłał „default” (race przed AuthProvider) — spróbuj odzyskać z JWT.
-    if not skip_jwt and (key == "default" or not raw):
+    jwt_key: Optional[str] = None
+    # Jeśli klient wysłał JWT — tenant z profilu wygrywa z X-Account-Key (anti-spoof).
+    if not skip_jwt and SUPABASE_URL:
         auth = (request.headers.get("authorization") or "").strip()
-        if auth.lower().startswith("bearer ") and SUPABASE_URL:
+        if auth.lower().startswith("bearer ") and auth[7:].strip() != SUPABASE_KEY:
             user_jwt = auth[7:].strip()
-            if user_jwt and user_jwt != SUPABASE_KEY:
+            if user_jwt:
                 try:
                     apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
                     async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
@@ -231,11 +231,13 @@ async def account_key_middleware(request: Request, call_next):
                                 if pref.status_code == 200:
                                     rows = pref.json() or []
                                     if rows and rows[0].get("account_key"):
-                                        key = str(rows[0]["account_key"]).strip() or key
-                                if key == "default":
-                                    key = f"ak_{str(uid).replace('-', '')}"
+                                        jwt_key = str(rows[0]["account_key"]).strip() or None
+                                if not jwt_key:
+                                    jwt_key = f"ak_{str(uid).replace('-', '')}"
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("account_key JWT resolve skipped: %s", exc)
+
+    key = prefer_jwt_account_key(header_key, jwt_key, _ACCOUNT_KEY_DEFAULT)
 
     token = _account_key_ctx.set(key)
     try:
@@ -2781,6 +2783,7 @@ async def _apply_supplier_product(client, p, transcript, source):
 
 @app.post("/api/actions/apply", response_model=ApplyResponse)
 async def actions_apply(req: ApplyRequest):
+    require_tenant_account_key()
     dispatch = {
         "waste": _apply_waste,
         "add_revenue": _apply_revenue,
@@ -2861,6 +2864,7 @@ class ApplyWasteRequestLegacy(BaseModel):
 
 @app.post("/api/waste/apply")
 async def apply_waste_legacy(req: ApplyWasteRequestLegacy):
+    require_tenant_account_key()
     payload = {
         "item_type": req.item_type,
         "related_id": req.related_id,
@@ -7275,21 +7279,27 @@ async def pos_providers_list():
     return {"providers": PROVIDERS}
 
 
+@app.get("/api/pos/webhook-config")
+async def pos_webhook_config(request: Request, provider: Optional[str] = None):
+    """Zwraca URL webhooka z tokenem HMAC dla zalogowanego tenanta."""
+    key = require_tenant_account_key()
+    base = (os.getenv("BACKEND_PUBLIC_URL") or "").strip().rstrip("/")
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    url = build_pos_webhook_path(key, provider, base)
+    return {"ok": True, "url": url, "account_key": key}
+
+
 @app.post("/api/pos/webhook")
 async def pos_webhook(request: Request, provider: Optional[str] = None):
     """Odbiera uderzenie POS (kanoniczny JSON lub format konkretnego providera).
 
     Query: ?provider=gopos|posbistro|dotykacka|… — normalizacja w pos_adapters.
     Dla każdej pozycji: pos_products → recipes → inventory → revenue.
-    Wymaga POS_WEBHOOK_SECRET (X-Pos-Webhook-Secret albo Bearer).
+    Wymaga tokenu HMAC w URL (account + token z Ustawień) albo nagłówka.
     """
-    require_env_secret(
-        request,
-        "POS_WEBHOOK_SECRET",
-        header="x-pos-webhook-secret",
-        missing_detail="POS_WEBHOOK_SECRET nie jest ustawiony — webhook POS wyłączony.",
-        bad_detail="Brak albo zły sekret webhooka POS.",
-    )
+    pos_account = require_pos_webhook_tenant(request)
+    _account_key_ctx.set(pos_account)
     try:
         body = await request.json()
     except Exception:

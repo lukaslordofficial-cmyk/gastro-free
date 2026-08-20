@@ -234,17 +234,20 @@ const DishCard = React.memo(function DishCard({
   const catColor = CATEGORY_COLORS[dish.category] ?? Colors.textSecondary;
   const customUri = getDishCustomImageSync(dish.id);
   const liveThumb = thumb ?? getMenuThumbSync(dish.name);
-  const liveThumbUri =
-    liveThumb?.source && typeof liveThumb.source === 'object' && 'uri' in liveThumb.source
-      ? liveThumb.source.uri
-      : undefined;
-  const thumbSrc = customUri ? { uri: customUri } : liveThumbUri ? { uri: liveThumbUri } : undefined;
+  const liveSource = liveThumb?.source;
+  const thumbSrc = customUri
+    ? { uri: customUri }
+    : typeof liveSource === 'number'
+      ? liveSource
+      : liveSource && typeof liveSource === 'object' && 'uri' in liveSource && liveSource.uri
+        ? { uri: liveSource.uri }
+        : undefined;
   const [imgFailed, setImgFailed] = useState(false);
-  const showThumb = !!thumbSrc && !imgFailed;
+  const showThumb = thumbSrc != null && !imgFailed;
 
   useEffect(() => {
     setImgFailed(false);
-  }, [dish.id, customUri, liveThumb?.slug, liveThumbUri]);
+  }, [dish.id, customUri, liveThumb?.slug, typeof liveSource === 'number' ? liveSource : (liveSource as any)?.uri]);
   const showPlaceholderBadge =
     !customUri && !!liveThumb && (liveThumb.matchTier === 'category' || liveThumb.matchTier === 'tags') && !!liveThumb.placeholderLabel;
 
@@ -276,6 +279,7 @@ const DishCard = React.memo(function DishCard({
                 cachePolicy="memory-disk"
                 transition={120}
                 recyclingKey={customUri || liveThumb?.slug || dish.id}
+                priority="low"
                 onError={() => setImgFailed(true)}
               />
             ) : (
@@ -1238,33 +1242,90 @@ export default function MenuScreen() {
 
   useEffect(() => subscribeMenuThumbs(() => setThumbTick((t) => t + 1)), []);
 
-  // Obrazki w tle — lista działa od razu; miniatury dochodzą partiami (sync match → cache → prefetch).
+  // Obrazki: lokalne WebP (lazy per folder) + szybki matcher — bez martwych URL-i Supabase.
+  // Nie zależymy od activeCat — przełączanie kategorii nie anuluje matchingu.
   useEffect(() => {
     if (!dishes.length) return;
     let cancelled = false;
     const items = dishes.map((d) => ({ name: d.name, category: d.category }));
+    const firstCat =
+      (activeCat && activeCat !== 'Wszystkie' ? activeCat : fewestCategory) || '';
+    const priorityNames = new Set(
+      (firstCat ? dishes.filter((d) => d.category === firstCat) : dishes.slice(0, 24)).map(
+        (d) => d.name,
+      ),
+    );
+
     const task = InteractionManager.runAfterInteractions(() => {
       void (async () => {
         try {
-          const { assignAndCacheMenuThumbs } = await import('@/lib/menuDishThumbs');
+          const {
+            hydrateMenuThumbsFromDisk,
+            applyThumbsToMemory,
+            persistMenuThumbMatches,
+          } = await import('@/lib/menuThumbCache');
           if (cancelled) return;
-          await assignAndCacheMenuThumbs(items, {
+          const seed = await hydrateMenuThumbsFromDisk(items);
+          if (cancelled) return;
+
+          const { assignMenuDishThumbsProgressive } = await import('@/lib/menuDishThumbs');
+          if (cancelled) return;
+
+          const assigned = await assignMenuDishThumbsProgressive(items, {
+            seed,
+            priorityNames,
             cancelled: () => cancelled,
-            onUpdate: () => {
-              if (!cancelled) setThumbTick((t) => t + 1);
+            chunkSize: 8,
+            onBatch: (map) => {
+              if (cancelled) return;
+              applyThumbsToMemory(map);
+              void persistMenuThumbMatches(items, map);
             },
           });
+          if (cancelled) return;
+
+          applyThumbsToMemory(assigned);
+          void persistMenuThumbMatches(items, assigned);
         } catch (err) {
           if (__DEV__) console.warn('[menu] thumb assign failed', err);
         }
       })();
     });
+
     return () => {
       cancelled = true;
-      task.cancel();
+      task.cancel?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey covers identity
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey only
   }, [dishNamesKey]);
+
+  // Warm folderów widocznej kategorii przy zmianie chipa (tanie, lokalne).
+  useEffect(() => {
+    if (!dishes.length || !activeCat || activeCat === 'Wszystkie') return;
+    const handle = InteractionManager.runAfterInteractions(() => {
+      void import('@/lib/dishAssets').then(({ warmDishAssetFolder }) => {
+        const folders = new Set<string>();
+        for (const d of dishes) {
+          if (d.category !== activeCat) continue;
+          // folderCandidates mirrored lightly
+          const c = `${d.category} ${d.name}`.toLowerCase();
+          if (/zup/.test(c)) {
+            folders.add('soups_pl');
+            folders.add('soups_polish');
+          } else if (/burger/.test(c)) folders.add('burgers');
+          else if (/pizz/.test(c)) folders.add('pizzas');
+          else if (/makaron|pasta/.test(c)) folders.add('pastas');
+          else if (/salat/.test(c)) folders.add('salads');
+          else {
+            folders.add('dinners');
+            folders.add('polish');
+          }
+        }
+        for (const f of folders) warmDishAssetFolder(f);
+      });
+    });
+    return () => handle.cancel?.();
+  }, [activeCat, dishes]);
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);

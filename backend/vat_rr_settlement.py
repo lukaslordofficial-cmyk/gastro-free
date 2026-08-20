@@ -37,12 +37,8 @@ class ProducerBillingFlags:
 
 
 def _www_secret() -> str:
-    return (
-        os.getenv("INTERNAL_API_SECRET")
-        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        or os.getenv("SUPABASE_KEY")
-        or ""
-    ).strip()
+    """Tylko INTERNAL_API_SECRET — service_role nie może być bearerem do panelu WWW."""
+    return (os.getenv("INTERNAL_API_SECRET") or "").strip()
 
 
 async def _insert_notification(

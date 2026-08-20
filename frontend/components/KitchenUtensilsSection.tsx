@@ -140,7 +140,7 @@ export function KitchenUtensilsSection({ accountKey, onChanged }: Props) {
       const msg = e?.message || 'Nie udało się zapisać.';
       if (/account_key|schema cache|column/i.test(msg)) {
         setErr(
-          'Brak kolumny account_key — uruchom w Supabase: ADD_KITCHEN_UTENSILS_TENANT.sql',
+          'Brak uprawnień do zapisu przyborów kuchennych. Wyloguj się i zaloguj ponownie albo skontaktuj się z supportem.',
         );
       } else {
         setErr(msg);

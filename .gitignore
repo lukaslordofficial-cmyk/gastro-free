@@ -49,6 +49,9 @@ htmlcov/
 # Local caches
 backend/.inspiration_recipe_cache.json
 **/.inspiration_recipe_cache.json
+backend/.restaurant_profile.json
+backend/scripts/_sim_*
+backend/scripts/_sim_*/
 *.env
 credentials.json
 *.pem

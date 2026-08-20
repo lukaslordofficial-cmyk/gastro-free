@@ -40,3 +40,26 @@ def test_job_ok_bearer(monkeypatch):
     monkeypatch.setenv("CRON_JOB_SECRET", "correct-secret")
     r = TestClient(_app()).get("/job", headers={"Authorization": "Bearer correct-secret"})
     assert r.status_code == 200
+
+
+def test_named_secret_pos_header(monkeypatch):
+    from cron_auth import require_env_secret
+
+    app = FastAPI()
+
+    @app.post("/pos")
+    async def pos(request: Request):
+        require_env_secret(
+            request,
+            "POS_WEBHOOK_SECRET",
+            header="x-pos-webhook-secret",
+            missing_detail="missing",
+            bad_detail="bad",
+        )
+        return {"ok": True}
+
+    monkeypatch.setenv("POS_WEBHOOK_SECRET", "pos-secret")
+    client = TestClient(app)
+    assert client.post("/pos").status_code == 401
+    r = client.post("/pos", headers={"X-Pos-Webhook-Secret": "pos-secret"})
+    assert r.status_code == 200

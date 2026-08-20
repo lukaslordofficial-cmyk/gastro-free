@@ -44,7 +44,7 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
-from cron_auth import require_cron_secret
+from cron_auth import require_cron_secret, require_env_secret
 from furgonetka_shop import router as furgonetka_shop_router
 from url_safety import (
     assert_safe_redirect_url,
@@ -7281,7 +7281,15 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
 
     Query: ?provider=gopos|posbistro|dotykacka|… — normalizacja w pos_adapters.
     Dla każdej pozycji: pos_products → recipes → inventory → revenue.
+    Wymaga POS_WEBHOOK_SECRET (X-Pos-Webhook-Secret albo Bearer).
     """
+    require_env_secret(
+        request,
+        "POS_WEBHOOK_SECRET",
+        header="x-pos-webhook-secret",
+        missing_detail="POS_WEBHOOK_SECRET nie jest ustawiony — webhook POS wyłączony.",
+        bad_detail="Brak albo zły sekret webhooka POS.",
+    )
     try:
         body = await request.json()
     except Exception:
@@ -15416,7 +15424,7 @@ async def billing_webhook(request: Request):
 
 @app.get("/api/billing/status")
 async def billing_status():
-    from billing_stripe import stripe_configured, DEFAULT_PRICES
+    from billing_stripe import stripe_configured
     return {
         "ok": True,
         "stripe_configured": stripe_configured(),
@@ -15425,7 +15433,6 @@ async def billing_status():
         ),
         "confirm_session_available": True,
         "mock_billing": os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() in ("1", "true", "yes"),
-        "prices": DEFAULT_PRICES,
     }
 
 

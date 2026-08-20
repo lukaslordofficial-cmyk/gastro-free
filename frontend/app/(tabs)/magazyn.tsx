@@ -1016,7 +1016,7 @@ export default function MagazynScreen() {
       premiumAlert(
         'Błąd',
         /row-level security|RLS/i.test(msg)
-          ? 'Brak uprawnień do kategorii (RLS). Uruchom w Supabase FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.'
+          ? 'Brak uprawnień do kategorii. Wyloguj się i zaloguj ponownie. Jeśli problem wraca — skontaktuj się z supportem.'
           : msg,
       );
       return;

@@ -22,6 +22,23 @@ def _bearer(request: Request) -> str:
     return ""
 
 
+def require_env_secret(
+    request: Request,
+    env_key: str,
+    *,
+    header: str,
+    missing_detail: str,
+    bad_detail: str,
+) -> None:
+    """401 unless header/Bearer matches env; 503 if env unset."""
+    expected = (os.environ.get(env_key) or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail=missing_detail)
+    got = (request.headers.get(header) or "").strip() or _bearer(request)
+    if not got or len(got) != len(expected) or not hmac.compare_digest(got, expected):
+        raise HTTPException(status_code=401, detail=bad_detail)
+
+
 def require_cron_secret(request: Request) -> None:
     """401 unless X-Cron-Secret / Bearer matches CRON_JOB_SECRET; 503 if unset."""
     expected = cron_secret()

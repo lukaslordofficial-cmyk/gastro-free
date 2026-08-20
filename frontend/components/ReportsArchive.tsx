@@ -287,8 +287,7 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
         <View style={styles.migrationBox} testID="reports-migration-box">
           <Text style={styles.migrationTitle}>⚙️ Wymagana jednorazowa migracja</Text>
           <Text style={styles.migrationText}>
-            Aby raporty były zapisywane, uruchom w Supabase (SQL Editor) skrypt{'\n'}
-            <Text style={styles.mono}>supabase_migrations/ADD_DAILY_REPORTS.sql</Text>.
+            Aby raporty były zapisywane, odśwież aplikację po aktualizacji serwera albo skontaktuj się z supportem.
           </Text>
         </View>
       )}

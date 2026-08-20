@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Alert,
   Animated,
   Modal,
   KeyboardAvoidingView,
@@ -1759,7 +1758,7 @@ export default function MenuScreen() {
           const msg = itemError.message || '';
           if (/row-level security|RLS/i.test(msg)) {
             throw new Error(
-              'Brak uprawnień do zapisu menu (RLS). Uruchom w Supabase migrację FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.',
+              'Brak uprawnień do zapisu menu. Wyloguj się i zaloguj ponownie. Jeśli problem wraca — skontaktuj się z supportem.',
             );
           }
           throw itemError;
@@ -1896,7 +1895,7 @@ export default function MenuScreen() {
           const msg = insertError.message || '';
           if (/row-level security|RLS/i.test(msg)) {
             throw new Error(
-              'Brak uprawnień do zapisu magazynu (RLS). Uruchom w Supabase migrację FIX_TENANT_RLS.sql, potem wyloguj i zaloguj ponownie.',
+              'Brak uprawnień do zapisu magazynu. Wyloguj się i zaloguj ponownie. Jeśli problem wraca — skontaktuj się z supportem.',
             );
           }
           throw insertError;
@@ -1936,7 +1935,6 @@ export default function MenuScreen() {
   const [showScanModal, setShowScanModal] = useState(false);
   const [showRecipes, setShowRecipes] = useState(false);
 
-  const handleMic = () => Alert.alert('Kreator Receptur AI — Głos', 'Funkcja rejestracji głosowej jest w trakcie implementacji.', [{ text: 'Rozumiem' }]);
   const handleScanMenu = () => setShowScanModal(true);
 
   if (loading && dishes.length === 0) return <LoadingScreen />;
@@ -2259,15 +2257,11 @@ export default function MenuScreen() {
             <ChefHat size={20} color={Colors.accent} strokeWidth={2} />
             <Text style={styles.aiTitle}>Kreator Receptur AI</Text>
           </View>
-          <Text style={styles.aiSub}>Wgraj menu (PDF lub zdjęcie) — AI odczyta potrawy, ceny i składniki. Możesz też rejestrować dania głosowo.</Text>
+          <Text style={styles.aiSub}>Wgraj menu (PDF lub zdjęcie) — AI odczyta potrawy, ceny i składniki.</Text>
           <View style={styles.aiButtons}>
             <TouchableOpacity style={[styles.aiBtn, { backgroundColor: Colors.success }]} onPress={handleScanMenu} activeOpacity={0.85} testID="menu-scan-open">
               <Camera size={18} color={Colors.white} strokeWidth={2} />
               <Text style={styles.aiBtnText}>Skanuj menu</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.aiBtn, { backgroundColor: Colors.accent }]} onPress={handleMic} activeOpacity={0.85}>
-              <Mic size={18} color={Colors.white} strokeWidth={2} />
-              <Text style={styles.aiBtnText}>Rejestruj głosem</Text>
             </TouchableOpacity>
           </View>
         </View>

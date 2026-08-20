@@ -173,7 +173,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // Closed beta: gdy Confirm email jeszcze włączone — Admin API, potem login.
       if (data.user?.id) {
-        const confirmed = await authService.autoConfirmUser(data.user.id);
+        const confirmed = await authService.autoConfirmUser(data.user.id, e);
         if (confirmed) {
           const { error: signErr } = await authService.signInWithPassword(e, password);
           if (!signErr) {

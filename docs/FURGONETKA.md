@@ -56,12 +56,12 @@ W sandbox.furgonetka.pl → Ustawienia → Integracje → Własne wklej:
 | --- | --- |
 | Nazwa wyświetlana | Gastro Manager |
 | Adres URL | `https://gastro-manager-api-production-21dd.up.railway.app/api/furgonetka` |
-| Token | `FURGONETKA_SHOP_TOKEN` (produkcja). Sandbox: `gm_furg_shop_7c9e4a2b18f04d6e9a51c3b8d0e27f14` tylko gdy `FURGONETKA_SANDBOX=1` |
+| Token | `FURGONETKA_SHOP_TOKEN` (ten sam string na Railway i w panelu Furgonetki) |
 | Synchronizacja zamówień | włącz |
 | Wysyłaj informacje o przesyłce | włącz (stub `PUT /orders/{id}` zwraca 200) |
 
 Na początek API zwraca `{ "orders": [] }` (HTTP 200) — test połączenia ma przejść nawet bez tokenu w GET. Token jest wymagany przy PUT (status przesyłki).
-Przy `FURGONETKA_PRODUCTION=1` token sandbox **nie** jest akceptowany — tylko `FURGONETKA_SHOP_TOKEN`.
+Ustaw `FURGONETKA_SHOP_TOKEN` na Railway i wklej **ten sam** token w panelu Furgonetki.
 
 ## Baza (Supabase)
 

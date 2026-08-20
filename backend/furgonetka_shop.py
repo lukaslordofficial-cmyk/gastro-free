@@ -22,9 +22,6 @@ logger = logging.getLogger("furgonetka.shop")
 
 router = APIRouter(tags=["furgonetka-shop"])
 
-# Token sandbox — ten sam wklejasz w sandbox.furgonetka.pl (Integracje → Własne).
-SANDBOX_SHOP_TOKEN = "gm_furg_shop_7c9e4a2b18f04d6e9a51c3b8d0e27f14"
-
 ORDERS_EMPTY = {"orders": []}
 
 
@@ -46,23 +43,13 @@ def is_furgonetka_sandbox() -> bool:
 
 
 def accepted_tokens() -> tuple[str, ...]:
-    """Env token; hardcoded sandbox tylko gdy FURGONETKA_SANDBOX=1."""
-    tokens: list[str] = []
+    """Tylko FURGONETKA_SHOP_TOKEN z env — zero tokenów w kodzie."""
     env = configured_shop_token()
-    if env:
-        tokens.append(env)
-    if is_furgonetka_sandbox() and SANDBOX_SHOP_TOKEN not in tokens:
-        tokens.append(SANDBOX_SHOP_TOKEN)
-    return tuple(tokens)
+    return (env,) if env else ()
 
 
 def shop_token() -> str:
-    env = configured_shop_token()
-    if env:
-        return env
-    if is_furgonetka_sandbox():
-        return SANDBOX_SHOP_TOKEN
-    return ""
+    return configured_shop_token()
 
 
 def extract_request_token(request: Request) -> str:

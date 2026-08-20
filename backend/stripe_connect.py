@@ -56,11 +56,12 @@ def distributor_inactive_message(*, account_id: str = "", detail: str = "") -> s
 
 
 def _public_base() -> str:
-    return (
-        (os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/")
-        or (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip("/")
-        or "https://gastro-manager-api-production-21dd.up.railway.app"
-    )
+    from url_safety import checkout_redirect_public_base
+
+    custom = (os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/")
+    if custom:
+        return custom
+    return checkout_redirect_public_base()
 
 
 def connect_return_url(producer_id: str) -> str:

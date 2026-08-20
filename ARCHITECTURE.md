@@ -20,6 +20,27 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: market-ready security + IngredientRow (`chore/split-monoliths`)
+
+- Auto-confirm: wymaga `email` zgodnego z kontem + konto młodsze niż 15 min; błędy Admin API nie wyciekają do klienta; osobny rate-limit IP.
+- JWT cache 25s; zapisy zawsze robią live lookup; 401/403 invaliduje cache.
+- `X-Account-Key` bez JWT jest ignorowany (spoof odczytów) — wyjątek: Bearer service_role.
+- `restaurant_profile` + `kitchen_utensils` w filtrze tenant; migracja `ADD_RESTAURANT_PROFILE_TENANT.sql`.
+- Token Furgonetki tylko z `FURGONETKA_SHOP_TOKEN`; brak hardcoded Railway URL.
+- TLS: `OPENAI_SSL_VERIFY=0` ignorowane na Railway production (`backend/http_ssl.py`).
+- Outbound URL: domyślnie tylko HTTPS.
+- Menu: `IngredientRow` + status magazynu → `frontend/components/menu/`.
+
+### 2026-08-20 — Kęs: split monolitów (`chore/split-monoliths`)
+
+Osobny branch od `chore/release-hardening` — działająca linia release **nie** jest tu ruszana.
+Zachowanie 1:1, tylko przeniesienie kodu:
+
+- Menu: `DishCard` + style → `frontend/components/menu/`; typy → `frontend/types/menu.ts`;
+  stałe → `frontend/constants/menuUi.ts`; mapowania → `frontend/lib/menuScreenHelpers.ts`.
+  Miniatury nadal przez `getMenuThumbSync` / `dishCustomImages` (bez mieszania z Inspiracjami).
+- Backend: liveness + auto-confirm + deep health → `backend/health_routes.py` (`APIRouter`).
+
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)
 
 Przegląd całej aplikacji vs dekalog `.agentrules`. Ten branch **nie** tnie monolitu
@@ -32,14 +53,16 @@ Przegląd całej aplikacji vs dekalog `.agentrules`. Ten branch **nie** tnie mon
 - Health nie wycieka `ACCOUNT_KEY` / nazw modeli.
 - Token sandbox Furgonetki tylko poza `FURGONETKA_PRODUCTION=1`.
 - Moduł `backend/cron_auth.py` + testy.
-- JWT z profilu wygrywa z `X-Account-Key` (anti-spoof). `actions/apply` i `waste/apply` wymagają tenanta.
+- JWT cache 25s + wspólny httpx (keepalive); zapisy bez cache.
+- Zapis przy `account_key=default` → 401 (wyjątek: Stripe/POS/Furgonetka webhooki).
+- Rate limit AI 40/min i zapis 180/min na tenanta (per worker).
 - POS: link z HMAC (`GET /api/pos/webhook-config`) — master `POS_WEBHOOK_SECRET` zostaje na serwerze.
 - Stripe Price ID z env (testowe fallbacki tylko z `ALLOW_STRIPE_TEST_PRICE_FALLBACK`).
 - Komunikaty UI bez nazw SQL / `STRIPE_SECRET_KEY`; usunięty martwy `PremiumDashboard`.
 
 **Kolejne kęsy (jeden na raz, po teście na telefonie):**
-1. Ciąć ekrany >250 linii: `menu.tsx`, `magazyn.tsx`, `dostawcy/index.tsx`, `index.tsx` (Finanse).
-2. Ciąć `backend/server.py` (routery per domena: menu, inventory, billing, LP).
+1. Dokończyć cięcie `menu.tsx` (IngredientRow, ekran) i `server.py` (voice, POS, billing).
+2. Ciąć pozostałe ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`, `index.tsx` (Finanse).
 3. Podwójny katalog obrazków: Menu = `dishAssets` (lazy); Inspiracje = `dishImagesCatalog` (eager `require` WebP) — nie scalać bez testu Menu.
 4. `as any` na ekranach Voice/Finanse.
 5. RLS audit (`SCALE_INDEXES_AND_RLS.sql`) jeśli jeszcze nie odpalone na produkcji.

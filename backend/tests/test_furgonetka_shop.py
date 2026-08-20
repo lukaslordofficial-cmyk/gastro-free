@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from furgonetka_shop import SANDBOX_SHOP_TOKEN, router, shop_token
+from furgonetka_shop import router, shop_token
 
 
 def _app() -> FastAPI:
@@ -61,22 +61,22 @@ def test_wrong_token_still_200_on_list(monkeypatch):
     assert r.json() == {"orders": []}
 
 
-def test_sandbox_fallback_token(monkeypatch):
+def test_shop_token_requires_env(monkeypatch):
     monkeypatch.delenv("FURGONETKA_SHOP_TOKEN", raising=False)
-    assert shop_token() == SANDBOX_SHOP_TOKEN
+    assert shop_token() == ""
     client = TestClient(_app())
-    r = client.get("/orders", headers={"Authorization": f"Bearer {SANDBOX_SHOP_TOKEN}"})
+    r = client.get("/orders", headers={"Authorization": "Bearer leftover-sandbox"})
     assert r.status_code == 200
     assert r.json() == {"orders": []}
 
 
-def test_sandbox_token_rejected_in_production(monkeypatch):
+def test_unknown_token_rejected_on_mutate(monkeypatch):
     monkeypatch.setenv("FURGONETKA_PRODUCTION", "1")
     monkeypatch.setenv("FURGONETKA_SHOP_TOKEN", "other-production-token")
     client = TestClient(_app())
     r = client.put(
         "/orders/abc-1",
-        headers={"Authorization": f"Bearer {SANDBOX_SHOP_TOKEN}"},
+        headers={"Authorization": "Bearer leftover-sandbox"},
         json={"tracking_number": "1"},
     )
     assert r.status_code == 401

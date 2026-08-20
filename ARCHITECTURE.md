@@ -20,6 +20,17 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: SSRF Storage + Connect HMAC + POS config (`chore/security-split`)
+
+Raport Code Registry (246 findings) — prawdziwe luki, nie fałszywe alarmy `httpx`:
+
+- GET faktur/etykiet tylko z hosta `SUPABASE_URL` (`assert_supabase_fetch_url`).
+- `invoice_url` typu `https://` spoza Storage jest odrzucany (nie SSRF na metadata).
+- GET `/api/stripe/connect` wymaga HMAC z `refresh_url` (koniec otwartego onboardingu).
+- `/api/pos/products` + webhook-config + providers → `backend/pos_config_routes.py`; produkty tylko z tenanta.
+- Usunięty `match_preview` z odpowiedzi klasyfikacji katalogu.
+- Menu: `ensureWarehouseLinks` / `buildIngredientRows` → `frontend/lib/menuWarehouseLinks.ts`.
+
 ### 2026-08-20 — Kęs: Menu → menuService (`chore/split-monoliths`)
 
 - **`frontend/services/menuService.ts`** — całe IO Menu: lista dań, receptury, magazyn

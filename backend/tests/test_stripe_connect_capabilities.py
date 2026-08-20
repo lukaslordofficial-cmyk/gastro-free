@@ -13,6 +13,7 @@ from local_producers_commerce import _pln_to_grosze  # noqa: E402
 from stripe_connect import (  # noqa: E402
     _capability_status,
     connect_refresh_token,
+    connect_refresh_url,
     verify_connect_refresh_token,
 )
 
@@ -100,8 +101,12 @@ def test_pln_to_grosze_rounding():
 
 def test_connect_refresh_token_hmac(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_SECRET", "unit-test-secret")
+    monkeypatch.setenv("PUBLIC_APP_URL", "https://api.example.com")
     tok = connect_refresh_token("prod_abc")
     assert len(tok) == 40
     assert verify_connect_refresh_token("prod_abc", tok)
     assert not verify_connect_refresh_token("prod_abc", "deadbeef" * 5)
     assert not verify_connect_refresh_token("other", tok)
+    url = connect_refresh_url("prod_abc")
+    assert "token=" in url
+    assert tok in url

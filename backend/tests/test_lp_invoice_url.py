@@ -35,3 +35,12 @@ def test_order_invoice_raw_prefers_invoice_url():
         )
         == "producer-documents:a.pdf"
     )
+
+
+def test_storage_path_rejects_traversal():
+    import pytest
+    from lp_invoice_url import _safe_storage_path
+
+    with pytest.raises(RuntimeError):
+        _safe_storage_path("../etc/passwd")
+    assert _safe_storage_path("/orders/a.pdf") == "orders/a.pdf"

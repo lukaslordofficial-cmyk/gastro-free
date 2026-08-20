@@ -22,7 +22,6 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react-native';
-import { supabase } from '@/lib/supabase';
 import { secureId } from '@/lib/secureId';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
@@ -32,6 +31,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { bestProductMatch, ingredientDedupeKey } from '@/lib/fuzzyProductMatch';
 import { normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import {
+  deleteRecipeIngredientIds,
+  fetchRecipeRowsForMenuItem,
+  insertRecipeIngredientRow,
+  persistWarehouseProductLink,
+  replaceMenuItemRecipe,
+  saveMenuItemPosId,
+  setMenuItemAvailable,
+  updateRecipeIngredientRow,
+} from '@/services/menuRecipeService';
 
 const RECIPE_WH_MAP_KEY = '@gm/recipe_wh_map';
 const UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
@@ -180,87 +189,8 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
 
   const loadIngredients = useCallback(async () => {
     setLoadingIngredients(true);
-    let data: any[] | null = null;
-    let errMsg: string | null = null;
 
-    const nestedFull = await supabase
-      .from('menu_items')
-      .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order, piece_weight_g, warehouse_product_id)')
-      .eq('id', menuItem.id)
-      .maybeSingle();
-
-    let nested = nestedFull;
-    if (nestedFull.error) {
-      nested = await supabase
-        .from('menu_items')
-        .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, piece_weight_g)')
-        .eq('id', menuItem.id)
-        .maybeSingle();
-      if (nested.error) {
-        nested = await supabase
-          .from('menu_items')
-          .select('id, recipe_ingredients(id, ingredient_name, quantity, unit)')
-          .eq('id', menuItem.id)
-          .maybeSingle();
-      }
-    }
-
-    if (!nested.error && nested.data) {
-      const raw = (nested.data as any).recipe_ingredients;
-      data = Array.isArray(raw) ? raw : raw ? [raw] : [];
-      errMsg = null;
-    } else {
-      errMsg = nested.error?.message ?? nestedFull.error?.message ?? null;
-      const fallback = await supabase
-        .from('recipe_ingredients')
-        .select('id, ingredient_name, quantity, unit, piece_weight_g')
-        .eq('menu_item_id', menuItem.id);
-      if (fallback.error && /piece_weight_g/i.test(fallback.error.message ?? '')) {
-        const fb2 = await supabase
-          .from('recipe_ingredients')
-          .select('id, ingredient_name, quantity, unit')
-          .eq('menu_item_id', menuItem.id);
-        data = (fb2.data as any[]) ?? [];
-        if (!fb2.error) errMsg = null;
-        else errMsg = fb2.error.message;
-      } else {
-        data = (fallback.data as any[]) ?? [];
-        if (!fallback.error) errMsg = null;
-        else errMsg = fallback.error.message;
-      }
-    }
-
-    if (errMsg && (!data || data.length === 0)) {
-      if (__DEV__) console.warn('[MenuRecipeRow] recipe_ingredients:', errMsg);
-    }
-
-    const sorted = [...(data ?? [])].sort(
-      (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
-    );
-
-    const rows: RecipeIngredientRow[] = sorted.map((r: any) => ({
-      id: r.id,
-      ingredient_name: r.ingredient_name,
-      quantity: Number(r.quantity) || 0,
-      unit: r.unit || 'g',
-      piece_weight_g: r.piece_weight_g != null ? Number(r.piece_weight_g) : null,
-      warehouse_product_id: r.warehouse_product_id ?? null,
-      warehouse_product_name: null,
-    }));
-
-    const whIds = rows.map((r) => r.warehouse_product_id).filter(Boolean) as string[];
-    if (whIds.length > 0) {
-      const { data: inv } = await supabase
-        .from('inventory_items')
-        .select('id, name')
-        .in('id', whIds);
-      const byId = new Map((inv ?? []).map((i: any) => [i.id, i.name]));
-      for (const row of rows) {
-        if (row.warehouse_product_id) {
-          row.warehouse_product_name = byId.get(row.warehouse_product_id) ?? null;
-        }
-      }
-    }
+    const rows = await fetchRecipeRowsForMenuItem(menuItem.id);
 
     const soft = await loadSoftMap();
     for (const row of rows) {
@@ -302,13 +232,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       row.warehouse_product_name = hit.name;
       row.in_stock = (Number(hit.quantity) || 0) > 0;
       row.stock_qty = Number(hit.quantity) || 0;
-      const { error } = await supabase
-        .from('recipe_ingredients')
-        .update({ warehouse_product_id: hit.id })
-        .eq('id', row.id);
-      if (error) {
-        /* soft map wystarczy */
-      }
+      await persistWarehouseProductLink(row.id, hit.id);
     }
     await saveSoftMap(soft);
 
@@ -319,16 +243,10 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     if (rows.length > 0 && !manualAvail) {
       const allOk = rows.every((r) => r.in_stock);
       if (allOk && !isAvailable) {
-        const { error } = await supabase
-          .from('menu_items')
-          .update({ is_available: true })
-          .eq('id', menuItem.id);
+        const { error } = await setMenuItemAvailable(menuItem.id, true);
         if (!error) setIsAvailable(true);
       } else if (!allOk && isAvailable) {
-        const { error } = await supabase
-          .from('menu_items')
-          .update({ is_available: false })
-          .eq('id', menuItem.id);
+        const { error } = await setMenuItemAvailable(menuItem.id, false);
         if (!error) setIsAvailable(false);
       }
     }
@@ -371,8 +289,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       const toDelete = existingIds.filter((id) => !keepIds.has(id));
 
       if (toDelete.length > 0) {
-        const { error } = await supabase.from('recipe_ingredients').delete().in('id', toDelete);
-        if (error) throw error;
+        await deleteRecipeIngredientIds(toDelete);
         for (const id of toDelete) delete soft[id];
       }
 
@@ -393,27 +310,8 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         }
 
         if (d.id) {
-          const { error } = await supabase
-            .from('recipe_ingredients')
-            .update(payload)
-            .eq('id', d.id);
-          if (error) {
-            const msg = (error.message || '').toLowerCase();
-            if (msg.includes('warehouse_product_id') || msg.includes('schema cache') || msg.includes('piece_weight_g')) {
-              const { error: e2 } = await supabase
-                .from('recipe_ingredients')
-                .update({
-                  ingredient_name: payload.ingredient_name,
-                  quantity: payload.quantity,
-                  unit: payload.unit,
-                  sort_order: payload.sort_order,
-                })
-                .eq('id', d.id);
-              if (e2) throw e2;
-            } else {
-              throw error;
-            }
-          }
+          const { error } = await updateRecipeIngredientRow(d.id, payload);
+          if (error) throw new Error(error.message);
           if (d.warehouse_product_id) soft[d.id] = d.warehouse_product_id;
           else delete soft[d.id];
         } else {
@@ -426,34 +324,10 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
           };
           if (d.warehouse_product_id) insertRow.warehouse_product_id = d.warehouse_product_id;
           if (payload.piece_weight_g != null) insertRow.piece_weight_g = payload.piece_weight_g;
-          const { data: inserted, error } = await supabase
-            .from('recipe_ingredients')
-            .insert(insertRow)
-            .select('id')
-            .single();
-          if (error) {
-            const msg = (error.message || '').toLowerCase();
-            if (msg.includes('warehouse_product_id') || msg.includes('schema cache') || msg.includes('piece_weight_g')) {
-              const { data: inserted2, error: e2 } = await supabase
-                .from('recipe_ingredients')
-                .insert({
-                  menu_item_id: menuItem.id,
-                  ingredient_name: payload.ingredient_name,
-                  quantity: payload.quantity,
-                  unit: payload.unit,
-                  sort_order: payload.sort_order,
-                })
-                .select('id')
-                .single();
-              if (e2) throw e2;
-              if (inserted2?.id && d.warehouse_product_id) {
-                soft[inserted2.id] = d.warehouse_product_id;
-              }
-            } else {
-              throw error;
-            }
-          } else if (inserted?.id && d.warehouse_product_id) {
-            soft[inserted.id] = d.warehouse_product_id;
+          const { id: insertedId, error } = await insertRecipeIngredientRow(insertRow);
+          if (error) throw new Error(error.message);
+          if (insertedId && d.warehouse_product_id) {
+            soft[insertedId] = d.warehouse_product_id;
           }
         }
       }
@@ -463,8 +337,11 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
       await loadIngredients();
       emitRecipeIngredientsChanged(menuItem.id);
       onChanged();
-    } catch (e: any) {
-      premiumAlert('Błąd zapisu', e?.message ?? 'Nie udało się zapisać receptury.');
+    } catch (e: unknown) {
+      premiumAlert(
+        'Błąd zapisu',
+        e instanceof Error ? e.message : 'Nie udało się zapisać receptury.',
+      );
     } finally {
       setRecipeSaving(false);
     }
@@ -515,18 +392,17 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
         premiumAlert('Brak propozycji', 'AI nie zwróciło składników dla tego dania.');
         return;
       }
-      await supabase.from('recipe_ingredients').delete().eq('menu_item_id', menuItem.id);
-      const rows = suggested
-        .filter((s) => (s.name || '').trim())
-        .map((s, i) => ({
-          menu_item_id: menuItem.id,
-          ingredient_name: s.name.trim(),
-          quantity: normalizeRecipeQuantity(Number(s.quantity) || 0),
-          unit: s.unit || 'g',
-          sort_order: i + 1,
-        }));
-      const { error } = await supabase.from('recipe_ingredients').insert(rows);
-      if (error) throw new Error(error.message);
+      await replaceMenuItemRecipe(
+        menuItem.id,
+        suggested
+          .filter((s) => (s.name || '').trim())
+          .map((s, i) => ({
+            ingredient_name: s.name.trim(),
+            quantity: normalizeRecipeQuantity(Number(s.quantity) || 0),
+            unit: s.unit || 'g',
+            sort_order: i + 1,
+          })),
+      );
       await loadIngredients();
       emitRecipeIngredientsChanged(menuItem.id);
       onChanged();
@@ -551,10 +427,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
   const handleToggleAvailable = async (value: boolean) => {
     setAvailSaving(true);
     setManualAvail(true);
-    const { error } = await supabase
-      .from('menu_items')
-      .update({ is_available: value })
-      .eq('id', menuItem.id);
+    const { error } = await setMenuItemAvailable(menuItem.id, value);
     setAvailSaving(false);
     if (error) {
       premiumAlert('Błąd', error.message);
@@ -592,19 +465,13 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     const soft = await loadSoftMap();
     soft[draft.id] = warehouseItemId;
     await saveSoftMap(soft);
-    const { error } = await supabase
-      .from('recipe_ingredients')
-      .update({ warehouse_product_id: warehouseItemId })
-      .eq('id', draft.id);
+    const { error, schemaMissing } = await persistWarehouseProductLink(
+      draft.id,
+      warehouseItemId,
+    );
     setSaving(false);
     setPickerOpen(false);
-    if (error) {
-      const msg = (error.message || '').toLowerCase();
-      if (msg.includes('warehouse_product_id') || msg.includes('schema cache')) {
-        emitRecipeIngredientsChanged(menuItem.id);
-        onChanged();
-        return;
-      }
+    if (error && !schemaMissing) {
       premiumAlert('Błąd', error.message);
     } else {
       emitRecipeIngredientsChanged(menuItem.id);
@@ -626,16 +493,10 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
     const soft = await loadSoftMap();
     delete soft[draft.id];
     await saveSoftMap(soft);
-    const { error } = await supabase
-      .from('recipe_ingredients')
-      .update({ warehouse_product_id: null })
-      .eq('id', draft.id);
-    if (error) {
-      const msg = (error.message || '').toLowerCase();
-      if (!(msg.includes('warehouse_product_id') || msg.includes('schema cache'))) {
-        premiumAlert('Błąd', error.message);
-        return;
-      }
+    const { error, schemaMissing } = await persistWarehouseProductLink(draft.id, null);
+    if (error && !schemaMissing) {
+      premiumAlert('Błąd', error.message);
+      return;
     }
     emitRecipeIngredientsChanged(menuItem.id);
     onChanged();
@@ -644,10 +505,7 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
   const handleSavePosId = async () => {
     setPosIdSaving(true);
     const value = posIdInput.trim() || null;
-    const { error } = await supabase
-      .from('menu_items')
-      .update({ pos_id: value })
-      .eq('id', menuItem.id);
+    const { error } = await saveMenuItemPosId(menuItem.id, value);
     setPosIdSaving(false);
     if (error) {
       premiumAlert('Błąd', error.message);

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -32,6 +32,7 @@ import {
   savePosSettings,
 } from '@/services/settingsService';
 import { Colors } from '@/constants/colors';
+import { CATEGORY_COLORS } from '@/constants/menuUi';
 import MenuRecipeRow, {
   MenuItemForMapping,
   InventoryItemForRecipe,
@@ -451,6 +452,21 @@ export default function UstawieniaScreen() {
 
   const unmappedPosCount = menuItems.filter((m) => !m.pos_id).length;
 
+  /** Segregacja jak w Menu — nagłówek kategorii + pozycje (kolejność alfabetyczna kategorii). */
+  const menuByCategory = useMemo(() => {
+    const map = new Map<string, MenuItemForMapping[]>();
+    for (const item of menuItems) {
+      const cat = (item.category || '').trim() || 'Bez kategorii';
+      const list = map.get(cat);
+      if (list) list.push(item);
+      else map.set(cat, [item]);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.name.localeCompare(b.name, 'pl'));
+    }
+    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pl'));
+  }, [menuItems]);
+
   const scrollBody = (
       <ScrollView
         refreshControl={
@@ -676,13 +692,34 @@ export default function UstawieniaScreen() {
               </Text>
             </View>
           ) : (
-            menuItems.map((item) => (
-              <MenuRecipeRow
-                key={item.id}
-                menuItem={item}
-                inventoryItems={inventoryItems}
-                onChanged={handleMenuItemChanged}
-              />
+            menuByCategory.map(([category, items]) => (
+              <View key={category} style={styles.categoryBlock}>
+                <View style={styles.categoryHeaderRow}>
+                  <View
+                    style={[
+                      styles.categoryDot,
+                      { backgroundColor: CATEGORY_COLORS[category] ?? theme.textMuted },
+                    ]}
+                  />
+                  <Text
+                    style={[styles.categoryHeader, { color: theme.isPremium ? theme.text : '#1E293B' }]}
+                    allowFontScaling={false}
+                  >
+                    {category}
+                  </Text>
+                  <Text style={[styles.categoryCount, { color: theme.textMuted }]} allowFontScaling={false}>
+                    {items.length}
+                  </Text>
+                </View>
+                {items.map((item) => (
+                  <MenuRecipeRow
+                    key={item.id}
+                    menuItem={item}
+                    inventoryItems={inventoryItems}
+                    onChanged={handleMenuItemChanged}
+                  />
+                ))}
+              </View>
             ))
           )}
         </View>
@@ -853,5 +890,32 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#94A3B8',
     textAlign: 'center',
+  },
+  categoryBlock: {
+    marginBottom: 14,
+    gap: 8,
+  },
+  categoryHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 2,
+    marginBottom: 2,
+  },
+  categoryDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  categoryHeader: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  categoryCount: {
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

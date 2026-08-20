@@ -20,6 +20,19 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: Ustawienia kategorie + menuRecipeService (`chore/split-monoliths`)
+
+- Mapowanie dań w Ustawieniach pogrupowane jak w Menu (nagłówek kategorii + kolor + licznik).
+- **`frontend/services/menuRecipeService.ts`** — IO receptur/POS z `MenuRecipeRow`
+  (odczyt składników, mapowanie magazynu, dostępność, pos_id, zapis/AI replace).
+- `MenuRecipeRow` bez bezpośredniego `supabase`.
+
+**Kolejne kęsy (po teście Ustawień na telefonie):**
+1. Dalsze cięcie UI `MenuRecipeRow` / `menu.tsx` + `server.py` (voice, POS webhook, billing).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`.
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+4. `as any` na Voice/Finanse; RLS audit na produkcji.
+
 ### 2026-08-20 — Kęs: settingsService + fix „ser biały” (`chore/split-monoliths`)
 
 - **`normalizeIngredientName`**: singularizacja wielowyrazowa tylko na ostatnim

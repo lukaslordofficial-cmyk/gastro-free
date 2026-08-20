@@ -72,13 +72,25 @@ def test_checkout_redirect_skips_localhost_expo(monkeypatch):
     from url_safety import checkout_redirect_public_base
 
     monkeypatch.setenv("PUBLIC_APP_URL", "http://localhost:8081")
+    monkeypatch.setenv("PUBLIC_API_URL", "https://api.example.com")
     monkeypatch.delenv("CHECKOUT_REDIRECT_BASE_URL", raising=False)
-    monkeypatch.delenv("PUBLIC_API_URL", raising=False)
     monkeypatch.delenv("BACKEND_PUBLIC_URL", raising=False)
     monkeypatch.delenv("RAILWAY_PUBLIC_DOMAIN", raising=False)
     base = checkout_redirect_public_base()
     assert "localhost" not in base
-    assert base.startswith("https://")
+    assert base.startswith("https://api.example.com")
+
+
+def test_checkout_redirect_requires_public_url(monkeypatch):
+    from url_safety import checkout_redirect_public_base
+
+    monkeypatch.setenv("PUBLIC_APP_URL", "http://localhost:8081")
+    monkeypatch.delenv("CHECKOUT_REDIRECT_BASE_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_API_URL", raising=False)
+    monkeypatch.delenv("BACKEND_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("RAILWAY_PUBLIC_DOMAIN", raising=False)
+    with pytest.raises(HTTPException):
+        checkout_redirect_public_base()
 
 
 def test_auth_user_url_fixed_origin():

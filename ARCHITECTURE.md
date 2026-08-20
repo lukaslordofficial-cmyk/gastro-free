@@ -24,6 +24,9 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 - Auto-confirm: wymaga `email` zgodnego z kontem + konto młodsze niż 15 min; błędy Admin API nie wyciekają do klienta; osobny rate-limit IP.
 - JWT cache 25s; zapisy zawsze robią live lookup; 401/403 invaliduje cache.
+- `X-Account-Key` bez JWT jest ignorowany (spoof odczytów) — wyjątek: Bearer service_role.
+- `restaurant_profile` + `kitchen_utensils` w filtrze tenant; migracja `ADD_RESTAURANT_PROFILE_TENANT.sql`.
+- Token Furgonetki tylko z `FURGONETKA_SHOP_TOKEN`; brak hardcoded Railway URL.
 - TLS: `OPENAI_SSL_VERIFY=0` ignorowane na Railway production (`backend/http_ssl.py`).
 - Outbound URL: domyślnie tylko HTTPS.
 - Menu: `IngredientRow` + status magazynu → `frontend/components/menu/`.

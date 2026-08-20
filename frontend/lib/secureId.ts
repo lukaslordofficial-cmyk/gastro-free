@@ -11,10 +11,7 @@ function randomBytesHex(byteLength: number): string {
   if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
     cryptoObj.getRandomValues(bytes);
   } else {
-    // Extremely rare fallback — still avoid Math.random for security-sensitive callers.
-    for (let i = 0; i < bytes.length; i += 1) {
-      bytes[i] = (Date.now() + i * 97) & 0xff;
-    }
+    throw new Error('Web Crypto getRandomValues jest niedostępne — nie wolno generować ID z Date.now().');
   }
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }

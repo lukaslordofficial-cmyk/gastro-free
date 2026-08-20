@@ -10,13 +10,23 @@ _JWT_CACHE_MAX = 8000
 _jwt_cache: dict[str, tuple[float, str]] = {}
 
 
-def prefer_jwt_account_key(header_key: str, jwt_key: str | None, default: str) -> str:
-    """If the user is logged in, ignore a mismatched X-Account-Key."""
+def prefer_jwt_account_key(
+    header_key: str,
+    jwt_key: str | None,
+    default: str,
+    *,
+    allow_header: bool = False,
+) -> str:
+    """If the user is logged in, ignore a mismatched X-Account-Key.
+
+    Without JWT, the header is spoofable — only service_role may set tenant via header.
+    """
     if jwt_key:
         return jwt_key.strip()
-    raw = (header_key or "").strip()
-    if raw and raw != "default":
-        return raw
+    if allow_header:
+        raw = (header_key or "").strip()
+        if raw and raw != "default":
+            return raw
     return (default or "default").strip() or "default"
 
 

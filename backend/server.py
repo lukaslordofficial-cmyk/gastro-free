@@ -20,7 +20,7 @@ import logging
 import os
 import uuid
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Literal, Tuple
 
@@ -203,11 +203,14 @@ async def account_key_middleware(request: Request, call_next):
     raw = (request.headers.get("x-account-key") or "").strip()
     header_key = raw if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw) else ""
 
+    auth = (request.headers.get("authorization") or "").strip()
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    is_service_role = bool(SUPABASE_KEY and bearer and bearer == SUPABASE_KEY)
+
     jwt_key: Optional[str] = None
     # Jeśli klient wysłał JWT — tenant z profilu wygrywa z X-Account-Key (anti-spoof).
     if not skip_jwt and SUPABASE_URL:
-        auth = (request.headers.get("authorization") or "").strip()
-        if auth.lower().startswith("bearer ") and auth[7:].strip() != SUPABASE_KEY:
+        if auth.lower().startswith("bearer ") and bearer != SUPABASE_KEY:
             user_jwt = auth[7:].strip()
             if user_jwt:
                 # Zapis/AI: zawsze live lookup (revoke nie czeka na TTL cache).
@@ -256,7 +259,12 @@ async def account_key_middleware(request: Request, call_next):
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("account_key JWT resolve skipped: %s", exc)
 
-    key = prefer_jwt_account_key(header_key, jwt_key, _ACCOUNT_KEY_DEFAULT)
+    key = prefer_jwt_account_key(
+        header_key,
+        jwt_key,
+        _ACCOUNT_KEY_DEFAULT,
+        allow_header=is_service_role,
+    )
 
     if is_mutate_method(request.method) and not is_public_mutate(path):
         if key == "default":
@@ -7532,13 +7540,17 @@ RESEND_FROM_EMAIL = _resend_from_email()
 # --- Profil restauracji (dane kontaktowe dla dostawców) ----------------------
 # Przechowujemy w Supabase (tabela restaurant_profile, singleton). Jeśli tabela
 # nie istnieje, korzystamy z lokalnego pliku fallback, aby funkcja działała od razu.
-PROFILE_FALLBACK_FILE = Path(__file__).parent / ".restaurant_profile.json"
+def _profile_disk_path() -> Path:
+    ak = (_account_key_ctx.get() or _ACCOUNT_KEY_DEFAULT).strip() or "default"
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", ak)[:80]
+    return Path(__file__).parent / f".restaurant_profile_{safe}.json"
 
 
 def _read_profile_disk() -> dict:
     try:
-        if PROFILE_FALLBACK_FILE.exists():
-            data = json.loads(PROFILE_FALLBACK_FILE.read_text(encoding="utf-8"))
+        path = _profile_disk_path()
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
             return {"contact_email": data.get("contact_email", "") or "",
                     "contact_phone": data.get("contact_phone", "") or ""}
     except Exception:  # noqa: BLE001
@@ -7548,7 +7560,7 @@ def _read_profile_disk() -> dict:
 
 def _write_profile_disk(email: str, phone: str) -> None:
     try:
-        PROFILE_FALLBACK_FILE.write_text(
+        _profile_disk_path().write_text(
             json.dumps({"contact_email": email, "contact_phone": phone}), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         logger.warning("Nie udało się zapisać profilu na dysku: %s", e)
@@ -15424,7 +15436,7 @@ async def _auth_user_id_from_request(request: Request) -> Optional[str]:
         apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
         async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
             uresp = await httpx_c.get(
-                f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+                build_supabase_auth_user_url(SUPABASE_URL),
                 headers={"Authorization": f"Bearer {user_jwt}", "apikey": apikey},
             )
             if uresp.status_code == 200:

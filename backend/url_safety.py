@@ -28,11 +28,7 @@ _BLOCKED_HOSTS = frozenset({
 
 
 def assert_supabase_origin(base_url: str) -> str:
-    """
-    Ensure outbound Supabase calls use a fixed https origin from env
-    (never a user-controlled host). Keeps scanners from treating
-    f\"{SUPABASE_URL}/...\" as an SSRF sink.
-    """
+    """Fixed https origin from env — never a user-controlled host."""
     cleaned = (base_url or "").strip().rstrip("/")
     if not cleaned:
         raise HTTPException(status_code=503, detail="SUPABASE_URL nie jest skonfigurowane.")
@@ -87,9 +83,7 @@ def assert_safe_rest_path(path: str) -> str:
     if raw_no_query.count("/") > 1:
         raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka REST.")
 
-    # PostgREST REST endpoints also accept `rpc/<function_name>`.
-    # The security scanner flags SSRF when rpc endpoints are assembled into URLs without validation,
-    # so we explicitly allow the only safe slash pattern: `rpc/<fn>`.
+    # PostgREST also accepts `rpc/<function_name>` as the only extra slash.
     if raw_no_query.startswith("rpc/"):
         fn = raw_no_query.split("/", 1)[1]
         if not _SEGMENT_RE.fullmatch(fn):
@@ -158,6 +152,21 @@ def assert_safe_outbound_url(
         for ip in _resolve_ips(host):
             if _is_blocked_ip(ip):
                 raise HTTPException(status_code=400, detail="Cel SSRF zablokowany.")
+    return cleaned
+
+
+def assert_supabase_fetch_url(url: str, supabase_url: str) -> str:
+    """GET tylko z hosta tego projektu Supabase (signed Storage), nie z dowolnego internetu."""
+    origin = assert_supabase_origin(supabase_url)
+    origin_host = (urlparse(origin).hostname or "").lower()
+    cleaned = assert_safe_outbound_url(url, allow_http=False, resolve_dns=False)
+    host = (urlparse(cleaned).hostname or "").lower()
+    allowed = {origin_host}
+    if origin_host.endswith(".supabase.co"):
+        ref = origin_host.split(".")[0]
+        allowed.add(f"{ref}.storage.supabase.co")
+    if host not in allowed:
+        raise HTTPException(status_code=400, detail="URL spoza Storage tego projektu.")
     return cleaned
 
 

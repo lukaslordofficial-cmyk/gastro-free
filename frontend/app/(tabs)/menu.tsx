@@ -38,7 +38,20 @@ import {
   Box,
   BookOpen,
 } from 'lucide-react-native';
-import { supabase } from '@/lib/supabase';
+import {
+  deleteMenuDish,
+  deleteOrphanZeroStockWarehouseProduct,
+  fetchActiveInventoryItems,
+  fetchMenuAuxiliary,
+  fetchMenuItemList,
+  fetchMenuRecipesMap,
+  fetchRecipeIngredientRows,
+  insertMenuItem,
+  insertRecipeIngredients,
+  replaceRecipeIngredients,
+  updateMenuItem,
+  upsertQuickAddInventoryItem,
+} from '@/services/menuService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
@@ -66,18 +79,17 @@ import {
 } from '@/constants/menuUi';
 import {
   makePosId,
-  mapDbToDish,
   mapInvDbRow,
   newDraftIngredient,
   normIngredientName,
 } from '@/lib/menuScreenHelpers';
+import { buildIngredientRows, ensureWarehouseLinks as linkWarehouseIngredients } from '@/lib/menuWarehouseLinks';
 import type {
   Dish,
   IngredientDraft,
   InventoryItem,
   KitchenUtensil,
   MenuListRow,
-  RecipeIngredient,
   StockStatus,
   Unit,
 } from '@/types/menu';
@@ -155,30 +167,7 @@ export default function MenuScreen() {
       setLoading(false);
     }
     try {
-      const listRes = await supabase
-        .from('menu_items')
-        .select('id, name, category, price_pln, pos_id')
-        .eq('account_key', ak)
-        .eq('is_active', true)
-        .order('category')
-        .order('name')
-        .limit(1000);
-      if (listRes.error) throw listRes.error;
-
-      const byId = new Map<string, Dish>();
-      for (const row of listRes.data ?? []) {
-        const id = String((row as { id?: string }).id || '');
-        if (!id || byId.has(id)) continue;
-        byId.set(id, {
-          id,
-          name: String((row as { name?: string }).name || ''),
-          category: String((row as { category?: string }).category || ''),
-          price_pln: Number((row as { price_pln?: number }).price_pln) || 0,
-          pos_id: String((row as { pos_id?: string }).pos_id || ''),
-          recipe: [],
-        });
-      }
-      const list = Array.from(byId.values());
+      const list = await fetchMenuItemList(ak);
       MENU_LIST_CACHE.set(ak, list);
       setDishes(list);
       setError(null);
@@ -187,26 +176,8 @@ export default function MenuScreen() {
 
       void (async () => {
         try {
-          let recipesRes = await supabase
-            .from('menu_items')
-            .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order, piece_weight_g)')
-            .eq('account_key', ak)
-            .eq('is_active', true)
-            .limit(1000);
-          if (recipesRes.error && /piece_weight_g/i.test(recipesRes.error.message ?? '')) {
-            recipesRes = await supabase
-              .from('menu_items')
-              .select('id, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)')
-              .eq('account_key', ak)
-              .eq('is_active', true)
-              .limit(1000);
-          }
-          if (!recipesRes.error && recipesRes.data) {
-            const recipeById = new Map<string, RecipeIngredient[]>();
-            for (const row of recipesRes.data) {
-              const mapped = mapDbToDish(row);
-              recipeById.set(mapped.id, mapped.recipe);
-            }
+          const recipeById = await fetchMenuRecipesMap(ak);
+          if (recipeById.size > 0) {
             setDishes((prev) => {
               const next = prev.map((d) => ({
                 ...d,
@@ -217,58 +188,10 @@ export default function MenuScreen() {
             });
           }
 
-          const [utensilsRes, invRes, catsRes] = await Promise.all([
-            supabase
-              .from('kitchen_utensils')
-              .select('id, name, utensil_type, capacity_value, capacity_unit')
-              .eq('account_key', ak)
-              .order('name'),
-            supabase
-              .from('inventory_items')
-              .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-              .eq('account_key', ak)
-              .eq('is_active', true)
-              .order('name')
-              .then(async (res) => {
-                if (res.error && /is_active/.test(res.error.message ?? '')) {
-                  return supabase
-                    .from('inventory_items')
-                    .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-                    .eq('account_key', ak)
-                    .order('name');
-                }
-                return res;
-              }),
-            supabase
-              .from('inventory_categories')
-              .select('id, name')
-              .eq('account_key', ak)
-              .order('sort_order'),
-          ]);
-
-          if (utensilsRes.error) {
-            if (!/account_key|schema cache|column/i.test(utensilsRes.error.message ?? '')) {
-              if (__DEV__) console.warn('[menu] utensils', utensilsRes.error.message);
-            }
-            setUtensils([]);
-          } else {
-            setUtensils(utensilsRes.data ?? []);
-          }
-          if (!invRes.error) {
-            const invMapped = (invRes.data ?? []).map(mapInvDbRow);
-            const invById = new Map<string, InventoryItem>();
-            for (const i of invMapped) {
-              if (!invById.has(i.id)) invById.set(i.id, i);
-            }
-            setInventory(Array.from(invById.values()));
-          }
-          if (!catsRes.error) {
-            const map: Record<string, string> = {};
-            (catsRes.data ?? []).forEach((c: { id?: string; name?: string }) => {
-              if (c.name && c.id) map[c.name] = c.id;
-            });
-            setCategoryMap(map);
-          }
+          const aux = await fetchMenuAuxiliary(ak);
+          setUtensils(aux.utensils);
+          setInventory(aux.inventory);
+          setCategoryMap(aux.categoryMap);
         } catch (bgErr) {
           if (__DEV__) console.warn('[menu] background', bgErr);
         }
@@ -310,17 +233,13 @@ export default function MenuScreen() {
           await fetchData();
           const open = editingDishRef.current;
           if (!payload?.menuItemId || !open || open.id !== payload.menuItemId) return;
-          const { data } = await supabase
-            .from('recipe_ingredients')
-            .select('ingredient_name, quantity, unit, sort_order, piece_weight_g')
-            .eq('menu_item_id', payload.menuItemId)
-            .order('sort_order');
-          const rows = (data ?? []).sort(
-            (a: any, b: any) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
+          const data = await fetchRecipeIngredientRows(payload.menuItemId);
+          const rows = [...data].sort(
+            (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0),
           );
           setIngredients(
             rows.length > 0
-              ? rows.map((r: any) => ({
+              ? rows.map((r) => ({
                   key: secureId('ing'),
                   name: r.ingredient_name ?? '',
                   quantity: String(r.quantity ?? 0),
@@ -629,45 +548,22 @@ export default function MenuScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { data: linkedRows } = await supabase
-                .from('recipe_ingredients')
-                .select('warehouse_product_id')
-                .eq('menu_item_id', dish.id);
-              const linkedIds = [
-                ...new Set(
-                  (linkedRows ?? [])
-                    .map((r: any) => r.warehouse_product_id as string | null)
-                    .filter((id): id is string => !!id),
-                ),
-              ];
-
-              await supabase.from('recipe_ingredients').delete().eq('menu_item_id', dish.id);
-              const { error: delError } = await supabase
-                .from('menu_items')
-                .delete()
-                .eq('id', dish.id);
-              if (delError) throw delError;
+              const { linkedWarehouseIds } = await deleteMenuDish(dish.id, accountKey ?? undefined);
               setDishes((prev) => prev.filter((d) => d.id !== dish.id));
 
               // Auto-usuń z magazynu produkty utworzone pod to danie, jeśli nadal mają stan 0
               // i nie są używane w innych recepturach.
-              for (const wid of linkedIds) {
-                const { data: inv } = await supabase
-                  .from('inventory_items')
-                  .select('id, quantity')
-                  .eq('id', wid)
-                  .maybeSingle();
-                if (!inv || Number(inv.quantity) > 0) continue;
-                const { count } = await supabase
-                  .from('recipe_ingredients')
-                  .select('id', { count: 'exact', head: true })
-                  .eq('warehouse_product_id', wid);
-                if ((count ?? 0) > 0) continue;
-                await supabase.from('inventory_items').delete().eq('id', wid);
-                setInventory((prev) => prev.filter((i) => i.id !== wid));
+              for (const wid of linkedWarehouseIds) {
+                const removed = await deleteOrphanZeroStockWarehouseProduct(wid);
+                if (removed) {
+                  setInventory((prev) => prev.filter((i) => i.id !== wid));
+                }
               }
-            } catch (e: any) {
-              premiumAlert('Błąd', e.message ?? 'Nie udało się usunąć dania.');
+            } catch (e: unknown) {
+              premiumAlert(
+                'Błąd',
+                e instanceof Error ? e.message : 'Nie udało się usunąć dania.',
+              );
             }
           },
         },
@@ -721,124 +617,14 @@ export default function MenuScreen() {
   async function ensureWarehouseLinks(
     validIngredients: IngredientDraft[],
   ): Promise<Map<string, string>> {
-    /** normName → inventory_items.id — tworzy brakujące produkty ze stanem 0. */
-    const linkMap = new Map<string, string>();
-    if (!accountKey || accountKey === 'default') return linkMap;
-
-    // Świeży snapshot z DB — lokalny stan może być nieaktualny przy równoległym skanie.
-    let dbInv: unknown[] | null = null;
-    {
-      const withActive = await supabase
-        .from('inventory_items')
-        .select(
-          'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name)',
-        )
-        .eq('account_key', accountKey)
-        .eq('is_active', true)
-        .limit(3000);
-      if (!withActive.error) {
-        dbInv = withActive.data;
-      } else if (/is_active/i.test(withActive.error.message ?? '')) {
-        const fallback = await supabase
-          .from('inventory_items')
-          .select(
-            'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name)',
-          )
-          .eq('account_key', accountKey)
-          .limit(3000);
-        dbInv = fallback.error ? null : fallback.data;
-      }
-    }
-    const working: InventoryItem[] = (dbInv ?? []).map(mapInvDbRow);
-    // Dołącz lokalne, których jeszcze nie ma w odpowiedzi (optimistic).
-    for (const local of inventory) {
-      if (!working.some((w) => w.id === local.id)) working.push(local);
-    }
-
-    const findLocal = (displayName: string, key: string) =>
-      working.find(
-        (i) =>
-          normIngredientName(i.product_name) === key ||
-          namesMatch(i.product_name, displayName, 86),
-      );
-
-    for (const ing of validIngredients) {
-      const name = normalizeIngredientName(ing.name.trim());
-      const key = normIngredientName(name);
-      if (!key || linkMap.has(key)) continue;
-      const existing = findLocal(name, key);
-      if (existing) {
-        linkMap.set(key, existing.id);
-        continue;
-      }
-      const unit = normalizeMenuUnit(ing.unit);
-      const insertPayload: Record<string, unknown> = {
-        name,
-        category_id: categoryMap['Inne'] ?? categoryMap['Przyprawy'] ?? null,
-        quantity: 0,
-        unit,
-        min_quantity: 1,
-        is_combo_polprodukt: false,
-        unit_cost: 0,
-        account_key: accountKey,
-      };
-      const { data: newRow, error } = await supabase
-        .from('inventory_items')
-        .insert(insertPayload as never)
-        .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name)')
-        .single();
-      if (error || !newRow?.id) {
-        // Race: ktoś właśnie dodał ten sam produkt — dociągnij i zlinkuj.
-        const { data: raced } = await supabase
-          .from('inventory_items')
-          .select(
-            'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name)',
-          )
-          .eq('account_key', accountKey)
-          .eq('is_active', true)
-          .limit(3000);
-        const hit = (raced ?? [])
-          .map(mapInvDbRow)
-          .find(
-            (i) =>
-              normIngredientName(i.product_name) === key ||
-              namesMatch(i.product_name, name, 86),
-          );
-        if (hit) {
-          working.push(hit);
-          linkMap.set(key, hit.id);
-        }
-        continue;
-      }
-      const mapped = mapInvDbRow(newRow);
-      working.push(mapped);
-      linkMap.set(key, newRow.id);
-      setInventory((prev) => (prev.some((p) => p.id === mapped.id) ? prev : [...prev, mapped]));
-    }
-    return linkMap;
-  }
-
-  function buildIngredientRows(
-    menuItemId: string,
-    validIngredients: IngredientDraft[],
-    linkMap: Map<string, string>,
-  ) {
-    return validIngredients.map((ing, idx) => {
-      const iname = normalizeIngredientName(ing.name.trim());
-      const row: Record<string, unknown> = {
-        menu_item_id: menuItemId,
-        ingredient_name: iname,
-        quantity: normalizeRecipeQuantity(parseFloat((ing.quantity || '').replace(',', '.')) || 0),
-        unit: normalizeMenuUnit(ing.unit),
-        sort_order: idx + 1,
-      };
-      const pw = parseOptionalPieceWeightG(ing.pieceWeightG);
-      if ((ing.unit === 'szt' || ing.unit === 'sztuka') && pw != null) {
-        row.piece_weight_g = pw;
-      }
-      const wid = linkMap.get(normIngredientName(iname));
-      if (wid) row.warehouse_product_id = wid;
-      return row;
+    return linkWarehouseIngredients({
+      accountKey,
+      validIngredients,
+      inventory,
+      categoryMap,
+      onInventoryAdd: (mapped) => {
+        setInventory((prev) => (prev.some((p) => p.id === mapped.id) ? prev : [...prev, mapped]));
+      },
     });
   }
 
@@ -875,26 +661,18 @@ export default function MenuScreen() {
 
       if (editingDish) {
         // ── Update existing dish ──
-        const { error: updateError } = await supabase
-          .from('menu_items')
-          .update({ name: nameTrim, category: form.category, price_pln: price })
-          .eq('id', editingDish.id);
-        if (updateError) throw updateError;
+        await updateMenuItem(
+          editingDish.id,
+          {
+            name: nameTrim,
+            category: form.category,
+            price_pln: price,
+          },
+          accountKey ?? undefined,
+        );
 
-        await supabase.from('recipe_ingredients').delete().eq('menu_item_id', editingDish.id);
-        if (validIngredients.length > 0) {
-          const rows = buildIngredientRows(editingDish.id, validIngredients, linkMap);
-          const { error: ingError } = await supabase.from('recipe_ingredients').insert(rows);
-          if (ingError) {
-            if (/piece_weight_g|warehouse_product_id|schema cache/i.test(ingError.message ?? '')) {
-              const fallback = rows.map(({ piece_weight_g: _pw, warehouse_product_id: _w, ...rest }) => rest);
-              const { error: e2 } = await supabase.from('recipe_ingredients').insert(fallback);
-              if (e2) throw e2;
-            } else {
-              throw ingError;
-            }
-          }
-        }
+        const rows = buildIngredientRows(editingDish.id, validIngredients, linkMap);
+        await replaceRecipeIngredients(editingDish.id, rows);
 
         const updatedDish: Dish = {
           ...editingDish,
@@ -919,40 +697,17 @@ export default function MenuScreen() {
         if (!accountKey || accountKey === 'default') {
           throw new Error('Brak konta użytkownika — wyloguj się i zaloguj ponownie.');
         }
-        const { data: newItem, error: itemError } = await supabase
-          .from('menu_items')
-          .insert({
-            name: nameTrim,
-            category: form.category,
-            price_pln: price,
-            pos_id: posId,
-            is_active: true,
-            account_key: accountKey,
-          })
-          .select('id')
-          .single();
-        if (itemError) {
-          const msg = itemError.message || '';
-          if (/row-level security|RLS/i.test(msg)) {
-            throw new Error(
-              'Brak uprawnień do zapisu menu. Wyloguj się i zaloguj ponownie. Jeśli problem wraca — skontaktuj się z supportem.',
-            );
-          }
-          throw itemError;
-        }
+        const newItem = await insertMenuItem({
+          name: nameTrim,
+          category: form.category,
+          price_pln: price,
+          pos_id: posId,
+          accountKey,
+        });
 
         if (validIngredients.length > 0) {
           const rows = buildIngredientRows(newItem.id, validIngredients, linkMap);
-          const { error: ingError } = await supabase.from('recipe_ingredients').insert(rows);
-          if (ingError) {
-            if (/piece_weight_g|warehouse_product_id|schema cache/i.test(ingError.message ?? '')) {
-              const fallback = rows.map(({ piece_weight_g: _pw, warehouse_product_id: _w, ...rest }) => rest);
-              const { error: e2 } = await supabase.from('recipe_ingredients').insert(fallback);
-              if (e2) throw e2;
-            } else {
-              throw ingError;
-            }
-          }
+          await insertRecipeIngredients(rows);
         }
 
         const newDish: Dish = {
@@ -973,8 +728,8 @@ export default function MenuScreen() {
         setSelectedCat(form.category);
         handleCloseAddModal();
       }
-    } catch (e: any) {
-      premiumAlert('Błąd zapisu', e.message ?? 'Nieznany błąd');
+    } catch (e: unknown) {
+      premiumAlert('Błąd zapisu', e instanceof Error ? e.message : 'Nieznany błąd');
     } finally {
       setSaving(false);
     }
@@ -1007,82 +762,35 @@ export default function MenuScreen() {
           normIngredientName(i.product_name) === nameKey ||
           namesMatch(i.product_name, nameTrim, 86),
       );
-      let linked = existingLocal;
+      let linked = existingLocal ?? null;
       if (!linked) {
-        const { data: dbHit } = await supabase
-          .from('inventory_items')
-          .select(
-            'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)',
-          )
-          .eq('account_key', accountKey)
-          .eq('is_active', true)
-          .limit(3000);
-        linked = (dbHit ?? [])
-          .map(mapInvDbRow)
-          .find(
+        const dbHit = await fetchActiveInventoryItems(accountKey);
+        linked =
+          dbHit.find(
             (i) =>
               normIngredientName(i.product_name) === nameKey ||
               namesMatch(i.product_name, nameTrim, 86),
-          );
+          ) ?? null;
       }
 
-      let newInvItem: InventoryItem;
-      if (linked) {
-        const nextQty = (Number(linked.current_qty) || 0) + (Number(currentQty) || 0);
-        const { data: updated, error: updErr } = await supabase
-          .from('inventory_items')
-          .update({
-            quantity: nextQty,
-            min_quantity: criticalThreshold,
-            unit: invForm.unit,
-            portion_size: invForm.portionSize.trim() ? (parseFloat(invForm.portionSize) || null) : null,
-            is_combo_polprodukt: invForm.isCombo,
-          })
-          .eq('id', linked.id)
-          .eq('account_key', accountKey)
-          .select(
-            'id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)',
-          )
-          .single();
-        if (updErr) throw updErr;
-        newInvItem = mapInvDbRow(updated);
-        setInventory((prev) =>
-          prev.some((p) => p.id === newInvItem.id)
-            ? prev.map((p) => (p.id === newInvItem.id ? newInvItem : p))
-            : [...prev, newInvItem],
-        );
-      } else {
-        const { data: newRow, error: insertError } = await supabase
-          .from('inventory_items')
-          .insert({
-            name: nameTrim,
-            category_id: categoryMap[invForm.category] ?? null,
-            quantity: currentQty,
-            unit: invForm.unit,
-            min_quantity: criticalThreshold,
-            portion_size: invForm.portionSize.trim() ? (parseFloat(invForm.portionSize) || null) : null,
-            is_combo_polprodukt: invForm.isCombo,
-            unit_cost: 0,
-            account_key: accountKey,
-          } as never)
-          .select('id, name, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)')
-          .single();
-
-        if (insertError) {
-          const msg = insertError.message || '';
-          if (/row-level security|RLS/i.test(msg)) {
-            throw new Error(
-              'Brak uprawnień do zapisu magazynu. Wyloguj się i zaloguj ponownie. Jeśli problem wraca — skontaktuj się z supportem.',
-            );
-          }
-          throw insertError;
-        }
-
-        newInvItem = mapInvDbRow(newRow);
-        setInventory((prev) =>
-          prev.some((p) => p.id === newInvItem.id) ? prev : [...prev, newInvItem],
-        );
-      }
+      const newInvItem = await upsertQuickAddInventoryItem(
+        {
+          name: nameTrim,
+          categoryId: categoryMap[invForm.category] ?? null,
+          quantity: currentQty,
+          unit: invForm.unit,
+          minQuantity: criticalThreshold,
+          portionSize: invForm.portionSize.trim() ? (parseFloat(invForm.portionSize) || null) : null,
+          isCombo: invForm.isCombo,
+          accountKey,
+        },
+        linked,
+      );
+      setInventory((prev) =>
+        prev.some((p) => p.id === newInvItem.id)
+          ? prev.map((p) => (p.id === newInvItem.id ? newInvItem : p))
+          : [...prev, newInvItem],
+      );
 
       // Auto-fill the ingredient row that triggered this flow
       if (pendingIngKey) {
@@ -1096,8 +804,8 @@ export default function MenuScreen() {
       setInvForm(BLANK_INV_FORM);
       setPendingIngKey(null);
       setShowInvModal(false);
-    } catch (e: any) {
-      premiumAlert('Błąd zapisu', e.message ?? 'Nieznany błąd');
+    } catch (e: unknown) {
+      premiumAlert('Błąd zapisu', e instanceof Error ? e.message : 'Nieznany błąd');
     } finally {
       setInvSaving(false);
     }

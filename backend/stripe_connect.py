@@ -7,6 +7,8 @@ Webhook account.updated → sync payouts_enabled / onboarding complete
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 from typing import Any, Optional
@@ -72,12 +74,40 @@ def connect_return_url(producer_id: str) -> str:
     return f"{_public_base()}/api/stripe/connect/callback?producer_id={producer_id}"
 
 
+def _connect_link_secret() -> str:
+    return (
+        (os.getenv("INTERNAL_API_SECRET") or "").strip()
+        or (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    )
+
+
+def connect_refresh_token(producer_id: str) -> str:
+    secret = _connect_link_secret()
+    pid = (producer_id or "").strip()
+    if not secret or not pid:
+        return ""
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"connect-refresh:{pid}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:40]
+
+
+def verify_connect_refresh_token(producer_id: str, token: Optional[str]) -> bool:
+    expected = connect_refresh_token(producer_id)
+    got = (token or "").strip()
+    if not expected or not got or len(got) != len(expected):
+        return False
+    return hmac.compare_digest(expected, got)
+
+
 def connect_refresh_url(producer_id: str) -> str:
+    q = f"producer_id={producer_id}&refresh=1&token={connect_refresh_token(producer_id)}"
     custom = (os.getenv("STRIPE_CONNECT_REFRESH_URL") or "").strip()
     if custom:
         sep = "&" if "?" in custom else "?"
-        return f"{custom}{sep}producer_id={producer_id}"
-    return f"{_public_base()}/api/stripe/connect?producer_id={producer_id}&refresh=1"
+        return f"{custom}{sep}{q}"
+    return f"{_public_base()}/api/stripe/connect?{q}"
 
 
 def connect_www_success_url() -> str:

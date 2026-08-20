@@ -97,3 +97,29 @@ def test_auth_user_url_fixed_origin():
     assert build_supabase_auth_user_url("https://proj.supabase.co") == (
         "https://proj.supabase.co/auth/v1/user"
     )
+
+
+def test_supabase_fetch_allows_project_and_storage_host():
+    from url_safety import assert_supabase_fetch_url
+
+    origin = "https://abcxyz.supabase.co"
+    signed = assert_supabase_fetch_url(
+        "https://abcxyz.supabase.co/storage/v1/object/sign/b/p",
+        origin,
+    )
+    assert signed.startswith("https://abcxyz.supabase.co/")
+    cdn = assert_supabase_fetch_url(
+        "https://abcxyz.storage.supabase.co/object/sign/b/p",
+        origin,
+    )
+    assert "storage.supabase.co" in cdn
+
+
+def test_supabase_fetch_blocks_foreign_host():
+    from url_safety import assert_supabase_fetch_url
+
+    with pytest.raises(HTTPException):
+        assert_supabase_fetch_url(
+            "https://evil.example/invoice.pdf",
+            "https://abcxyz.supabase.co",
+        )

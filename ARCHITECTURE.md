@@ -20,6 +20,88 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: fix Map shadow + split Ustawienia UI (`chore/split-monoliths`)
+
+- **Crash „constructor is not callable”:** ikona lucide `Map` zasłaniała globalny
+  `Map` — import jako `MapIcon`; grupowanie przez `groupMenuItemsByCategory`
+  (`globalThis.Map`).
+- Wycięte z monolitu `ustawienia.tsx`: `PosInstructionBanner`, `WebhookUrlRow`,
+  `settingsScreenStyles.ts`, helper kategorii.
+
+**Kolejne kęsy (po teście Ustawień):**
+1. Dalsze cięcie `MenuRecipeRow` / `menu.tsx` + `server.py` (voice, POS webhook).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`.
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+
+### 2026-08-20 — Kęs: fix hooks Ustawienia + expiry IO (`chore/split-monoliths`)
+
+- **Fix crash Ustawienia:** `useMemo(menuByCategory)` przeniesiony **przed** early
+  return `loading`/`error` (Rules of Hooks — „Rendered more hooks…”).
+- **`inventoryService`:** `fetchExpiryBatches` / `replaceExpiryBatches` z filtrem
+  `account_key`; `ProductExpiryEditor` bez bezpośredniego `supabase`.
+
+**Kolejne kęsy (po teście Ustawień na telefonie):**
+1. Dalsze cięcie UI `MenuRecipeRow` / `menu.tsx` + `server.py` (voice, POS webhook, billing).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`.
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+4. `as any` na Voice/Finanse; RLS audit na produkcji.
+
+### 2026-08-20 — Kęs: Ustawienia kategorie + menuRecipeService (`chore/split-monoliths`)
+
+- Mapowanie dań w Ustawieniach pogrupowane jak w Menu (nagłówek kategorii + kolor + licznik).
+- **`frontend/services/menuRecipeService.ts`** — IO receptur/POS z `MenuRecipeRow`
+  (odczyt składników, mapowanie magazynu, dostępność, pos_id, zapis/AI replace).
+- `MenuRecipeRow` bez bezpośredniego `supabase`.
+
+**Kolejne kęsy (po teście Ustawień na telefonie):**
+1. Dalsze cięcie UI `MenuRecipeRow` / `menu.tsx` + `server.py` (voice, POS webhook, billing).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`.
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+4. `as any` na Voice/Finanse; RLS audit na produkcji.
+
+### 2026-08-20 — Kęs: settingsService + fix „ser biały” (`chore/split-monoliths`)
+
+- **`normalizeIngredientName`**: singularizacja wielowyrazowa tylko na ostatnim
+  wyrazie oryginału (nie na posortowanych tokenach) — naprawia „ser biały” → „ser ser”.
+- **`frontend/services/settingsService.ts`** — IO Ustawień (POS + menu + magazyn);
+  `ustawienia.tsx` bez bezpośredniego `supabase`.
+- Odczyty menu/magazynu w Ustawieniach filtrują `account_key` gdy tenant znany.
+- Smoke: `frontend/scripts/smoke_normalize_ingredient_name.mjs`.
+
+**Kolejne kęsy (jeden na raz, po teście Ustawień + „ser biały” na telefonie):**
+1. Cięcie UI `menu.tsx` / `MenuRecipeRow` (nadal ma supabase) + `server.py` (voice, POS webhook, billing).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`, `index.tsx` (Finanse).
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+4. `as any` na Voice/Finanse; RLS audit `SCALE_INDEXES_AND_RLS.sql` na produkcji.
+
+### 2026-08-20 — Kęs: SSRF Storage + Connect HMAC + POS config (`chore/security-split`)
+
+Raport Code Registry (246 findings) — prawdziwe luki, nie fałszywe alarmy `httpx`:
+
+- GET faktur/etykiet tylko z hosta `SUPABASE_URL` (`assert_supabase_fetch_url`).
+- `invoice_url` typu `https://` spoza Storage jest odrzucany (nie SSRF na metadata).
+- GET `/api/stripe/connect` wymaga HMAC z `refresh_url` (koniec otwartego onboardingu).
+- `/api/pos/products` + webhook-config + providers → `backend/pos_config_routes.py`; produkty tylko z tenanta.
+- Usunięty `match_preview` z odpowiedzi klasyfikacji katalogu.
+- Menu: `ensureWarehouseLinks` / `buildIngredientRows` → `frontend/lib/menuWarehouseLinks.ts`.
+
+### 2026-08-20 — Kęs: Menu → menuService (`chore/split-monoliths`)
+
+- **`frontend/services/menuService.ts`** — całe IO Menu: lista dań, receptury, magazyn
+  pomocniczy, CRUD dań/składników, quick-add produktu, orphan cleanup.
+- **`menu.tsx`** — 0 bezpośrednich zapytań `supabase` (było ~20); tylko UI + stan.
+- Update/delete `menu_items` filtruje `account_key` (defense-in-depth obok RLS).
+- Martwy import `supabase` usunięty z `magazyn.tsx`.
+- Backend: cienkie POS (`pos_config_routes.py`); Stripe Connect refresh URL z HMAC;
+  Storage invoice URL tylko z hosta projektu; usunięty `match_preview` z odpowiedzi oferty.
+
+**Kolejne kęsy (jeden na raz, po teście Menu na telefonie):**
+1. Cięcie UI `menu.tsx` (modale / listy) + `server.py` (voice, POS webhook, billing).
+2. `ustawienia.tsx` → `settingsService` (pozostałe UI → supabase).
+3. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`, `index.tsx` (Finanse).
+4. Podwójny katalog obrazków — nie scalać bez testu Menu.
+5. `as any` na Voice/Finanse; RLS audit `SCALE_INDEXES_AND_RLS.sql` na produkcji.
+
 ### 2026-08-20 — Kęs: market-ready security + IngredientRow (`chore/split-monoliths`)
 
 - Menu screen styles → `menuScreenStyles.ts`; blank forms → `menuFormDefaults.ts`.

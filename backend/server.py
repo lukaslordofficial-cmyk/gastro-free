@@ -57,6 +57,7 @@ from request_guards import is_ai_path, is_mutate_method, is_public_mutate
 from rate_limit import allow_ai, allow_ip, allow_write
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
+from pos_config_routes import router as pos_config_router
 from url_safety import (
     assert_safe_redirect_url,
     checkout_redirect_public_base,
@@ -193,6 +194,7 @@ app.add_middleware(
 )
 app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
+app.include_router(pos_config_router)
 
 
 @app.middleware("http")
@@ -4592,7 +4594,6 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
 
     visible_count = 0
     hidden_count = 0
-    match_debug: list[dict] = []
 
     for p in products:
         name = (p.get("product_name") or "").strip()
@@ -4662,16 +4663,6 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
         else:
             hidden_count += 1
 
-        if len(match_debug) < 40:
-            match_debug.append({
-                "product": name,
-                "is_visible": is_visible,
-                "matched_via": matched_via,
-                "matched_to": matched_to,
-                "score": round(matched_score, 1),
-                "reason": reason,
-            })
-
         price = float(p.get("price_netto") or 0)
         volume_label = (p.get("volume_label") or "").strip()
         unit = (p.get("unit") or "szt").strip()
@@ -4720,7 +4711,6 @@ async def _process_offer(client: httpx.AsyncClient, supplier_id: str, data: dict
         "hidden_count": hidden_count,
         "menu_dishes": len(menu_lista),
         "classification": "menu_ai" if ai_map else "recipe_strict_fallback",
-        "match_preview": match_debug,
         "warnings": warnings,
     }
 
@@ -7315,24 +7305,6 @@ class PosWebhookRequest(BaseModel):
     items: list[PosSaleItem]
 
 
-@app.get("/api/pos/providers")
-async def pos_providers_list():
-    """Lista adapterów popularnych POS (PL) — do pickera w Ustawieniach."""
-    from pos_adapters import PROVIDERS
-    return {"providers": PROVIDERS}
-
-
-@app.get("/api/pos/webhook-config")
-async def pos_webhook_config(request: Request, provider: Optional[str] = None):
-    """Zwraca URL webhooka z tokenem HMAC dla zalogowanego tenanta."""
-    key = require_tenant_account_key()
-    base = (os.getenv("BACKEND_PUBLIC_URL") or "").strip().rstrip("/")
-    if not base:
-        base = str(request.base_url).rstrip("/")
-    url = build_pos_webhook_path(key, provider, base)
-    return {"ok": True, "url": url, "account_key": key}
-
-
 @app.post("/api/pos/webhook")
 async def pos_webhook(request: Request, provider: Optional[str] = None):
     """Odbiera uderzenie POS (kanoniczny JSON lub format konkretnego providera).
@@ -7593,19 +7565,6 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
         "sale_log_ids": sale_log_ids,
         "warnings": warnings,
     }
-
-
-@app.get("/api/pos/products")
-async def pos_products_list():
-    """Helper dla generatora ruchu i debugowania: lista produktów POS."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "pos_products", params={
-            "select": "id,pos_external_id,name,price_pln",
-            "order": "name.asc",
-            "limit": "500",
-        })
-    return {"products": rows or []}
-
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -15573,9 +15532,16 @@ async def stripe_connect_onboard_post(request: Request, body: StripeConnectReque
 
 
 @app.get("/api/stripe/connect")
-async def stripe_connect_onboard_get(producer_id: str, refresh: Optional[int] = None):
-    """Refresh URL z Stripe Account Link — przekierowanie do nowego linku onboardingu."""
+async def stripe_connect_onboard_get(
+    producer_id: str,
+    refresh: Optional[int] = None,
+    token: Optional[str] = None,
+):
+    """Refresh URL z Stripe Account Link — tylko z HMAC z refresh_url."""
     from fastapi.responses import RedirectResponse
+    from stripe_connect import verify_connect_refresh_token
+    if not verify_connect_refresh_token(producer_id, token):
+        raise HTTPException(status_code=401, detail="Brak tokenu odświeżenia Connect.")
     result = await _run_stripe_connect_onboard(producer_id, require_owner_uid=None)
     if result.get("url"):
         return RedirectResponse(url=result["url"], status_code=303)
@@ -15592,6 +15558,7 @@ async def stripe_connect_callback(
     """
     from fastapi.responses import RedirectResponse, HTMLResponse
     from stripe_connect import sync_connect_account_to_producer, connect_www_success_url
+    import html as html_lib
 
     pid = (producer_id or "").strip()
     if not pid:
@@ -15611,7 +15578,8 @@ async def stripe_connect_callback(
             return HTMLResponse(
                 content=(
                     "<html><body style='font-family:sans-serif;padding:2rem'>"
-                    f"<h1>Stripe Connect — błąd</h1><p>{str(e)[:300]}</p>"
+                    "<h1>Stripe Connect — błąd</h1>"
+                    f"<p>{html_lib.escape(str(e)[:300])}</p>"
                     "</body></html>"
                 ),
                 status_code=502,
@@ -15619,6 +15587,7 @@ async def stripe_connect_callback(
 
     success = connect_www_success_url()
     if success.startswith("http"):
+        success = assert_safe_redirect_url(success)
         sep = "&" if "?" in success else "?"
         return RedirectResponse(
             url=f"{success}{sep}producer_id={pid}&stripe_connect_id={synced.get('stripe_connect_id','')}",
@@ -16762,6 +16731,8 @@ async def producer_order_furgonetka_label(order_id: str, request: Request):
                         client=client,
                         verify=_httpx_verify(),
                     )
+                    from url_safety import assert_supabase_fetch_url
+                    signed = assert_supabase_fetch_url(signed, SUPABASE_URL)
                     r = await client.get(signed)
                     if r.status_code < 400 and r.content:
                         pdf = r.content

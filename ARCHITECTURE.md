@@ -20,6 +20,26 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)
+
+Przegląd całej aplikacji vs dekalog `.agentrules`. Ten branch **nie** tnie monolitu
+(`server.py` ~16k, `menu.tsx` ~3k) — to osobne kęsy po akceptacji. Zrobione teraz:
+
+- `AUTO_CONFIRM_EMAIL` domyślnie **false** (Admin API nie potwierdza maili byle komu).
+- Joby cron (`expiry-daily-job`, `core-alerts-job`, `migration-status`) wymagają `CRON_JOB_SECRET`.
+- CORS z `CORS_ALLOW_ORIGINS` (niehardkodowane `*`).
+- Usunięty leftover `GET /api/download/gastro-manager-updated.zip`.
+- Health nie wycieka `ACCOUNT_KEY` / nazw modeli.
+- Token sandbox Furgonetki tylko poza `FURGONETKA_PRODUCTION=1`.
+- Moduł `backend/cron_auth.py` + testy.
+
+**Kolejne kęsy (jeden na raz, po teście na telefonie):**
+1. Ciąć ekrany >250 linii: `menu.tsx`, `magazyn.tsx`, `dostawcy/index.tsx`, `index.tsx` (Finanse).
+2. Ciąć `backend/server.py` (routery per domena: menu, inventory, billing, LP).
+3. Podwójny katalog obrazków: Menu = `dishAssets` (lazy); Inspiracje = `dishImagesCatalog` (eager `require` WebP) — nie scalać bez testu Menu.
+4. `as any` na ekranach Voice/Finanse.
+5. RLS audit (`SCALE_INDEXES_AND_RLS.sql`) jeśli jeszcze nie odpalone na produkcji.
+
 ### 2026-08-12 — Łowca: lokalni → „Zamów i zapłać” (Stripe)
 
 - Przy koszyku lokalnego przetwórcy zamiast e-mail/SMS: sheet adresu + Stripe Checkout

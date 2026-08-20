@@ -36,19 +36,33 @@ def configured_shop_token() -> str:
     return _norm_token(os.getenv("FURGONETKA_SHOP_TOKEN") or "")
 
 
+def is_furgonetka_sandbox() -> bool:
+    """Sandbox token jest dozwolony tylko poza produkcją."""
+    prod = (os.getenv("FURGONETKA_PRODUCTION") or "").strip().lower()
+    if prod in ("1", "true", "yes", "on"):
+        return False
+    raw = (os.getenv("FURGONETKA_SANDBOX") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def accepted_tokens() -> tuple[str, ...]:
-    """Env + stały token sandbox (panel Furgonetki ma wpisany sandbox)."""
+    """Env token; hardcoded sandbox tylko gdy FURGONETKA_SANDBOX=1."""
     tokens: list[str] = []
     env = configured_shop_token()
     if env:
         tokens.append(env)
-    if SANDBOX_SHOP_TOKEN not in tokens:
+    if is_furgonetka_sandbox() and SANDBOX_SHOP_TOKEN not in tokens:
         tokens.append(SANDBOX_SHOP_TOKEN)
     return tuple(tokens)
 
 
 def shop_token() -> str:
-    return configured_shop_token() or SANDBOX_SHOP_TOKEN
+    env = configured_shop_token()
+    if env:
+        return env
+    if is_furgonetka_sandbox():
+        return SANDBOX_SHOP_TOKEN
+    return ""
 
 
 def extract_request_token(request: Request) -> str:

@@ -138,5 +138,6 @@ END $$;
 --
 -- Alternatywa bez pg_cron: zaplanuj wywołanie FastAPI
 --   GET /api/inventory/expiry-daily-job
+--   Header: X-Cron-Secret: $CRON_JOB_SECRET
 -- przez zewnętrzny scheduler (GitHub Actions / Railway cron).
 -- =============================================================================

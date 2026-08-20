@@ -33,7 +33,6 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from openai import AsyncOpenAI, APIError, OpenAIError
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz, process as rf_process
@@ -45,6 +44,7 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
+from cron_auth import require_cron_secret
 from furgonetka_shop import router as furgonetka_shop_router
 from url_safety import (
     assert_safe_redirect_url,
@@ -165,9 +165,17 @@ if not _SUPABASE_CONFIGURED:
         "nie są ustawione — ustaw Variables w Railway, inaczej API DB nie zadziała."
     )
 
+def _cors_allow_origins() -> list[str]:
+    raw = (os.environ.get("CORS_ALLOW_ORIGINS") or "*").strip()
+    if not raw or raw == "*":
+        return ["*"]
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["*"]
+
+
 app = FastAPI(title="Gastro Manager — Voice API")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+    CORSMiddleware, allow_origins=_cors_allow_origins(), allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(furgonetka_shop_router)
@@ -615,19 +623,6 @@ async def root():
     return {"service": "gastro-voice", "status": "ok"}
 
 
-@app.get("/api/download/gastro-manager-updated.zip")
-async def download_updated_zip():
-    """Serves the packaged updated codebase for the user to review locally."""
-    path = Path(__file__).parent / "static" / "gastro-manager-updated.zip"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Paczka nie została jeszcze zbudowana.")
-    return FileResponse(
-        path=str(path),
-        media_type="application/zip",
-        filename="gastro-manager-updated.zip",
-    )
-
-
 @app.get("/")
 @app.get("/health")
 @app.get("/api/health")
@@ -638,9 +633,6 @@ async def health():
         "service": "gastro-voice",
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
         "openai_configured": bool(OPENAI_API_KEY),
-        "account_key_default": _ACCOUNT_KEY_DEFAULT,
-        "stt_model": STT_MODEL,
-        "chat_model": CHAT_MODEL,
     }
 
 
@@ -651,12 +643,12 @@ class AutoConfirmBody(BaseModel):
 @app.post("/api/auth/auto-confirm")
 async def auth_auto_confirm(body: AutoConfirmBody):
     """
-    Closed beta: potwierdza e-mail użytkownika przez Admin API (bez maila).
-    Wyłącz: AUTO_CONFIRM_EMAIL=false na Railway.
-    Docelowo wyłącz też „Confirm email” w Supabase → Authentication → Providers → Email.
+    Closed beta only: potwierdza e-mail przez Admin API (bez maila).
+    Domyślnie WYŁĄCZONE. Włącz: AUTO_CONFIRM_EMAIL=true na Railway.
+    Produkcja: Confirm email w Supabase + ten flag = false.
     """
-    flag = (os.environ.get("AUTO_CONFIRM_EMAIL") or "true").strip().lower()
-    if flag in ("0", "false", "no", "off"):
+    flag = (os.environ.get("AUTO_CONFIRM_EMAIL") or "false").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail="AUTO_CONFIRM_EMAIL jest wyłączone.")
     _require_supabase()
     uid = (body.user_id or "").strip()
@@ -5870,8 +5862,9 @@ async def scan_expiration(
 
 
 @app.get("/api/inventory/expiry-daily-job")
-async def expiry_daily_job():
+async def expiry_daily_job(request: Request):
     """Scheduler: odśwież statusy; alert gdy days_left ∈ alert_triggers (domyślnie 7/3/1)."""
+    require_cron_secret(request)
     from datetime import date as _date, timedelta
 
     today = _date.today()
@@ -6014,8 +6007,9 @@ async def expiry_daily_job():
 
 
 @app.get("/api/manager/core-alerts-job")
-async def manager_core_alerts_job(push: bool = True):
+async def manager_core_alerts_job(request: Request, push: bool = True):
     """Cron: policz alerty CORE i opcjonalnie wyślij push (severity critical/warn)."""
+    require_cron_secret(request)
     res = await _run_manager_core_alerts(period_type="week", limit_days=7)
     alerts = [a for a in (res.get("alerts") or []) if a.get("severity") in ("critical", "warn")]
     pushed = 0
@@ -12490,9 +12484,10 @@ async def voice_dispatch(req: VoiceDispatchRequest):
 
 
 @app.get("/api/admin/migration-status")
-async def admin_migration_status():
+async def admin_migration_status(request: Request):
     """Sprawdza czy migracja `ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql` została uruchomiona.
     Zwraca listę brakujących kolumn/tabel i pełny SQL do wklejenia w Supabase SQL Editor."""
+    require_cron_secret(request)
     async with httpx.AsyncClient(timeout=15.0, verify=_httpx_verify()) as client:
         checks = {}
         try:

@@ -31,7 +31,7 @@ Bez tych kroków funkcje „są w kodzie”, ale lokal/staging nie zadziała:
 - **Migracje Supabase** — pliki w `supabase_migrations/` (m.in. daily reports, soft delete, expiry, push tokens, shipping, `lead_time_days`, reliability, Stripe). Uruchamiać ręcznie w SQL Editor.
 - **`EXPO_PUBLIC_BACKEND_URL`** — musi wskazywać host:port backendu (**8001**, nie Metro 8081); po zmianie IP → restart Expo
 - **`backend/.env`** — Supabase URL/keys, OpenAI, Stripe (`STRIPE_*`, price IDs), opcjonalnie `ALLOW_MOCK_BILLING`
-- **Edge cron expiry** — deploy `supabase/functions/expiry-daily-cron` + harmonogram **lub** scheduler na `/api/inventory/expiry-daily-job`
+- **Edge cron expiry** — deploy `supabase/functions/expiry-daily-cron` + harmonogram **lub** scheduler na `/api/inventory/expiry-daily-job` z nagłówkiem `X-Cron-Secret`
 - **Stripe webhook** — URL produkcyjny/staging → `/api/billing/webhook`
 - **Lead time / shipping / reliability** — kolumny puste, dopóki nie uzupełnisz w UI dostawców / nie włączysz migracji
 - **Dane demo** — Finance/PnL sensowne dopiero po seedzie (`backend/scripts/seed_sim_*.py`) lub realnych wpisach
@@ -61,7 +61,7 @@ Bez tych kroków funkcje „są w kodzie”, ale lokal/staging nie zadziała:
 - [ ] Uruchomić migracje SQL z `supabase_migrations/` (kolejność: core → feature; szczególnie expiry, push, shipping, lead_time, reliability, Stripe)
 - [ ] Ustawić `frontend/.env` → `EXPO_PUBLIC_BACKEND_URL` (IP/host:8001) i zrestartować Expo
 - [ ] Ustawić `backend/.env` (Supabase, OpenAI, Stripe **Test**) i odpalić API na 8001
-- [ ] Deploy + cron `expiry-daily-cron` **albo** zewnętrzny scheduler na expiry-daily-job
+- [ ] Deploy + cron `expiry-daily-cron` **albo** scheduler na expiry-daily-job + `CRON_JOB_SECRET`
 - [ ] Skonfigurować Stripe **Test mode** (keys, price IDs, webhook) i przejść test checkout
 - [ ] (Opcjonalnie) seed danych demo pod Finance / magazyn
 

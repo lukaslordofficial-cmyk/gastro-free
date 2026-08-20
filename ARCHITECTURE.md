@@ -40,6 +40,7 @@ Zachowanie 1:1, tylko przeniesienie kodu:
 - Menu: `DishCard` + style → `frontend/components/menu/`; typy → `frontend/types/menu.ts`;
   stałe → `frontend/constants/menuUi.ts`; mapowania → `frontend/lib/menuScreenHelpers.ts`.
   Miniatury nadal przez `getMenuThumbSync` / `dishCustomImages` (bez mieszania z Inspiracjami).
+- Menu screen styles → `menuScreenStyles.ts`
 - Backend: liveness + auto-confirm + deep health → `backend/health_routes.py` (`APIRouter`).
 
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)

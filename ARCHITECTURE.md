@@ -20,6 +20,19 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: fix hooks Ustawienia + expiry IO (`chore/split-monoliths`)
+
+- **Fix crash Ustawienia:** `useMemo(menuByCategory)` przeniesiony **przed** early
+  return `loading`/`error` (Rules of Hooks — „Rendered more hooks…”).
+- **`inventoryService`:** `fetchExpiryBatches` / `replaceExpiryBatches` z filtrem
+  `account_key`; `ProductExpiryEditor` bez bezpośredniego `supabase`.
+
+**Kolejne kęsy (po teście Ustawień na telefonie):**
+1. Dalsze cięcie UI `MenuRecipeRow` / `menu.tsx` + `server.py` (voice, POS webhook, billing).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`.
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+4. `as any` na Voice/Finanse; RLS audit na produkcji.
+
 ### 2026-08-20 — Kęs: Ustawienia kategorie + menuRecipeService (`chore/split-monoliths`)
 
 - Mapowanie dań w Ustawieniach pogrupowane jak w Menu (nagłówek kategorii + kolor + licznik).

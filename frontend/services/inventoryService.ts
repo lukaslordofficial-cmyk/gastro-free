@@ -235,3 +235,61 @@ export async function autoUnlockOfferItems(accountKey: string, newItemId: string
     /* non-critical */
   }
 }
+
+export type ExpiryBatchRow = {
+  id: string;
+  quantity: number | string;
+  expiration_date: string;
+  alert_triggers?: number[] | null;
+};
+
+/** Partie dat ważności + bieżący stan produktu (scope tenant). */
+export async function fetchExpiryBatches(
+  inventoryItemId: string,
+  accountKey?: string,
+): Promise<{ batches: ExpiryBatchRow[]; stockQty: number }> {
+  let batchQ = supabase
+    .from('warehouse_inventory')
+    .select('id, quantity, expiration_date, alert_triggers')
+    .eq('inventory_item_id', inventoryItemId)
+    .order('expiration_date', { ascending: true });
+  let invQ = supabase.from('inventory_items').select('quantity').eq('id', inventoryItemId);
+  if (accountKey && accountKey !== 'default') {
+    batchQ = batchQ.eq('account_key', accountKey);
+    invQ = invQ.eq('account_key', accountKey);
+  }
+  const [{ data }, { data: inv }] = await Promise.all([batchQ, invQ.maybeSingle()]);
+  return {
+    batches: (data ?? []) as ExpiryBatchRow[],
+    stockQty: Number(inv?.quantity) || 0,
+  };
+}
+
+export type ExpiryBatchInsert = {
+  inventory_item_id: string;
+  product_name: string;
+  quantity: number;
+  unit: string;
+  expiration_date: string;
+  status: string;
+  alert_triggers: number[];
+  source: string;
+  account_key: string;
+};
+
+/** Zastąp wszystkie partie produktu (delete + insert, scope tenant). */
+export async function replaceExpiryBatches(
+  inventoryItemId: string,
+  rows: ExpiryBatchInsert[],
+  accountKey?: string,
+): Promise<void> {
+  let del = supabase.from('warehouse_inventory').delete().eq('inventory_item_id', inventoryItemId);
+  if (accountKey && accountKey !== 'default') {
+    del = del.eq('account_key', accountKey);
+  }
+  const { error: delErr } = await del;
+  if (delErr) throw delErr;
+  if (!rows.length) return;
+  const { error } = await supabase.from('warehouse_inventory').insert(rows as never);
+  if (error) throw error;
+}

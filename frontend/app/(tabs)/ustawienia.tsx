@@ -447,11 +447,6 @@ export default function UstawieniaScreen() {
     })();
   };
 
-  if (loading) return <LoadingScreen />;
-  if (error) return <ErrorScreen message={error} />;
-
-  const unmappedPosCount = menuItems.filter((m) => !m.pos_id).length;
-
   /** Segregacja jak w Menu — nagłówek kategorii + pozycje (kolejność alfabetyczna kategorii). */
   const menuByCategory = useMemo(() => {
     const map = new Map<string, MenuItemForMapping[]>();
@@ -466,6 +461,11 @@ export default function UstawieniaScreen() {
     }
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b, 'pl'));
   }, [menuItems]);
+
+  const unmappedPosCount = menuItems.filter((m) => !m.pos_id).length;
+
+  if (loading) return <LoadingScreen />;
+  if (error) return <ErrorScreen message={error} />;
 
   const scrollBody = (
       <ScrollView

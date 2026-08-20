@@ -12,8 +12,8 @@ import {
 } from 'react-native';
 import { Plus, Trash2, Bell, Save } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
-import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { fetchExpiryBatches, replaceExpiryBatches } from '@/services/inventoryService';
 import { ExpiryDateField } from '@/components/ExpiryDateField';
 import { scheduleExpiryReminders } from '@/lib/pushNotifications';
 import { usePremiumAlert } from '@/components/PremiumAlert';
@@ -75,19 +75,15 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [{ data }, { data: inv }] = await Promise.all([
-        supabase
-          .from('warehouse_inventory')
-          .select('id, quantity, expiration_date, alert_triggers')
-          .eq('inventory_item_id', inventoryItemId)
-          .order('expiration_date', { ascending: true }),
-        supabase.from('inventory_items').select('quantity').eq('id', inventoryItemId).maybeSingle(),
-      ]);
-      setStockQty(Number(inv?.quantity) || 0);
-      const rows = data ?? [];
+      const ak = getAccountKey();
+      const { batches: rows, stockQty: qty } = await fetchExpiryBatches(
+        inventoryItemId,
+        ak !== 'default' ? ak : undefined,
+      );
+      setStockQty(qty);
       if (rows.length) {
         setBatches(
-          rows.map((r: any) => ({
+          rows.map((r) => ({
             key: String(r.id),
             id: String(r.id),
             quantity: String(r.quantity ?? ''),
@@ -152,7 +148,6 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
     }
     setSaving(true);
     try {
-      await supabase.from('warehouse_inventory').delete().eq('inventory_item_id', inventoryItemId);
       const ak = getAccountKey();
       const payload = valid.map((b) => ({
         inventory_item_id: inventoryItemId,
@@ -165,8 +160,11 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
         source: 'manual_edit',
         account_key: ak,
       }));
-      const { error } = await supabase.from('warehouse_inventory').insert(payload);
-      if (error) throw error;
+      await replaceExpiryBatches(
+        inventoryItemId,
+        payload,
+        ak !== 'default' ? ak : undefined,
+      );
       await scheduleExpiryReminders(
         productName,
         valid.map((b) => ({ expirationDate: b.expiration_date, alertDays })),
@@ -175,8 +173,10 @@ export function ProductExpiryEditor({ inventoryItemId, productName, unit }: Prop
         { text: 'OK', style: 'primary' },
       ]);
       await load();
-    } catch (e: any) {
-      alert('Błąd', e?.message || 'Nie udało się zapisać dat.', [{ text: 'OK', style: 'primary' }]);
+    } catch (e: unknown) {
+      alert('Błąd', e instanceof Error ? e.message : 'Nie udało się zapisać dat.', [
+        { text: 'OK', style: 'primary' },
+      ]);
     } finally {
       setSaving(false);
     }

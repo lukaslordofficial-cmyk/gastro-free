@@ -292,15 +292,17 @@ export function normalizeIngredientName(raw: string): string {
   if (tokens.length === 1) {
     return SINGULAR_DISPLAY[tokens[0]] ?? trimmed;
   }
-  // Wielowyrazowe: zachowaj oryginał, ale zredukuj oczywiste formy liczby mnogiej na końcu
-  const last = tokens[tokens.length - 1];
-  const lastDisp = SINGULAR_DISPLAY[last];
-  if (lastDisp && /y$|i$|e$|ów$|ow$/i.test(trimmed.split(/\s+/).pop() || '')) {
-    const parts = trimmed.split(/\s+/);
-    parts[parts.length - 1] = lastDisp;
-    return parts.join(' ');
-  }
-  return trimmed;
+  // Wielowyrazowe: singularizuj TYLKO ostatni wyraz oryginału.
+  // Nie wolno brać ostatniego z posortowanych tokenów — „ser biały” → tokeny
+  // [bialy, ser] kończą się na „ser” i błędnie zamieniały „biały” → „ser ser”.
+  const parts = trimmed.split(/\s+/);
+  const lastRaw = parts[parts.length - 1] || '';
+  if (!/y$|i$|e$|ów$|ow$/i.test(lastRaw)) return trimmed;
+  const lastTok = productTokens(lastRaw)[0];
+  const lastDisp = lastTok ? SINGULAR_DISPLAY[lastTok] : undefined;
+  if (!lastDisp) return trimmed;
+  parts[parts.length - 1] = lastDisp;
+  return parts.join(' ');
 }
 
 /** Klucz dedupe magazyn ↔ receptura (pomidor === pomidory). */

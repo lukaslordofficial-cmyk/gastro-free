@@ -26,7 +26,11 @@ import {
   Zap,
   LogOut,
 } from 'lucide-react-native';
-import { supabase } from '@/lib/supabase';
+import {
+  fetchActiveMenuPosList,
+  fetchSettingsBundle,
+  savePosSettings,
+} from '@/services/settingsService';
 import { Colors } from '@/constants/colors';
 import MenuRecipeRow, {
   MenuItemForMapping,
@@ -380,99 +384,24 @@ export default function UstawieniaScreen() {
   const fetchAll = useCallback(async () => {
     setError(null);
     try {
-      const [posRes, menuRes, invRes] = await Promise.all([
-        supabase.from('pos_settings').select('*').maybeSingle(),
-        supabase
-          .from('menu_items')
-          .select(
-            'id, name, category, price_pln, pos_id, is_available, recipe_ingredients(id, ingredient_name, quantity, unit, sort_order)'
-          )
-          .eq('is_active', true)
-          .order('category')
-          .order('name'),
-        supabase
-          .from('inventory_items')
-          .select('id, name, unit, quantity, min_quantity, inventory_categories(name)')
-          .order('name'),
-      ]);
-
-      if (posRes.data) {
+      const bundle = await fetchSettingsBundle(accountKey);
+      if (bundle.pos) {
         setPosSettings({
-          id: posRes.data.id,
-          api_key: posRes.data.api_key ?? '',
-          is_connected: posRes.data.is_connected ?? false,
+          id: bundle.pos.id,
+          api_key: bundle.pos.api_key,
+          is_connected: bundle.pos.is_connected,
         } as PosSettings & { id: string });
         setHasSaved(true);
       }
-
-      if (menuRes.error) {
-        // Fallback bez zagnieżdżenia
-        const plain = await supabase
-          .from('menu_items')
-          .select('id, name, category, price_pln, pos_id, is_available')
-          .eq('is_active', true)
-          .order('category')
-          .order('name');
-        if (plain.error) throw plain.error;
-        setMenuItems(
-          (plain.data ?? []).map((m: any) => ({
-            id: m.id,
-            name: m.name,
-            category: m.category,
-            price_pln: m.price_pln,
-            pos_id: m.pos_id,
-            is_available: m.is_available !== false,
-            recipeIngredients: [],
-          }))
-        );
-      } else {
-        setMenuItems(
-          (menuRes.data ?? []).map((m: any) => {
-            const ings = Array.isArray(m.recipe_ingredients)
-              ? m.recipe_ingredients
-              : m.recipe_ingredients
-              ? [m.recipe_ingredients]
-              : [];
-            const sorted = [...ings].sort(
-              (a: any, b: any) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
-            );
-            return {
-              id: m.id,
-              name: m.name,
-              category: m.category,
-              price_pln: m.price_pln,
-              pos_id: m.pos_id,
-              is_available: m.is_available !== false,
-              recipeIngredients: sorted.map((r: any) => ({
-                id: r.id,
-                ingredient_name: r.ingredient_name,
-                quantity: Number(r.quantity) || 0,
-                unit: r.unit || 'g',
-                warehouse_product_id: r.warehouse_product_id ?? null,
-                warehouse_product_name: null,
-              })),
-            };
-          })
-        );
-      }
-
-      setInventoryItems(
-        (invRes.data ?? []).map((i: any) => ({
-          id: i.id,
-          name: i.name,
-          unit: i.unit,
-          quantity: Number(i.quantity) || 0,
-          min_quantity: Number(i.min_quantity) || 0,
-          category_name: i.inventory_categories?.name ?? null,
-        }))
-      );
-    } catch (e: any) {
-      setError(e.message ?? 'Błąd ładowania ustawień');
+      setMenuItems(bundle.menuItems);
+      setInventoryItems(bundle.inventoryItems);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Błąd ładowania ustawień');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [accountKey]);
 
   useEffect(() => {
     fetchAll();
@@ -493,21 +422,13 @@ export default function UstawieniaScreen() {
 
   const handleSavePosSettings = async () => {
     setPosSaving(true);
-    let result;
     const payload = {
       webhook_url: webhookUrl,
       api_key: posSettings.api_key,
       is_connected: posSettings.is_connected,
     };
-
-    if ((posSettings as any).id) {
-      result = await supabase
-        .from('pos_settings')
-        .update(payload)
-        .eq('id', (posSettings as any).id);
-    } else {
-      result = await supabase.from('pos_settings').insert(payload);
-    }
+    const existingId = (posSettings as PosSettings & { id?: string }).id;
+    const result = await savePosSettings(payload, existingId);
     setPosSaving(false);
     if (result.error) {
       Alert.alert('Błąd', result.error.message);
@@ -519,25 +440,10 @@ export default function UstawieniaScreen() {
   };
 
   const handleMenuItemChanged = () => {
-    supabase
-      .from('menu_items')
-      .select('id, name, category, price_pln, pos_id')
-      .eq('is_active', true)
-      .order('category')
-      .order('name')
-      .then(({ data }) => {
-        if (data) {
-          setMenuItems(
-            data.map((m: any) => ({
-              id: m.id,
-              name: m.name,
-              category: m.category,
-              price_pln: m.price_pln,
-              pos_id: m.pos_id,
-            }))
-          );
-        }
-      });
+    void (async () => {
+      const data = await fetchActiveMenuPosList(accountKey);
+      if (data.length) setMenuItems(data);
+    })();
   };
 
   if (loading) return <LoadingScreen />;

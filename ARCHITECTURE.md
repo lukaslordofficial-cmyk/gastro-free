@@ -20,6 +20,21 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: settingsService + fix „ser biały” (`chore/split-monoliths`)
+
+- **`normalizeIngredientName`**: singularizacja wielowyrazowa tylko na ostatnim
+  wyrazie oryginału (nie na posortowanych tokenach) — naprawia „ser biały” → „ser ser”.
+- **`frontend/services/settingsService.ts`** — IO Ustawień (POS + menu + magazyn);
+  `ustawienia.tsx` bez bezpośredniego `supabase`.
+- Odczyty menu/magazynu w Ustawieniach filtrują `account_key` gdy tenant znany.
+- Smoke: `frontend/scripts/smoke_normalize_ingredient_name.mjs`.
+
+**Kolejne kęsy (jeden na raz, po teście Ustawień + „ser biały” na telefonie):**
+1. Cięcie UI `menu.tsx` / `MenuRecipeRow` (nadal ma supabase) + `server.py` (voice, POS webhook, billing).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`, `index.tsx` (Finanse).
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+4. `as any` na Voice/Finanse; RLS audit `SCALE_INDEXES_AND_RLS.sql` na produkcji.
+
 ### 2026-08-20 — Kęs: SSRF Storage + Connect HMAC + POS config (`chore/security-split`)
 
 Raport Code Registry (246 findings) — prawdziwe luki, nie fałszywe alarmy `httpx`:

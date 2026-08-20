@@ -69,3 +69,16 @@ def jwt_cache_put(token: str, account_key: str) -> None:
                 _jwt_cache.pop(k, None)
     _jwt_cache[_jwt_fp(token)] = (now + _JWT_TTL_S, key)
 
+
+def collect_tenant_account_keys(rows: list[dict]) -> list[str]:
+    """Unikalne account_key z wierszy profiles — bez ``default`` i pustych."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        ak = str((r or {}).get("account_key") or "").strip()
+        if not ak or ak == "default" or ak in seen:
+            continue
+        seen.add(ak)
+        keys.append(ak)
+    return keys
+

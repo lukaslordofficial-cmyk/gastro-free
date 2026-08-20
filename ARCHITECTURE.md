@@ -22,6 +22,8 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ### 2026-08-20 — Kęs: market-ready security + IngredientRow (`chore/split-monoliths`)
 
+- Menu screen styles → `menuScreenStyles.ts`; blank forms → `menuFormDefaults.ts`.
+- `secureId`: nie wywala Menu gdy brak Web Crypto (fallback tylko dla kluczy UI).
 - Auto-confirm: wymaga `email` zgodnego z kontem + konto młodsze niż 15 min; błędy Admin API nie wyciekają do klienta; osobny rate-limit IP.
 - JWT cache 25s; zapisy zawsze robią live lookup; 401/403 invaliduje cache.
 - `X-Account-Key` bez JWT jest ignorowany (spoof odczytów) — wyjątek: Bearer service_role.
@@ -29,6 +31,7 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 - Token Furgonetki tylko z `FURGONETKA_SHOP_TOKEN`; brak hardcoded Railway URL.
 - TLS: `OPENAI_SSL_VERIFY=0` ignorowane na Railway production (`backend/http_ssl.py`).
 - Outbound URL: domyślnie tylko HTTPS.
+- Cron `expiry-daily-job` iteruje wszystkie `profiles.account_key` (push tylko do userów danego tenanta).
 - Menu: `IngredientRow` + status magazynu → `frontend/components/menu/`.
 
 ### 2026-08-20 — Kęs: split monolitów (`chore/split-monoliths`)
@@ -39,6 +42,7 @@ Zachowanie 1:1, tylko przeniesienie kodu:
 - Menu: `DishCard` + style → `frontend/components/menu/`; typy → `frontend/types/menu.ts`;
   stałe → `frontend/constants/menuUi.ts`; mapowania → `frontend/lib/menuScreenHelpers.ts`.
   Miniatury nadal przez `getMenuThumbSync` / `dishCustomImages` (bez mieszania z Inspiracjami).
+- Menu screen styles → `menuScreenStyles.ts`
 - Backend: liveness + auto-confirm + deep health → `backend/health_routes.py` (`APIRouter`).
 
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)

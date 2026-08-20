@@ -50,18 +50,24 @@ To **nie** jest REST OAuth (`/packages`). Po zapisaniu formularza Furgonetka odp
 
 z tokenem w `Authorization: Bearer …` albo `?token=`.
 
-W sandbox.furgonetka.pl → Ustawienia → Integracje → Własne wklej:
+W panelu Furgonetka → Integracje → **Własne** (formularz „DODAJ”) wpisz:
 
 | Pole | Wartość |
 | --- | --- |
-| Nazwa wyświetlana | Gastro Manager |
-| Adres URL | `https://gastro-manager-api-production-21dd.up.railway.app/api/furgonetka` |
-| Token | `FURGONETKA_SHOP_TOKEN` (ten sam string na Railway i w panelu Furgonetki) |
-| Synchronizacja zamówień | włącz |
-| Wysyłaj informacje o przesyłce | włącz (stub `PUT /orders/{id}` zwraca 200) |
+| Nazwa wyświetlana | `Gastro Manager` |
+| Adres sklepu | `https://gastro-manager-api-production-21dd.up.railway.app/api/furgonetka` |
+| Token | ten sam string co `FURGONETKA_SHOP_TOKEN` na Railway (losowy hex, min. 32 znaki) |
 
-Na początek API zwraca `{ "orders": [] }` (HTTP 200) — test połączenia ma przejść nawet bez tokenu w GET. Token jest wymagany przy PUT (status przesyłki).
-Ustaw `FURGONETKA_SHOP_TOKEN` na Railway i wklej **ten sam** token w panelu Furgonetki.
+Furgonetka woła `{Adres sklepu}/orders` → u nas `GET /api/furgonetka/orders`.
+
+Na Railway **i** w lokalnym `backend/.env` ustaw:
+
+```env
+FURGONETKA_SHOP_TOKEN=twój_losowy_token
+PUBLIC_API_URL=https://gastro-manager-api-production-21dd.up.railway.app
+```
+
+Token generujesz Ty (np. PowerShell: `-join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })`) — **ten sam** string wklejasz w Furgonetce i w env. Nie commituj go do gita.
 
 ## Baza (Supabase)
 

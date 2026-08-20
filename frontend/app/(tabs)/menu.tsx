@@ -26,7 +26,25 @@ import {
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ChefHat, Search, ChevronDown, Mic, Camera, Ruler, Leaf, X, UtensilsCrossed, Plus, Trash2, Check, CreditCard as Edit, FlaskConical } from 'lucide-react-native';
+import {
+  ChefHat,
+  Search,
+  ChevronDown,
+  Mic,
+  Camera,
+  Ruler,
+  Leaf,
+  X,
+  UtensilsCrossed,
+  Plus,
+  Trash2,
+  Check,
+  CreditCard as Edit,
+  FlaskConical,
+  Bell,
+  Box,
+  BookOpen,
+} from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
@@ -35,11 +53,6 @@ import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { MenuScanModal } from '@/components/MenuScanModal';
 import { BatchPrepModal, type BatchPrepDish } from '@/components/BatchPrepModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
-
-/** Ciężki modal receptur — osobny chunk Metro, nie przy cold start Menu. */
-const RecipesModal = lazy(() =>
-  import('@/components/RecipesModal').then((m) => ({ default: m.RecipesModal })),
-);
 import { formatPln } from '@/lib/format';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import {
@@ -59,13 +72,17 @@ import {
 } from '@/lib/dishCustomImages';
 import { getMenuThumbSync, subscribeMenuThumbs } from '@/lib/menuThumbCache';
 import * as ImagePicker from 'expo-image-picker';
-import { Bell, Box, BookOpen } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { ingredientDedupeKey, normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+
+/** Ciężki modal receptur — osobny chunk Metro, nie przy cold start Menu. */
+const RecipesModal = lazy(() =>
+  import('@/components/RecipesModal').then((m) => ({ default: m.RecipesModal })),
+);
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1235,6 +1252,8 @@ export default function MenuScreen() {
   }, [grouped]);
 
   const [thumbTick, setThumbTick] = useState(0);
+  const [customImageTick, setCustomImageTick] = useState(0);
+  const [photoSaving, setPhotoSaving] = useState(false);
   const dishNamesKey = useMemo(
     () => dishes.map((d) => `${d.name}\u0001${d.category}`).join('|'),
     [dishes],
@@ -1308,11 +1327,6 @@ export default function MenuScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey only
   }, [dishNamesKey]);
 
-  // Usunięto „warm folderów po kategorii” — przy cache nie ma sensu; lokalny asset
-  // ładuje się przy hydrate z relativePath, a matcher tylko dla nowych pozycji.
-
-  const [customImageTick, setCustomImageTick] = useState(0);
-  const [photoSaving, setPhotoSaving] = useState(false);
   useEffect(() => {
     void loadDishCustomImages().then(() => setCustomImageTick((t) => t + 1));
     return subscribeDishCustomImages(() => setCustomImageTick((t) => t + 1));

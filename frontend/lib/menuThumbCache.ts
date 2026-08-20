@@ -118,6 +118,20 @@ export async function hydrateMenuThumbsFromDisk(
   return out;
 }
 
+/** Pozycje bez zapisanego przypisania — tylko one wymagają matchera. */
+export function listMissingThumbItems(
+  items: ReadonlyArray<{ name: string; category?: string }>,
+  hydrated: Map<string, MenuDishThumb>,
+): Array<{ name: string; category?: string }> {
+  const missing: Array<{ name: string; category?: string }> = [];
+  for (const item of items) {
+    if (!item.name) continue;
+    if (hydrated.has(item.name) || thumbsByName.has(item.name)) continue;
+    missing.push(item);
+  }
+  return missing;
+}
+
 function mergeThumbIntoStore(name: string, category: string | undefined, thumb: MenuDishThumb) {
   const rel =
     thumb.relativePath ||

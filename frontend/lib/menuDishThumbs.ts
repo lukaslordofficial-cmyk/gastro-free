@@ -272,8 +272,8 @@ function yieldMs(ms: number): Promise<void> {
 }
 
 /**
- * Progresywne dopasowanie: najpierw priority (widoczna kategoria), potem reszta.
- * Przed matchowaniem warmujemy foldery kategorii — jeden require na folder.
+ * Dopasuj TYLKO brakujące dania (pierwsze przypisanie).
+ * Gdy seed już pokrywa listę — natychmiastowy return, bez imageLibrary / indeksu.
  */
 export async function assignMenuDishThumbsProgressive(
   items: ReadonlyArray<{ name: string; category?: string }>,
@@ -288,34 +288,28 @@ export async function assignMenuDishThumbsProgressive(
   const out = new Map(opts?.seed || []);
   if (!items.length) return out;
 
+  const missing = items.filter((it) => it.name && !out.has(it.name));
+  if (!missing.length) {
+    // Kolejne wejścia: zero matchingu, zero skanowania 1000+ obrazków.
+    return out;
+  }
+
   await new Promise<void>((resolve) => {
     InteractionManager.runAfterInteractions(() => resolve());
   });
   if (opts?.cancelled?.()) return out;
 
   await yieldMs(16);
+  // Indeks budujemy dopiero gdy naprawdę trzeba dopasować nowe dania.
   buildFastIndex();
   if (opts?.cancelled?.()) return out;
-
-  // Warm foldery użyte w menu (zwykle 2–6), nie całe 43.
-  const foldersToWarm = new Set<string>();
-  for (const item of items) {
-    for (const f of folderCandidates(item.category, item.name).slice(0, 2)) {
-      foldersToWarm.add(f);
-    }
-  }
-  for (const f of foldersToWarm) {
-    if (opts?.cancelled?.()) return out;
-    warmDishAssetFolder(f);
-    await yieldMs(8);
-  }
 
   const priority = new Set(
     opts?.priorityNames instanceof Set ? opts.priorityNames : opts?.priorityNames || [],
   );
   const ordered = [
-    ...items.filter((it) => priority.has(it.name)),
-    ...items.filter((it) => !priority.has(it.name)),
+    ...missing.filter((it) => priority.has(it.name)),
+    ...missing.filter((it) => !priority.has(it.name)),
   ];
 
   const used = new Set([...out.values()].map((t) => t.slug));
@@ -327,6 +321,7 @@ export async function assignMenuDishThumbsProgressive(
     const item = ordered[i];
     if (!item.name || out.has(item.name)) continue;
 
+    // Lazy require folderu dzieje się w resolveDishLocalAsset przy trafieniu.
     const thumb = matchDishThumbFast(item.name, {
       menuCategory: item.category,
       excludeSlugs: used,

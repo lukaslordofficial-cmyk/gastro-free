@@ -1242,8 +1242,8 @@ export default function MenuScreen() {
 
   useEffect(() => subscribeMenuThumbs(() => setThumbTick((t) => t + 1)), []);
 
-  // Obrazki: lokalne WebP (lazy per folder) + szybki matcher — bez martwych URL-i Supabase.
-  // Nie zależymy od activeCat — przełączanie kategorii nie anuluje matchingu.
+  // 1) Odczyt zapisanych przypisań (natychmiast).
+  // 2) Matcher TYLKO dla nowych dań bez cache — nigdy ponownie dla całego menu.
   useEffect(() => {
     if (!dishes.length) return;
     let cancelled = false;
@@ -1263,15 +1263,24 @@ export default function MenuScreen() {
             hydrateMenuThumbsFromDisk,
             applyThumbsToMemory,
             persistMenuThumbMatches,
+            listMissingThumbItems,
           } = await import('@/lib/menuThumbCache');
           if (cancelled) return;
+
           const seed = await hydrateMenuThumbsFromDisk(items);
           if (cancelled) return;
+          applyThumbsToMemory(seed);
+
+          const missing = listMissingThumbItems(items, seed);
+          if (!missing.length) {
+            // Wszystkie potrawy mają już obrazek — koniec, bez indeksu / matchera.
+            return;
+          }
 
           const { assignMenuDishThumbsProgressive } = await import('@/lib/menuDishThumbs');
           if (cancelled) return;
 
-          const assigned = await assignMenuDishThumbsProgressive(items, {
+          const assigned = await assignMenuDishThumbsProgressive(missing, {
             seed,
             priorityNames,
             cancelled: () => cancelled,
@@ -1279,13 +1288,13 @@ export default function MenuScreen() {
             onBatch: (map) => {
               if (cancelled) return;
               applyThumbsToMemory(map);
-              void persistMenuThumbMatches(items, map);
+              void persistMenuThumbMatches(missing, map);
             },
           });
           if (cancelled) return;
 
           applyThumbsToMemory(assigned);
-          void persistMenuThumbMatches(items, assigned);
+          void persistMenuThumbMatches(missing, assigned);
         } catch (err) {
           if (__DEV__) console.warn('[menu] thumb assign failed', err);
         }
@@ -1299,33 +1308,8 @@ export default function MenuScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey only
   }, [dishNamesKey]);
 
-  // Warm folderów widocznej kategorii przy zmianie chipa (tanie, lokalne).
-  useEffect(() => {
-    if (!dishes.length || !activeCat || activeCat === 'Wszystkie') return;
-    const handle = InteractionManager.runAfterInteractions(() => {
-      void import('@/lib/dishAssets').then(({ warmDishAssetFolder }) => {
-        const folders = new Set<string>();
-        for (const d of dishes) {
-          if (d.category !== activeCat) continue;
-          // folderCandidates mirrored lightly
-          const c = `${d.category} ${d.name}`.toLowerCase();
-          if (/zup/.test(c)) {
-            folders.add('soups_pl');
-            folders.add('soups_polish');
-          } else if (/burger/.test(c)) folders.add('burgers');
-          else if (/pizz/.test(c)) folders.add('pizzas');
-          else if (/makaron|pasta/.test(c)) folders.add('pastas');
-          else if (/salat/.test(c)) folders.add('salads');
-          else {
-            folders.add('dinners');
-            folders.add('polish');
-          }
-        }
-        for (const f of folders) warmDishAssetFolder(f);
-      });
-    });
-    return () => handle.cancel?.();
-  }, [activeCat, dishes]);
+  // Usunięto „warm folderów po kategorii” — przy cache nie ma sensu; lokalny asset
+  // ładuje się przy hydrate z relativePath, a matcher tylko dla nowych pozycji.
 
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);

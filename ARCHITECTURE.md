@@ -20,6 +20,19 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-20 — Kęs: fix Map shadow + split Ustawienia UI (`chore/split-monoliths`)
+
+- **Crash „constructor is not callable”:** ikona lucide `Map` zasłaniała globalny
+  `Map` — import jako `MapIcon`; grupowanie przez `groupMenuItemsByCategory`
+  (`globalThis.Map`).
+- Wycięte z monolitu `ustawienia.tsx`: `PosInstructionBanner`, `WebhookUrlRow`,
+  `settingsScreenStyles.ts`, helper kategorii.
+
+**Kolejne kęsy (po teście Ustawień):**
+1. Dalsze cięcie `MenuRecipeRow` / `menu.tsx` + `server.py` (voice, POS webhook).
+2. Ekrany >250 linii: `magazyn.tsx`, `dostawcy/index.tsx`.
+3. Podwójny katalog obrazków — nie scalać bez testu Menu.
+
 ### 2026-08-20 — Kęs: fix hooks Ustawienia + expiry IO (`chore/split-monoliths`)
 
 - **Fix crash Ustawienia:** `useMemo(menuByCategory)` przeniesiony **przed** early

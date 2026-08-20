@@ -29,6 +29,7 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 - Token Furgonetki tylko z `FURGONETKA_SHOP_TOKEN`; brak hardcoded Railway URL.
 - TLS: `OPENAI_SSL_VERIFY=0` ignorowane na Railway production (`backend/http_ssl.py`).
 - Outbound URL: domyślnie tylko HTTPS.
+- Cron `expiry-daily-job` iteruje wszystkie `profiles.account_key` (push tylko do userów danego tenanta).
 - Menu: `IngredientRow` + status magazynu → `frontend/components/menu/`.
 
 ### 2026-08-20 — Kęs: split monolitów (`chore/split-monoliths`)

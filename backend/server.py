@@ -46,7 +46,13 @@ from token_billing import (
 )
 from cron_auth import require_cron_secret
 from pos_webhook_auth import build_pos_webhook_path, require_pos_webhook_tenant
-from tenant_auth import jwt_cache_get, jwt_cache_invalidate, jwt_cache_put, prefer_jwt_account_key
+from tenant_auth import (
+    collect_tenant_account_keys,
+    jwt_cache_get,
+    jwt_cache_invalidate,
+    jwt_cache_put,
+    prefer_jwt_account_key,
+)
 from request_guards import is_ai_path, is_mutate_method, is_public_mutate
 from rate_limit import allow_ai, allow_ip, allow_write
 from furgonetka_shop import router as furgonetka_shop_router
@@ -62,6 +68,8 @@ from url_safety import (
 from supabase_rest import (
     configure as _configure_supabase_rest,
     require_supabase as _require_supabase,
+    push_account_key as _push_account_key,
+    reset_account_key as _reset_account_key,
     sb_delete,
     sb_get,
     sb_headers as _sb_headers,
@@ -5830,6 +5838,163 @@ async def scan_expiration(
     )
 
 
+async def _list_tenant_account_keys(client: httpx.AsyncClient) -> list[str]:
+    """Wszystkie account_key z profiles — cron musi obejść każdego tenanta osobno."""
+    rows = await sb_get(
+        client,
+        "profiles",
+        params={"select": "account_key", "limit": "5000"},
+    ) or []
+    return collect_tenant_account_keys(rows)
+
+
+async def _run_expiry_alerts_for_tenant(
+    httpx_c: httpx.AsyncClient,
+    *,
+    today,
+    warn_until,
+) -> tuple[list[dict], Optional[str]]:
+    """Jeden tenant: partie kończące ważność + opcjonalne danie dnia + Expo Push."""
+    from datetime import date as _date
+
+    alerts: list[dict] = []
+    dish: Optional[str] = None
+
+    rows = await sb_get(
+        httpx_c,
+        "warehouse_inventory",
+        params={
+            "select": "id,restaurant_id,product_name,quantity,unit,expiration_date,status,alert_triggers",
+            "expiration_date": f"lte.{warn_until.isoformat()}",
+            "quantity": "gt.0",
+            "limit": "500",
+        },
+    ) or []
+
+    batches = []
+    for r in rows:
+        try:
+            exp = _date.fromisoformat(str(r.get("expiration_date"))[:10])
+        except Exception:
+            continue
+        if exp < today:
+            continue
+        if float(r.get("quantity") or 0) <= 0:
+            continue
+        batches.append(r)
+
+    names = [str(b.get("product_name") or "") for b in batches if b.get("product_name")]
+    if names:
+        try:
+            await _guard_ai(needs_credits=False)
+            client = _openai()
+            resp = await client.chat.completions.create(
+                model=CHAT_MODEL,
+                temperature=0.4,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
+                            "zaproponuj jedno konkretne „Danie dnia” po polsku "
+                            "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
+                        ),
+                    },
+                    {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
+                ],
+            )
+            dish = (resp.choices[0].message.content or "").strip() or None
+        except Exception:
+            logging.exception("expiry job: dish suggestion failed")
+
+    for i, b in enumerate(batches):
+        exp = _date.fromisoformat(str(b["expiration_date"])[:10])
+        days_left = (exp - today).days
+        triggers = b.get("alert_triggers") or [7, 3, 1]
+        if not isinstance(triggers, list):
+            triggers = [7, 3, 1]
+        triggers_i = {int(x) for x in triggers if str(x).lstrip('-').isdigit() or isinstance(x, (int, float))}
+        if days_left not in triggers_i and days_left != 0:
+            continue
+        message = (
+            f"Produkt {b['product_name']} kończy ważność DZIŚ! Użyj go!"
+            if days_left == 0
+            else f"Produkt {b['product_name']} kończy ważność za {days_left} dni! Użyj go!"
+        )
+        logging.info("EXPIRY_ALERT %s", message)
+        alerts.append({
+            "restaurant_id": b.get("restaurant_id"),
+            "batch_id": b.get("id"),
+            "product_name": b.get("product_name"),
+            "days_left": days_left,
+            "alert_day": days_left,
+            "message": message,
+            "dish_of_the_day": dish if i == 0 else None,
+        })
+    if not alerts:
+        return alerts, dish
+
+    try:
+        await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
+    except Exception:
+        for a in alerts:
+            a.pop("alert_day", None)
+        try:
+            await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
+        except Exception:
+            logging.exception("expiry job: alert insert failed")
+
+    try:
+        profiles = await sb_get(
+            httpx_c,
+            "profiles",
+            params={
+                "select": "id",
+                "account_key": f"eq.{get_account_key()}",
+                "limit": "200",
+            },
+        ) or []
+        uids = [str(p.get("id")) for p in profiles if p.get("id")]
+        tokens: list[dict] = []
+        if uids:
+            tokens = await sb_get(
+                httpx_c,
+                "device_push_tokens",
+                params={
+                    "select": "token",
+                    "user_id": f"in.({','.join(uids)})",
+                    "limit": "500",
+                },
+            ) or []
+        push_msgs = []
+        for t in tokens:
+            tok = str(t.get("token") or "").strip()
+            if not tok:
+                continue
+            for a in alerts[:20]:
+                push_msgs.append({
+                    "to": tok,
+                    "title": "Termin przydatności",
+                    "body": a["message"],
+                    "sound": "default",
+                    "data": {"type": "expiry", "product_name": a.get("product_name")},
+                })
+        for i in range(0, len(push_msgs), 80):
+            chunk = push_msgs[i:i + 80]
+            if not chunk:
+                continue
+            await httpx_c.post(
+                "https://exp.host/--/api/v2/push/send",
+                json=chunk,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=30.0,
+            )
+    except Exception:
+        logging.exception("expiry job: Expo Push failed")
+
+    return alerts, dish
+
+
 @app.get("/api/inventory/expiry-daily-job")
 async def expiry_daily_job(request: Request):
     """Scheduler: odśwież statusy; alert gdy days_left ∈ alert_triggers (domyślnie 7/3/1)."""
@@ -5837,141 +6002,43 @@ async def expiry_daily_job(request: Request):
     from datetime import date as _date, timedelta
 
     today = _date.today()
-    warn_until = today + timedelta(days=14)  # max look-ahead for custom triggers
-    alerts: list[dict] = []
+    warn_until = today + timedelta(days=14)
+    all_alerts: list[dict] = []
     dish: Optional[str] = None
+    tenants_done = 0
 
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
         try:
-            # Refresh endpoint: PostgREST RPC. Use sb_post() so we validate
-            # the rest path (prevents SSRF-style URL construction findings).
             await sb_post(httpx_c, "rpc/warehouse_inventory_refresh_status", {})
         except Exception:
             logging.exception("expiry job: refresh_status RPC failed")
 
-        rows = await sb_get(
-            httpx_c,
-            "warehouse_inventory",
-            params={
-                "select": "id,restaurant_id,product_name,quantity,unit,expiration_date,status,alert_triggers",
-                "expiration_date": f"lte.{warn_until.isoformat()}",
-                "quantity": "gt.0",
-                "limit": "500",
-            },
-        ) or []
+        tenant_keys = await _list_tenant_account_keys(httpx_c)
+        if not tenant_keys:
+            # Fallback: bieżący kontekst (ACCOUNT_KEY env) — lokalny single-tenant.
+            fallback = (get_account_key() or "").strip()
+            if fallback and fallback != "default":
+                tenant_keys = [fallback]
 
-        batches = []
-        for r in rows:
+        for ak in tenant_keys:
+            tok = _push_account_key(ak)
             try:
-                exp = _date.fromisoformat(str(r.get("expiration_date"))[:10])
-            except Exception:
-                continue
-            if exp < today:
-                continue
-            if float(r.get("quantity") or 0) <= 0:
-                continue
-            batches.append(r)
-
-        names = [str(b.get("product_name") or "") for b in batches if b.get("product_name")]
-        if names:
-            try:
-                await _guard_ai(needs_credits=False)
-                client = _openai()
-                resp = await client.chat.completions.create(
-                    model=CHAT_MODEL,
-                    temperature=0.4,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
-                                "zaproponuj jedno konkretne „Danie dnia” po polsku "
-                                "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
-                            ),
-                        },
-                        {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
-                    ],
+                tenant_alerts, tenant_dish = await _run_expiry_alerts_for_tenant(
+                    httpx_c, today=today, warn_until=warn_until,
                 )
-                dish = (resp.choices[0].message.content or "").strip() or None
-            except Exception:
-                logging.exception("expiry job: dish suggestion failed")
-
-        for i, b in enumerate(batches):
-            exp = _date.fromisoformat(str(b["expiration_date"])[:10])
-            days_left = (exp - today).days
-            triggers = b.get("alert_triggers") or [7, 3, 1]
-            if not isinstance(triggers, list):
-                triggers = [7, 3, 1]
-            triggers_i = {int(x) for x in triggers if str(x).lstrip('-').isdigit() or isinstance(x, (int, float))}
-            if days_left not in triggers_i and days_left != 0:
-                continue
-            message = (
-                f"Produkt {b['product_name']} kończy ważność DZIŚ! Użyj go!"
-                if days_left == 0
-                else f"Produkt {b['product_name']} kończy ważność za {days_left} dni! Użyj go!"
-            )
-            # Expo Push + log
-            logging.info("EXPIRY_ALERT %s", message)
-            alerts.append({
-                "restaurant_id": b.get("restaurant_id"),
-                "batch_id": b.get("id"),
-                "product_name": b.get("product_name"),
-                "days_left": days_left,
-                "alert_day": days_left,
-                "message": message,
-                "dish_of_the_day": dish if i == 0 else None,
-            })
-        if alerts:
-            try:
-                await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
-            except Exception:
-                # retry without alert_day if column missing
-                for a in alerts:
-                    a.pop("alert_day", None)
-                try:
-                    await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
-                except Exception:
-                    logging.exception("expiry job: alert insert failed")
-
-            # Wyślij Expo Push do zarejestrowanych urządzeń
-            try:
-                tokens = await sb_get(
-                    httpx_c,
-                    "device_push_tokens",
-                    params={"select": "token", "limit": "500"},
-                ) or []
-                push_msgs = []
-                for t in tokens:
-                    tok = str(t.get("token") or "").strip()
-                    if not tok:
-                        continue
-                    for a in alerts[:20]:
-                        push_msgs.append({
-                            "to": tok,
-                            "title": "Termin przydatności",
-                            "body": a["message"],
-                            "sound": "default",
-                            "data": {"type": "expiry", "product_name": a.get("product_name")},
-                        })
-                # Expo accepts arrays up to ~100
-                for i in range(0, len(push_msgs), 80):
-                    chunk = push_msgs[i:i + 80]
-                    if not chunk:
-                        continue
-                    await httpx_c.post(
-                        "https://exp.host/--/api/v2/push/send",
-                        json=chunk,
-                        headers={"Accept": "application/json", "Content-Type": "application/json"},
-                        timeout=30.0,
-                    )
-            except Exception:
-                logging.exception("expiry job: Expo Push failed")
+                all_alerts.extend(tenant_alerts)
+                if tenant_dish and not dish:
+                    dish = tenant_dish
+                tenants_done += 1
+            finally:
+                _reset_account_key(tok)
 
     return {
         "ok": True,
-        "alert_count": len(alerts),
+        "tenants": tenants_done,
+        "alert_count": len(all_alerts),
         "dish_of_the_day": dish,
-        "reminders": [a["message"] for a in alerts],
+        "reminders": [a["message"] for a in all_alerts],
     }
 
 

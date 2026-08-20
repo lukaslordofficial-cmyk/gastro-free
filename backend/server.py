@@ -1603,11 +1603,22 @@ async def _get_subscription(client: httpx.AsyncClient) -> dict:
 async def _check_ai_access(client: httpx.AsyncClient, *, needs_credits: bool = True,
                            needs_deal_hunter: bool = False) -> dict:
     """Autoryzacja tieru przed operacją AI. Rzuca 403 gdy brak uprawnień/kredytów.
-    Fail-open: jeśli tabela subscriptions nie istnieje jeszcze (brak migracji), nie blokuje."""
+
+    Produkcja: brak tabeli subscriptions → 503 (fail-closed).
+    Lokalnie / bez RAILWAY: fail-open tylko gdy migracja jeszcze nie wgrana.
+    """
+    from http_ssl import is_production_runtime
+
     try:
         sub = await _get_subscription(client)
     except httpx.HTTPStatusError as e:
-        logger.warning(f"subscriptions niedostępne → autoryzacja pominięta: {e}")
+        if is_production_runtime():
+            logger.error("subscriptions niedostępne w produkcji: %s", e)
+            raise HTTPException(
+                status_code=503,
+                detail="Subskrypcje niedostępne. Spróbuj ponownie za chwilę.",
+            ) from e
+        logger.warning("subscriptions niedostępne → autoryzacja pominięta (dev): %s", e)
         return {"tier_level": 2, "credits_balance": 10 ** 9, "status": "active"}
     # Łowca: płatny tier 2 LUB aktywny 30-dniowy trial Premium
     if needs_deal_hunter and not _premium_entitled(sub):

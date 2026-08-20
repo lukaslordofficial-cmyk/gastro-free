@@ -33,6 +33,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, APIError, OpenAIError
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz, process as rf_process
@@ -46,7 +47,9 @@ from token_billing import (
 )
 from cron_auth import require_cron_secret
 from pos_webhook_auth import build_pos_webhook_path, require_pos_webhook_tenant
-from tenant_auth import prefer_jwt_account_key
+from tenant_auth import jwt_cache_get, jwt_cache_put, prefer_jwt_account_key
+from request_guards import is_ai_path, is_mutate_method, is_public_mutate
+from rate_limit import allow_ai, allow_ip, allow_write
 from furgonetka_shop import router as furgonetka_shop_router
 from url_safety import (
     assert_safe_redirect_url,
@@ -206,38 +209,72 @@ async def account_key_middleware(request: Request, call_next):
         if auth.lower().startswith("bearer ") and auth[7:].strip() != SUPABASE_KEY:
             user_jwt = auth[7:].strip()
             if user_jwt:
-                try:
-                    apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
-                    async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
-                        uresp = await httpx_c.get(
-                            build_supabase_auth_user_url(SUPABASE_URL),
-                            headers={
-                                "Authorization": f"Bearer {user_jwt}",
-                                "apikey": apikey,
-                            },
-                        )
-                        if uresp.status_code == 200:
-                            uid = (uresp.json() or {}).get("id")
-                            if uid:
-                                pref = await httpx_c.get(
-                                    build_supabase_rest_url(SUPABASE_URL, "profiles"),
-                                    params={"select": "account_key", "id": f"eq.{uid}", "limit": "1"},
-                                    headers={
-                                        "Authorization": f"Bearer {SUPABASE_KEY}",
-                                        "apikey": SUPABASE_KEY,
-                                        "Accept": "application/json",
-                                    },
-                                )
-                                if pref.status_code == 200:
-                                    rows = pref.json() or []
-                                    if rows and rows[0].get("account_key"):
-                                        jwt_key = str(rows[0]["account_key"]).strip() or None
-                                if not jwt_key:
-                                    jwt_key = f"ak_{str(uid).replace('-', '')}"
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("account_key JWT resolve skipped: %s", exc)
+                jwt_key = jwt_cache_get(user_jwt)
+                if not jwt_key:
+                    try:
+                        apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
+                        httpx_c = _jwt_http
+                        close_tmp = False
+                        if httpx_c is None:
+                            httpx_c = httpx.AsyncClient(timeout=8.0, verify=_httpx_verify())
+                            close_tmp = True
+                        try:
+                            uresp = await httpx_c.get(
+                                build_supabase_auth_user_url(SUPABASE_URL),
+                                headers={
+                                    "Authorization": f"Bearer {user_jwt}",
+                                    "apikey": apikey,
+                                },
+                            )
+                            if uresp.status_code == 200:
+                                uid = (uresp.json() or {}).get("id")
+                                if uid:
+                                    pref = await httpx_c.get(
+                                        build_supabase_rest_url(SUPABASE_URL, "profiles"),
+                                        params={"select": "account_key", "id": f"eq.{uid}", "limit": "1"},
+                                        headers={
+                                            "Authorization": f"Bearer {SUPABASE_KEY}",
+                                            "apikey": SUPABASE_KEY,
+                                            "Accept": "application/json",
+                                        },
+                                    )
+                                    if pref.status_code == 200:
+                                        rows = pref.json() or []
+                                        if rows and rows[0].get("account_key"):
+                                            jwt_key = str(rows[0]["account_key"]).strip() or None
+                                    if not jwt_key:
+                                        jwt_key = f"ak_{str(uid).replace('-', '')}"
+                        finally:
+                            if close_tmp:
+                                await httpx_c.aclose()
+                        if jwt_key:
+                            jwt_cache_put(user_jwt, jwt_key)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("account_key JWT resolve skipped: %s", exc)
 
     key = prefer_jwt_account_key(header_key, jwt_key, _ACCOUNT_KEY_DEFAULT)
+
+    if is_mutate_method(request.method) and not is_public_mutate(path):
+        if key == "default":
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Zaloguj się ponownie — brak konta restauracji przy zapisie.",
+                },
+            )
+        ip = request.client.host if request.client else "0"
+        bucket_key = key
+        if is_ai_path(path):
+            if not allow_ai(bucket_key) or not allow_ip(ip):
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Zbyt wiele zapytań AI. Spróbuj za chwilę."},
+                )
+        elif not allow_write(bucket_key):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Zbyt wiele zapytań. Spróbuj za chwilę."},
+            )
 
     token = _account_key_ctx.set(key)
     try:
@@ -247,6 +284,7 @@ async def account_key_middleware(request: Request, call_next):
 
 
 _openai_client: AsyncOpenAI | None = None
+_jwt_http: httpx.AsyncClient | None = None
 
 
 def _httpx_verify():
@@ -257,6 +295,24 @@ def _httpx_verify():
     if mode in ("certifi", "bundle"):
         return certifi.where()
     return ssl.create_default_context()
+
+
+@app.on_event("startup")
+async def _startup_shared_http():
+    global _jwt_http
+    _jwt_http = httpx.AsyncClient(
+        timeout=8.0,
+        verify=_httpx_verify(),
+        limits=httpx.Limits(max_keepalive_connections=40, max_connections=120),
+    )
+
+
+@app.on_event("shutdown")
+async def _shutdown_shared_http():
+    global _jwt_http
+    if _jwt_http is not None:
+        await _jwt_http.aclose()
+        _jwt_http = None
 
 
 def _openai() -> AsyncOpenAI:
@@ -684,18 +740,11 @@ async def health_deep():
                     client,
                     "subscriptions",
                     params={
-                        "select": "tier_level,credits_balance",
-                        "account_key": f"eq.{get_account_key()}",
+                        "select": "id",
                         "limit": "1",
                     },
                 )
-                if rows:
-                    sub_status = (
-                        f"ok tier={rows[0].get('tier_level')} "
-                        f"credits={rows[0].get('credits_balance')}"
-                    )
-                else:
-                    sub_status = "empty"
+                sub_status = "ok" if rows is not None else "empty"
             except httpx.HTTPStatusError as e:
                 sub_status = f"error {e.response.status_code}"
             except Exception as e:  # noqa: BLE001
@@ -705,7 +754,6 @@ async def health_deep():
     return {
         "status": "ok",
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "account_key": get_account_key(),
         "subscription": sub_status,
         "openai_configured": bool(OPENAI_API_KEY),
     }

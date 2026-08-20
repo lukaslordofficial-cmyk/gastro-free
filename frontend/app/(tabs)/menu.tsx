@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Animated,
   Modal,
   KeyboardAvoidingView,
   Platform,
@@ -22,13 +21,11 @@ import {
   RECIPE_INGREDIENTS_CHANGED,
   type RecipeIngredientsChangedPayload,
 } from '@/lib/recipeSync';
-import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   ChefHat,
   Search,
-  ChevronDown,
   Mic,
   Camera,
   Ruler,
@@ -38,7 +35,6 @@ import {
   Plus,
   Trash2,
   Check,
-  CreditCard as Edit,
   FlaskConical,
   Bell,
   Box,
@@ -52,15 +48,39 @@ import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { MenuScanModal } from '@/components/MenuScanModal';
 import { BatchPrepModal, type BatchPrepDish } from '@/components/BatchPrepModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
-import { formatPln } from '@/lib/format';
+import { DishCard } from '@/components/menu/DishCard';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import {
-  PremiumBadge,
   PremiumCapsule,
   PremiumGlowCta,
   PremiumOutlineBtn,
   PremiumStatTile,
 } from '@/components/premium/PremiumUI';
+import {
+  CATEGORY_COLORS,
+  FORM_CATEGORIES,
+  INV_CATEGORY_COLORS,
+  INV_PRESET_CATEGORIES,
+  INV_UNIT_OPTIONS,
+  UNIT_OPTIONS,
+} from '@/constants/menuUi';
+import {
+  makePosId,
+  mapDbToDish,
+  mapInvDbRow,
+  newDraftIngredient,
+  normIngredientName,
+  PIECE_WEIGHT_HINT,
+} from '@/lib/menuScreenHelpers';
+import type {
+  Dish,
+  IngredientDraft,
+  InventoryItem,
+  KitchenUtensil,
+  MenuListRow,
+  RecipeIngredient,
+  Unit,
+} from '@/types/menu';
 import { DS } from '@/constants/premiumTheme';
 import {
   loadDishCustomImages,
@@ -73,7 +93,7 @@ import { getMenuThumbSync, subscribeMenuThumbs } from '@/lib/menuThumbCache';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
-import { ingredientDedupeKey, normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
+import { normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
@@ -83,553 +103,8 @@ const RecipesModal = lazy(() =>
   import('@/components/RecipesModal').then((m) => ({ default: m.RecipesModal })),
 );
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type Unit = 'g' | 'ml' | 'szt' | 'opak' | 'L' | 'kg';
-
-interface RecipeIngredient {
-  name: string;
-  quantity: number;
-  unit: string;
-  piece_weight_g?: number | null;
-}
-
-interface Dish {
-  id: string;
-  name: string;
-  category: string;
-  price_pln: number;
-  pos_id: string;
-  recipe: RecipeIngredient[];
-}
-
-type DishThumbAssignment = {
-  source?: number | { uri: string };
-  slug?: string;
-};
 
 const MENU_LIST_CACHE = new Map<string, Dish[]>();
-
-type MenuListRow =
-  | { type: 'header'; category: string; count: number }
-  | { type: 'dish'; dish: Dish };
-
-interface KitchenUtensil {
-  id: string;
-  name: string;
-  utensil_type: string;
-  capacity_value: number | null;
-  capacity_unit: string | null;
-}
-
-interface IngredientDraft {
-  key: string;
-  name: string;
-  quantity: string;
-  unit: string;
-  /** Wzorcowa waga 1 sztuki (g) — gdy unit=szt */
-  pieceWeightG: string;
-}
-
-// Inventory item shape mirrored from magazyn.tsx
-interface InventoryItem {
-  id: string;
-  product_name: string;
-  category: string;
-  current_qty: number;
-  critical_threshold: number;
-  unit: Unit;
-  is_combo_półprodukt: boolean;
-  portion_size: number | null;
-}
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const FORM_CATEGORIES = ['Burgery', 'Dania główne', 'Sałatki', 'Makarony', 'Zupy', 'Półprodukty'];
-
-const CATEGORY_COLORS: Record<string, string> = {
-  Burgery: '#D97706',
-  'Dania główne': '#2563EB',
-  Sałatki: '#16A34A',
-  Makarony: '#7C3AED',
-  Zupy: '#DC2626',
-  Półprodukty: '#A855F7',
-};
-
-const INV_CATEGORY_COLORS: Record<string, string> = {
-  'Napoje/Alkohole': '#2563EB',
-  Mięso: '#DC2626',
-  Warzywa: '#16A34A',
-  Przyprawy: '#D97706',
-  'Środki czystości': '#7C3AED',
-  'Przybory kuchenne': '#475569',
-  Nabiał: '#0891B2',
-  Pieczywo: '#78716C',
-  Inne: '#64748B',
-};
-
-const UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'];
-const INV_UNIT_OPTIONS: Unit[] = ['g', 'ml', 'szt', 'opak', 'L', 'kg'];
-const INV_PRESET_CATEGORIES = [
-  'Mięso', 'Warzywa', 'Przyprawy', 'Napoje/Alkohole',
-  'Środki czystości', 'Przybory kuchenne', 'Nabiał', 'Pieczywo', 'Inne',
-];
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function makePosId(category: string, total: number): string {
-  const prefix: Record<string, string> = { Burgery: 'BRG', 'Dania główne': 'DAN', Sałatki: 'SAL', Makarony: 'MAK', Zupy: 'ZUP' };
-  return `${prefix[category] ?? 'DAN'}-${String(total).padStart(3, '0')}`;
-}
-
-function newDraftIngredient(): IngredientDraft {
-  return { key: secureId('ing'), name: '', quantity: '', unit: 'g', pieceWeightG: '' };
-}
-
-/** Dedupe / link key — stem-ish (pomidor ≡ pomidory). */
-function normIngredientName(name: string): string {
-  return ingredientDedupeKey(name);
-}
-
-const PIECE_WEIGHT_HINT =
-  'Pole nieobowiązkowe — wpisz, jeśli ten produkt kupujesz u dostawcy na wagę. Dzięki temu możliwe będzie monitorowanie stanu tego produktu na magazynie.';
-
-function mapDbToDish(row: any): Dish {
-  const ingredients = (row.recipe_ingredients ?? []).sort((a: any, b: any) => a.sort_order - b.sort_order);
-  return {
-    id: row.id,
-    name: row.name,
-    category: row.category,
-    price_pln: Number(row.price_pln),
-    pos_id: row.pos_id ?? '',
-    recipe: ingredients.map((i: any) => ({
-      name: i.ingredient_name,
-      quantity: Number(i.quantity),
-      unit: i.unit,
-      piece_weight_g: i.piece_weight_g != null ? Number(i.piece_weight_g) : null,
-    })),
-  };
-}
-
-function mapInvDbRow(row: any): InventoryItem {
-  return {
-    id: row.id,
-    product_name: row.name,
-    category: row.inventory_categories?.name ?? 'Inne',
-    current_qty: Number(row.quantity),
-    critical_threshold: Number(row.min_quantity),
-    unit: row.unit as Unit,
-    is_combo_półprodukt: row.is_combo_polprodukt ?? false,
-    portion_size: row.portion_size != null ? Number(row.portion_size) : null,
-  };
-}
-
-// ─── DishCard ─────────────────────────────────────────────────────────────────
-
-const DishCard = React.memo(function DishCard({
-  dish,
-  onEdit,
-  onDelete,
-  onBatchPrep,
-  premium,
-  thumb,
-  onChangePhoto,
-}: {
-  dish: Dish;
-  onEdit: (dish: Dish) => void;
-  onDelete: (dish: Dish) => void;
-  onBatchPrep?: (dish: Dish) => void;
-  premium?: boolean;
-  thumb?: DishThumbAssignment;
-  onChangePhoto?: (dish: Dish) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const anim = useRef(new Animated.Value(0)).current;
-  const catColor = CATEGORY_COLORS[dish.category] ?? Colors.textSecondary;
-  const customUri = getDishCustomImageSync(dish.id);
-  const liveThumb = thumb ?? getMenuThumbSync(dish.name);
-  const liveSource = liveThumb?.source;
-  const thumbSrc = customUri
-    ? { uri: customUri }
-    : typeof liveSource === 'number'
-      ? liveSource
-      : liveSource && typeof liveSource === 'object' && 'uri' in liveSource && liveSource.uri
-        ? { uri: liveSource.uri }
-        : undefined;
-  const [imgFailed, setImgFailed] = useState(false);
-  const showThumb = thumbSrc != null && !imgFailed;
-
-  useEffect(() => {
-    setImgFailed(false);
-  }, [dish.id, customUri, liveThumb?.slug, typeof liveSource === 'number' ? liveSource : (liveSource as any)?.uri]);
-
-  const toggle = () => {
-    const toValue = expanded ? 0 : 1;
-    Animated.spring(anim, { toValue, useNativeDriver: true, tension: 60, friction: 9 }).start();
-    setExpanded(!expanded);
-  };
-
-  const rotateIcon = anim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
-
-  if (premium) {
-    return (
-      <View style={dishStyles.premCard}>
-        <TouchableOpacity style={dishStyles.premHeader} onPress={toggle} activeOpacity={0.8}>
-          <TouchableOpacity
-            activeOpacity={0.85}
-            onPress={(e) => {
-              e.stopPropagation?.();
-              onChangePhoto?.(dish);
-            }}
-            style={dishStyles.premThumbWrap}
-          >
-            {showThumb ? (
-              <Image
-                source={thumbSrc as any}
-                style={dishStyles.premThumb}
-                contentFit="cover"
-                cachePolicy="memory-disk"
-                transition={120}
-                recyclingKey={customUri || liveThumb?.slug || dish.id}
-                priority="low"
-                onError={() => setImgFailed(true)}
-              />
-            ) : (
-              <View style={dishStyles.premThumbPh} />
-            )}
-          </TouchableOpacity>
-          <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
-            <Text style={dishStyles.premName} numberOfLines={1} allowFontScaling={false}>{dish.name}</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <PremiumBadge label={dish.category} tone="ok" />
-              <Text style={dishStyles.premPos} allowFontScaling={false}>
-                {dish.recipe.length > 0
-                  ? `Receptura: ${dish.recipe.length} skł.`
-                  : 'Brak receptury'}
-              </Text>
-            </View>
-            {!!dish.pos_id && (
-              <Text style={dishStyles.premPos} allowFontScaling={false}>POS: {dish.pos_id}</Text>
-            )}
-          </View>
-          <View style={{ alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
-            <Text style={dishStyles.premPrice} allowFontScaling={false}>{formatPln(dish.price_pln)}</Text>
-            <Animated.View style={{ transform: [{ rotate: rotateIcon }] }}>
-              <ChevronDown size={16} color={DS.color.muted} strokeWidth={2} />
-            </Animated.View>
-          </View>
-        </TouchableOpacity>
-        {expanded && (
-          <View style={dishStyles.premBody}>
-            <Text style={dishStyles.premRecipeLabel}>Receptura — skład porcji</Text>
-            {dish.recipe.length === 0 ? (
-              <TouchableOpacity
-                style={dishStyles.premEdit}
-                onPress={() => onEdit(dish)}
-                activeOpacity={0.85}
-              >
-                <Edit size={14} color={DS.color.greenEnd} strokeWidth={2} />
-                <Text style={{ color: DS.color.greenEnd, fontWeight: '700', fontSize: 13 }}>
-                  Zbuduj recepturę
-                </Text>
-              </TouchableOpacity>
-            ) : (
-              dish.recipe.map((ing, idx) => (
-                <View key={idx} style={dishStyles.premIngRow}>
-                  <Text style={dishStyles.premIngName}>{ing.name}</Text>
-                  <Text style={dishStyles.premIngQty}>
-                    {ing.quantity % 1 === 0 ? ing.quantity.toFixed(0) : ing.quantity.toFixed(1)} {ing.unit}
-                  </Text>
-                </View>
-              ))
-            )}
-            {onBatchPrep && dish.recipe.length > 0 ? (
-              <TouchableOpacity
-                style={dishStyles.premBatch}
-                onPress={() => onBatchPrep(dish)}
-                activeOpacity={0.85}
-                testID={`batch-prep-open-${dish.id}`}
-              >
-                <ChefHat size={14} color="#0A0A0A" strokeWidth={2.5} />
-                <Text style={dishStyles.premBatchText}>Przygotowanie partii</Text>
-              </TouchableOpacity>
-            ) : null}
-            <View style={dishStyles.actionRow}>
-              <TouchableOpacity style={dishStyles.premEdit} onPress={() => onEdit(dish)}>
-                <Edit size={14} color={DS.color.greenEnd} strokeWidth={2} />
-                <Text style={{ color: DS.color.greenEnd, fontWeight: '700', fontSize: 13 }}>Edytuj</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={dishStyles.premDel} onPress={() => onDelete(dish)}>
-                <Trash2 size={14} color={DS.color.danger} strokeWidth={2} />
-                <Text style={{ color: DS.color.danger, fontWeight: '700', fontSize: 13 }}>Usuń</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-      </View>
-    );
-  }
-
-  return (
-    <View style={dishStyles.container}>
-      <TouchableOpacity style={dishStyles.header} onPress={toggle} activeOpacity={0.7}>
-        {showThumb ? (
-          <Image
-            source={thumbSrc!}
-            style={dishStyles.stdThumb}
-            contentFit="cover"
-            cachePolicy="memory-disk"
-            transition={120}
-            recyclingKey={customUri || liveThumb?.slug || dish.id}
-            onError={() => setImgFailed(true)}
-          />
-        ) : (
-          <View style={[dishStyles.catDot, { backgroundColor: catColor }]} />
-        )}
-        <View style={dishStyles.headerText}>
-          <Text style={dishStyles.name}>{dish.name}</Text>
-          <View style={dishStyles.meta}>
-            <Text style={[dishStyles.category, { color: catColor }]}>{dish.category}</Text>
-            {!!dish.pos_id && (
-              <>
-                <Text style={dishStyles.sep}>·</Text>
-                <Text style={dishStyles.posId}>POS: {dish.pos_id}</Text>
-              </>
-            )}
-          </View>
-        </View>
-        <View style={dishStyles.right}>
-          <Text style={dishStyles.price}>{formatPln(dish.price_pln)}</Text>
-          <Animated.View style={{ transform: [{ rotate: rotateIcon }] }}>
-            <ChevronDown size={16} color={Colors.textSecondary} strokeWidth={2} />
-          </Animated.View>
-        </View>
-      </TouchableOpacity>
-
-      {expanded && (
-        <View style={dishStyles.body}>
-          <Text style={dishStyles.recipeLabel}>Receptura — skład porcji</Text>
-          {dish.recipe.length === 0 ? (
-            <Text style={dishStyles.noRecipe}>Brak zdefiniowanych składników</Text>
-          ) : (
-            dish.recipe.map((ing, idx) => (
-              <View key={idx} style={[dishStyles.ingRow, idx === dish.recipe.length - 1 && dishStyles.ingRowLast]}>
-                <View style={dishStyles.bullet} />
-                <Text style={dishStyles.ingName}>{ing.name}</Text>
-                <Text style={dishStyles.ingQty}>
-                  {ing.quantity % 1 === 0 ? ing.quantity.toFixed(0) : ing.quantity.toFixed(1)} {ing.unit}
-                </Text>
-              </View>
-            ))
-          )}
-          <View style={dishStyles.costRow}>
-            <Text style={dishStyles.costLabel}>Składniki: {dish.recipe.length} pozycji</Text>
-            <View style={[dishStyles.priceBadge, { backgroundColor: Colors.accentLight }]}>
-              <Text style={[dishStyles.priceBadgeText, { color: Colors.accent }]}>{formatPln(dish.price_pln)}</Text>
-            </View>
-          </View>
-
-          <View style={dishStyles.actionRow}>
-            <TouchableOpacity style={dishStyles.editBtn} onPress={() => onEdit(dish)} activeOpacity={0.8}>
-              <Edit size={14} color={Colors.accent} strokeWidth={2} />
-              <Text style={dishStyles.editBtnText}>Edytuj</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={dishStyles.deleteBtn} onPress={() => onDelete(dish)} activeOpacity={0.8}>
-              <Trash2 size={14} color={Colors.danger} strokeWidth={2} />
-              <Text style={dishStyles.deleteBtnText}>Usuń</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-    </View>
-  );
-});
-
-const dishStyles = StyleSheet.create({
-  container: {
-    backgroundColor: Colors.card,
-    borderRadius: 12,
-    marginBottom: 10,
-    shadowColor: Colors.shadow,
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
-    overflow: 'hidden',
-  },
-  premCard: {
-    backgroundColor: DS.color.surfaceCard,
-    borderRadius: DS.radius.card,
-    marginBottom: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: DS.color.borderSubtle,
-    overflow: 'hidden',
-    ...DS.shadow.card,
-  },
-  premHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    padding: 12,
-  },
-  premThumb: {
-    width: 68,
-    height: 68,
-    borderRadius: DS.radius.image,
-    backgroundColor: DS.color.bgTertiary,
-  },
-  premThumbPh: {
-    width: 68,
-    height: 68,
-    borderRadius: DS.radius.image,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.10)',
-  },
-  stdThumb: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    backgroundColor: Colors.borderLight,
-    marginRight: 2,
-  },
-  premThumbWrap: {
-    width: 68,
-  },
-  premName: {
-    color: DS.color.heading,
-    fontSize: 14,
-    fontWeight: '600',
-    letterSpacing: -0.2,
-  },
-  premPos: { color: DS.color.muted, fontSize: 11 },
-  premPrice: { color: DS.color.heading, fontSize: 14, fontWeight: '700' },
-  premBody: {
-    paddingHorizontal: 12,
-    paddingBottom: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: DS.color.borderSubtle,
-    gap: 6,
-  },
-  premRecipeLabel: { color: DS.color.muted, fontSize: 11, fontWeight: '600', marginTop: 8 },
-  premMuted: { color: DS.color.muted, fontSize: 12 },
-  premIngRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
-  premIngName: { color: DS.color.body, fontSize: 13, flex: 1 },
-  premIngQty: { color: DS.color.heading, fontSize: 12, fontWeight: '600' },
-  premEdit: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: DS.radius.button,
-    backgroundColor: 'rgba(0,255,120,0.08)',
-  },
-  premDel: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: DS.radius.button,
-    backgroundColor: DS.color.dangerSoft,
-  },
-  premBatch: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 12,
-    borderRadius: DS.radius.button,
-    backgroundColor: DS.color.greenEnd,
-    marginTop: 4,
-    ...DS.shadow.greenGlow,
-  },
-  premBatchText: { color: '#0A0A0A', fontWeight: '800', fontSize: 13 },
-  header: { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
-  catDot: { width: 10, height: 10, borderRadius: 5 },
-  headerText: { flex: 1, gap: 3 },
-  name: { fontSize: 15, fontWeight: '600', color: Colors.textPrimary },
-  meta: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  category: { fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.3 },
-  sep: { fontSize: 11, color: Colors.textTertiary },
-  posId: { fontSize: 11, color: Colors.textTertiary },
-  right: { alignItems: 'flex-end', gap: 4 },
-  price: { fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
-  body: {
-    borderTopWidth: 1,
-    borderTopColor: Colors.borderLight,
-    paddingHorizontal: 14,
-    paddingBottom: 14,
-    paddingTop: 10,
-  },
-  recipeLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: Colors.textSecondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 10,
-  },
-  noRecipe: { fontSize: 13, color: Colors.textTertiary, fontStyle: 'italic', paddingVertical: 8 },
-  ingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 7,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.borderLight,
-    gap: 10,
-  },
-  ingRowLast: { borderBottomWidth: 0 },
-  bullet: { width: 5, height: 5, borderRadius: 3, backgroundColor: Colors.accent },
-  ingName: { flex: 1, fontSize: 13, color: Colors.textPrimary },
-  ingQty: { fontSize: 13, fontWeight: '600', color: Colors.accent },
-  costRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 12,
-    marginBottom: 12,
-  },
-  costLabel: { fontSize: 11, color: Colors.textSecondary },
-  priceBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
-  priceBadgeText: { fontSize: 12, fontWeight: '700' },
-  actionRow: {
-    flexDirection: 'row',
-    gap: 8,
-    borderTopWidth: 1,
-    borderTopColor: Colors.borderLight,
-    paddingTop: 12,
-  },
-  editBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 9,
-    borderRadius: 8,
-    backgroundColor: Colors.accentLight,
-    borderWidth: 1,
-    borderColor: '#BFDBFE',
-  },
-  editBtnText: { fontSize: 13, fontWeight: '600', color: Colors.accent },
-  deleteBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 9,
-    borderRadius: 8,
-    backgroundColor: Colors.dangerLight,
-    borderWidth: 1,
-    borderColor: '#FECACA',
-  },
-  deleteBtnText: { fontSize: 13, fontWeight: '600', color: Colors.danger },
-});
 
 // ─── IngredientStockBadge ─────────────────────────────────────────────────
 

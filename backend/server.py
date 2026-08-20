@@ -51,6 +51,7 @@ from tenant_auth import jwt_cache_get, jwt_cache_put, prefer_jwt_account_key
 from request_guards import is_ai_path, is_mutate_method, is_public_mutate
 from rate_limit import allow_ai, allow_ip, allow_write
 from furgonetka_shop import router as furgonetka_shop_router
+from health_routes import router as health_router
 from url_safety import (
     assert_safe_redirect_url,
     checkout_redirect_public_base,
@@ -184,6 +185,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(furgonetka_shop_router)
+app.include_router(health_router)
 
 
 @app.middleware("http")
@@ -672,92 +674,7 @@ class ApplyResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Health
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.get("/api/")
-async def root():
-    return {"service": "gastro-voice", "status": "ok"}
-
-
-@app.get("/")
-@app.get("/health")
-@app.get("/api/health")
-async def health():
-    """Lightweight liveness for Railway — no outbound calls (must stay fast)."""
-    return {
-        "status": "ok",
-        "service": "gastro-voice",
-        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "openai_configured": bool(OPENAI_API_KEY),
-    }
-
-
-class AutoConfirmBody(BaseModel):
-    user_id: str = Field(..., min_length=8, max_length=80)
-
-
-@app.post("/api/auth/auto-confirm")
-async def auth_auto_confirm(body: AutoConfirmBody):
-    """
-    Closed beta only: potwierdza e-mail przez Admin API (bez maila).
-    Domyślnie WYŁĄCZONE. Włącz: AUTO_CONFIRM_EMAIL=true na Railway.
-    Produkcja: Confirm email w Supabase + ten flag = false.
-    """
-    flag = (os.environ.get("AUTO_CONFIRM_EMAIL") or "false").strip().lower()
-    if flag not in ("1", "true", "yes", "on"):
-        raise HTTPException(status_code=403, detail="AUTO_CONFIRM_EMAIL jest wyłączone.")
-    _require_supabase()
-    uid = (body.user_id or "").strip()
-    url = build_supabase_auth_admin_url(SUPABASE_URL, uid)
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=20.0, verify=_httpx_verify()) as client:
-        r = await client.put(url, headers=headers, json={"email_confirm": True})
-        if r.status_code >= 400:
-            # starsze API czasem używa PATCH
-            r2 = await client.patch(url, headers=headers, json={"email_confirm": True})
-            if r2.status_code >= 400:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Nie udało się potwierdzić e-maila: {r2.text[:300]}",
-                )
-    return {"ok": True, "user_id": uid, "email_confirmed": True}
-
-
-@app.get("/api/health/deep")
-async def health_deep():
-    """Optional deep check (Supabase round-trip) — not used by Railway healthcheck."""
-    sub_status = "skipped"
-    if SUPABASE_URL and SUPABASE_KEY:
-        async with httpx.AsyncClient(timeout=5.0, verify=_httpx_verify()) as client:
-            try:
-                rows = await sb_get(
-                    client,
-                    "subscriptions",
-                    params={
-                        "select": "id",
-                        "limit": "1",
-                    },
-                )
-                sub_status = "ok" if rows is not None else "empty"
-            except httpx.HTTPStatusError as e:
-                sub_status = f"error {e.response.status_code}"
-            except Exception as e:  # noqa: BLE001
-                sub_status = f"error {type(e).__name__}"
-    else:
-        sub_status = "not_configured"
-    return {
-        "status": "ok",
-        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
-        "subscription": sub_status,
-        "openai_configured": bool(OPENAI_API_KEY),
-    }
-
+# Health + auto-confirm: backend/health_routes.py (app.include_router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) Voice transcription  — official openai SDK

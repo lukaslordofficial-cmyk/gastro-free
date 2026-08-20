@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import logging
 import os
-import ssl
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 from urllib.parse import urlencode
 
 import httpx
+
+from http_ssl import httpx_verify as _ssl_verify
 
 logger = logging.getLogger("billing.stripe")
 
@@ -46,16 +47,6 @@ def _secret() -> str:
     if not key:
         raise RuntimeError("Brak STRIPE_SECRET_KEY w backend/.env")
     return key
-
-
-def _ssl_verify():
-    mode = os.environ.get("OPENAI_SSL_VERIFY", "auto").strip().lower()
-    if mode in ("0", "false", "no"):
-        return False
-    if mode in ("certifi", "bundle"):
-        import certifi
-        return certifi.where()
-    return ssl.create_default_context()
 
 
 def _env_price(name: str, fallback: str) -> str:

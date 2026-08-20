@@ -1,13 +1,16 @@
 from rate_limit import SlidingWindow, allow_ai, allow_write
 from request_guards import is_ai_path, is_mutate_method, is_public_mutate
-from tenant_auth import jwt_cache_get, jwt_cache_put, prefer_jwt_account_key
+from tenant_auth import jwt_cache_get, jwt_cache_invalidate, jwt_cache_put, prefer_jwt_account_key
 
 
 def test_jwt_cache_roundtrip():
     tok = "header.payload.sig-example"
+    jwt_cache_invalidate(tok)
     assert jwt_cache_get(tok) is None
     jwt_cache_put(tok, "ak_user1aaaa")
     assert jwt_cache_get(tok) == "ak_user1aaaa"
+    jwt_cache_invalidate(tok)
+    assert jwt_cache_get(tok) is None
 
 
 def test_public_mutate_webhooks():

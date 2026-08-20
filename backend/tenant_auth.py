@@ -4,7 +4,8 @@ from __future__ import annotations
 import hashlib
 import time
 
-_JWT_TTL_S = 90.0
+# Krótki TTL: po ban/revoke sesja nie zostaje w cache na 1.5 min.
+_JWT_TTL_S = 25.0
 _JWT_CACHE_MAX = 8000
 _jwt_cache: dict[str, tuple[float, str]] = {}
 
@@ -21,6 +22,12 @@ def prefer_jwt_account_key(header_key: str, jwt_key: str | None, default: str) -
 
 def _jwt_fp(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def jwt_cache_invalidate(token: str) -> None:
+    if not token:
+        return
+    _jwt_cache.pop(_jwt_fp(token), None)
 
 
 def jwt_cache_get(token: str) -> str | None:

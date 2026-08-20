@@ -35,6 +35,7 @@ class SlidingWindow:
 AI_LIMIT = SlidingWindow(limit=40, window_s=60.0)
 WRITE_LIMIT = SlidingWindow(limit=180, window_s=60.0)
 IP_LIMIT = SlidingWindow(limit=80, window_s=60.0)
+AUTO_CONFIRM_LIMIT = SlidingWindow(limit=8, window_s=60.0)
 
 
 def allow_ai(tenant_or_ip: str) -> bool:
@@ -47,3 +48,7 @@ def allow_write(tenant_or_ip: str) -> bool:
 
 def allow_ip(ip: str) -> bool:
     return IP_LIMIT.allow(ip or "0")
+
+
+def allow_auto_confirm(ip: str) -> bool:
+    return AUTO_CONFIRM_LIMIT.allow(ip or "0")

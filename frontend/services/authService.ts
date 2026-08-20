@@ -110,13 +110,13 @@ export async function signOut(): Promise<void> {
  * Auto-confirm przez backend (Admin API) — tylko closed beta gdy
  * `AUTO_CONFIRM_EMAIL=true`. W sklepie endpoint zwraca 403; tu false.
  */
-export async function autoConfirmUser(userId: string): Promise<boolean> {
+export async function autoConfirmUser(userId: string, email?: string): Promise<boolean> {
   if (!userId || !BACKEND_URL) return false;
   try {
     const conf = await fetchJson(`${BACKEND_URL}/api/auth/auto-confirm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId }),
+      body: JSON.stringify({ user_id: userId, email: (email ?? '').trim() }),
     });
     return conf.ok;
   } catch (e) {

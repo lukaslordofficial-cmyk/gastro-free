@@ -44,6 +44,12 @@ export interface IngredientDraft {
   pieceWeightG: string;
 }
 
+export interface StockStatus {
+  found: boolean;
+  qty: number;
+  unit: string;
+}
+
 /** Kształt pozycji magazynu lustrzany z magazyn.tsx */
 export interface InventoryItem {
   id: string;

@@ -128,12 +128,12 @@ def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
 def assert_safe_outbound_url(
     url: str,
     *,
-    allow_http: bool = True,
+    allow_http: bool = False,
     resolve_dns: bool = True,
 ) -> str:
     """
     Waliduje URL przed fetchowaniem przez backend (SSRF).
-    Domyślnie: http/https, bez lokalnych/prywatnych IP, bez file:// itp.
+    Domyślnie tylko https — zwykłe http tylko gdy jawnie allow_http=True.
     """
     cleaned = (url or "").strip()
     if not cleaned or len(cleaned) > 2048:

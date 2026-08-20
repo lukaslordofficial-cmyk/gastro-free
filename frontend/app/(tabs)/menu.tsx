@@ -11,7 +11,6 @@ import {
   Platform,
   Switch,
   RefreshControl,
-  Pressable,
   DeviceEventEmitter,
   ActivityIndicator,
   InteractionManager,
@@ -49,6 +48,7 @@ import { MenuScanModal } from '@/components/MenuScanModal';
 import { BatchPrepModal, type BatchPrepDish } from '@/components/BatchPrepModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { DishCard } from '@/components/menu/DishCard';
+import { IngredientRow } from '@/components/menu/IngredientRow';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import {
   PremiumCapsule,
@@ -62,7 +62,6 @@ import {
   INV_CATEGORY_COLORS,
   INV_PRESET_CATEGORIES,
   INV_UNIT_OPTIONS,
-  UNIT_OPTIONS,
 } from '@/constants/menuUi';
 import {
   makePosId,
@@ -70,7 +69,6 @@ import {
   mapInvDbRow,
   newDraftIngredient,
   normIngredientName,
-  PIECE_WEIGHT_HINT,
 } from '@/lib/menuScreenHelpers';
 import type {
   Dish,
@@ -79,6 +77,7 @@ import type {
   KitchenUtensil,
   MenuListRow,
   RecipeIngredient,
+  StockStatus,
   Unit,
 } from '@/types/menu';
 import { DS } from '@/constants/premiumTheme';
@@ -105,290 +104,6 @@ const RecipesModal = lazy(() =>
 
 
 const MENU_LIST_CACHE = new Map<string, Dish[]>();
-
-// ─── IngredientStockBadge ─────────────────────────────────────────────────
-
-interface StockStatus {
-  found: boolean;
-  qty: number;
-  unit: string;
-}
-
-function IngredientStockBadge({ status }: { status: StockStatus | null }) {
-  const [showTip, setShowTip] = useState(false);
-  if (!status) return <View style={ingStyles.statusPlaceholder} />;
-
-  const label = status.found
-    ? `Na stanie: ${status.qty % 1 === 0 ? status.qty.toFixed(0) : status.qty.toFixed(2)} ${status.unit}`
-    : 'Brak produktu w magazynie';
-
-  return (
-    <View style={ingStyles.statusWrap}>
-      <Pressable
-        onPress={() => setShowTip((s) => !s)}
-        onHoverIn={() => setShowTip(true)}
-        onHoverOut={() => setShowTip(false)}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        style={[ingStyles.statusIcon, status.found ? ingStyles.statusOk : ingStyles.statusBad]}
-        testID={`ingredient-status-${status.found ? 'ok' : 'missing'}`}
-      >
-        {status.found ? (
-          <Check size={13} color={Colors.white} strokeWidth={3} />
-        ) : (
-          <X size={13} color={Colors.white} strokeWidth={3} />
-        )}
-      </Pressable>
-      {showTip && (
-        <View style={ingStyles.tooltip} testID="ingredient-status-tooltip">
-          <Text style={ingStyles.tooltipText}>{label}</Text>
-        </View>
-      )}
-    </View>
-  );
-}
-
-// ─── IngredientRow ────────────────────────────────────────────────────────
-
-function IngredientRow({
-  draft,
-  index,
-  suggestions,
-  stock,
-  onChange,
-  onRemove,
-  onSelectSuggestion,
-}: {
-  draft: IngredientDraft;
-  index: number;
-  suggestions: string[];
-  stock: StockStatus | null;
-  onChange: (key: string, field: keyof IngredientDraft, value: string) => void;
-  onRemove: (key: string) => void;
-  onSelectSuggestion: (key: string, name: string) => void;
-}) {
-  const theme = useAppTheme();
-  const prem = theme.isPremium;
-  const showSuggestions = draft.name.length >= 2 && suggestions.length > 0;
-  const inputPrem = prem
-    ? {
-        backgroundColor: DS.color.bgTertiary,
-        borderColor: DS.color.borderSubtle,
-        color: DS.color.heading,
-      }
-    : null;
-  const unitActive = prem
-    ? { backgroundColor: DS.color.greenEnd, borderColor: DS.color.greenEnd }
-    : null;
-
-  return (
-    <View style={ingStyles.outerWrap}>
-      <View style={[ingStyles.wrap, prem && { backgroundColor: DS.color.surfaceCard, borderColor: DS.color.borderSubtle }]}>
-        <View style={[ingStyles.indexWrap, prem && { backgroundColor: 'rgba(0,255,120,0.14)' }]}>
-          <Text style={[ingStyles.index, prem && { color: DS.color.greenEnd }]}>{index + 1}</Text>
-        </View>
-        <View style={ingStyles.fields}>
-          <View>
-            <View style={ingStyles.nameRow}>
-              <TextInput
-                style={[ingStyles.input, ingStyles.nameInput, inputPrem]}
-                placeholder="Nazwa składnika"
-                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-                value={draft.name}
-                onChangeText={(v) => onChange(draft.key, 'name', v)}
-                returnKeyType="next"
-                autoCorrect={false}
-              />
-              <IngredientStockBadge status={stock} />
-            </View>
-            {showSuggestions && (
-              <View style={[ingStyles.suggestionsBox, prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle }]}>
-                {suggestions.slice(0, 5).map((s) => (
-                  <TouchableOpacity
-                    key={s}
-                    style={ingStyles.suggestionRow}
-                    onPress={() => onSelectSuggestion(draft.key, s)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[ingStyles.suggestionText, prem && { color: DS.color.heading }]}>{s}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-          </View>
-          <View style={ingStyles.qtyRow}>
-            <TextInput
-              style={[ingStyles.input, ingStyles.qtyInput, inputPrem]}
-              placeholder="Ilość"
-              placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-              value={draft.quantity}
-              onChangeText={(v) => onChange(draft.key, 'quantity', v)}
-              keyboardType="decimal-pad"
-            />
-            <View style={ingStyles.unitWrap}>
-              {UNIT_OPTIONS.map((u) => {
-                const active = draft.unit === u;
-                return (
-                  <TouchableOpacity
-                    key={u}
-                    style={[
-                      ingStyles.unitBtn,
-                      prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                      active && (unitActive ?? ingStyles.unitBtnActive),
-                    ]}
-                    onPress={() => onChange(draft.key, 'unit', u)}
-                    activeOpacity={0.7}
-                  >
-                    <Text
-                      style={[
-                        ingStyles.unitText,
-                        prem && !active && { color: DS.color.muted },
-                        active && ingStyles.unitTextActive,
-                        active && prem && { color: '#0A0A0A' },
-                      ]}
-                    >
-                      {u}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <TouchableOpacity style={ingStyles.removeBtn} onPress={() => onRemove(draft.key)} activeOpacity={0.7}>
-              <Trash2 size={14} color={Colors.danger} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-          {(draft.unit === 'szt' || draft.unit === 'sztuka') && (
-            <View
-              style={[
-                ingStyles.pieceWeightBox,
-                prem && {
-                  backgroundColor: 'rgba(0,255,120,0.06)',
-                  borderColor: DS.color.borderSubtle,
-                },
-              ]}
-            >
-              <Text style={[ingStyles.pieceWeightLabel, prem && { color: DS.color.muted }]}>
-                Wzorcowa waga 1 sztuki (g)
-              </Text>
-              <TextInput
-                style={[ingStyles.input, ingStyles.pieceWeightInput, inputPrem]}
-                placeholder="opcjonalnie, np. 180"
-                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-                value={draft.pieceWeightG ?? ''}
-                onChangeText={(v) => onChange(draft.key, 'pieceWeightG', v)}
-                keyboardType="decimal-pad"
-              />
-              <Text style={[ingStyles.pieceWeightHint, prem && { color: DS.color.muted }]}>
-                {PIECE_WEIGHT_HINT}
-              </Text>
-            </View>
-          )}
-        </View>
-      </View>
-    </View>
-  );
-}
-
-const ingStyles = StyleSheet.create({
-  outerWrap: { marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: Colors.borderLight },
-  wrap: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  indexWrap: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: Colors.accentLight,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 12,
-  },
-  index: { fontSize: 10, fontWeight: '700', color: Colors.accent },
-  fields: { flex: 1, gap: 6 },
-  nameInput: { flex: 1 },
-  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  statusPlaceholder: { width: 26, height: 26 },
-  statusWrap: { position: 'relative' },
-  statusIcon: {
-    width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center',
-  },
-  statusOk: { backgroundColor: Colors.success },
-  statusBad: { backgroundColor: Colors.danger },
-  tooltip: {
-    position: 'absolute', top: 32, right: 0, backgroundColor: Colors.textPrimary,
-    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, minWidth: 150, zIndex: 50,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 6, elevation: 6,
-  },
-  tooltipText: { fontSize: 12, color: Colors.white, fontWeight: '600' },
-  qtyRow: { flexDirection: 'row', gap: 6, alignItems: 'center' },
-  qtyInput: { width: 72 },
-  pieceWeightBox: {
-    marginTop: 4,
-    padding: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    backgroundColor: Colors.background,
-    gap: 6,
-  },
-  pieceWeightLabel: { fontSize: 11, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.2 },
-  pieceWeightInput: { width: 100 },
-  pieceWeightHint: { fontSize: 10, color: Colors.textTertiary, lineHeight: 14 },
-  input: {
-    backgroundColor: Colors.background,
-    borderWidth: 1.5,
-    borderColor: Colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    fontSize: 13,
-    color: Colors.textPrimary,
-  },
-  unitWrap: { flex: 1, flexDirection: 'row', gap: 4, flexWrap: 'wrap' },
-  unitBtn: {
-    paddingHorizontal: 9,
-    paddingVertical: 7,
-    borderRadius: 7,
-    borderWidth: 1.5,
-    borderColor: Colors.border,
-    backgroundColor: Colors.card,
-  },
-  unitBtnActive: { backgroundColor: Colors.accent, borderColor: Colors.accent },
-  unitText: { fontSize: 11, fontWeight: '600', color: Colors.textSecondary },
-  unitTextActive: { color: Colors.white },
-  removeBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    backgroundColor: Colors.dangerLight,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: '#FECACA',
-  },
-  suggestionsBox: {
-    backgroundColor: Colors.card,
-    borderWidth: 1.5,
-    borderColor: Colors.border,
-    borderRadius: 8,
-    marginTop: 3,
-    overflow: 'hidden',
-    shadowColor: Colors.shadow,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  suggestionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.borderLight,
-    gap: 6,
-  },
-  suggestionText: { flex: 1, fontSize: 13, color: Colors.textPrimary, fontWeight: '500' },
-  suggestionHint: { fontSize: 11, color: Colors.success, fontWeight: '600' },
-});
 
 // ─── Blank forms ──────────────────────────────────────────────────────────────
 

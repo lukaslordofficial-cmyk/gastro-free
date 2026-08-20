@@ -35,7 +35,9 @@ def test_outbound_blocks_localhost():
         assert_safe_outbound_url("file:///etc/passwd", resolve_dns=False)
 
 
-def test_outbound_allows_https_public(monkeypatch):
+def test_outbound_blocks_plain_http_public():
+    with pytest.raises(HTTPException):
+        assert_safe_outbound_url("http://example.com/cennik", resolve_dns=False)
     # Skip DNS in unit test — host is public-looking.
     url = assert_safe_outbound_url("https://example.com/cennik", resolve_dns=False)
     assert url.startswith("https://example.com")

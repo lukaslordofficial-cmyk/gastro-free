@@ -1,8 +1,10 @@
 """Wydzielony router health — liveness + bramka AUTO_CONFIRM_EMAIL."""
+from datetime import datetime, timezone, timedelta
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from health_routes import router
+from health_routes import auto_confirm_denied_reason, router
 
 
 def _app() -> FastAPI:
@@ -36,9 +38,33 @@ def test_auto_confirm_disabled_by_default(monkeypatch):
     monkeypatch.delenv("AUTO_CONFIRM_EMAIL", raising=False)
     r = TestClient(_app()).post(
         "/api/auth/auto-confirm",
-        json={"user_id": "aaaaaaaa"},
+        json={"user_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "email": "a@b.co"},
     )
     assert r.status_code == 403
+
+
+def test_auto_confirm_requires_email(monkeypatch):
+    monkeypatch.setenv("AUTO_CONFIRM_EMAIL", "true")
+    r = TestClient(_app()).post(
+        "/api/auth/auto-confirm",
+        json={"user_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+    )
+    assert r.status_code == 422
+
+
+def test_auto_confirm_denied_reason_mismatch_and_age():
+    now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    user = {
+        "email": "cook@example.com",
+        "created_at": "2026-08-20T11:55:00+00:00",
+    }
+    assert auto_confirm_denied_reason(user, "cook@example.com", now=now) is None
+    assert auto_confirm_denied_reason(user, "other@example.com", now=now) == "email"
+    old = {
+        "email": "cook@example.com",
+        "created_at": (now - timedelta(hours=2)).isoformat(),
+    }
+    assert auto_confirm_denied_reason(old, "cook@example.com", now=now) == "too_old"
 
 
 def test_health_deep_without_supabase(monkeypatch):

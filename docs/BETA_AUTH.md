@@ -25,7 +25,7 @@ Bez pkt 4–5 nowi użytkownicy mogą widzieć wspólne dane albo nie móc nic z
 **Authentication → Providers → Email → Confirm email = OFF**
 
 To wymagane na closed beta. Sesja powstaje od razu po `signUp`.  
-Zapas (tylko closed beta): backend `POST /api/auth/auto-confirm` wymaga **`AUTO_CONFIRM_EMAIL=true`** na Railway (domyślnie wyłączone).
+Zapas (tylko closed beta): backend `POST /api/auth/auto-confirm` wymaga **`AUTO_CONFIRM_EMAIL=true`** na Railway (domyślnie wyłączone). Body: `{ "user_id", "email" }` — email musi należeć do konta utworzonego w ostatnich 15 minutach.
 
 Po zakończeniu bety możesz włączyć Confirm email z powrotem i poprawić szablony PL: Authentication → Email Templates → Confirm signup.
 
@@ -33,7 +33,7 @@ Po zakończeniu bety możesz włączyć Confirm email z powrotem i poprawić sza
 
 - Nagłówek `X-Account-Key` + opcjonalnie `Authorization: Bearer <jwt>`.
 - FastAPI dokleja `account_key` do zapytań tenantowych (service_role omija RLS).
-- Endpoint: `POST /api/auth/auto-confirm` body `{ "user_id": "<uuid>" }` — tylko gdy `AUTO_CONFIRM_EMAIL=true`.
+- Endpoint: `POST /api/auth/auto-confirm` body `{ "user_id": "<uuid>", "email": "<ten sam e-mail>" }` — tylko gdy `AUTO_CONFIRM_EMAIL=true`. Konto musi być młodsze niż 15 min.
 
 ## Po deployu
 

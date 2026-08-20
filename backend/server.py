@@ -18,7 +18,6 @@ import io
 import json
 import logging
 import os
-import ssl
 import uuid
 from contextvars import ContextVar
 from datetime import datetime
@@ -28,7 +27,7 @@ from typing import Any, Optional, Literal, Tuple
 import re
 import unicodedata
 
-import certifi
+from http_ssl import httpx_verify as _httpx_verify
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
@@ -47,7 +46,7 @@ from token_billing import (
 )
 from cron_auth import require_cron_secret
 from pos_webhook_auth import build_pos_webhook_path, require_pos_webhook_tenant
-from tenant_auth import jwt_cache_get, jwt_cache_put, prefer_jwt_account_key
+from tenant_auth import jwt_cache_get, jwt_cache_invalidate, jwt_cache_put, prefer_jwt_account_key
 from request_guards import is_ai_path, is_mutate_method, is_public_mutate
 from rate_limit import allow_ai, allow_ip, allow_write
 from furgonetka_shop import router as furgonetka_shop_router
@@ -211,7 +210,8 @@ async def account_key_middleware(request: Request, call_next):
         if auth.lower().startswith("bearer ") and auth[7:].strip() != SUPABASE_KEY:
             user_jwt = auth[7:].strip()
             if user_jwt:
-                jwt_key = jwt_cache_get(user_jwt)
+                # Zapis/AI: zawsze live lookup (revoke nie czeka na TTL cache).
+                jwt_key = None if is_mutate_method(request.method) else jwt_cache_get(user_jwt)
                 if not jwt_key:
                     try:
                         apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
@@ -228,6 +228,8 @@ async def account_key_middleware(request: Request, call_next):
                                     "apikey": apikey,
                                 },
                             )
+                            if uresp.status_code in (401, 403):
+                                jwt_cache_invalidate(user_jwt)
                             if uresp.status_code == 200:
                                 uid = (uresp.json() or {}).get("id")
                                 if uid:
@@ -287,16 +289,6 @@ async def account_key_middleware(request: Request, call_next):
 
 _openai_client: AsyncOpenAI | None = None
 _jwt_http: httpx.AsyncClient | None = None
-
-
-def _httpx_verify():
-    """SSL verify for httpx — Windows needs system cert store, not certifi bundle."""
-    mode = os.environ.get("OPENAI_SSL_VERIFY", "auto").strip().lower()
-    if mode in ("0", "false", "no"):
-        return False
-    if mode in ("certifi", "bundle"):
-        return certifi.where()
-    return ssl.create_default_context()
 
 
 @app.on_event("startup")

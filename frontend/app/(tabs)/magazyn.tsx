@@ -37,7 +37,6 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
-import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import * as inventoryService from '@/services/inventoryService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';

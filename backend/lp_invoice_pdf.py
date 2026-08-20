@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -589,7 +590,13 @@ async def fetch_stored_invoice_bytes(
             logger.info("stored invoice sign failed: %s", e)
             return None
     try:
+        from fastapi import HTTPException
+        from url_safety import assert_supabase_fetch_url
+
+        url = assert_supabase_fetch_url(url, os.environ.get("SUPABASE_URL") or "")
         r = await client.get(url)
+    except HTTPException:
+        return None
     except Exception as e:
         logger.info("stored invoice fetch failed: %s", e)
         return None

@@ -11,9 +11,18 @@ from urllib.parse import quote
 
 import httpx
 
+from url_safety import assert_supabase_fetch_url, assert_supabase_origin
+
 logger = logging.getLogger("lp.invoice")
 
 DEFAULT_DOCS_BUCKET = "producer-documents"
+
+
+def _safe_storage_path(path: str) -> str:
+    raw = (path or "").strip().lstrip("/")
+    if not raw or ".." in raw or "\\" in raw:
+        raise RuntimeError("Nieprawidłowa ścieżka Storage")
+    return raw
 
 
 def parse_invoice_storage_ref(ref: Optional[str]) -> Optional[dict[str, str]]:
@@ -39,12 +48,12 @@ async def create_storage_signed_url(
     client: Optional[httpx.AsyncClient] = None,
     verify: Any = True,
 ) -> str:
-    base = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+    base = assert_supabase_origin(os.getenv("SUPABASE_URL") or "")
     key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
-    if not base or not key:
-        raise RuntimeError("Brak SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
+    if not key:
+        raise RuntimeError("Brak SUPABASE_SERVICE_ROLE_KEY")
+    path = _safe_storage_path(path)
 
-    # Storage sign API: POST /storage/v1/object/sign/{bucket}/{path}
     attempts = [
         "/".join(quote(seg, safe="") for seg in path.split("/")),
         "/".join(quote(seg, safe="/") for seg in path.split("/")),
@@ -74,7 +83,7 @@ async def create_storage_signed_url(
                 continue
             signed = str(signed)
             if signed.startswith("http"):
-                return signed
+                return assert_supabase_fetch_url(signed, base)
             if not signed.startswith("/"):
                 signed = "/" + signed
             if signed.startswith("/storage/v1"):
@@ -96,11 +105,11 @@ async def upload_private_bytes(
     verify: Any = True,
 ) -> str:
     """PUT pliku do prywatnego bucketa. Zwraca ``bucket:path``."""
-    base = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+    base = assert_supabase_origin(os.getenv("SUPABASE_URL") or "")
     key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
-    if not base or not key:
-        raise RuntimeError("Brak SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
-    enc_path = "/".join(quote(seg, safe="") for seg in path.strip("/").split("/"))
+    if not key:
+        raise RuntimeError("Brak SUPABASE_SERVICE_ROLE_KEY")
+    enc_path = "/".join(quote(seg, safe="") for seg in _safe_storage_path(path).split("/"))
     url = f"{base}/storage/v1/object/{quote(bucket, safe='')}/{enc_path}"
     own = client is None
     http = client or httpx.AsyncClient(timeout=60.0, verify=verify)
@@ -116,7 +125,6 @@ async def upload_private_bytes(
             content=content,
         )
         if r.status_code >= 400:
-            # Niektóre instancje Storage wolą PUT
             r = await http.put(
                 url,
                 headers={
@@ -159,7 +167,13 @@ async def resolve_order_invoice_url(
     if not parsed:
         return None
     if parsed.get("kind") == "http":
-        return parsed["url"]
+        try:
+            return assert_supabase_fetch_url(
+                parsed["url"], os.getenv("SUPABASE_URL") or ""
+            )
+        except Exception:
+            logger.info("odrzut invoice http URL spoza Storage")
+            return None
     return await create_storage_signed_url(
         bucket=parsed["bucket"],
         path=parsed["path"],

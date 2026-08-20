@@ -10,7 +10,11 @@ if str(ROOT) not in sys.path:
 
 from billing_stripe import _form_encode  # noqa: E402
 from local_producers_commerce import _pln_to_grosze  # noqa: E402
-from stripe_connect import _capability_status  # noqa: E402
+from stripe_connect import (  # noqa: E402
+    _capability_status,
+    connect_refresh_token,
+    verify_connect_refresh_token,
+)
 
 
 def test_form_encode_capabilities_nested():
@@ -92,3 +96,12 @@ def test_pln_to_grosze_rounding():
     assert _pln_to_grosze(10.01) == 1001
     assert _pln_to_grosze(0) == 0
     assert _pln_to_grosze(None) == 0
+
+
+def test_connect_refresh_token_hmac(monkeypatch):
+    monkeypatch.setenv("INTERNAL_API_SECRET", "unit-test-secret")
+    tok = connect_refresh_token("prod_abc")
+    assert len(tok) == 40
+    assert verify_connect_refresh_token("prod_abc", tok)
+    assert not verify_connect_refresh_token("prod_abc", "deadbeef" * 5)
+    assert not verify_connect_refresh_token("other", tok)

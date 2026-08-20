@@ -70,14 +70,16 @@ def test_sandbox_fallback_token(monkeypatch):
     assert r.json() == {"orders": []}
 
 
-def test_sandbox_token_works_even_if_env_differs(monkeypatch):
+def test_sandbox_token_rejected_in_production(monkeypatch):
+    monkeypatch.setenv("FURGONETKA_PRODUCTION", "1")
     monkeypatch.setenv("FURGONETKA_SHOP_TOKEN", "other-production-token")
     client = TestClient(_app())
-    r = client.get(
-        "/api/furgonetka/orders",
+    r = client.put(
+        "/orders/abc-1",
         headers={"Authorization": f"Bearer {SANDBOX_SHOP_TOKEN}"},
+        json={"tracking_number": "1"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 401
 
 
 def test_put_order_tracking_stub(monkeypatch):

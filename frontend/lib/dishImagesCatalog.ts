@@ -1,5 +1,7 @@
 /**
- * Katalog grafik dań (zupy / burgery) — plansze 5×5, lokalne WebP.
+ * Katalog grafik dań dla Inspiracji / receptur (eager require WebP).
+ * Miniatury zakładki Menu idą przez `lib/dishAssets` (lazy per folder) — nie importuj
+ * tego pliku z Menu, bo wciąga setki WebP do bundla startowego.
  */
 /** Rodzina menu do category-aware matching (1000+ assets). */
 export type DishMenuFamily =

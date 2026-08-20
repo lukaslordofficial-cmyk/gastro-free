@@ -107,8 +107,8 @@ export async function signOut(): Promise<void> {
 }
 
 /**
- * Auto-confirm przez backend (Admin API) — używane gdy Supabase ma jeszcze
- * włączone „Confirm email" na closed becie. Zwraca true, gdy potwierdzono.
+ * Auto-confirm przez backend (Admin API) — tylko closed beta gdy
+ * `AUTO_CONFIRM_EMAIL=true`. W sklepie endpoint zwraca 403; tu false.
  */
 export async function autoConfirmUser(userId: string): Promise<boolean> {
   if (!userId || !BACKEND_URL) return false;

@@ -38,6 +38,8 @@ Zalecane / billing:
 - `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_TIER1/2`, `STRIPE_PRICE_TOPUP_*`
 - `PUBLIC_APP_URL`, `BILLING_SUCCESS_URL`, `BILLING_CANCEL_URL`
 - `ALLOW_MOCK_BILLING=false`
+- `AUTO_CONFIRM_EMAIL=false` (store). Closed beta: `true` tylko gdy Confirm email w Supabase jest ON.
+- `CRON_JOB_SECRET` — wymagany; joby `expiry-daily-job` / `core-alerts-job` / `migration-status` bez nagłówka `X-Cron-Secret` zwracają 401/503
 - `ACCOUNT_KEY=default` (fallback gdy brak nagłówka `X-Account-Key` — apka z logowaniem wysyła klucz z `profiles`)
 - `RESEND_API_KEY`, `RESEND_FROM_EMAIL` (maile zamówień)
 
@@ -56,6 +58,8 @@ CORS: aplikacja ma `allow_origins=["*"]` — OK na closed beta.
 - [ ] `STRIPE_PRICE_TIER1` / `STRIPE_PRICE_TIER2` / `STRIPE_PRICE_TOPUP_*` (jeśli używane)
 - [ ] `PUBLIC_APP_URL` / `BILLING_SUCCESS_URL` / `BILLING_CANCEL_URL`
 - [ ] `ALLOW_MOCK_BILLING=false`
+- [ ] `AUTO_CONFIRM_EMAIL=false`
+- [ ] `CRON_JOB_SECRET`
 - [ ] `ACCOUNT_KEY=default` (tylko fallback)
 - [ ] `RESEND_API_KEY` / `RESEND_FROM_EMAIL` (opcjonalnie)
 - [ ] `PORT` — Railway ustawia samo; Dockerfile czyta `${PORT}`

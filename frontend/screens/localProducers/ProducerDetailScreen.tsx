@@ -202,7 +202,7 @@ export function ProducerDetailScreen() {
         if (!pay.ok) {
           premiumAlert(
             'Zamówienie zapisane',
-            `${pay.message}\n\nID: ${order.id.slice(0, 8)}…\nSprawdź STRIPE_SECRET_KEY na Railway albo spróbuj ponownie.`,
+            `${pay.message}\n\nPłatność chwilowo niedostępna. Spróbuj ponownie za chwilę albo skontaktuj się z supportem.`,
             [{ text: 'OK', style: 'primary' }],
           );
           return;

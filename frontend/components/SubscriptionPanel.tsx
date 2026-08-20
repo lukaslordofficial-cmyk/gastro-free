@@ -1,7 +1,7 @@
 /**
  * SubscriptionPanel — plany, kredyty, top-up. Styl premium dark gdy isPremiumUi.
  */
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, ScrollView, RefreshControl,
 } from 'react-native';
@@ -13,6 +13,7 @@ import { formatTrialDaysLeft, trialDaysRemaining } from '@/lib/subscriptionClien
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { DS } from '@/constants/premiumTheme';
+import { fetchBillingStatus } from '@/lib/billingClient';
 
 export function SubscriptionPanel() {
   const theme = useAppTheme();
@@ -21,6 +22,11 @@ export function SubscriptionPanel() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [mockBilling, setMockBilling] = useState(false);
+
+  useEffect(() => {
+    void fetchBillingStatus().then((s) => setMockBilling(s.mock_billing));
+  }, []);
 
   const run = useCallback(async (key: string, fn: () => Promise<{ message?: string | null }>) => {
     setBusy(key);
@@ -50,7 +56,7 @@ export function SubscriptionPanel() {
           <Info size={22} color={theme.accent} strokeWidth={2} />
           <Text style={styles.migrateTitle}>System subskrypcji nieaktywny</Text>
           <Text style={styles.migrateText}>
-            {data?.message ?? 'Uruchom ADD_SUBSCRIPTIONS.sql i FIX_SUBSCRIPTIONS_RLS.sql w Supabase SQL Editor.'}
+            {data?.message ?? 'Subskrypcje są chwilowo niedostępne. Odśwież albo skontaktuj się z supportem.'}
           </Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => refresh()} testID="subscription-retry">
             <RefreshCw size={15} color={theme.isPremium ? '#0A0A0A' : Colors.white} strokeWidth={2.4} />
@@ -189,10 +195,15 @@ export function SubscriptionPanel() {
           </TouchableOpacity>
         ))}
       </View>
-      <Text style={styles.mockNote}>
-        Płatności przez Stripe Checkout (test). Po zapłacie wróć tu i kliknij „Potwierdź płatność”
-        albo przeciągnij listę w dół, by odświeżyć portfel.
-      </Text>
+      {mockBilling ? (
+        <Text style={styles.mockNote}>
+          Tryb testowy Stripe. Po zapłacie wróć tu i odśwież portfel albo potwierdź sesję poniżej.
+        </Text>
+      ) : (
+        <Text style={styles.mockNote}>
+          Po zapłacie w Stripe portfel odświeży się automatycznie. Jeśli saldo się nie zmieni — przeciągnij listę w dół.
+        </Text>
+      )}
 
       <TouchableOpacity
         style={styles.portalBtn}
@@ -205,7 +216,7 @@ export function SubscriptionPanel() {
       >
         {busy === 'confirm'
           ? <ActivityIndicator size="small" color={theme.accent} />
-          : <Text style={styles.portalText}>Potwierdź płatność Stripe</Text>}
+          : <Text style={styles.portalText}>Odśwież status płatności</Text>}
       </TouchableOpacity>
 
       {activePaid && (

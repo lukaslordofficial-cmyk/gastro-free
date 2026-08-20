@@ -34,7 +34,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: false,
     panelHint: 'Ustawienia → Webhook / Integracje → URL + zdarzenie sprzedaży',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W swoim POS wklej go jako endpoint zdarzenia „zamknięcie rachunku / sale”.',
       'Upewnij się, że body to JSON z tablicą items (pos_external_id, quantity_sold).',
       'W sekcji Mapowanie receptur wpisz te same kody produktów co w POS (SKU / ID).',
@@ -54,7 +54,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: true,
     panelHint: 'Panel GoPOS → Integracje → Webhooki / API',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W panelu GoPOS wejdź w Integracje → Webhooki.',
       'Dodaj URL i wybierz zdarzenie sprzedaży / zamknięcia rachunku.',
       'Jeśli GoPOS poda token — wklej go w „Klucz API” poniżej.',
@@ -75,7 +75,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: true,
     panelHint: 'POSbistro Admin → Ustawienia → Integracje',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W adminie POSbistro: Ustawienia → Integracje / Webhook.',
       'Wklej URL i włącz powiadomienia o sprzedaży.',
       'Zmapuj kody PLU/SKU dań w sekcji Mapowanie receptur.',
@@ -95,7 +95,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: true,
     panelHint: 'Cloud → Nastavení → Webhooky / API',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W chmurze Dotykačka dodaj webhook na zdarzenie order/sale.',
       'Wklej URL i (opcjonalnie) zapisz klucz API.',
       'Kody produktów w mapowaniu = ID / SKU z katalogu Dotykačka.',
@@ -117,7 +117,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: false,
     panelHint: 'Panel SoftPOS → Integracje zewnętrzne',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W panelu SoftPOS dodaj endpoint HTTP na event sprzedaży.',
       'Zmapuj kody towarów 1:1 w Mapowaniu receptur.',
     ],
@@ -136,7 +136,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: true,
     panelHint: 'iPOS Backoffice → Integracje',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W backoffice iPOS wklej URL webhooka sprzedaży.',
       'Wpisz kody pozycji menu zgodnie z iPOS.',
     ],
@@ -155,7 +155,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: true,
     panelHint: 'Poster → Ustawienia → API / Webhooks',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W Poster dodaj webhook na closed transaction.',
       'Zmapuj product_id / sku w Mapowaniu receptur.',
     ],
@@ -175,7 +175,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: true,
     panelHint: 'Restimo → Integracje → Webhook',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W Restimo ustaw webhook na zamówienia zakończone.',
       'Kody pozycji = zewnętrzne ID dań z Restimo / menu.',
     ],
@@ -194,7 +194,7 @@ export const POS_PROVIDERS: PosProvider[] = [
     needsApiKey: false,
     panelHint: 'Panel → Eksport / Webhook sprzedaży',
     steps: [
-      'Skopiuj swój link webhook.',
+      'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'Skonfiguruj wysyłkę JSON po zamknięciu rachunku.',
       'Zmapuj kody PLU w aplikacji.',
     ],
@@ -211,8 +211,16 @@ export function getPosProvider(id: string | null | undefined): PosProvider {
   return POS_PROVIDERS.find((p) => p.id === id) ?? POS_PROVIDERS[0];
 }
 
-export function buildPosWebhookUrl(baseUrl: string, providerId: PosProviderId): string {
+export function buildPosWebhookUrl(
+  baseUrl: string,
+  providerId: PosProviderId,
+  opts?: { account?: string; token?: string },
+): string {
   const base = baseUrl.replace(/\/$/, '');
-  if (!providerId || providerId === 'generic') return `${base}/api/pos/webhook`;
-  return `${base}/api/pos/webhook?provider=${encodeURIComponent(providerId)}`;
+  const params = new URLSearchParams();
+  if (opts?.account) params.set('account', opts.account);
+  if (opts?.token) params.set('token', opts.token);
+  if (providerId && providerId !== 'generic') params.set('provider', providerId);
+  const qs = params.toString();
+  return qs ? `${base}/api/pos/webhook?${qs}` : `${base}/api/pos/webhook`;
 }

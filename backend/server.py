@@ -33,7 +33,6 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from openai import AsyncOpenAI, APIError, OpenAIError
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz, process as rf_process
@@ -45,6 +44,9 @@ from token_billing import (
     merge_billing_events,
     tokens_from_usage,
 )
+from cron_auth import require_cron_secret
+from pos_webhook_auth import build_pos_webhook_path, require_pos_webhook_tenant
+from tenant_auth import prefer_jwt_account_key
 from furgonetka_shop import router as furgonetka_shop_router
 from url_safety import (
     assert_safe_redirect_url,
@@ -165,9 +167,17 @@ if not _SUPABASE_CONFIGURED:
         "nie są ustawione — ustaw Variables w Railway, inaczej API DB nie zadziała."
     )
 
+def _cors_allow_origins() -> list[str]:
+    raw = (os.environ.get("CORS_ALLOW_ORIGINS") or "*").strip()
+    if not raw or raw == "*":
+        return ["*"]
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["*"]
+
+
 app = FastAPI(title="Gastro Manager — Voice API")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+    CORSMiddleware, allow_origins=_cors_allow_origins(), allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(furgonetka_shop_router)
@@ -184,20 +194,18 @@ async def account_key_middleware(request: Request, call_next):
         or path.rstrip("/") == "/orders"
         or path.startswith("/orders/")
         or path.startswith("/api/furgonetka")
+        or path.split("?")[0].rstrip("/") == "/api/pos/webhook"
     )
     raw = (request.headers.get("x-account-key") or "").strip()
-    # Allow only safe slug chars (ak_<uuid> / default / custom deploy slugs)
-    if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw):
-        key = raw
-    else:
-        key = _ACCOUNT_KEY_DEFAULT
+    header_key = raw if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw) else ""
 
-    # Jeśli klient wysłał „default” (race przed AuthProvider) — spróbuj odzyskać z JWT.
-    if not skip_jwt and (key == "default" or not raw):
+    jwt_key: Optional[str] = None
+    # Jeśli klient wysłał JWT — tenant z profilu wygrywa z X-Account-Key (anti-spoof).
+    if not skip_jwt and SUPABASE_URL:
         auth = (request.headers.get("authorization") or "").strip()
-        if auth.lower().startswith("bearer ") and SUPABASE_URL:
+        if auth.lower().startswith("bearer ") and auth[7:].strip() != SUPABASE_KEY:
             user_jwt = auth[7:].strip()
-            if user_jwt and user_jwt != SUPABASE_KEY:
+            if user_jwt:
                 try:
                     apikey = _SUPABASE_ANON_KEY or SUPABASE_KEY
                     async with httpx.AsyncClient(timeout=8.0, verify=_httpx_verify()) as httpx_c:
@@ -223,11 +231,13 @@ async def account_key_middleware(request: Request, call_next):
                                 if pref.status_code == 200:
                                     rows = pref.json() or []
                                     if rows and rows[0].get("account_key"):
-                                        key = str(rows[0]["account_key"]).strip() or key
-                                if key == "default":
-                                    key = f"ak_{str(uid).replace('-', '')}"
+                                        jwt_key = str(rows[0]["account_key"]).strip() or None
+                                if not jwt_key:
+                                    jwt_key = f"ak_{str(uid).replace('-', '')}"
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("account_key JWT resolve skipped: %s", exc)
+
+    key = prefer_jwt_account_key(header_key, jwt_key, _ACCOUNT_KEY_DEFAULT)
 
     token = _account_key_ctx.set(key)
     try:
@@ -615,19 +625,6 @@ async def root():
     return {"service": "gastro-voice", "status": "ok"}
 
 
-@app.get("/api/download/gastro-manager-updated.zip")
-async def download_updated_zip():
-    """Serves the packaged updated codebase for the user to review locally."""
-    path = Path(__file__).parent / "static" / "gastro-manager-updated.zip"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Paczka nie została jeszcze zbudowana.")
-    return FileResponse(
-        path=str(path),
-        media_type="application/zip",
-        filename="gastro-manager-updated.zip",
-    )
-
-
 @app.get("/")
 @app.get("/health")
 @app.get("/api/health")
@@ -638,9 +635,6 @@ async def health():
         "service": "gastro-voice",
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
         "openai_configured": bool(OPENAI_API_KEY),
-        "account_key_default": _ACCOUNT_KEY_DEFAULT,
-        "stt_model": STT_MODEL,
-        "chat_model": CHAT_MODEL,
     }
 
 
@@ -651,12 +645,12 @@ class AutoConfirmBody(BaseModel):
 @app.post("/api/auth/auto-confirm")
 async def auth_auto_confirm(body: AutoConfirmBody):
     """
-    Closed beta: potwierdza e-mail użytkownika przez Admin API (bez maila).
-    Wyłącz: AUTO_CONFIRM_EMAIL=false na Railway.
-    Docelowo wyłącz też „Confirm email” w Supabase → Authentication → Providers → Email.
+    Closed beta only: potwierdza e-mail przez Admin API (bez maila).
+    Domyślnie WYŁĄCZONE. Włącz: AUTO_CONFIRM_EMAIL=true na Railway.
+    Produkcja: Confirm email w Supabase + ten flag = false.
     """
-    flag = (os.environ.get("AUTO_CONFIRM_EMAIL") or "true").strip().lower()
-    if flag in ("0", "false", "no", "off"):
+    flag = (os.environ.get("AUTO_CONFIRM_EMAIL") or "false").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail="AUTO_CONFIRM_EMAIL jest wyłączone.")
     _require_supabase()
     uid = (body.user_id or "").strip()
@@ -2789,6 +2783,7 @@ async def _apply_supplier_product(client, p, transcript, source):
 
 @app.post("/api/actions/apply", response_model=ApplyResponse)
 async def actions_apply(req: ApplyRequest):
+    require_tenant_account_key()
     dispatch = {
         "waste": _apply_waste,
         "add_revenue": _apply_revenue,
@@ -2869,6 +2864,7 @@ class ApplyWasteRequestLegacy(BaseModel):
 
 @app.post("/api/waste/apply")
 async def apply_waste_legacy(req: ApplyWasteRequestLegacy):
+    require_tenant_account_key()
     payload = {
         "item_type": req.item_type,
         "related_id": req.related_id,
@@ -5870,8 +5866,9 @@ async def scan_expiration(
 
 
 @app.get("/api/inventory/expiry-daily-job")
-async def expiry_daily_job():
+async def expiry_daily_job(request: Request):
     """Scheduler: odśwież statusy; alert gdy days_left ∈ alert_triggers (domyślnie 7/3/1)."""
+    require_cron_secret(request)
     from datetime import date as _date, timedelta
 
     today = _date.today()
@@ -6014,8 +6011,9 @@ async def expiry_daily_job():
 
 
 @app.get("/api/manager/core-alerts-job")
-async def manager_core_alerts_job(push: bool = True):
+async def manager_core_alerts_job(request: Request, push: bool = True):
     """Cron: policz alerty CORE i opcjonalnie wyślij push (severity critical/warn)."""
+    require_cron_secret(request)
     res = await _run_manager_core_alerts(period_type="week", limit_days=7)
     alerts = [a for a in (res.get("alerts") or []) if a.get("severity") in ("critical", "warn")]
     pushed = 0
@@ -7281,13 +7279,27 @@ async def pos_providers_list():
     return {"providers": PROVIDERS}
 
 
+@app.get("/api/pos/webhook-config")
+async def pos_webhook_config(request: Request, provider: Optional[str] = None):
+    """Zwraca URL webhooka z tokenem HMAC dla zalogowanego tenanta."""
+    key = require_tenant_account_key()
+    base = (os.getenv("BACKEND_PUBLIC_URL") or "").strip().rstrip("/")
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    url = build_pos_webhook_path(key, provider, base)
+    return {"ok": True, "url": url, "account_key": key}
+
+
 @app.post("/api/pos/webhook")
 async def pos_webhook(request: Request, provider: Optional[str] = None):
     """Odbiera uderzenie POS (kanoniczny JSON lub format konkretnego providera).
 
     Query: ?provider=gopos|posbistro|dotykacka|… — normalizacja w pos_adapters.
     Dla każdej pozycji: pos_products → recipes → inventory → revenue.
+    Wymaga tokenu HMAC w URL (account + token z Ustawień) albo nagłówka.
     """
+    pos_account = require_pos_webhook_tenant(request)
+    _account_key_ctx.set(pos_account)
     try:
         body = await request.json()
     except Exception:
@@ -12490,9 +12502,10 @@ async def voice_dispatch(req: VoiceDispatchRequest):
 
 
 @app.get("/api/admin/migration-status")
-async def admin_migration_status():
+async def admin_migration_status(request: Request):
     """Sprawdza czy migracja `ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql` została uruchomiona.
     Zwraca listę brakujących kolumn/tabel i pełny SQL do wklejenia w Supabase SQL Editor."""
+    require_cron_secret(request)
     async with httpx.AsyncClient(timeout=15.0, verify=_httpx_verify()) as client:
         checks = {}
         try:
@@ -15421,7 +15434,7 @@ async def billing_webhook(request: Request):
 
 @app.get("/api/billing/status")
 async def billing_status():
-    from billing_stripe import stripe_configured, DEFAULT_PRICES
+    from billing_stripe import stripe_configured
     return {
         "ok": True,
         "stripe_configured": stripe_configured(),
@@ -15430,7 +15443,6 @@ async def billing_status():
         ),
         "confirm_session_available": True,
         "mock_billing": os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() in ("1", "true", "yes"),
-        "prices": DEFAULT_PRICES,
     }
 
 

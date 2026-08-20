@@ -59,7 +59,17 @@ def _ssl_verify():
 
 
 def _env_price(name: str, fallback: str) -> str:
-    return (os.getenv(name) or "").strip() or fallback
+    val = (os.getenv(name) or "").strip()
+    if val:
+        return val
+    allow = (os.getenv("ALLOW_STRIPE_TEST_PRICE_FALLBACK") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if allow:
+        return fallback
+    raise RuntimeError(
+        f"Brak {name} — ustaw Price ID Stripe (testowe fallbacki tylko z ALLOW_STRIPE_TEST_PRICE_FALLBACK=true)."
+    )
 
 
 def resolve_price_id(*, tier_level: Optional[int] = None, package: Optional[str] = None) -> str:

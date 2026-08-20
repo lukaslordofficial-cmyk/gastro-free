@@ -112,7 +112,7 @@ export function CreditsUsageHistoryModal({ visible, onClose }: Props) {
             <View style={[styles.migrationBox, { backgroundColor: card, borderColor: border }]} testID="usage-history-migration">
               <Text style={[styles.migrationTitle, { color: text }]}>Brak tabeli historii</Text>
               <Text style={[styles.migrationText, { color: muted }]}>
-                Uruchom migrację ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql w Supabase SQL Editor.
+                Historia zużycia będzie dostępna po aktualizacji serwera. Odśwież za chwilę albo skontaktuj się z supportem.
               </Text>
             </View>
           )}

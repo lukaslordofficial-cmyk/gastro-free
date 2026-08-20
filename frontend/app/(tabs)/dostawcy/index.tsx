@@ -2506,10 +2506,10 @@ export default function DostawcyScreen() {
       };
       const { partials } = await suppliersService.saveSupplier({ payload, editingId, ak });
       if (partials.includes('lead')) {
-        Alert.alert('Częściowy zapis', 'Zapisano bez lead time. Uruchom ADD_SUPPLIER_LEAD_TIME.sql w Supabase.');
+        Alert.alert('Częściowy zapis', 'Zapisano bez czasu realizacji. Spróbuj ponownie później albo skontaktuj się z supportem.');
       }
       if (partials.includes('shipping')) {
-        Alert.alert('Częściowy zapis', 'Zapisano dane podstawowe. Uruchom ADD_SUPPLIER_SHIPPING.sql w Supabase, aby włączyć koszty dostawy.');
+        Alert.alert('Częściowy zapis', 'Zapisano dane podstawowe. Koszty dostawy będą dostępne po aktualizacji serwera.');
       }
       setShowAddModal(false);
       resetForm();

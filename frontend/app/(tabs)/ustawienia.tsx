@@ -45,6 +45,7 @@ import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import { useAuth } from '@/contexts/AuthContext';
 import { router } from 'expo-router';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -208,7 +209,7 @@ function WebhookUrlRow({ url }: { url: string }) {
         </TouchableOpacity>
       </View>
       <Text style={[whStyles.hint, { color: theme.textMuted }]}>
-        Ten adres wklej w polu "Webhook URL" lub "Endpoint" w panelu swojego systemu POS.
+        Ten adres wklej w polu „Webhook URL” w panelu POS (cały link, łącznie z tokenem).
         Kody produktów w Mapowaniu receptur muszą być takie same jak w POS.
       </Text>
     </View>
@@ -308,6 +309,7 @@ export default function UstawieniaScreen() {
   const [posSaving, setPosSaving] = useState(false);
   const [hasSaved, setHasSaved] = useState(false);
   const [posProvider, setPosProvider] = useState<PosProviderId>('generic');
+  const [signedWebhookUrl, setSignedWebhookUrl] = useState<string | null>(null);
 
   const [menuItems, setMenuItems] = useState<MenuItemForMapping[]>([]);
   const [inventoryItems, setInventoryItems] = useState<InventoryItemForRecipe[]>([]);
@@ -336,10 +338,31 @@ export default function UstawieniaScreen() {
     ]);
   };
 
-  const webhookUrl = buildPosWebhookUrl(
+  const fallbackWebhookUrl = buildPosWebhookUrl(
     BACKEND_URL || 'http://127.0.0.1:8001',
-    posProvider
+    posProvider,
   );
+  const webhookUrl = signedWebhookUrl || fallbackWebhookUrl;
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const headers = await apiJsonHeaders();
+        const q = posProvider && posProvider !== 'generic' ? `?provider=${encodeURIComponent(posProvider)}` : '';
+        const res = await fetch(`${BACKEND_URL}/api/pos/webhook-config${q}`, { headers });
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok && typeof data.url === 'string' && data.url) {
+          setSignedWebhookUrl(data.url);
+        }
+      } catch {
+        if (!cancelled) setSignedWebhookUrl(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [posProvider, accountKey]);
 
   useEffect(() => {
     AsyncStorage.getItem(POS_PROVIDER_KEY).then((v) => {

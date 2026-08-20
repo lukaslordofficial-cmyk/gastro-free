@@ -240,7 +240,7 @@ export async function fetchSubscriptionState(): Promise<SubscriptionState> {
       features: FEATURE_CATALOG.map((f) => ({ ...f, locked: true, locked_reason: 'Brak migracji' })),
       topup_packages: TOPUP_PACKAGES,
       plans: TIER_PLANS,
-      message: 'Uruchom ADD_SUBSCRIPTIONS.sql i FIX_SUBSCRIPTIONS_RLS.sql w Supabase SQL Editor.',
+      message: 'Subskrypcje są chwilowo niedostępne. Odśwież albo skontaktuj się z supportem.',
     };
   }
 }

@@ -49,6 +49,7 @@ import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { DishCard } from '@/components/menu/DishCard';
 import { IngredientRow } from '@/components/menu/IngredientRow';
 import { menuScreenStyles as styles } from '@/components/menu/menuScreenStyles';
+import { BLANK_DISH_FORM, BLANK_INV_FORM } from '@/constants/menuFormDefaults';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import {
   PremiumCapsule,
@@ -104,20 +105,6 @@ const RecipesModal = lazy(() =>
 
 
 const MENU_LIST_CACHE = new Map<string, Dish[]>();
-
-// ─── Blank forms ──────────────────────────────────────────────────────────────
-
-const BLANK_DISH_FORM = { name: '', category: FORM_CATEGORIES[0], price: '' };
-
-const BLANK_INV_FORM = {
-  name: '',
-  category: INV_PRESET_CATEGORIES[0],
-  currentQty: '',
-  criticalThreshold: '',
-  unit: 'g' as Unit,
-  isCombo: false,
-  portionSize: '',
-};
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 

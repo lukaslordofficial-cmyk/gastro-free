@@ -22,6 +22,8 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ### 2026-08-20 — Kęs: market-ready security + IngredientRow (`chore/split-monoliths`)
 
+- Menu screen styles → `menuScreenStyles.ts`; blank forms → `menuFormDefaults.ts`.
+- `secureId`: nie wywala Menu gdy brak Web Crypto (fallback tylko dla kluczy UI).
 - Auto-confirm: wymaga `email` zgodnego z kontem + konto młodsze niż 15 min; błędy Admin API nie wyciekają do klienta; osobny rate-limit IP.
 - JWT cache 25s; zapisy zawsze robią live lookup; 401/403 invaliduje cache.
 - `X-Account-Key` bez JWT jest ignorowany (spoof odczytów) — wyjątek: Bearer service_role.

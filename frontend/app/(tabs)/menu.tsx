@@ -107,8 +107,6 @@ interface Dish {
 type DishThumbAssignment = {
   source?: number | { uri: string };
   slug?: string;
-  matchTier?: 'exact' | 'tags' | 'category';
-  placeholderLabel?: string;
 };
 
 const MENU_LIST_CACHE = new Map<string, Dish[]>();
@@ -265,8 +263,6 @@ const DishCard = React.memo(function DishCard({
   useEffect(() => {
     setImgFailed(false);
   }, [dish.id, customUri, liveThumb?.slug, typeof liveSource === 'number' ? liveSource : (liveSource as any)?.uri]);
-  const showPlaceholderBadge =
-    !customUri && !!liveThumb && (liveThumb.matchTier === 'category' || liveThumb.matchTier === 'tags') && !!liveThumb.placeholderLabel;
 
   const toggle = () => {
     const toValue = expanded ? 0 : 1;
@@ -301,13 +297,6 @@ const DishCard = React.memo(function DishCard({
               />
             ) : (
               <View style={dishStyles.premThumbPh} />
-            )}
-            {showPlaceholderBadge && (
-              <View style={dishStyles.thumbBadge}>
-                <Text style={dishStyles.thumbBadgeText} numberOfLines={1} allowFontScaling={false}>
-                  {liveThumb.placeholderLabel}
-                </Text>
-              </View>
             )}
           </TouchableOpacity>
           <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
@@ -507,24 +496,6 @@ const dishStyles = StyleSheet.create({
   },
   premThumbWrap: {
     width: 68,
-    position: 'relative',
-  },
-  thumbBadge: {
-    marginTop: 4,
-    alignSelf: 'stretch',
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    borderRadius: 4,
-    backgroundColor: 'rgba(0,0,0,0.72)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
-  },
-  thumbBadgeText: {
-    color: 'rgba(255,255,255,0.88)',
-    fontSize: 8,
-    fontWeight: '600',
-    letterSpacing: 0.2,
-    textAlign: 'center',
   },
   premName: {
     color: DS.color.heading,

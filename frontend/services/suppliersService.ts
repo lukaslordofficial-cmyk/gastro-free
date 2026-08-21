@@ -15,10 +15,11 @@ type RecipeIngredientRow = Database['public']['Tables']['recipe_ingredients']['R
 const ICON_COLORS = ['#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2', '#475569'];
 const randomIconColor = () => ICON_COLORS[secureRandomIndex(ICON_COLORS.length)];
 
-const EXTRA = 'min_order_value, shipping_cost, free_shipping_threshold, lead_time_days';
+const EXTRA = 'min_order_value, shipping_cost, free_shipping_threshold, lead_time_days, address, bank_account';
 const CAT = 'supplier_catalog(id, name, variant, volume_label, unit_count, price_pln, liters_total, sort_order';
 const SEL_VISIBLE = `id, name, nip, category, contact_person, phone, email, notes, icon_color, ${EXTRA}, ${CAT}, is_visible)`;
 const SEL_BASE = `id, name, nip, category, contact_person, phone, email, notes, icon_color, ${EXTRA}, ${CAT})`;
+const SEL_NO_PAY = `id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, shipping_cost, free_shipping_threshold, lead_time_days, ${CAT}, is_visible)`;
 const SEL_NO_LEAD = `id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, shipping_cost, free_shipping_threshold, ${CAT})`;
 const SEL_LEGACY = `id, name, nip, category, contact_person, phone, email, notes, icon_color, min_order_value, ${CAT})`;
 
@@ -47,7 +48,22 @@ export async function fetchSuppliersData(ak: string): Promise<SuppliersData> {
   let data: unknown = suppliersRes.data;
   if (suppliersRes.error) {
     const msg = suppliersRes.error.message ?? '';
-    if (/lead_time_days/.test(msg)) {
+    if (/bank_account|address/.test(msg)) {
+      const retry = await supabase.from('suppliers').select(SEL_NO_PAY).eq('account_key', ak).order('name');
+      if (retry.error) {
+        // spadamy do dotychczasowych fallbacków poniżej
+        const msg2 = retry.error.message ?? '';
+        if (/lead_time_days/.test(msg2)) {
+          const r2 = await supabase.from('suppliers').select(SEL_NO_LEAD).eq('account_key', ak).order('name');
+          if (r2.error) throw r2.error;
+          data = r2.data;
+        } else if (/is_visible/.test(msg2)) {
+          const r2 = await supabase.from('suppliers').select(SEL_BASE.replace(', address, bank_account', '')).eq('account_key', ak).order('name');
+          if (r2.error) throw r2.error;
+          data = r2.data;
+        } else throw retry.error;
+      } else data = retry.data;
+    } else if (/lead_time_days/.test(msg)) {
       const retry = await supabase.from('suppliers').select(SEL_NO_LEAD).eq('account_key', ak).order('name');
       if (retry.error) {
         if (/shipping_cost|free_shipping_threshold/.test(retry.error.message ?? '')) {
@@ -131,6 +147,12 @@ export async function saveSupplier(input: {
         ).error;
 
   let err = await run(payload);
+  if (err && /bank_account|address/.test(err.message ?? '')) {
+    const noPay = { ...payload };
+    delete noPay.bank_account;
+    delete noPay.address;
+    err = await run(noPay);
+  }
   if (err && /lead_time_days/.test(err.message ?? '')) {
     const noLead = { ...payload }; delete noLead.lead_time_days;
     err = await run(noLead);
@@ -138,6 +160,7 @@ export async function saveSupplier(input: {
   }
   if (err && /shipping_cost|free_shipping_threshold/.test(err.message ?? '')) {
     const legacy = { ...payload }; delete legacy.shipping_cost; delete legacy.free_shipping_threshold; delete legacy.lead_time_days;
+    delete legacy.bank_account; delete legacy.address;
     err = await run(legacy);
     if (!err) partials.push('shipping');
   }

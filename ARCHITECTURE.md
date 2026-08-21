@@ -132,6 +132,9 @@ Zachowanie 1:1, tylko przeniesienie kodu:
 - Menu: helpery składników (suggest/stock/patch) → `frontend/lib/menuScreenHelpers.ts`.
 - `pos_sales_log` w `_TENANT_TABLES` + migracja `ADD_POS_SALES_LOG_TENANT.sql`.
 - CORS prod: brak / `*` wymaga `CORS_ALLOW_STAR=1` (fail-closed przy starcie API).
+- Łowca: ręczna płatność przelewem (`ManualBankPaymentSheet`) pod wygenerowanym
+  zamówieniem hurtowym — kopiowanie danych + kafelki banków PL (bez bramek).
+  Kolumny `suppliers.address` / `bank_account` → `ADD_SUPPLIER_MANUAL_PAYMENT.sql`.
 
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)
 

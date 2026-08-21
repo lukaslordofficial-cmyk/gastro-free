@@ -146,6 +146,8 @@ export type Supplier = {
   free_shipping_threshold?: number | null;
   lead_time_days?: number | null;
   is_visible?: boolean | null;
+  address?: string | null;
+  bank_account?: string | null;
   created_at: string;
 }
 

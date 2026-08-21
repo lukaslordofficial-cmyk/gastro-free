@@ -101,6 +101,8 @@ interface Supplier {
   shipping_cost: number;
   free_shipping_threshold: number;
   lead_time_days: number | null;
+  address: string;
+  bank_account: string;
   catalog: CatalogProduct[];
 }
 
@@ -147,6 +149,8 @@ function mapDbRow(row: any, menuIngredientNames: string[] = []): Supplier {
       row.lead_time_days != null && row.lead_time_days !== ''
         ? Number(row.lead_time_days)
         : null,
+    address: row.address ?? '',
+    bank_account: row.bank_account ?? '',
     catalog: (row.supplier_catalog ?? [])
       .sort((a: any, b: any) => a.sort_order - b.sort_order)
       .map((c: any): CatalogProduct => {
@@ -2333,6 +2337,8 @@ export default function DostawcyScreen() {
   const [formEmail, setFormEmail] = useState('');
   const [formCategory, setFormCategory] = useState(CATEGORY_OPTIONS[0]);
   const [formNotes, setFormNotes] = useState('');
+  const [formAddress, setFormAddress] = useState('');
+  const [formBankAccount, setFormBankAccount] = useState('');
   const [formMinOrder, setFormMinOrder] = useState('');
   const [formMinOrderOn, setFormMinOrderOn] = useState(false);
   const [formShipping, setFormShipping] = useState('');
@@ -2449,6 +2455,7 @@ export default function DostawcyScreen() {
     setFormShipping(''); setFormFreeShipOn(false); setFormFreeShipFrom('');
     setFormLeadTime('');
     setFormCategory(CATEGORY_OPTIONS[0]); setFormNotes('');
+    setFormAddress(''); setFormBankAccount('');
   };
 
   const openAddSupplier = () => { resetForm(); setShowAddModal(true); };
@@ -2470,6 +2477,8 @@ export default function DostawcyScreen() {
     setFormLeadTime(
       s.lead_time_days != null && s.lead_time_days > 0 ? String(s.lead_time_days) : '',
     );
+    setFormAddress(s.address ?? '');
+    setFormBankAccount(s.bank_account ?? '');
     setShowAddModal(true);
   };
 
@@ -2497,6 +2506,8 @@ export default function DostawcyScreen() {
         email: formEmail.trim() || null,
         category: formCategory,
         notes: formNotes.trim() || null,
+        address: formAddress.trim() || null,
+        bank_account: formBankAccount.trim() || null,
         min_order_value: formMinOrderOn && isFinite(minVal) && minVal > 0 ? minVal : 0,
         shipping_cost: isFinite(shipVal) && shipVal > 0 ? shipVal : 0,
         free_shipping_threshold:
@@ -2841,6 +2852,27 @@ export default function DostawcyScreen() {
 
               <Text style={[mainStyles.fieldLabel, premLabel]}>Adres e-mail zamówień</Text>
               <TextInput style={[mainStyles.input, premInput]} value={formEmail} onChangeText={setFormEmail} placeholder="zamowienia@dostawca.pl" placeholderTextColor={premPh} keyboardType="email-address" autoCapitalize="none" testID="supplier-email-input" />
+
+              <Text style={[mainStyles.fieldLabel, premLabel]}>Adres dostawcy</Text>
+              <TextInput
+                style={[mainStyles.input, premInput]}
+                value={formAddress}
+                onChangeText={setFormAddress}
+                placeholder="ul. Przykładowa 1, 00-001 Warszawa"
+                placeholderTextColor={premPh}
+                testID="supplier-address-input"
+              />
+
+              <Text style={[mainStyles.fieldLabel, premLabel]}>Numer konta bankowego</Text>
+              <TextInput
+                style={[mainStyles.input, premInput]}
+                value={formBankAccount}
+                onChangeText={setFormBankAccount}
+                placeholder="PL00 0000 0000 0000 0000 0000 0000"
+                placeholderTextColor={premPh}
+                autoCapitalize="characters"
+                testID="supplier-bank-account-input"
+              />
 
               <View style={[mainStyles.toggleBlock, premTile]}>
                 <View style={mainStyles.toggleRow}>

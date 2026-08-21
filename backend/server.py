@@ -7696,12 +7696,12 @@ async def get_restaurant_profile(client: httpx.AsyncClient) -> dict:
             for k in _PROFILE_KEYS:
                 if not (db.get(k) or "").strip() and (disk.get(k) or "").strip():
                     db[k] = disk[k]
-            return db
+            return await _enrich_restaurant_from_auth_profiles(client, db)
         if any(disk.values()):
-            return disk
-        return _empty_restaurant_profile()
+            return await _enrich_restaurant_from_auth_profiles(client, disk)
+        return await _enrich_restaurant_from_auth_profiles(client, _empty_restaurant_profile())
     except httpx.HTTPError:
-        return _read_profile_disk()
+        return await _enrich_restaurant_from_auth_profiles(client, _read_profile_disk())
 
 
 async def set_restaurant_profile(client: httpx.AsyncClient, updates: dict) -> dict:
@@ -7742,8 +7742,10 @@ async def set_restaurant_profile(client: httpx.AsyncClient, updates: dict) -> di
                 )
             else:
                 await sb_post(client, "restaurant_profile", payload_min)
+        await _sync_restaurant_to_auth_profiles(client, merged)
         return merged
     except httpx.HTTPError:
+        await _sync_restaurant_to_auth_profiles(client, merged)
         return merged
 
 
@@ -7764,6 +7766,96 @@ async def _account_login_email(client: httpx.AsyncClient) -> str:
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def _delivery_from_shipping_row(row: dict) -> str:
+    """Złóż adres z pól shipping_* albo użyj shipping_street jako pełnej linii."""
+    street = str(row.get("shipping_street") or "").strip()
+    building = str(row.get("shipping_building") or "").strip()
+    city = str(row.get("shipping_city") or "").strip()
+    post = str(row.get("shipping_post_code") or "").strip()
+    if city or post or building:
+        line1 = " ".join(x for x in (street, building) if x).strip()
+        line2 = " ".join(x for x in (post, city) if x).strip()
+        return ", ".join(x for x in (line1, line2) if x)
+    return street
+
+
+async def _auth_profiles_row(client: httpx.AsyncClient) -> dict:
+    try:
+        rows = await sb_get(
+            client,
+            "profiles",
+            params={
+                "select": (
+                    "email,restaurant_name,shipping_phone,shipping_street,"
+                    "shipping_building,shipping_city,shipping_post_code,"
+                    "shipping_nip,shipping_regon"
+                ),
+                "account_key": f"eq.{get_account_key()}",
+                "limit": "1",
+            },
+        ) or []
+        if rows and isinstance(rows[0], dict):
+            return rows[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+async def _enrich_restaurant_from_auth_profiles(
+    client: httpx.AsyncClient, profile: dict
+) -> dict:
+    """Uzupełnij company_name / adres z profiles (trwałe, nawet bez migracji billing)."""
+    out = dict(profile)
+    row = await _auth_profiles_row(client)
+    if not row:
+        return out
+    if not (out.get("company_name") or "").strip():
+        out["company_name"] = str(row.get("restaurant_name") or "").strip()
+    if not (out.get("delivery_address") or "").strip():
+        out["delivery_address"] = _delivery_from_shipping_row(row)
+    if not (out.get("contact_phone") or "").strip():
+        out["contact_phone"] = str(row.get("shipping_phone") or "").strip()
+    if not (out.get("nip") or "").strip():
+        out["nip"] = str(row.get("shipping_nip") or "").strip()
+    if not (out.get("regon") or "").strip():
+        out["regon"] = str(row.get("shipping_regon") or "").strip()
+    if not (out.get("contact_email") or "").strip():
+        out["contact_email"] = str(row.get("email") or "").strip()
+    return out
+
+
+async def _sync_restaurant_to_auth_profiles(client: httpx.AsyncClient, merged: dict) -> None:
+    """Zapisz nazwę/adres też w profiles — źródło prawdy widoczne w app i LP."""
+    patch: dict = {}
+    company = (merged.get("company_name") or "").strip()
+    delivery = (merged.get("delivery_address") or "").strip()
+    phone = (merged.get("contact_phone") or "").strip()
+    nip = (merged.get("nip") or "").strip()
+    regon = (merged.get("regon") or "").strip()
+    if company:
+        patch["restaurant_name"] = company
+    if delivery:
+        # Pełna linia adresu — get składa z powrotem delivery_address
+        patch["shipping_street"] = delivery
+    if phone:
+        patch["shipping_phone"] = phone
+    if nip:
+        patch["shipping_nip"] = nip
+    if regon:
+        patch["shipping_regon"] = regon
+    if not patch:
+        return
+    try:
+        await sb_patch(
+            client,
+            "profiles",
+            {"account_key": f"eq.{get_account_key()}"},
+            patch,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sync restaurant → profiles failed: %s", exc)
 
 
 def _order_footer(profile: dict, *, fallback_email: str = "") -> str:

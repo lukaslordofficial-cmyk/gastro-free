@@ -4,6 +4,7 @@
  */
 
 import { apiJsonHeaders } from '@/lib/apiHeaders';
+import { fetchRestaurantProfile } from '@/services/restaurantProfileService';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
@@ -65,13 +66,22 @@ export async function fetchOrderEmailTemplate(opts: {
   if (!BACKEND_URL) {
     throw new Error('Brak EXPO_PUBLIC_BACKEND_URL — nie można wygenerować szablonu.');
   }
+  let restaurantName = (opts.restaurantName || '').trim();
+  if (!restaurantName || restaurantName.toLowerCase() === 'nasza restauracja') {
+    try {
+      const p = await fetchRestaurantProfile();
+      restaurantName = (p.company_name || '').trim() || restaurantName;
+    } catch {
+      /* backend i tak dociągnie z profilu */
+    }
+  }
   const subtotal = opts.items.reduce((s, i) => s + (Number(i.line_total) || 0), 0);
   const notes = isInternalOrderNote(opts.notes) ? undefined : opts.notes?.trim() || undefined;
   const res = await fetch(`${BACKEND_URL}/api/orders/generate-messages`, {
     method: 'POST',
     headers: await apiJsonHeaders(),
     body: JSON.stringify({
-      restaurant_name: opts.restaurantName ?? 'Nasza restauracja',
+      restaurant_name: restaurantName || undefined,
       notes,
       suppliers: [
         {

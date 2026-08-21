@@ -1850,7 +1850,10 @@ export function DealHunterModal({
       const res = await fetch(`${BACKEND_URL}/api/orders/generate-messages`, {
         method: 'POST',
         headers: await apiJsonHeaders(),
-        body: JSON.stringify({ restaurant_name: restaurantName ?? 'Nasza restauracja', suppliers }),
+        body: JSON.stringify({
+          restaurant_name: restaurantName || undefined,
+          suppliers,
+        }),
       });
       if (!res.ok) throw new Error(`Błąd serwera (${res.status})`);
       const data = await res.json();

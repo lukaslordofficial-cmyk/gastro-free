@@ -15,5 +15,5 @@ export function buildManualOrderTitle(opts: {
   const name = (opts.restaurantName || '').trim() || '—';
   const addr = (opts.deliveryAddress || '').trim() || '—';
   const dateStr = formatPlManualPayDate(opts.date ?? new Date());
-  return `Zamówienie dla restauracji ${name} na adres ${addr} ${dateStr}`;
+  return `Zamówienie dla restauracji ${name}, na adres ${addr}. ${dateStr}`;
 }

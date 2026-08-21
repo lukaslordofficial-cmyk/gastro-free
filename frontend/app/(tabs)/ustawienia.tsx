@@ -20,7 +20,6 @@ import {
   Info,
   Key,
   LogOut,
-  Building2,
 } from 'lucide-react-native';
 import {
   fetchActiveMenuPosList,
@@ -38,7 +37,7 @@ import { PosProviderPicker } from '@/components/PosProviderPicker';
 import { PosInstructionBanner } from '@/components/settings/PosInstructionBanner';
 import { WebhookUrlRow } from '@/components/settings/WebhookUrlRow';
 import { RestaurantBillingForm } from '@/components/settings/RestaurantBillingForm';
-import { SettingsSubSection } from '@/components/settings/SettingsSubSection';
+import { SettingsTopTabs, type SettingsPaneId } from '@/components/settings/SettingsTopTabs';
 import { settingsScreenStyles as styles } from '@/components/settings/settingsScreenStyles';
 import { groupMenuItemsByCategory } from '@/lib/settingsMenuGroups';
 import {
@@ -86,8 +85,7 @@ export default function UstawieniaScreen() {
   const { alert: premiumAlert } = usePremiumAlert();
   const { user, profile, accountKey, signOut } = useAuth();
   const [signingOut, setSigningOut] = useState(false);
-  const [daneLokaluOpen, setDaneLokaluOpen] = useState(true);
-  const [posOpen, setPosOpen] = useState(false);
+  const [settingsPane, setSettingsPane] = useState<SettingsPaneId>('lokal');
 
   const handleSignOut = () => {
     Alert.alert('Wylogowanie', 'Na pewno chcesz się wylogować?', [
@@ -245,6 +243,8 @@ export default function UstawieniaScreen() {
           </View>
         ) : null}
 
+        <SettingsTopTabs value={settingsPane} onChange={setSettingsPane} />
+
         {/* ── Konto ── */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -306,112 +306,104 @@ export default function UstawieniaScreen() {
           </View>
         </View>
 
-        <SettingsSubSection
-          title="Dane lokalu"
-          icon={Building2}
-          open={daneLokaluOpen}
-          onToggle={() => setDaneLokaluOpen((v) => !v)}
-          testID="settings-dane-lokalu"
-        >
-          <RestaurantBillingForm />
-        </SettingsSubSection>
+        {settingsPane === 'lokal' ? (
+          <View style={styles.section}>
+            <RestaurantBillingForm />
+          </View>
+        ) : null}
 
-        <SettingsSubSection
-          title="Integracja POS"
-          icon={Webhook}
-          open={posOpen}
-          onToggle={() => setPosOpen((v) => !v)}
-          testID="settings-integracja-pos"
-        >
-          <PosInstructionBanner providerId={posProvider} />
+        {settingsPane === 'pos' ? (
+          <>
+            <PosInstructionBanner providerId={posProvider} />
 
-          <View
-            style={[
-              styles.card,
-              theme.isPremium && {
-                backgroundColor: theme.card,
-                borderColor: theme.border,
-              },
-            ]}
-          >
-            <PosProviderPicker value={posProvider} onChange={handleProviderChange} />
+            <View
+              style={[
+                styles.card,
+                theme.isPremium && {
+                  backgroundColor: theme.card,
+                  borderColor: theme.border,
+                },
+              ]}
+            >
+              <PosProviderPicker value={posProvider} onChange={handleProviderChange} />
 
-            <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
+              <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
 
-            <WebhookUrlRow url={webhookUrl} />
+              <WebhookUrlRow url={webhookUrl} />
 
-            <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
+              <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
 
-            <View style={styles.fieldRow}>
-              <View style={styles.fieldLabelRow}>
-                <Key size={12} color={theme.textSecondary} strokeWidth={2} />
-                <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>Klucz API</Text>
+              <View style={styles.fieldRow}>
+                <View style={styles.fieldLabelRow}>
+                  <Key size={12} color={theme.textSecondary} strokeWidth={2} />
+                  <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>Klucz API</Text>
+                </View>
+                <TextInput
+                  style={[
+                    styles.input,
+                    theme.isPremium && {
+                      backgroundColor: theme.segmentBg,
+                      borderColor: theme.border,
+                      color: theme.text,
+                    },
+                  ]}
+                  value={posSettings.api_key}
+                  onChangeText={(v) => setPosSettings((p) => ({ ...p, api_key: v }))}
+                  placeholder="Wklej tutaj token z panelu POS..."
+                  placeholderTextColor={theme.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry
+                />
+                <Text style={[styles.fieldHint, { color: theme.textMuted }]}>
+                  {getPosProvider(posProvider).needsApiKey
+                    ? 'Ten POS zwykle wymaga tokenu — wklej klucz z panelu, potem włącz integrację.'
+                    : '(Opcjonalnie) Wklej klucz tokenu wygenerowany w panelu Twojego POS, jeśli system wymaga dwustronnej autoryzacji.'}
+                </Text>
               </View>
-              <TextInput
+
+              <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
+
+              <View style={styles.fieldRowSwitch}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>Aktywna integracja</Text>
+                  {!hasSaved && (
+                    <Text style={[styles.switchHint, { color: theme.textMuted }]}>
+                      Zapisz ustawienia, aby włączyć
+                    </Text>
+                  )}
+                </View>
+                <Switch
+                  value={posSettings.is_connected}
+                  onValueChange={(v) => setPosSettings((p) => ({ ...p, is_connected: v }))}
+                  trackColor={{ true: theme.accent, false: theme.isPremium ? theme.border : '#CBD5E1' }}
+                  disabled={!hasSaved}
+                />
+              </View>
+
+              <TouchableOpacity
                 style={[
-                  styles.input,
-                  theme.isPremium && {
-                    backgroundColor: theme.segmentBg,
-                    borderColor: theme.border,
-                    color: theme.text,
-                  },
+                  styles.saveBtn,
+                  theme.isPremium && { backgroundColor: theme.accent },
+                  posSaving && styles.saveBtnDisabled,
                 ]}
-                value={posSettings.api_key}
-                onChangeText={(v) => setPosSettings((p) => ({ ...p, api_key: v }))}
-                placeholder="Wklej tutaj token z panelu POS..."
-                placeholderTextColor={theme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry
-              />
-              <Text style={[styles.fieldHint, { color: theme.textMuted }]}>
-                {getPosProvider(posProvider).needsApiKey
-                  ? 'Ten POS zwykle wymaga tokenu — wklej klucz z panelu, potem włącz integrację.'
-                  : '(Opcjonalnie) Wklej klucz tokenu wygenerowany w panelu Twojego POS, jeśli system wymaga dwustronnej autoryzacji.'}
-              </Text>
-            </View>
-
-            <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
-
-            <View style={styles.fieldRowSwitch}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>Aktywna integracja</Text>
-                {!hasSaved && (
-                  <Text style={[styles.switchHint, { color: theme.textMuted }]}>
-                    Zapisz ustawienia, aby włączyć
+                onPress={handleSavePosSettings}
+                disabled={posSaving}
+                activeOpacity={0.8}
+              >
+                {posSaving ? (
+                  <ActivityIndicator size="small" color={theme.isPremium ? '#0A0A0A' : '#fff'} />
+                ) : (
+                  <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
+                    Zapisz ustawienia POS
                   </Text>
                 )}
-              </View>
-              <Switch
-                value={posSettings.is_connected}
-                onValueChange={(v) => setPosSettings((p) => ({ ...p, is_connected: v }))}
-                trackColor={{ true: theme.accent, false: theme.isPremium ? theme.border : '#CBD5E1' }}
-                disabled={!hasSaved}
-              />
+              </TouchableOpacity>
             </View>
+          </>
+        ) : null}
 
-            <TouchableOpacity
-              style={[
-                styles.saveBtn,
-                theme.isPremium && { backgroundColor: theme.accent },
-                posSaving && styles.saveBtnDisabled,
-              ]}
-              onPress={handleSavePosSettings}
-              disabled={posSaving}
-              activeOpacity={0.8}
-            >
-              {posSaving ? (
-                <ActivityIndicator size="small" color={theme.isPremium ? '#0A0A0A' : '#fff'} />
-              ) : (
-                <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
-                  Zapisz ustawienia POS
-                </Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </SettingsSubSection>
-
-        {/* ── Recipe Mapping ── */}
+        {settingsPane === 'mapowanie' ? (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <MapIcon size={16} color={theme.textSecondary} />
@@ -492,6 +484,7 @@ export default function UstawieniaScreen() {
             ))
           )}
         </View>
+        ) : null}
       </ScrollView>
   );
 

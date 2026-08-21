@@ -1987,7 +1987,6 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
       supplierId: d.supplier_id,
       supplierName: d.supplier_name,
       supplierEmail: d.supplier_email,
-      restaurantName: 'Nasza restauracja',
       notes: d.notes ?? undefined,
       items: d.items.map((it) => ({
         product_name: it.name,

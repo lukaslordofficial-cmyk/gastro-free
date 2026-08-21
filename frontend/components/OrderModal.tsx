@@ -254,7 +254,6 @@ export function OrderModal({
         supplierId,
         supplierName,
         supplierEmail,
-        restaurantName: 'Nasza restauracja',
         notes,
         items: cartItems.map((e) => ({
           product_name: e.item.name,

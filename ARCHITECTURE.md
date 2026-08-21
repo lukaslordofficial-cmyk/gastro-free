@@ -20,6 +20,13 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-21 — Kęs: order email out of server.py (`chore/split-monoliths`)
+
+- **Split:** `backend/order_email_format.py` (pure szablony) +
+  `backend/order_email_routes.py` (`generate-messages`, `send-email`).
+- **Security:** oba endpointy wymagają `require_tenant_account_key()`.
+- Testy: `backend/tests/test_order_email_routes.py`.
+
 ### 2026-08-21 — Kęs: POS webhook out of server.py + fix bottleneck (`chore/split-monoliths`)
 
 - **Split:** `backend/pos_webhook_routes.py` + `backend/pos_webhook_consume.py`

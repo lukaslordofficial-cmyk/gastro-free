@@ -60,12 +60,9 @@ from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
 from pos_config_routes import router as pos_config_router
 from pos_webhook_routes import router as pos_webhook_router
+from order_email_routes import router as order_email_router
 from restaurant_profile_routes import router as restaurant_profile_router
-from restaurant_profile import (
-    account_login_email as _account_login_email,
-    get_restaurant_profile,
-    order_footer as _order_footer,
-)
+from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
     assert_safe_redirect_url,
     checkout_redirect_public_base,
@@ -199,6 +196,7 @@ app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
 app.include_router(pos_config_router)
 app.include_router(pos_webhook_router)
+app.include_router(order_email_router)
 app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
 
@@ -7790,12 +7788,7 @@ def _pack_mismatch_note(product: str, needed_base: float, ordered_base: float, d
     )
 
 
-def _fmt_pln(v: float) -> str:
-    return f"{v:.2f}".replace(".", ",") + " zł"
-
-
-def _fmt_qty(q: float) -> str:
-    return (f"{q:.0f}" if float(q).is_integer() else f"{q:.2f}".replace(".", ","))
+# _fmt_pln / _fmt_qty: order_email_format (import wyżej)
 
 
 # --- Schematy ----------------------------------------------------------------
@@ -7819,31 +7812,6 @@ class CompareOffersRequest(BaseModel):
     cart_objective: Optional[str] = None
     # Gdzie Łowca szuka ofert: suppliers_only | local_producers_only | both
     search_scope: Optional[str] = "suppliers_only"
-
-
-class MessageSupplierGroup(BaseModel):
-    supplier_id: Optional[str] = None
-    supplier_name: str
-    supplier_email: Optional[str] = None
-    subtotal_pln: float = 0.0
-    items: list[dict] = Field(default_factory=list)
-
-
-class GenerateMessagesRequest(BaseModel):
-    suppliers: list[MessageSupplierGroup]
-    restaurant_name: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class SendEmailRequest(BaseModel):
-    to: str
-    subject: str
-    html: Optional[str] = None
-    body_text: Optional[str] = None
-    supplier_name: Optional[str] = None
-    # nadpisania (opcjonalne, domyślnie centralny klucz/adres systemowy)
-    api_key: Optional[str] = None
-    from_email: Optional[str] = None
 
 
 class InterpretOrderRequest(BaseModel):
@@ -10479,274 +10447,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
     }
 
 
-def _is_internal_order_note(notes: Optional[str]) -> bool:
-    """Notatki wewnętrzne (koszyk / draft) — nie trafiają do maila do dostawcy."""
-    t = (notes or "").strip().lower()
-    if not t:
-        return True
-    markers = (
-        "łowca okazji",
-        "lowca okazji",
-        "zapisane na później",
-        "zapisane na pozniej",
-        "na później",
-        "na pozniej",
-        "[internal]",
-    )
-    return any(m in t for m in markers)
-
-@app.post("/api/orders/generate-messages")
-async def generate_messages(req: GenerateMessagesRequest):
-    if not req.suppliers:
-        raise HTTPException(status_code=400, detail="Brak dostawców do wygenerowania wiadomości.")
-    today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as _c:
-        profile = await get_restaurant_profile(_c)
-        login_email = await _account_login_email(_c)
-        # Uzupełnij nazwy/e-maile dostawców z DB (FE czasem wysyła puste / „Dostawca”)
-        resolved_suppliers: dict[str, dict] = {}
-        for g in req.suppliers:
-            sid = (g.supplier_id or "").strip()
-            if not sid or sid in resolved_suppliers:
-                continue
-            try:
-                rows = await sb_get(
-                    _c, "suppliers",
-                    params={"select": "id,name,email,contact_person", "id": f"eq.{sid}", "limit": "1"},
-                ) or []
-                if rows:
-                    resolved_suppliers[sid] = rows[0]
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"generate-messages resolve supplier {sid}: {e}")
-
-    company = (profile.get("company_name") or "").strip()
-    delivery = (profile.get("delivery_address") or "").strip()
-    req_name = (req.restaurant_name or "").strip()
-    if not req_name or req_name.lower() in ("nasza restauracja", "restauracja"):
-        restaurant = company or req_name or "Nasza restauracja"
-    else:
-        restaurant = req_name
-
-    contact_email = (profile.get("contact_email") or "").strip() or login_email
-    contact_phone = (profile.get("contact_phone") or "").strip()
-    footer = _order_footer(profile, fallback_email=login_email)
-    contact_block = ""
-    if contact_email or contact_phone:
-        parts = []
-        if contact_email:
-            parts.append(f"e-mail: {contact_email}")
-        if contact_phone:
-            parts.append(f"tel.: {contact_phone}")
-        contact_block = "W razie pytań prosimy o kontakt: " + ", ".join(parts) + "."
-
-    delivery_block = ""
-    if delivery:
-        delivery_block = f"<p style='margin:0 0 14px 0;color:#64748B;font-size:13px'>Adres dostawy: <strong>{delivery}</strong></p>"
-    delivery_text = f"Adres dostawy: {delivery}\n" if delivery else ""
-
-    messages = []
-    for g in req.suppliers:
-        items = g.items or []
-        subtotal = g.subtotal_pln or round(sum(float(i.get("line_total") or 0) for i in items), 2)
-        sid = (g.supplier_id or "").strip()
-        db_sup = resolved_suppliers.get(sid) if sid else None
-        supplier_hello = (
-            ((db_sup or {}).get("name") or "").strip()
-            or (g.supplier_name or "").strip()
-            or "Państwa firmę"
-        )
-        if supplier_hello == "Dostawca" and (db_sup or {}).get("name"):
-            supplier_hello = str(db_sup.get("name")).strip()
-        supplier_email = (
-            ((db_sup or {}).get("email") or "").strip()
-            or (g.supplier_email or "").strip()
-            or None
-        )
-
-        rows_html = ""
-        for i in items:
-            qty = _fmt_qty(float(i.get("quantity") or 0))
-            unit = i.get("unit", "")
-            name = i.get("matched_name") or i.get("product_name", "")
-            line = float(i.get("line_total") or 0)
-            rows_html += (
-                f"<tr>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0'>{name}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:center'>{qty} {unit}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:right'>{_fmt_pln(line)}</td>"
-                f"</tr>"
-            )
-
-        safe_notes = (req.notes or "").strip()
-        if _is_internal_order_note(safe_notes):
-            safe_notes = ""
-        notes_html = (
-            f'<p style="margin-top:12px"><strong>Uwagi do zamówienia:</strong> {safe_notes}</p>'
-            if safe_notes else ""
-        )
-        email_html = f"""<div style="font-family:Arial,Helvetica,sans-serif;color:#0F172A;max-width:640px;line-height:1.5">
-  <p>Szanowni Państwo (<strong>{supplier_hello}</strong>),</p>
-  <p>
-    w imieniu restauracji <strong>{restaurant}</strong> przesyłamy do firmy
-    <strong>{supplier_hello}</strong> zamówienie towaru z prośbą o potwierdzenie realizacji.
-  </p>
-  <p style="margin:0 0 4px 0;color:#64748B;font-size:13px">Data zamówienia: {today}</p>
-  <p style="margin:0 0 14px 0;color:#64748B;font-size:13px">Odbiorca / hurtownia: <strong>{supplier_hello}</strong></p>
-  {delivery_block}
-  <table style="border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:14px">
-    <thead>
-      <tr style="background:#F1F5F9">
-        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:left">Pozycja</th>
-        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:center">Ilość</th>
-        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right">Wartość orientacyjna</th>
-      </tr>
-    </thead>
-    <tbody>{rows_html}</tbody>
-    <tfoot>
-      <tr>
-        <td colspan="2" style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right;font-weight:700">
-          Łączna wartość orientacyjna
-        </td>
-        <td style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right;font-weight:700">{_fmt_pln(subtotal)}</td>
-      </tr>
-    </tfoot>
-  </table>
-  <p>
-    Prosimy o potwierdzenie: <strong>dostępności produktów</strong>, ostatecznych cen netto
-    oraz <strong>terminu i formy dostawy</strong>.
-    Podane kwoty mają charakter orientacyjny (na podstawie aktualnego cennika) —
-    wiążące będą ceny potwierdzone przez Państwa.
-  </p>
-  {notes_html}
-  <p>{contact_block}</p>
-  <p style="margin-top:20px">
-    Z poważaniem,<br/>
-    <strong>{restaurant}</strong>
-  </p>
-  <p style="color:#94A3B8;font-size:12px;border-top:1px solid #E2E8F0;padding-top:12px;margin-top:20px">{footer}</p>
-</div>"""
-
-        email_text_lines = [
-            f"Szanowni Państwo ({supplier_hello}),",
-            "",
-            f"W imieniu restauracji {restaurant} przesyłamy do firmy {supplier_hello} "
-            f"zamówienie towaru (data: {today}) z prośbą o potwierdzenie realizacji.",
-            f"Hurtownia: {supplier_hello}",
-        ]
-        if delivery_text:
-            email_text_lines.append(delivery_text.strip())
-        email_text_lines += [
-            "",
-            "Zamawiane pozycje:",
-        ]
-        for i in items:
-            pname = i.get("matched_name") or i.get("product_name", "")
-            email_text_lines.append(
-                f"• {pname} — {_fmt_qty(float(i.get('quantity') or 0))} {i.get('unit', '')} "
-                f"(orient. {_fmt_pln(float(i.get('line_total') or 0))})"
-            )
-        email_text_lines += [
-            "",
-            f"Łączna wartość orientacyjna: {_fmt_pln(subtotal)}",
-            "",
-            "Prosimy o potwierdzenie dostępności, ostatecznych cen netto oraz terminu i formy dostawy.",
-            "Podane kwoty mają charakter orientacyjny — wiążące będą ceny potwierdzone przez Państwa.",
-        ]
-        if safe_notes:
-            email_text_lines += ["", f"Uwagi: {safe_notes}"]
-        if contact_block:
-            email_text_lines += ["", contact_block]
-        email_text_lines += ["", "Z poważaniem,", restaurant, "", footer]
-        email_text = "\n".join(email_text_lines)
-
-        sms_items = "; ".join(
-            f"{_fmt_qty(float(i.get('quantity') or 0))} {i.get('unit', '')} "
-            f"{(i.get('matched_name') or i.get('product_name') or '')}"
-            for i in items
-        )
-        sms_text = (
-            f"{restaurant} — zamówienie ({today}): {sms_items}. "
-            f"Orient. {_fmt_pln(subtotal)}. Prosimy o potwierdzenie dostępności i terminu dostawy."
-        )
-        if contact_phone:
-            sms_text += f" Kontakt: {contact_phone}."
-
-        messages.append({
-            "supplier_id": g.supplier_id or sid or None,
-            "supplier_name": supplier_hello,
-            "supplier_email": supplier_email,
-            "email_subject": f"Zamówienie towaru — {restaurant} → {supplier_hello} | {today}",
-            "email_html": email_html,
-            "email_text": email_text,
-            "email_body_text": email_text,
-            "sms_text": sms_text,
-            "subtotal_pln": subtotal,
-        })
-
-    return {"messages": messages, "profile": profile,
-            "profile_complete": bool(contact_email and contact_phone)}
-
-
-
-# --- Wysyłka e-mail przez Resend ---------------------------------------------
-
-@app.post("/api/orders/send-email")
-async def send_order_email(req: SendEmailRequest):
-    api_key = (req.api_key or _resend_api_key() or RESEND_API_KEY).strip()
-    from_email = (req.from_email or _resend_from_email() or RESEND_FROM_EMAIL).strip()
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Brak klucza Resend (RESEND_API_KEY). "
-                "Dodaj go w backend/.env i zrestartuj uvicorn (zmiana .env wymaga pełnego restartu)."
-            ),
-        )
-    if not req.to:
-        raise HTTPException(status_code=400, detail="Brak adresu odbiorcy (supplier email).")
-
-    # Treść: jeśli podano edytowalny body_text, budujemy z niego HTML (zachowując
-    # łamanie linii). W przeciwnym razie używamy gotowego HTML.
-    html = req.html
-    if req.body_text:
-        safe = (req.body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-        html = ("<div style=\"font-family:Arial,Helvetica,sans-serif;color:#0F172A;"
-                "white-space:pre-wrap;line-height:1.5\">" + safe.replace("\n", "<br>") + "</div>")
-    if not html:
-        raise HTTPException(status_code=400, detail="Brak treści wiadomości.")
-
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        profile = await get_restaurant_profile(client)
-        login_email = await _account_login_email(client)
-        payload = {
-            "from": f"Gastro Manager <{from_email}>",
-            "to": [req.to],
-            "subject": req.subject,
-            "html": html,
-        }
-        # reply_to = e-mail restauratora → odpowiedź hurtowni trafia do niego, nie do nas
-        reply_to = (profile.get("contact_email") or "").strip() or login_email
-        if reply_to:
-            payload["reply_to"] = reply_to
-        try:
-            r = await client.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Błąd połączenia z Resend: {e}") from e
-
-    if r.status_code >= 400:
-        detail = r.text
-        try:
-            detail = r.json().get("message", detail)
-        except Exception:
-            pass
-        raise HTTPException(status_code=502, detail=f"Resend odrzucił wysyłkę: {detail}")
-
-    data = r.json() if r.text else {}
-    return {"ok": True, "id": data.get("id"), "to": req.to}
+# Order email: backend/order_email_routes.py + order_email_format.py
 
 
 # --- Intencja głosowa Jarvisa: order_product ---------------------------------

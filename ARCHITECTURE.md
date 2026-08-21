@@ -126,6 +126,10 @@ Zachowanie 1:1, tylko przeniesienie kodu:
   Miniatury nadal przez `getMenuThumbSync` / `dishCustomImages` (bez mieszania z Inspiracjami).
 - Menu screen styles → `menuScreenStyles.ts`
 - Backend: liveness + auto-confirm + deep health → `backend/health_routes.py` (`APIRouter`).
+- Stripe billing (checkout / confirm / portal / webhook / status) → `backend/billing_routes.py`.
+- CORS → `backend/cors_config.py` (produkcja: ostrzeżenie gdy brak / `*`).
+- Cron `core-alerts-job`: pętla po tenantach + push tylko do tokenów użytkowników tenanta.
+- Menu: helpery składników (suggest/stock/patch) → `frontend/lib/menuScreenHelpers.ts`.
 
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)
 

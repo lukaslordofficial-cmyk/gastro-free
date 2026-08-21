@@ -27,7 +27,7 @@ from typing import Any, Optional, Literal, Tuple
 import re
 import unicodedata
 
-from http_ssl import httpx_verify as _httpx_verify
+from http_ssl import httpx_verify as _httpx_verify, is_production_runtime
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
@@ -55,6 +55,7 @@ from tenant_auth import (
 )
 from request_guards import is_ai_path, is_mutate_method, is_public_mutate
 from rate_limit import allow_ai, allow_ip, allow_write
+from billing_routes import router as billing_router
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
 from pos_config_routes import router as pos_config_router
@@ -179,22 +180,18 @@ if not _SUPABASE_CONFIGURED:
         "nie są ustawione — ustaw Variables w Railway, inaczej API DB nie zadziała."
     )
 
-def _cors_allow_origins() -> list[str]:
-    raw = (os.environ.get("CORS_ALLOW_ORIGINS") or "*").strip()
-    if not raw or raw == "*":
-        return ["*"]
-    origins = [o.strip() for o in raw.split(",") if o.strip()]
-    return origins or ["*"]
+from cors_config import cors_allow_origins
 
 
 app = FastAPI(title="Gastro Manager — Voice API")
 app.add_middleware(
-    CORSMiddleware, allow_origins=_cors_allow_origins(), allow_credentials=False,
+    CORSMiddleware, allow_origins=cors_allow_origins(), allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
 app.include_router(pos_config_router)
+app.include_router(billing_router)
 
 
 @app.middleware("http")
@@ -6045,52 +6042,94 @@ async def expiry_daily_job(request: Request):
 
 @app.get("/api/manager/core-alerts-job")
 async def manager_core_alerts_job(request: Request, push: bool = True):
-    """Cron: policz alerty CORE i opcjonalnie wyślij push (severity critical/warn)."""
+    """Cron: alerty CORE dla każdego tenanta osobno (+ opcjonalny Expo Push)."""
     require_cron_secret(request)
-    res = await _run_manager_core_alerts(period_type="week", limit_days=7)
-    alerts = [a for a in (res.get("alerts") or []) if a.get("severity") in ("critical", "warn")]
+    all_alerts: list[dict] = []
+    speech: Optional[str] = None
     pushed = 0
-    if push and alerts:
-        async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
+    tenants_done = 0
+
+    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
+        tenant_keys = await _list_tenant_account_keys(httpx_c)
+        if not tenant_keys:
+            fallback = (get_account_key() or "").strip()
+            if fallback and fallback != "default":
+                tenant_keys = [fallback]
+
+        for ak in tenant_keys:
+            tok = _push_account_key(ak)
             try:
-                tokens = await sb_get(
-                    httpx_c,
-                    "device_push_tokens",
-                    params={"select": "token", "limit": "500"},
-                ) or []
-                push_msgs = []
-                for a in alerts[:8]:
-                    body = f"[{a.get('pair')}] {a.get('name')}: {a.get('detail', '')}"[:180]
-                    for t in tokens:
-                        tok = t.get("token")
-                        if not tok:
+                res = await _run_manager_core_alerts(period_type="week", limit_days=7)
+                alerts = [
+                    a for a in (res.get("alerts") or [])
+                    if a.get("severity") in ("critical", "warn")
+                ]
+                all_alerts.extend(alerts)
+                if res.get("assistant_speech") and not speech:
+                    speech = res.get("assistant_speech")
+                tenants_done += 1
+
+                if not (push and alerts):
+                    continue
+                try:
+                    profiles = await sb_get(
+                        httpx_c,
+                        "profiles",
+                        params={
+                            "select": "id",
+                            "account_key": f"eq.{ak}",
+                            "limit": "200",
+                        },
+                    ) or []
+                    uids = [str(p.get("id")) for p in profiles if p.get("id")]
+                    tokens: list[dict] = []
+                    if uids:
+                        tokens = await sb_get(
+                            httpx_c,
+                            "device_push_tokens",
+                            params={
+                                "select": "token",
+                                "user_id": f"in.({','.join(uids)})",
+                                "limit": "500",
+                            },
+                        ) or []
+                    push_msgs = []
+                    for a in alerts[:8]:
+                        body = f"[{a.get('pair')}] {a.get('name')}: {a.get('detail', '')}"[:180]
+                        for t in tokens:
+                            tok_s = t.get("token")
+                            if not tok_s:
+                                continue
+                            push_msgs.append({
+                                "to": tok_s,
+                                "title": "Manager AI — alert",
+                                "body": body,
+                                "sound": "default",
+                                "data": {"type": "manager_core", "pair": a.get("pair")},
+                            })
+                    for i in range(0, len(push_msgs), 80):
+                        chunk = push_msgs[i:i + 80]
+                        if not chunk:
                             continue
-                        push_msgs.append({
-                            "to": tok,
-                            "title": "Manager AI — alert",
-                            "body": body,
-                            "sound": "default",
-                            "data": {"type": "manager_core", "pair": a.get("pair")},
-                        })
-                for i in range(0, len(push_msgs), 80):
-                    chunk = push_msgs[i:i + 80]
-                    if not chunk:
-                        continue
-                    await httpx_c.post(
-                        "https://exp.host/--/api/v2/push/send",
-                        json=chunk,
-                        headers={"Accept": "application/json", "Content-Type": "application/json"},
-                        timeout=30.0,
-                    )
-                    pushed += len(chunk)
-            except Exception:
-                logging.exception("manager core alerts: Expo Push failed")
+                        await httpx_c.post(
+                            "https://exp.host/--/api/v2/push/send",
+                            json=chunk,
+                            headers={"Accept": "application/json", "Content-Type": "application/json"},
+                            timeout=30.0,
+                        )
+                        pushed += len(chunk)
+                except Exception:
+                    logging.exception("manager core alerts: Expo Push failed for %s", ak)
+            finally:
+                _reset_account_key(tok)
+
     return {
         "ok": True,
-        "alert_count": len(res.get("alerts") or []),
+        "tenants": tenants_done,
+        "alert_count": len(all_alerts),
         "pushed_messages": pushed,
-        "speech": res.get("assistant_speech"),
-        "alerts": res.get("alerts") or [],
+        "speech": speech,
+        "alerts": all_alerts,
     }
 
 
@@ -15294,162 +15333,6 @@ async def subscription_subscribe(req: SubscribeRequest):
                                   message=f"Aktywowano plan {cfg['name']} (+{grant} kredytów). MOCK.")
         view["ok"] = True
         return view
-
-
-# ── Stripe Billing (Checkout + Webhooks) ─────────────────────────────────────
-
-class CheckoutSessionRequest(BaseModel):
-    kind: Literal["subscription", "topup"]
-    tier_level: Optional[int] = None
-    package: Optional[str] = None
-    success_url: Optional[str] = None
-    cancel_url: Optional[str] = None
-    idempotency_key: Optional[str] = None
-
-
-class PortalSessionRequest(BaseModel):
-    return_url: Optional[str] = None
-
-
-@app.post("/api/billing/create-checkout-session")
-async def billing_create_checkout(req: CheckoutSessionRequest):
-    """Tworzy Stripe Checkout Session. Kredyty dolicza TYLKO webhook / confirm-session po płatności."""
-    from billing_stripe import create_checkout_session, stripe_configured
-    if not stripe_configured():
-        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
-    success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
-    cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or "myapp://billing/cancel").strip()
-    # Stripe wymaga https lub http localhost — deep linki Expo: użyj https success page z redirect
-    if success.startswith("myapp://"):
-        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
-        success = f"{public}/billing-success?session_id={{CHECKOUT_SESSION_ID}}"
-    if cancel.startswith("myapp://"):
-        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
-        cancel = f"{public}/billing-cancel"
-    success = assert_safe_redirect_url(success)
-    cancel = assert_safe_redirect_url(cancel)
-    try:
-        session = await create_checkout_session(
-            account_key=get_account_key(),
-            kind=req.kind,
-            tier_level=req.tier_level,
-            package=req.package,
-            success_url=success,
-            cancel_url=cancel,
-            idempotency_key=req.idempotency_key or str(uuid.uuid4()),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.exception("create-checkout-session failed")
-        raise HTTPException(status_code=502, detail=str(e)[:300])
-    return {"ok": True, **session}
-
-
-class ConfirmSessionRequest(BaseModel):
-    session_id: str
-
-
-@app.post("/api/billing/confirm-session")
-async def billing_confirm_session(req: ConfirmSessionRequest):
-    """
-    Potwierdzenie płatności bez Stripe CLI / webhooka.
-    Backend odpytuje Stripe API — jeśli session jest opłacona, dolicza kredyty/tier.
-    Frontend NIE może podać kwoty kredytów — tylko session_id.
-    """
-    from billing_stripe import (
-        apply_paid_checkout_session,
-        retrieve_checkout_session,
-        stripe_configured,
-    )
-    if not stripe_configured():
-        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
-    sid = (req.session_id or "").strip()
-    if not sid.startswith("cs_"):
-        raise HTTPException(status_code=400, detail="Nieprawidłowy session_id")
-    try:
-        session = await retrieve_checkout_session(sid)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e)[:300])
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        result = await apply_paid_checkout_session(
-            session,
-            client=client,
-            sb_get=sb_get,
-            sb_post=sb_post,
-            sb_patch=sb_patch,
-            account_key_default=get_account_key(),
-            tier_config=TIER_CONFIG,
-        )
-        if result.get("paid"):
-            sub = await _get_subscription(client)
-            view = _subscription_view(sub, message="Płatność potwierdzona. Portfel zaktualizowany.")
-            view["ok"] = True
-            view["billing"] = result
-            return view
-        return {"ok": False, **result}
-
-
-@app.post("/api/billing/portal")
-async def billing_portal(req: PortalSessionRequest):
-    """Stripe Customer Portal — zarządzanie kartą / anulowanie / faktury."""
-    from billing_stripe import create_billing_portal_session, stripe_configured
-    if not stripe_configured():
-        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        sub = await _ensure_subscription(client)
-        cid = sub.get("stripe_customer_id")
-        if not cid:
-            raise HTTPException(status_code=400, detail="Brak klienta Stripe — najpierw wykup plan.")
-        ret = (req.return_url or os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").strip()
-        ret = assert_safe_redirect_url(ret)
-        try:
-            portal = await create_billing_portal_session(customer_id=cid, return_url=ret)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e)[:300])
-        return {"ok": True, **portal}
-
-
-@app.post("/api/billing/webhook")
-async def billing_webhook(request: Request):
-    """Stripe Webhook — jedyne miejsce dodawania kredytów / zmiany tieru."""
-    from billing_stripe import construct_event, handle_stripe_event
-    payload = await request.body()
-    sig = request.headers.get("stripe-signature") or ""
-    try:
-        event = construct_event(payload, sig)
-    except Exception as e:
-        logger.warning("Stripe webhook signature failed: %s", e)
-        raise HTTPException(status_code=400, detail=f"Webhook signature: {e}")
-    if hasattr(event, "to_dict"):
-        event_dict = event.to_dict()
-    else:
-        event_dict = dict(event)
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        result = await handle_stripe_event(
-            event_dict,
-            client=client,
-            sb_get=sb_get,
-            sb_post=sb_post,
-            sb_patch=sb_patch,
-            account_key_default=get_account_key(),
-            tier_config=TIER_CONFIG,
-        )
-    return result
-
-
-@app.get("/api/billing/status")
-async def billing_status():
-    from billing_stripe import stripe_configured
-    return {
-        "ok": True,
-        "stripe_configured": stripe_configured(),
-        "webhook_secret_set": bool(
-            (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip().startswith("whsec_")
-        ),
-        "confirm_session_available": True,
-        "mock_billing": os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() in ("1", "true", "yes"),
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

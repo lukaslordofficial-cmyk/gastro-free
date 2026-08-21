@@ -22,7 +22,8 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ### 2026-08-21 — Kęs: mail compose wg domeny + draft w koszyku + voice STT (`chore/split-monoliths`)
 
-- **UX:** `openMailCompose` — Gmail/Yahoo/Outlook/WP/… według domeny nadawcy;
+- **UX:** `openMailInBrowser` / `openMailInApp` + katalog `mailProviders` —
+  Gmail/Yahoo/Outlook/WP/O2/Onet/… według domeny nadawcy; wybór przeglądarka vs aplikacja;
   otwarcie skrzynki **nie** oznacza zamówienia jako `sent` (zostaje `draft` do ręcznego usunięcia).
 - **Split:** `backend/voice_transcribe_routes.py` (`POST /api/voice/transcribe`).
 - `OrderModal.placeOrder` zapisuje koszyk jako `draft`.

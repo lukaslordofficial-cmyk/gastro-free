@@ -1,10 +1,16 @@
 /**
- * Smoke: domena From → URL compose (bez Linking).
- * node --experimental-vm-modules / zwykły node z dynamic import nie potrzebny —
- * kopiujemy logikę domeny przez require transpiled? Użyj prostego asercji przez ts-node?
- * Tutaj: mały test w JS mirror — lepiej w backendzie nie. FE smoke mjs:
+ * Smoke: domena From → dostawca poczty (bez Linking).
  */
 import assert from 'node:assert/strict';
+
+const MAIL_PROVIDERS = [
+  { id: 'gmail', domains: ['gmail.com', 'googlemail.com'] },
+  { id: 'yahoo', domains: ['yahoo.com', 'yahoo.pl'] },
+  { id: 'outlook', domains: ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'] },
+  { id: 'wp', domains: ['wp.pl'] },
+  { id: 'o2', domains: ['o2.pl'] },
+  { id: 'op', domains: ['op.pl', 'orange.pl'] },
+];
 
 function domainOf(email) {
   const at = email.trim().toLowerCase().lastIndexOf('@');
@@ -12,16 +18,18 @@ function domainOf(email) {
   return email.trim().toLowerCase().slice(at + 1);
 }
 
-function composeKind(fromEmail) {
+function findId(fromEmail) {
   const d = domainOf(fromEmail);
-  if (d === 'gmail.com' || d === 'googlemail.com') return 'gmail';
-  if (d.includes('yahoo')) return 'yahoo';
-  if (['outlook.com', 'hotmail.com', 'live.com', 'msn.com'].includes(d)) return 'outlook';
-  return 'mailto';
+  for (const p of MAIL_PROVIDERS) {
+    if (p.domains.some((dom) => d === dom || d.endsWith(`.${dom}`))) return p.id;
+  }
+  return 'unknown';
 }
 
-assert.equal(composeKind('ja@gmail.com'), 'gmail');
-assert.equal(composeKind('x@yahoo.pl'), 'yahoo');
-assert.equal(composeKind('x@hotmail.com'), 'outlook');
-assert.equal(composeKind('szef@firma.pl'), 'mailto');
+assert.equal(findId('ja@gmail.com'), 'gmail');
+assert.equal(findId('x@yahoo.pl'), 'yahoo');
+assert.equal(findId('x@hotmail.com'), 'outlook');
+assert.equal(findId('ja@o2.pl'), 'o2');
+assert.equal(findId('ja@op.pl'), 'op');
+assert.equal(findId('szef@firma.pl'), 'unknown');
 console.log('smoke_open_mail_compose: ok');

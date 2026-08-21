@@ -11,12 +11,12 @@ import {
   ActivityIndicator,
   StyleSheet,
   Platform,
-  Alert,
 } from 'react-native';
 import { X, PackageCheck, Truck } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { formatPln } from '@/lib/format';
 import {
   fetchOrdersByStatuses,
@@ -45,6 +45,7 @@ function formatPlDate(iso: string): string {
 export function SupplierOrdersModal({ visible, onClose }: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
+  const { alert } = usePremiumAlert();
   const [tab, setTab] = useState<Tab>('preparing');
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -69,11 +70,11 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
       setDone(rec);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się wczytać zamówień.';
-      Alert.alert('Zamówienia', msg);
+      alert('Zamówienia', msg);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [alert]);
 
   useEffect(() => {
     if (!visible) return;
@@ -83,7 +84,7 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
   const list = tab === 'preparing' ? preparing : done;
 
   const onReceive = (order: SupplierOrderFull) => {
-    Alert.alert(
+    alert(
       'Odebrałem dostawę',
       'Czy przenieść produkty z zamówienia do magazynu i wpisać koszty zmienne (suma pozycji)?',
       [
@@ -94,7 +95,7 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
         },
         {
           text: 'Tak, magazyn + koszty',
-          style: 'default',
+          style: 'primary',
           onPress: () => void finishReceive(order, true, true),
         },
       ],
@@ -111,15 +112,16 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
       await receiveSupplierOrder(order, { applyInventory, applyVariableCost });
       await reload();
       setTab('done');
-      Alert.alert(
+      alert(
         'Gotowe',
         applyInventory || applyVariableCost
           ? 'Zamówienie w „Zrealizowane”. Magazyn/koszty zaktualizowane zgodnie z wyborem.'
           : 'Zamówienie przeniesione do „Zrealizowane”.',
+        [{ text: 'OK', style: 'primary' }],
       );
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się oznaczyć odbioru.';
-      Alert.alert('Błąd', msg);
+      alert('Błąd', msg);
     } finally {
       setBusyId(null);
     }

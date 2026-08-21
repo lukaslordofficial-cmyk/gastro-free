@@ -46,7 +46,7 @@ import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
-import { openMailCompose } from '@/lib/openMailCompose';
+import { openMailInBrowser } from '@/lib/openMailCompose';
 import * as supplierOrdersService from '@/services/supplierOrdersService';
 import {
   type OptimizeResult,
@@ -2105,7 +2105,7 @@ export function DealHunterModal({
     const bodyToSend = usesAssistant ? body : stripAssistantOrderFooter(body);
     if (!usesAssistant) {
       try {
-        await openMailCompose({
+        await openMailInBrowser({
           fromEmail: from,
           to,
           subject,
@@ -2127,6 +2127,10 @@ export function DealHunterModal({
             /* best-effort */
           }
         }
+        premiumAlert(
+          'Zamówienie',
+          'Twoje zamówienie trafiło do zakładki Dostawy - Przygotowywane',
+        );
       } catch {
         setSendStatus((s) => ({ ...s, [key]: 'error' }));
       }
@@ -2165,7 +2169,7 @@ export function DealHunterModal({
     } catch {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
     }
-  }, [toEmails, fromEmails, bodyText, subjectText]);
+  }, [toEmails, fromEmails, bodyText, subjectText, premiumAlert]);
 
   const sendAllEmails = useCallback(async () => {
     if (!messages.length) return;
@@ -2193,7 +2197,7 @@ export function DealHunterModal({
       // eslint-disable-next-line no-await-in-loop
       await sendEmail(m);
     }
-  }, [messages, sendStatus, fromEmails, sendEmail]);
+  }, [messages, sendStatus, fromEmails, sendEmail, premiumAlert]);
 
   const result = liveResult;
   const stepIndex = step === 'qty' ? 0 : step === 'compare' ? 1 : 2;

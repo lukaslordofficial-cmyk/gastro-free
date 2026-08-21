@@ -74,10 +74,14 @@ export async function saveRestaurantProfile(
   return normalize(res.data);
 }
 
-/** Preferuj mail restauracji; bez stopki asystenta gdy nie asystent. */
+/**
+ * Preferuj mail restauracji z ustawień; potem e-mail konta (rejestracja);
+ * na końcu fallback asystenta. Bez stopki asystenta gdy mail restauracji/konta.
+ */
 export async function resolveOrderEmailFrom(
   body: string,
   assistantFallback: string,
+  accountEmail?: string | null,
 ): Promise<{ fromEmail: string; body: string }> {
   try {
     const profile = await fetchRestaurantProfile();
@@ -86,7 +90,11 @@ export async function resolveOrderEmailFrom(
       return { fromEmail: mail, body: stripAssistantOrderFooter(body) };
     }
   } catch {
-    /* asystent */
+    /* dalej: konto / asystent */
+  }
+  const account = (accountEmail || '').trim();
+  if (account.includes('@')) {
+    return { fromEmail: account, body: stripAssistantOrderFooter(body) };
   }
   return { fromEmail: assistantFallback, body };
 }

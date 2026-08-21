@@ -41,6 +41,7 @@ import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
 import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
@@ -1313,6 +1314,8 @@ export function DealHunterModal({
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
   const { alert: premiumAlert } = usePremiumAlert();
+  const { user, profile: authProfile } = useAuth();
+  const accountMail = (user?.email || authProfile?.email || '').trim();
   const { dealHunterUnlocked } = useSubscription();
   const lastDraftFpRef = useRef<string | null>(null);
   const compareScrollRef = useRef<ScrollView>(null);
@@ -1856,6 +1859,7 @@ export function DealHunterModal({
       const profileEmail = (
         (data.profile?.contact_email as string | undefined)
         || contactEmail
+        || accountMail
         || ''
       ).trim();
       const preferredFrom = profileEmail || ASSISTANT_FROM_EMAIL;
@@ -1884,7 +1888,7 @@ export function DealHunterModal({
     } finally {
       setLoading(false);
     }
-  }, [selectedSuppliers, restaurantName, pendingGroups, contactEmail]);
+  }, [selectedSuppliers, restaurantName, pendingGroups, contactEmail, accountMail]);
 
   const prepareEmailForGroups = useCallback(async (groups: SupplierGroup[]) => {
     if (!groups.length) return;
@@ -1964,9 +1968,11 @@ export function DealHunterModal({
         headers: await apiJsonHeaders(),
       });
       const data = await res.json();
-      setContactEmail(data.contact_email ?? '');
+      setContactEmail((data.contact_email || accountMail || '').trim());
       setContactPhone(data.contact_phone ?? '');
-      if (data.complete) {
+      const emailOk = !!(String(data.contact_email || accountMail || '').trim());
+      const phoneOk = !!(String(data.contact_phone || '').trim());
+      if (emailOk && phoneOk) {
         await generateMessages(cleaned);
       } else {
         setStep('contact');
@@ -1976,7 +1982,7 @@ export function DealHunterModal({
       setStep('contact');
       setLoading(false);
     }
-  }, [generateMessages]);
+  }, [generateMessages, accountMail]);
 
   const saveProfile = useCallback(async () => {
     const email = contactEmail.trim();

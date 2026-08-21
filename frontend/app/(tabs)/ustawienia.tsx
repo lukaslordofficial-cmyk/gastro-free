@@ -20,6 +20,7 @@ import {
   Info,
   Key,
   LogOut,
+  Building2,
 } from 'lucide-react-native';
 import {
   fetchActiveMenuPosList,
@@ -37,6 +38,7 @@ import { PosProviderPicker } from '@/components/PosProviderPicker';
 import { PosInstructionBanner } from '@/components/settings/PosInstructionBanner';
 import { WebhookUrlRow } from '@/components/settings/WebhookUrlRow';
 import { RestaurantBillingForm } from '@/components/settings/RestaurantBillingForm';
+import { SettingsSubSection } from '@/components/settings/SettingsSubSection';
 import { settingsScreenStyles as styles } from '@/components/settings/settingsScreenStyles';
 import { groupMenuItemsByCategory } from '@/lib/settingsMenuGroups';
 import {
@@ -48,6 +50,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useAuth } from '@/contexts/AuthContext';
 import { router } from 'expo-router';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
@@ -80,8 +83,11 @@ export default function UstawieniaScreen() {
   const [menuItems, setMenuItems] = useState<MenuItemForMapping[]>([]);
   const [inventoryItems, setInventoryItems] = useState<InventoryItemForRecipe[]>([]);
   const theme = useAppTheme();
+  const { alert: premiumAlert } = usePremiumAlert();
   const { user, profile, accountKey, signOut } = useAuth();
   const [signingOut, setSigningOut] = useState(false);
+  const [daneLokaluOpen, setDaneLokaluOpen] = useState(true);
+  const [posOpen, setPosOpen] = useState(false);
 
   const handleSignOut = () => {
     Alert.alert('Wylogowanie', 'Na pewno chcesz się wylogować?', [
@@ -193,10 +199,12 @@ export default function UstawieniaScreen() {
     const result = await savePosSettings(payload, existingId);
     setPosSaving(false);
     if (result.error) {
-      Alert.alert('Błąd', result.error.message);
+      premiumAlert('Błąd', result.error.message);
     } else {
       setHasSaved(true);
-      Alert.alert('Zapisano', 'Ustawienia POS zostały zaktualizowane.');
+      premiumAlert('Zapisano', 'Ustawienia POS zostały zaktualizowane.', [
+        { text: 'OK', style: 'primary' },
+      ]);
       fetchAll();
     }
   };
@@ -298,15 +306,23 @@ export default function UstawieniaScreen() {
           </View>
         </View>
 
-        <RestaurantBillingForm />
+        <SettingsSubSection
+          title="Dane lokalu"
+          icon={Building2}
+          open={daneLokaluOpen}
+          onToggle={() => setDaneLokaluOpen((v) => !v)}
+          testID="settings-dane-lokalu"
+        >
+          <RestaurantBillingForm />
+        </SettingsSubSection>
 
-        {/* ── POS Settings ── */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Webhook size={16} color={theme.textSecondary} />
-            <Text style={[styles.sectionTitle, { color: theme.textSecondary }]}>Integracja POS</Text>
-          </View>
-
+        <SettingsSubSection
+          title="Integracja POS"
+          icon={Webhook}
+          open={posOpen}
+          onToggle={() => setPosOpen((v) => !v)}
+          testID="settings-integracja-pos"
+        >
           <PosInstructionBanner providerId={posProvider} />
 
           <View
@@ -393,7 +409,7 @@ export default function UstawieniaScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </View>
+        </SettingsSubSection>
 
         {/* ── Recipe Mapping ── */}
         <View style={styles.section}>

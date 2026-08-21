@@ -35,6 +35,7 @@ import {
 import { formatPlnNumber } from '@/lib/format';
 import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
 import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface Props {
   supplierId: string;
@@ -67,6 +68,7 @@ export function OrderModal({
 }: Props) {
   const theme = useAppTheme();
   const { alert } = usePremiumAlert();
+  const { user, profile } = useAuth();
   const prem = theme.isPremium;
   const accent = prem ? DS.color.greenEnd : Colors.accent;
   const text = prem ? DS.color.heading : Colors.textPrimary;
@@ -265,7 +267,11 @@ export function OrderModal({
       let fromEmail = ASSISTANT_FROM_EMAIL;
       let body = tpl.body;
       try {
-        const resolved = await resolveOrderEmailFrom(tpl.body, ASSISTANT_FROM_EMAIL);
+        const resolved = await resolveOrderEmailFrom(
+          tpl.body,
+          ASSISTANT_FROM_EMAIL,
+          user?.email || profile?.email,
+        );
         fromEmail = resolved.fromEmail;
         body = resolved.body;
       } catch {

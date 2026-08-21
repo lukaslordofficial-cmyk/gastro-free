@@ -228,11 +228,12 @@ export function OrderModal({
     }
     setSaving(true);
     try {
+      // status=sent → panel Zamówienia / Przygotowywane (po przejściu do maila)
       const { data: order, error: orderErr } = await supabase
         .from('supplier_orders')
         .insert({
           supplier_id: supplierId,
-          status: 'draft',
+          status: 'sent',
           notes: notes.trim() || null,
         })
         .select()
@@ -599,11 +600,11 @@ export function OrderModal({
           setShowEmail(false);
         }}
         onSent={() => {
-          // Asystent: treść poszła; draft zostaje w koszyku aż do ręcznego usunięcia
+          // Asystent: zamówienie już jest status=sent (Przygotowywane)
           setShowEmail(false);
         }}
         onMailClientOpened={() => {
-          // Zewnętrzna skrzynka — szablon zostaje na ekranie po powrocie
+          // Zewnętrzna skrzynka — zostaje w Przygotowywanych (sent)
         }}
         onPayPress={
           emailDraft

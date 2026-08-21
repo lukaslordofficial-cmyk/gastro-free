@@ -47,6 +47,7 @@ import { formatPln } from '@/lib/format';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
 import { openMailCompose } from '@/lib/openMailCompose';
+import * as supplierOrdersService from '@/services/supplierOrdersService';
 import {
   type OptimizeResult,
   type OfferItem,
@@ -1885,6 +1886,24 @@ export function DealHunterModal({
       setToEmails(toInit);
       setPendingGroups(null);
       setStep('preview');
+      // Panel Zamówienia → Przygotowywane
+      try {
+        for (const g of suppliers) {
+          if (g.is_local_producer || !g.supplier_id) continue;
+          await supplierOrdersService.ensureSentOrderForSupplier({
+            supplierId: g.supplier_id,
+            notes: 'Łowca Okazji',
+            items: (g.items || []).map((it) => ({
+              raw_product_name: it.matched_name || it.product_name,
+              price_net: it.unit_price_base ?? null,
+              unit: it.unit || 'szt',
+              quantity_ordered: Number(it.quantity) || 0,
+            })),
+          });
+        }
+      } catch {
+        /* best-effort — mail i tak działa */
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się wygenerować wiadomości.';
       setError(msg);
@@ -2093,6 +2112,21 @@ export function DealHunterModal({
           body: bodyToSend,
         });
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
+        if (m.supplier_id) {
+          try {
+            const { data } = await supabase
+              .from('supplier_orders')
+              .select('id')
+              .eq('supplier_id', m.supplier_id)
+              .eq('status', 'draft');
+            const ids = (data || []).map((r: { id: string }) => r.id);
+            if (ids.length) {
+              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
       } catch {
         setSendStatus((s) => ({ ...s, [key]: 'error' }));
       }
@@ -2113,6 +2147,21 @@ export function DealHunterModal({
       });
       if (!res.ok) throw new Error();
       setSendStatus((s) => ({ ...s, [key]: 'sent' }));
+      if (m.supplier_id) {
+        try {
+          const { data } = await supabase
+            .from('supplier_orders')
+            .select('id')
+            .eq('supplier_id', m.supplier_id)
+            .eq('status', 'draft');
+          const ids = (data || []).map((r: { id: string }) => r.id);
+          if (ids.length) {
+            await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+          }
+        } catch {
+          /* best-effort */
+        }
+      }
     } catch {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
     }

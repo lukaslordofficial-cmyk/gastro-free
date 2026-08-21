@@ -318,6 +318,9 @@ Przegląd całej aplikacji vs dekalog `.agentrules`. Ten branch **nie** tnie mon
   całe IO Dostawców: fetch z 4-poziomowym fallbackiem schematu, katalog, oferty AI,
   edge function `process-offer`, zamówienia/drafty. `app/(tabs)/dostawcy.tsx` = 0
   bezpośrednich zapytań `supabase` (było 36).
+- **Panel Zamówienia (2026-08):** `SupplierOrdersModal` + statusy `sent` (Przygotowywane)
+  / `received` (Zrealizowane); odbiór dostawy z opcją magazyn + koszty zmienne.
+  Wejście: przycisk pod „Zgłoś informację” na ekranie Dostawcy.
 - Weryfikacja: bundle Metro OK, tsc 166->154 (usunięte surowe inserty `never`).
 - Pozostałe ekrany z `supabase` w UI: `menu.tsx` (7), `ustawienia.tsx` (2) — kolejne kęsy.
 ### 2026-06 — Kęs #3: Serwis Magazynu + fix crashu (czeka na test urządzenia)

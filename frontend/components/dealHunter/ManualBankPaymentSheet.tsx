@@ -18,6 +18,7 @@ import { POLISH_BANK_LOGINS } from '@/lib/polishBankLogins';
 import { buildManualPayCopyRows, type ManualPayCopyRow } from '@/lib/manualPayCopyRows';
 import { DS } from '@/constants/premiumTheme';
 import { manualPayStyles as styles } from '@/components/dealHunter/manualBankPaymentStyles';
+import { BankLogoBadge } from '@/components/dealHunter/BankLogoBadge';
 
 export type ManualPaymentOrder = {
   supplierId: string | null;
@@ -264,18 +265,22 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
                       activeOpacity={0.8}
                       testID={`manual-pay-bank-${bank.id}`}
                     >
-                      <View style={[styles.bankBadge, { backgroundColor: bank.color }]}>
-                        <Text style={styles.bankBadgeText} allowFontScaling={false}>
-                          {bank.short}
+                      <BankLogoBadge bank={bank} size={42} />
+                      <View style={{ flex: 1, gap: 2 }}>
+                        <Text
+                          style={[styles.bankName, { color: C.text }]}
+                          numberOfLines={1}
+                          allowFontScaling={false}
+                        >
+                          {bank.name}
+                        </Text>
+                        <Text
+                          style={{ fontSize: 10, fontWeight: '600', color: C.textTertiary }}
+                          allowFontScaling={false}
+                        >
+                          Logowanie →
                         </Text>
                       </View>
-                      <Text
-                        style={[styles.bankName, { color: C.text }]}
-                        numberOfLines={1}
-                        allowFontScaling={false}
-                      >
-                        {bank.name}
-                      </Text>
                     </TouchableOpacity>
                   ))}
                 </View>

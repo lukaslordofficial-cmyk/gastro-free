@@ -16,7 +16,7 @@ import {
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import { X, ShoppingCart, Plus, Package, Trash2, Truck, Search } from 'lucide-react-native';
+import { X, ShoppingCart, Plus, Package, Trash2, Truck, Search, Landmark } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { supabase } from '@/lib/supabase';
 import { Colors } from '@/constants/colors';
@@ -28,6 +28,10 @@ import {
   type OrderEmailDraft,
   ASSISTANT_FROM_EMAIL,
 } from '@/components/OrderEmailComposer';
+import {
+  ManualBankPaymentSheet,
+  type ManualPaymentOrder,
+} from '@/components/dealHunter/ManualBankPaymentSheet';
 import { formatPlnNumber } from '@/lib/format';
 import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
 
@@ -83,6 +87,7 @@ export function OrderModal({
   const [query, setQuery] = useState('');
   const [emailDraft, setEmailDraft] = useState<OrderEmailDraft | null>(null);
   const [showEmail, setShowEmail] = useState(false);
+  const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
 
   const cartItems = useMemo(() => Array.from(cart.values()), [cart]);
   const cartCount = cartItems.length;
@@ -262,6 +267,11 @@ export function OrderModal({
         fromEmail: ASSISTANT_FROM_EMAIL,
         subject: tpl.subject,
         body: tpl.body,
+        supplierId,
+        totalPln: productsTotal ?? cartItems.reduce(
+          (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+          0,
+        ),
       });
       setShowEmail(true);
     } catch (e: any) {
@@ -507,6 +517,25 @@ export function OrderModal({
                 </LinearGradient>
               </TouchableOpacity>
             </View>
+            <TouchableOpacity
+              style={[styles.manualPayBtn, { borderColor: accent }]}
+              onPress={() =>
+                setManualPayOrder({
+                  supplierId,
+                  supplierName,
+                  orderTitle: `Zamówienie — ${supplierName}`,
+                  totalPln: productsTotal ?? cartItems.reduce(
+                    (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+                    0,
+                  ),
+                })
+              }
+              activeOpacity={0.85}
+              testID="order-modal-manual-pay"
+            >
+              <Landmark size={16} color={accent} strokeWidth={2.2} />
+              <Text style={[styles.manualPayText, { color: accent }]}>Opłać zamówienie</Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -557,6 +586,32 @@ export function OrderModal({
         onSent={() => {
           setShowEmail(false);
           onClose();
+        }}
+        onPayPress={
+          emailDraft
+            ? () =>
+                setManualPayOrder({
+                  supplierId: emailDraft.supplierId ?? supplierId,
+                  supplierName: emailDraft.supplierName || supplierName,
+                  orderTitle: emailDraft.subject || `Zamówienie — ${supplierName}`,
+                  totalPln: emailDraft.totalPln ?? 0,
+                })
+            : undefined
+        }
+      />
+      <ManualBankPaymentSheet
+        visible={!!manualPayOrder}
+        order={manualPayOrder}
+        onClose={() => setManualPayOrder(null)}
+        colors={{
+          card,
+          text,
+          textSecondary: muted,
+          textTertiary: muted,
+          border,
+          accent,
+          background: bg,
+          isPremium: prem,
         }}
       />
     </Modal>
@@ -693,6 +748,17 @@ const styles = StyleSheet.create({
   draftGrad: { paddingVertical: 13, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
   placeBtn: { flex: 1, borderRadius: 12, overflow: 'hidden' },
   placeGrad: { paddingVertical: 13, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
+  manualPayBtn: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    paddingVertical: 12,
+  },
+  manualPayText: { fontSize: 14, fontWeight: '800' },
   premBtnText: { fontSize: 13, fontWeight: '800', color: '#0A0A0A' },
   qtyOverlay: {
     flex: 1,

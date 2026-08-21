@@ -53,6 +53,10 @@ import {
   type OrderEmailDraft,
   ASSISTANT_FROM_EMAIL,
 } from '@/components/OrderEmailComposer';
+import {
+  ManualBankPaymentSheet,
+  type ManualPaymentOrder,
+} from '@/components/dealHunter/ManualBankPaymentSheet';
 import { CatalogScanModal } from '@/components/CatalogScanModal';
 import { fetchOrderEmailTemplate, isInternalOrderNote } from '@/lib/orderEmailTemplate';
 import { Colors } from '@/constants/colors';
@@ -1907,6 +1911,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
   const [showEmail, setShowEmail] = useState(false);
   const [emailBusy, setEmailBusy] = useState(false);
   const [emailDraftOrderId, setEmailDraftOrderId] = useState<string | null>(null);
+  const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
 
   const accent = prem ? DS.color.greenEnd : Colors.accent;
   const text = prem ? DS.color.heading : Colors.textPrimary;
@@ -2018,6 +2023,8 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           fromEmail: ASSISTANT_FROM_EMAIL,
           subject,
           body,
+          supplierId: d.supplier_id,
+          totalPln: draftTotal(d),
         });
         setShowEmail(true);
       } catch (e: any) {
@@ -2060,6 +2067,8 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
                     fromEmail: ASSISTANT_FROM_EMAIL,
                     subject,
                     body,
+                    supplierId: d.supplier_id,
+                    totalPln: draftTotal(d),
                   });
                   setShowEmail(true);
                   await new Promise((r) => setTimeout(r, 600));
@@ -2300,6 +2309,32 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
             void markDraftSent(id);
           }
           setEmailDraftOrderId(null);
+        }}
+        onPayPress={
+          emailDraft
+            ? () =>
+                setManualPayOrder({
+                  supplierId: emailDraft.supplierId ?? null,
+                  supplierName: emailDraft.supplierName,
+                  orderTitle: emailDraft.subject || `Zamówienie — ${emailDraft.supplierName}`,
+                  totalPln: emailDraft.totalPln ?? 0,
+                })
+            : undefined
+        }
+      />
+      <ManualBankPaymentSheet
+        visible={!!manualPayOrder}
+        order={manualPayOrder}
+        onClose={() => setManualPayOrder(null)}
+        colors={{
+          card: cardBg,
+          text,
+          textSecondary: muted,
+          textTertiary: muted,
+          border,
+          accent,
+          background: bg,
+          isPremium: prem,
         }}
       />
       {editingDraft && (

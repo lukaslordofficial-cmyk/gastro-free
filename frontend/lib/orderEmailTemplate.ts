@@ -3,6 +3,8 @@
  * (POST /api/orders/generate-messages + stopka asystenta).
  */
 
+import { apiJsonHeaders } from '@/lib/apiHeaders';
+
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
 /** Notatki wewnętrzne koszyka — nie wysyłamy do dostawcy. */
@@ -36,6 +38,22 @@ export type GeneratedOrderEmail = {
   supplierEmail?: string;
 };
 
+async function readErrorDetail(res: Response): Promise<string> {
+  try {
+    const raw = await res.text();
+    if (!raw) return `Błąd serwera (${res.status})`;
+    try {
+      const j = JSON.parse(raw) as { detail?: unknown };
+      if (typeof j.detail === 'string' && j.detail.trim()) return j.detail.trim();
+    } catch {
+      /* plain text */
+    }
+    return raw.slice(0, 280);
+  } catch {
+    return `Błąd serwera (${res.status})`;
+  }
+}
+
 export async function fetchOrderEmailTemplate(opts: {
   supplierId?: string | null;
   supplierName: string;
@@ -51,7 +69,7 @@ export async function fetchOrderEmailTemplate(opts: {
   const notes = isInternalOrderNote(opts.notes) ? undefined : opts.notes?.trim() || undefined;
   const res = await fetch(`${BACKEND_URL}/api/orders/generate-messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await apiJsonHeaders(),
     body: JSON.stringify({
       restaurant_name: opts.restaurantName ?? 'Nasza restauracja',
       notes,
@@ -73,8 +91,7 @@ export async function fetchOrderEmailTemplate(opts: {
     }),
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(detail || `Błąd serwera (${res.status})`);
+    throw new Error(await readErrorDetail(res));
   }
   const data = await res.json();
   const msg = (data.messages ?? [])[0];

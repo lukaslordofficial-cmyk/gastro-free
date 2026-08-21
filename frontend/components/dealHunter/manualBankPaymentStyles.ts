@@ -39,6 +39,22 @@ export const manualPayStyles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.2,
   },
+  editDataBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 8,
+    marginHorizontal: 18,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  editDataText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
   hint: {
     fontSize: 12,
     lineHeight: 17,

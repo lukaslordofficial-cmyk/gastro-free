@@ -59,6 +59,12 @@ from billing_routes import router as billing_router
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
 from pos_config_routes import router as pos_config_router
+from restaurant_profile_routes import router as restaurant_profile_router
+from restaurant_profile import (
+    account_login_email as _account_login_email,
+    get_restaurant_profile,
+    order_footer as _order_footer,
+)
 from url_safety import (
     assert_safe_redirect_url,
     checkout_redirect_public_base,
@@ -192,6 +198,7 @@ app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
 app.include_router(pos_config_router)
 app.include_router(billing_router)
+app.include_router(restaurant_profile_router)
 
 
 @app.middleware("http")
@@ -7620,95 +7627,7 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
 RESEND_API_KEY = _resend_api_key()
 RESEND_FROM_EMAIL = _resend_from_email()
 
-# --- Profil restauracji (dane kontaktowe dla dostawców) ----------------------
-# Przechowujemy w Supabase (tabela restaurant_profile, singleton). Jeśli tabela
-# nie istnieje, korzystamy z lokalnego pliku fallback, aby funkcja działała od razu.
-def _profile_disk_path() -> Path:
-    ak = (_account_key_ctx.get() or _ACCOUNT_KEY_DEFAULT).strip() or "default"
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", ak)[:80]
-    return Path(__file__).parent / f".restaurant_profile_{safe}.json"
-
-
-def _read_profile_disk() -> dict:
-    try:
-        path = _profile_disk_path()
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return {"contact_email": data.get("contact_email", "") or "",
-                    "contact_phone": data.get("contact_phone", "") or ""}
-    except Exception:  # noqa: BLE001
-        pass
-    return {"contact_email": "", "contact_phone": ""}
-
-
-def _write_profile_disk(email: str, phone: str) -> None:
-    try:
-        _profile_disk_path().write_text(
-            json.dumps({"contact_email": email, "contact_phone": phone}), encoding="utf-8")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Nie udało się zapisać profilu na dysku: %s", e)
-
-
-async def get_restaurant_profile(client: httpx.AsyncClient) -> dict:
-    try:
-        rows = await sb_get(client, "restaurant_profile",
-                            params={"select": "contact_email,contact_phone", "limit": "1"})
-        if rows:
-            return {"contact_email": rows[0].get("contact_email") or "",
-                    "contact_phone": rows[0].get("contact_phone") or ""}
-        disk = _read_profile_disk()
-        if disk["contact_email"] or disk["contact_phone"]:
-            return disk
-        return {"contact_email": "", "contact_phone": ""}
-    except httpx.HTTPError:
-        return _read_profile_disk()
-
-
-async def set_restaurant_profile(client: httpx.AsyncClient, email: str, phone: str) -> None:
-    payload = {"contact_email": email, "contact_phone": phone,
-               "updated_at": datetime.now(timezone.utc).isoformat()}
-    try:
-        rows = await sb_get(client, "restaurant_profile", params={"select": "id", "limit": "1"})
-        if rows:
-            await sb_patch(client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload)
-        else:
-            await sb_post(client, "restaurant_profile", payload)
-    except httpx.HTTPError:
-        _write_profile_disk(email, phone)
-
-
-def _order_footer(profile: dict) -> str:
-    email = (profile.get("contact_email") or "").strip() or "(brak)"
-    phone = (profile.get("contact_phone") or "").strip() or "(brak)"
-    return ("--- Wiadomość wygenerowana automatycznie przez asystenta AI Gastro-Manager. "
-            "Prosimy NIE ODPOWIADAĆ na tego maila. Kontakt z restauracją wyłącznie pod adresem: "
-            f"{email} lub numerem telefonu: {phone}. ---")
-
-
-class ProfilePayload(BaseModel):
-    contact_email: str = ""
-    contact_phone: str = ""
-
-
-@app.get("/api/restaurant/profile")
-async def get_profile_endpoint():
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        p = await get_restaurant_profile(client)
-    complete = bool((p.get("contact_email") or "").strip() and (p.get("contact_phone") or "").strip())
-    return {**p, "complete": complete}
-
-
-@app.put("/api/restaurant/profile")
-async def put_profile_endpoint(payload: ProfilePayload):
-    email = (payload.contact_email or "").strip()
-    phone = (payload.contact_phone or "").strip()
-    if not email or not phone:
-        raise HTTPException(status_code=400, detail="Podaj e-mail oraz telefon kontaktowy.")
-    if "@" not in email or "." not in email:
-        raise HTTPException(status_code=400, detail="Podaj poprawny adres e-mail.")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await set_restaurant_profile(client, email, phone)
-    return {"ok": True, "contact_email": email, "contact_phone": phone, "complete": True}
+# Profil restauracji: backend/restaurant_profile.py + restaurant_profile_routes.py
 
 # --- Jednostki: przeliczanie do wspólnej jednostki bazowej (kg / l / szt) ----
 # dim -> (base_dim, factor_do_bazowej)
@@ -10855,10 +10774,10 @@ def _is_internal_order_note(notes: Optional[str]) -> bool:
 async def generate_messages(req: GenerateMessagesRequest):
     if not req.suppliers:
         raise HTTPException(status_code=400, detail="Brak dostawców do wygenerowania wiadomości.")
-    restaurant = (req.restaurant_name or "Nasza restauracja").strip()
     today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as _c:
         profile = await get_restaurant_profile(_c)
+        login_email = await _account_login_email(_c)
         # Uzupełnij nazwy/e-maile dostawców z DB (FE czasem wysyła puste / „Dostawca”)
         resolved_suppliers: dict[str, dict] = {}
         for g in req.suppliers:
@@ -10874,9 +10793,18 @@ async def generate_messages(req: GenerateMessagesRequest):
                     resolved_suppliers[sid] = rows[0]
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"generate-messages resolve supplier {sid}: {e}")
-    footer = _order_footer(profile)
-    contact_email = (profile.get("contact_email") or "").strip()
+
+    company = (profile.get("company_name") or "").strip()
+    delivery = (profile.get("delivery_address") or "").strip()
+    req_name = (req.restaurant_name or "").strip()
+    if not req_name or req_name.lower() in ("nasza restauracja", "restauracja"):
+        restaurant = company or req_name or "Nasza restauracja"
+    else:
+        restaurant = req_name
+
+    contact_email = (profile.get("contact_email") or "").strip() or login_email
     contact_phone = (profile.get("contact_phone") or "").strip()
+    footer = _order_footer(profile, fallback_email=login_email)
     contact_block = ""
     if contact_email or contact_phone:
         parts = []
@@ -10885,6 +10813,11 @@ async def generate_messages(req: GenerateMessagesRequest):
         if contact_phone:
             parts.append(f"tel.: {contact_phone}")
         contact_block = "W razie pytań prosimy o kontakt: " + ", ".join(parts) + "."
+
+    delivery_block = ""
+    if delivery:
+        delivery_block = f"<p style='margin:0 0 14px 0;color:#64748B;font-size:13px'>Adres dostawy: <strong>{delivery}</strong></p>"
+    delivery_text = f"Adres dostawy: {delivery}\n" if delivery else ""
 
     messages = []
     for g in req.suppliers:
@@ -10934,6 +10867,7 @@ async def generate_messages(req: GenerateMessagesRequest):
   </p>
   <p style="margin:0 0 4px 0;color:#64748B;font-size:13px">Data zamówienia: {today}</p>
   <p style="margin:0 0 14px 0;color:#64748B;font-size:13px">Odbiorca / hurtownia: <strong>{supplier_hello}</strong></p>
+  {delivery_block}
   <table style="border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:14px">
     <thead>
       <tr style="background:#F1F5F9">
@@ -10973,6 +10907,10 @@ async def generate_messages(req: GenerateMessagesRequest):
             f"W imieniu restauracji {restaurant} przesyłamy do firmy {supplier_hello} "
             f"zamówienie towaru (data: {today}) z prośbą o potwierdzenie realizacji.",
             f"Hurtownia: {supplier_hello}",
+        ]
+        if delivery_text:
+            email_text_lines.append(delivery_text.strip())
+        email_text_lines += [
             "",
             "Zamawiane pozycje:",
         ]
@@ -11054,6 +10992,7 @@ async def send_order_email(req: SendEmailRequest):
 
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
         profile = await get_restaurant_profile(client)
+        login_email = await _account_login_email(client)
         payload = {
             "from": f"Gastro Manager <{from_email}>",
             "to": [req.to],
@@ -11061,7 +11000,7 @@ async def send_order_email(req: SendEmailRequest):
             "html": html,
         }
         # reply_to = e-mail restauratora → odpowiedź hurtowni trafia do niego, nie do nas
-        reply_to = (profile.get("contact_email") or "").strip()
+        reply_to = (profile.get("contact_email") or "").strip() or login_email
         if reply_to:
             payload["reply_to"] = reply_to
         try:

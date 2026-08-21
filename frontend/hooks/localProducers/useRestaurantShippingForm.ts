@@ -1,12 +1,46 @@
 /**
  * Adres paczki restauracji — wczytanie z Supabase i pola formularza.
+ * Uzupełnia puste pola z „Dane lokalu” (restaurant_profile).
  */
 import { useCallback, useEffect, useState } from 'react';
 import * as localProducersService from '@/services/localProducers';
 import type { ProducerDeliveryAddress } from '@/types/localProducers';
+import { fetchRestaurantProfile } from '@/services/restaurantProfileService';
 
 function digitsOnly(v: string): string {
   return String(v || '').replace(/\D/g, '');
+}
+
+/** Prosty rozbiór „ul. X 12, 00-001 Miasto” / „ul. X, kod, miasto”. */
+function parseDeliveryAddress(raw: string): {
+  street: string;
+  building: string;
+  post: string;
+  city: string;
+} {
+  const s = (raw || '').trim();
+  if (!s) return { street: '', building: '', post: '', city: '' };
+  const postMatch = s.match(/\b(\d{2}-\d{3})\b/);
+  const post = postMatch?.[1] || '';
+  const rest = post ? s.replace(post, ',').replace(/,\s*,/g, ',') : s;
+  const parts = rest.split(',').map((p) => p.trim()).filter(Boolean);
+  let street = '';
+  let building = '';
+  let city = '';
+  if (parts.length >= 2) {
+    const streetPart = parts[0];
+    city = parts[parts.length - 1].replace(post, '').trim() || parts[parts.length - 1];
+    const bm = streetPart.match(/^(.*?)[\s]+(\d+[A-Za-z/-]*)$/);
+    if (bm) {
+      street = bm[1].trim();
+      building = bm[2].trim();
+    } else {
+      street = streetPart;
+    }
+  } else {
+    street = s;
+  }
+  return { street, building, post, city };
 }
 
 export function useRestaurantShippingForm() {
@@ -32,6 +66,21 @@ export function useRestaurantShippingForm() {
         setShipPost((v) => v || saved.post_code);
         setShipNip((v) => v || String(saved.nip || '').trim());
         setShipRegon((v) => v || String(saved.regon || '').trim());
+      }
+      // Fallback: Dane lokalu z Ustawień
+      try {
+        const rp = await fetchRestaurantProfile();
+        const parsed = parseDeliveryAddress(rp.delivery_address || '');
+        setShipName((v) => v || (rp.company_name || '').trim());
+        setShipPhone((v) => v || (rp.contact_phone || '').trim());
+        setShipStreet((v) => v || parsed.street);
+        setShipBuilding((v) => v || parsed.building);
+        setShipCity((v) => v || parsed.city);
+        setShipPost((v) => v || parsed.post);
+        setShipNip((v) => v || (rp.nip || '').trim());
+        setShipRegon((v) => v || (rp.regon || '').trim());
+      } catch {
+        /* brak profilu — OK */
       }
     } catch (e) {
       if (__DEV__) console.warn('[shipping form]', e);

@@ -59,6 +59,7 @@ import {
 } from '@/components/dealHunter/ManualBankPaymentSheet';
 import { CatalogScanModal } from '@/components/CatalogScanModal';
 import { fetchOrderEmailTemplate, isInternalOrderNote } from '@/lib/orderEmailTemplate';
+import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
@@ -1900,6 +1901,8 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
   const theme = useAppTheme();
   const prem = theme.isPremium;
   const { alert } = usePremiumAlert();
+  const { user, profile } = useAuth();
+  const accountMail = user?.email || profile?.email || null;
   const [groups, setGroups] = useState<GlobalBasketGroup[]>([]);
   const [draftOrders, setDraftOrders] = useState<DraftOrder[]>([]);
   const [editingDraft, setEditingDraft] = useState<DraftOrder | null>(null);
@@ -1984,7 +1987,6 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
       supplierId: d.supplier_id,
       supplierName: d.supplier_name,
       supplierEmail: d.supplier_email,
-      restaurantName: 'Nasza restauracja',
       notes: d.notes ?? undefined,
       items: d.items.map((it) => ({
         product_name: it.name,
@@ -2016,13 +2018,14 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
       setEmailBusy(true);
       try {
         const { subject, body, email } = await buildOrderEmail(d);
+        const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
         setEmailDraftOrderId(d.id);
         setEmailDraft({
           supplierName: d.supplier_name,
           toEmail: email,
-          fromEmail: ASSISTANT_FROM_EMAIL,
+          fromEmail: resolved.fromEmail,
           subject,
-          body,
+          body: resolved.body,
           supplierId: d.supplier_id,
           totalPln: draftTotal(d),
         });
@@ -2060,13 +2063,14 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
                 // Wysyłamy kolejno; po każdym sukcesie koszyk draft znika (status=sent)
                 for (const d of draftOrders) {
                   const { subject, body, email } = await buildOrderEmail(d);
+                  const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
                   setEmailDraftOrderId(d.id);
                   setEmailDraft({
                     supplierName: d.supplier_name,
                     toEmail: email,
-                    fromEmail: ASSISTANT_FROM_EMAIL,
+                    fromEmail: resolved.fromEmail,
                     subject,
-                    body,
+                    body: resolved.body,
                     supplierId: d.supplier_id,
                     totalPln: draftTotal(d),
                   });

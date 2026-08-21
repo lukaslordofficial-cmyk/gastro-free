@@ -12,10 +12,16 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
-import { Check, Copy, Landmark, X } from 'lucide-react-native';
+import { router } from 'expo-router';
+import { Check, Copy, Landmark, Pencil, X } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { POLISH_BANK_LOGINS } from '@/lib/polishBankLogins';
 import { buildManualPayCopyRows, type ManualPayCopyRow } from '@/lib/manualPayCopyRows';
+import { buildManualOrderTitle } from '@/lib/manualOrderTitle';
+import {
+  fetchRestaurantProfile,
+  type RestaurantProfile,
+} from '@/services/restaurantProfileService';
 import { DS } from '@/constants/premiumTheme';
 import { manualPayStyles as styles } from '@/components/dealHunter/manualBankPaymentStyles';
 import { BankLogoBadge } from '@/components/dealHunter/BankLogoBadge';
@@ -23,7 +29,8 @@ import { BankLogoBadge } from '@/components/dealHunter/BankLogoBadge';
 export type ManualPaymentOrder = {
   supplierId: string | null;
   supplierName: string;
-  orderTitle: string;
+  /** Ignorowane — tytuł budowany z profilu restauracji. */
+  orderTitle?: string;
   totalPln: number;
 };
 
@@ -54,12 +61,14 @@ type CopyRow = ManualPayCopyRow;
 export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: Props) {
   const [loading, setLoading] = useState(false);
   const [profile, setProfile] = useState<SupplierPayProfile | null>(null);
+  const [restaurant, setRestaurant] = useState<RestaurantProfile | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible || !order) {
       setProfile(null);
+      setRestaurant(null);
       setCopiedKey(null);
       setToast(null);
       return;
@@ -68,33 +77,36 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
     (async () => {
       setLoading(true);
       try {
-        const sid = order.supplierId?.trim();
-        if (!sid) {
-          if (!cancelled) {
-            setProfile({ name: order.supplierName, bankAccount: null, address: null });
-          }
-          return;
-        }
-        const { data, error } = await supabase
-          .from('suppliers')
-          .select('name,address,bank_account')
-          .eq('id', sid)
-          .maybeSingle();
+        const [rest, supplier] = await Promise.all([
+          fetchRestaurantProfile().catch(() => null),
+          (async (): Promise<SupplierPayProfile> => {
+            const sid = order.supplierId?.trim();
+            if (!sid) {
+              return { name: order.supplierName, bankAccount: null, address: null };
+            }
+            const { data, error } = await supabase
+              .from('suppliers')
+              .select('name,address,bank_account')
+              .eq('id', sid)
+              .maybeSingle();
+            if (error || !data) {
+              return { name: order.supplierName, bankAccount: null, address: null };
+            }
+            const row = data as {
+              name?: string;
+              address?: string | null;
+              bank_account?: string | null;
+            };
+            return {
+              name: (row.name || order.supplierName).trim() || order.supplierName,
+              bankAccount: (row.bank_account || '').trim() || null,
+              address: (row.address || '').trim() || null,
+            };
+          })(),
+        ]);
         if (cancelled) return;
-        if (error) {
-          setProfile({ name: order.supplierName, bankAccount: null, address: null });
-          return;
-        }
-        const row = data as {
-          name?: string;
-          address?: string | null;
-          bank_account?: string | null;
-        } | null;
-        setProfile({
-          name: (row?.name || order.supplierName).trim() || order.supplierName,
-          bankAccount: (row?.bank_account || '').trim() || null,
-          address: (row?.address || '').trim() || null,
-        });
+        setRestaurant(rest);
+        setProfile(supplier);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -104,6 +116,15 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
     };
   }, [visible, order]);
 
+  const orderTitle = useMemo(() => {
+    const name = (restaurant?.company_name || '').trim() || null;
+    const addr = (restaurant?.delivery_address || '').trim() || null;
+    return buildManualOrderTitle({
+      restaurantName: name,
+      deliveryAddress: addr,
+    });
+  }, [restaurant]);
+
   const rows: CopyRow[] = useMemo(() => {
     if (!order) return [];
     return buildManualPayCopyRows({
@@ -111,9 +132,9 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
       bankAccount: profile?.bankAccount ?? null,
       address: profile?.address ?? null,
       totalPln: order.totalPln,
-      orderTitle: order.orderTitle,
+      orderTitle,
     });
-  }, [order, profile]);
+  }, [order, profile, orderTitle]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -123,7 +144,7 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
   const copyValue = useCallback(
     async (row: CopyRow) => {
       const text = (row.value || '').trim();
-      if (!text) {
+      if (!text || text === '—') {
         showToast(row.emptyHint || 'Brak danych do skopiowania');
         return;
       }
@@ -151,6 +172,11 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
     [showToast],
   );
 
+  const goEditProfile = useCallback(() => {
+    onClose();
+    router.push('/(tabs)/ustawienia');
+  }, [onClose]);
+
   if (!order) return null;
 
   return (
@@ -168,6 +194,18 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
               <X size={22} color={C.textSecondary} strokeWidth={2} />
             </TouchableOpacity>
           </View>
+
+          <TouchableOpacity
+            style={[styles.editDataBtn, { borderColor: C.border, backgroundColor: C.background }]}
+            onPress={goEditProfile}
+            activeOpacity={0.8}
+            testID="manual-pay-edit-data"
+          >
+            <Pencil size={14} color={C.accent} strokeWidth={2.2} />
+            <Text style={[styles.editDataText, { color: C.accent }]} allowFontScaling={false}>
+              Edytuj swoje dane
+            </Text>
+          </TouchableOpacity>
 
           <Text style={[styles.hint, { color: C.textSecondary }]} allowFontScaling={false}>
             Skopiuj dane do przelewu, potem otwórz bank i wklej je w formularzu. Płatność jest
@@ -205,7 +243,7 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
                   Dane do przelewu
                 </Text>
                 {rows.map((row) => {
-                  const hasValue = !!(row.value || '').trim();
+                  const hasValue = !!(row.value || '').trim() && row.value !== '—';
                   const isCopied = copiedKey === row.key;
                   return (
                     <TouchableOpacity

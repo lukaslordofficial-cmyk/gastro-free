@@ -1,7 +1,7 @@
 /**
  * Edytowalny szablon e-maila zamówienia (Łowca Okazji + zamówienie ręczne).
  * — Nadawca = asystent.dostaw@… → wysyłka przez Resend (backend)
- * — Inny nadawca → otwiera klienta poczty telefonu (mailto)
+ * — Inny nadawca (np. mail restauracji) → klient poczty telefonu (mailto), bez stopki asystenta
  */
 import React, { useMemo, useState } from 'react';
 import {
@@ -24,6 +24,8 @@ import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { fetchJson } from '@/lib/safeFetch';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
+import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
 
 export const ASSISTANT_FROM_EMAIL = 'asystent.dostaw@gastromanager.org';
 
@@ -48,6 +50,10 @@ type Props = {
   onPayPress?: () => void;
 };
 
+function isAssistantFrom(email: string): boolean {
+  return email.trim().toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
+}
+
 export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress }: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
@@ -60,10 +66,12 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
 
   React.useEffect(() => {
     if (!visible || !draft) return;
-    setFromEmail((draft.fromEmail || ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL);
+    const from = (draft.fromEmail || ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
+    setFromEmail(from);
     setToEmail(draft.toEmail || '');
     setSubject(draft.subject || '');
-    setBody(draft.body || '');
+    const rawBody = draft.body || '';
+    setBody(isAssistantFrom(from) ? rawBody : stripAssistantOrderFooter(rawBody));
   }, [visible, draft]);
 
   const bg = prem ? DS.color.bgPrimary : Colors.background;
@@ -73,9 +81,14 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
   const muted = prem ? DS.color.muted : Colors.textSecondary;
   const inputBg = prem ? DS.color.bgTertiary : Colors.borderLight;
 
-  const usesAssistant = useMemo(() => {
-    return fromEmail.trim().toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
-  }, [fromEmail]);
+  const usesAssistant = useMemo(() => isAssistantFrom(fromEmail), [fromEmail]);
+
+  const onChangeFrom = (next: string) => {
+    setFromEmail(next);
+    if (!isAssistantFrom(next)) {
+      setBody((b) => stripAssistantOrderFooter(b));
+    }
+  };
 
   const send = async () => {
     const to = toEmail.trim();
@@ -93,9 +106,10 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
       return;
     }
 
-    if (!usesAssistant) {
-      // Klient poczty użytkownika (Gmail / Mail itd.)
-      const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const bodyToSend = isAssistantFrom(from) ? body : stripAssistantOrderFooter(body);
+
+    if (!isAssistantFrom(from)) {
+      const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyToSend)}`;
       try {
         await Linking.openURL(url);
         onSent?.();
@@ -107,7 +121,10 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
     }
 
     if (!BACKEND_URL) {
-      alert('Brak backendu', 'Ustaw EXPO_PUBLIC_BACKEND_URL, aby wysłać z adresu asystenta.');
+      alert(
+        'Brak backendu',
+        'Ustaw EXPO_PUBLIC_BACKEND_URL na port 8001 (uvicorn), nie 8081 (Expo), aby wysłać z adresu asystenta.',
+      );
       return;
     }
 
@@ -117,11 +134,11 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
         `${BACKEND_URL}/api/orders/send-email`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await apiJsonHeaders(),
           body: JSON.stringify({
             to,
             subject,
-            body_text: body,
+            body_text: bodyToSend,
             from_email: ASSISTANT_FROM_EMAIL,
             supplier_name: draft?.supplierName,
           }),
@@ -172,7 +189,7 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
           <TextInput
             style={[styles.input, { backgroundColor: inputBg, borderColor: border, color: text }]}
             value={fromEmail}
-            onChangeText={setFromEmail}
+            onChangeText={onChangeFrom}
             autoCapitalize="none"
             keyboardType="email-address"
             placeholder={ASSISTANT_FROM_EMAIL}
@@ -181,8 +198,8 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
           />
           <Text style={[styles.hint, { color: muted }]}>
             {usesAssistant
-              ? 'Wiadomość wyśle skrypt z adresu asystenta dostaw.'
-              : 'Otworzymy Twoją aplikację pocztową z gotową treścią.'}
+              ? 'Wiadomość wyśle skrypt z adresu asystenta dostaw (wymaga backendu :8001).'
+              : 'Otworzymy Twoją aplikację pocztową z gotową treścią (bez stopki asystenta).'}
           </Text>
 
           <Text style={[styles.label, { color: muted }]}>Odbiorca (dostawca)</Text>

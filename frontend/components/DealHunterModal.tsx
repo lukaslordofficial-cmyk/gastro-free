@@ -2317,6 +2317,24 @@ export function DealHunterModal({
                   </>
                 )}
               </TouchableOpacity>
+              {!g.is_local_producer && !blocked ? (
+                <TouchableOpacity
+                  style={styles.payBtn}
+                  onPress={() =>
+                    setManualPayOrder({
+                      supplierId: g.supplier_id,
+                      supplierName: (g.supplier_name || '').trim() || 'Dostawca',
+                      orderTitle: `Zamówienie — ${(g.supplier_name || '').trim() || 'Dostawca'}`,
+                      totalPln: Number(g.total_pln ?? g.subtotal_pln) || 0,
+                    })
+                  }
+                  activeOpacity={0.85}
+                  testID={`deal-hunter-cart-manual-pay-${g.supplier_id ?? gi}`}
+                >
+                  <Landmark size={16} color={C.accent} strokeWidth={2.2} />
+                  <Text style={styles.payBtnText}>Opłać zamówienie</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
             );
           })

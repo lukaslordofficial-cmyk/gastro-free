@@ -77,6 +77,7 @@ def test_build_patch_fills_missing_keeps_existing_on_empty():
         "email": None,
         "contact_person": "Jan Kowalski",
         "address": "Kraków, Rynek 1",
+        "bank_account": "PL61 1090 1014 0000 0712 1981 2874",
         "payment_terms": "14 dni",
         "shipping_cost": 40.0,
         "min_order_value": 500.0,
@@ -88,6 +89,8 @@ def test_build_patch_fills_missing_keeps_existing_on_empty():
     assert patch["phone"] == "+48 500 100 200"
     assert "email" not in patch  # pusty z dokumentu — zostaw old@
     assert patch["contact_person"] == "Jan Kowalski"
+    assert patch["address"] == "Kraków, Rynek 1"
+    assert patch["bank_account"] == "PL61 1090 1014 0000 0712 1981 2874"
     assert "Adres: Kraków, Rynek 1" in patch["notes"]
     assert patch["shipping_cost"] == 40.0
     assert patch["min_order_value"] == 500.0

@@ -3769,6 +3769,7 @@ def _normalize_supplier_scan_meta(raw: Optional[dict]) -> dict:
         "email": _str("email"),
         "contact_person": _str("contact_person"),
         "address": _str("address"),
+        "bank_account": _str("bank_account"),
         "payment_terms": _str("payment_terms"),
         "shipping_cost": _num("shipping_cost"),
         "min_order_value": _num("min_order_value"),
@@ -3888,6 +3889,8 @@ def build_supplier_patch_from_scan(existing: dict, meta: dict) -> dict:
         ("phone", "phone"),
         ("email", "email"),
         ("contact_person", "text"),
+        ("address", "text"),
+        ("bank_account", "text"),
     ):
         chosen = _prefer_supplier_str(existing.get(key), meta.get(key), kind=kind)
         if chosen is not None:
@@ -3940,7 +3943,7 @@ def supplier_meta_preview(meta: dict) -> dict:
     """Kompaktowy podgląd pól dostawcy dla FE (pomija puste)."""
     out: dict = {}
     for k in (
-        "nip", "phone", "email", "contact_person", "address", "payment_terms",
+        "nip", "phone", "email", "contact_person", "address", "bank_account", "payment_terms",
         "shipping_cost", "min_order_value", "free_shipping_threshold", "lead_time_days",
     ):
         v = meta.get(k)
@@ -3998,7 +4001,7 @@ async def _apply_supplier_scan_meta(
         return {"updated_fields": [], "supplier_meta": {}}
 
     select_cols = (
-        "id,name,nip,phone,email,contact_person,notes,"
+        "id,name,nip,phone,email,contact_person,notes,address,bank_account,"
         "min_order_value,shipping_cost,free_shipping_threshold,lead_time_days"
     )
     rows = None
@@ -4008,8 +4011,10 @@ async def _apply_supplier_scan_meta(
             params={"select": select_cols, "id": f"eq.{supplier_id}", "limit": "1"},
         )
     except Exception:
-        # Graceful: migracje shipping/lead_time mogą nie być uruchomione
+        # Graceful: migracje shipping/lead_time/bank mogą nie być uruchomione
         for cols in (
+            "id,name,nip,phone,email,contact_person,notes,"
+            "min_order_value,shipping_cost,free_shipping_threshold,lead_time_days",
             "id,name,nip,phone,email,contact_person,notes,min_order_value,shipping_cost,free_shipping_threshold",
             "id,name,nip,phone,email,contact_person,notes,min_order_value",
             "id,name,nip,phone,email,contact_person,notes",
@@ -4743,6 +4748,7 @@ class ConfirmInvoiceRequest(BaseModel):
     supplier_email: Optional[str] = None
     supplier_contact_person: Optional[str] = None
     supplier_address: Optional[str] = None
+    supplier_bank_account: Optional[str] = None
     supplier_payment_terms: Optional[str] = None
     supplier_shipping_cost: Optional[float] = None
     supplier_min_order_value: Optional[float] = None
@@ -5310,6 +5316,7 @@ async def confirm_invoice(req: ConfirmInvoiceRequest):
         "email": req.supplier_email,
         "contact_person": req.supplier_contact_person,
         "address": req.supplier_address,
+        "bank_account": req.supplier_bank_account,
         "payment_terms": req.supplier_payment_terms,
         "shipping_cost": req.supplier_shipping_cost,
         "min_order_value": req.supplier_min_order_value,

@@ -703,6 +703,29 @@ function SupplierCard({
                   </Text>
                 </View>
               )}
+              {!!supplier.address && (
+                <View style={cardStyles.dataRow} testID={`supplier-address-${supplier.id}`}>
+                  <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Adres</Text>
+                  <Text style={[cardStyles.dataValue, theme.isPremium && cardStyles.dataValuePrem]}>
+                    {supplier.address}
+                  </Text>
+                </View>
+              )}
+              {supplier.bank_account ? (
+                <View style={cardStyles.dataRow} testID={`supplier-bank-${supplier.id}`}>
+                  <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Konto</Text>
+                  <Text style={[cardStyles.dataValue, theme.isPremium && cardStyles.dataValuePrem]}>
+                    {supplier.bank_account}
+                  </Text>
+                </View>
+              ) : (
+                <View style={cardStyles.dataRow} testID={`supplier-bank-missing-${supplier.id}`}>
+                  <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Konto</Text>
+                  <Text style={[cardStyles.dataValue, theme.isPremium && { color: DS.color.muted }]}>
+                    Uzupełnij numer konta (przelew z Łowcy)
+                  </Text>
+                </View>
+              )}
               {!!supplier.notes && (
                 <View style={cardStyles.dataRow}>
                   <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Notatki</Text>
@@ -2862,6 +2885,9 @@ export default function DostawcyScreen() {
                 placeholderTextColor={premPh}
                 testID="supplier-address-input"
               />
+              <Text style={[mainStyles.toggleHint, prem && { color: DS.color.muted, marginBottom: 10 }]}>
+                Opcjonalnie — używane przy przelewie ręcznym z Łowcy okazji.
+              </Text>
 
               <Text style={[mainStyles.fieldLabel, premLabel]}>Numer konta bankowego</Text>
               <TextInput
@@ -2873,6 +2899,9 @@ export default function DostawcyScreen() {
                 autoCapitalize="characters"
                 testID="supplier-bank-account-input"
               />
+              <Text style={[mainStyles.toggleHint, prem && { color: DS.color.muted, marginBottom: 10 }]}>
+                Możesz wpisać ręcznie nawet po skanie faktury bez numeru konta. Potrzebne do „Opłać zamówienie”.
+              </Text>
 
               <View style={[mainStyles.toggleBlock, premTile]}>
                 <View style={mainStyles.toggleRow}>

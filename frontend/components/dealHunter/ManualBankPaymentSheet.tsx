@@ -14,8 +14,8 @@ import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
 import { Check, Copy, Landmark, X } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
-import { formatPln } from '@/lib/format';
 import { POLISH_BANK_LOGINS } from '@/lib/polishBankLogins';
+import { buildManualPayCopyRows, type ManualPayCopyRow } from '@/lib/manualPayCopyRows';
 import { DS } from '@/constants/premiumTheme';
 import { manualPayStyles as styles } from '@/components/dealHunter/manualBankPaymentStyles';
 
@@ -48,12 +48,7 @@ type Props = {
   };
 };
 
-type CopyRow = {
-  key: string;
-  label: string;
-  value: string;
-  emptyHint?: string;
-};
+type CopyRow = ManualPayCopyRow;
 
 export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: Props) {
   const [loading, setLoading] = useState(false);
@@ -110,24 +105,13 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
 
   const rows: CopyRow[] = useMemo(() => {
     if (!order) return [];
-    const name = profile?.name || order.supplierName;
-    const list: CopyRow[] = [
-      {
-        key: 'bank',
-        label: 'Numer konta bankowego',
-        value: profile?.bankAccount || '',
-        emptyHint: 'Brak w profilu dostawcy — uzupełnij w module Dostawcy',
-      },
-      { key: 'name', label: 'Pełna nazwa dostawcy', value: name },
-    ];
-    if (profile?.address) {
-      list.push({ key: 'address', label: 'Adres dostawcy', value: profile.address });
-    }
-    list.push(
-      { key: 'total', label: 'Łączna cena zamówienia', value: formatPln(order.totalPln) },
-      { key: 'title', label: 'Tytuł zamówienia', value: order.orderTitle },
-    );
-    return list;
+    return buildManualPayCopyRows({
+      supplierName: profile?.name || order.supplierName,
+      bankAccount: profile?.bankAccount ?? null,
+      address: profile?.address ?? null,
+      totalPln: order.totalPln,
+      orderTitle: order.orderTitle,
+    });
   }, [order, profile]);
 
   const showToast = useCallback((msg: string) => {

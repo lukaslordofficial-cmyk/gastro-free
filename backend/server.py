@@ -7675,6 +7675,8 @@ def _write_profile_disk(profile: dict) -> None:
 
 async def get_restaurant_profile(client: httpx.AsyncClient) -> dict:
     select_full = ",".join(_PROFILE_KEYS)
+    base = _empty_restaurant_profile()
+    disk = _read_profile_disk()
     try:
         try:
             rows = await sb_get(
@@ -7683,89 +7685,77 @@ async def get_restaurant_profile(client: httpx.AsyncClient) -> dict:
                 params={"select": select_full, "limit": "1"},
             )
         except httpx.HTTPError:
-            # Stara tabela bez kolumn billing — tylko kontakt
             rows = await sb_get(
                 client,
                 "restaurant_profile",
                 params={"select": "contact_email,contact_phone", "limit": "1"},
             )
-        disk = _read_profile_disk()
         if rows:
-            db = _normalize_restaurant_profile(rows[0])
-            # Uzupełnij puste pola z dysku (gdy migracja billing nie weszła / partial write)
-            for k in _PROFILE_KEYS:
-                if not (db.get(k) or "").strip() and (disk.get(k) or "").strip():
-                    db[k] = disk[k]
-            return await _enrich_restaurant_from_auth_profiles(client, db)
-        if any(disk.values()):
-            return await _enrich_restaurant_from_auth_profiles(client, disk)
-        return await _enrich_restaurant_from_auth_profiles(client, _empty_restaurant_profile())
+            base = _normalize_restaurant_profile(rows[0])
+        for k in _PROFILE_KEYS:
+            if not (base.get(k) or "").strip() and (disk.get(k) or "").strip():
+                base[k] = disk[k]
     except httpx.HTTPError:
-        return await _enrich_restaurant_from_auth_profiles(client, _read_profile_disk())
+        base = _normalize_restaurant_profile(disk)
+    return await _enrich_restaurant_from_auth_profiles(client, base)
+
+
+async def _write_restaurant_profile_table(client: httpx.AsyncClient, merged: dict) -> None:
+    """Best-effort zapis do restaurant_profile (kontakt zawsze, billing jeśli kolumny są)."""
+    ts = datetime.now(timezone.utc).isoformat()
+    payload_full = {**{k: merged[k] for k in _PROFILE_KEYS}, "updated_at": ts}
+    payload_min = {
+        "contact_email": merged["contact_email"],
+        "contact_phone": merged["contact_phone"],
+        "updated_at": ts,
+    }
+    # Pośredni payload: kontakt + nazwa + adres (bez bank/nip — mniej ryzyka PGRST204)
+    payload_mid = {
+        **payload_min,
+        "company_name": merged["company_name"],
+        "delivery_address": merged["delivery_address"],
+    }
+    try:
+        rows = await sb_get(client, "restaurant_profile", params={"select": "id", "limit": "1"})
+    except httpx.HTTPError as exc:
+        logger.warning("restaurant_profile list failed: %s", exc)
+        return
+    for payload in (payload_full, payload_mid, payload_min):
+        try:
+            if rows:
+                await sb_patch(
+                    client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload
+                )
+            else:
+                await sb_post(client, "restaurant_profile", payload)
+                rows = await sb_get(
+                    client, "restaurant_profile", params={"select": "id", "limit": "1"}
+                ) or rows
+            return
+        except httpx.HTTPError as exc:
+            logger.warning("restaurant_profile write tier failed (%s): %s", list(payload), exc)
 
 
 async def set_restaurant_profile(client: httpx.AsyncClient, updates: dict) -> dict:
-    """Merge partial updates into tenant restaurant_profile (or disk fallback)."""
+    """Zapisz dane lokalu: profiles (trwałe) + restaurant_profile + dysk."""
     current = await get_restaurant_profile(client)
     merged = {**current}
     for k in _PROFILE_KEYS:
         if k in updates and updates[k] is not None:
             merged[k] = str(updates[k]).strip()
-    # Zawsze trzymaj pełny profil na dysku — nawet gdy PostgREST odrzuci nowe kolumny.
     _write_profile_disk(merged)
-    payload_full = {
-        **{k: merged[k] for k in _PROFILE_KEYS},
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    payload_min = {
-        "contact_email": merged["contact_email"],
-        "contact_phone": merged["contact_phone"],
-        "updated_at": payload_full["updated_at"],
-    }
-    try:
-        rows = await sb_get(client, "restaurant_profile", params={"select": "id", "limit": "1"})
-        try:
-            if rows:
-                await sb_patch(
-                    client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload_full
-                )
-            else:
-                await sb_post(client, "restaurant_profile", payload_full)
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "restaurant_profile full write failed (%s) — zapisuję contact + dysk",
-                exc,
-            )
-            if rows:
-                await sb_patch(
-                    client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload_min
-                )
-            else:
-                await sb_post(client, "restaurant_profile", payload_min)
-        await _sync_restaurant_to_auth_profiles(client, merged)
-        return merged
-    except httpx.HTTPError:
-        await _sync_restaurant_to_auth_profiles(client, merged)
-        return merged
+    # 1) profiles — główne źródło nazwy/adresu (nie zależy od migracji billing)
+    await _sync_restaurant_to_auth_profiles(client, merged)
+    # 2) restaurant_profile — best effort
+    await _write_restaurant_profile_table(client, merged)
+    # Zwróć to, co faktycznie da się odczytać (profiles + tabela)
+    return await get_restaurant_profile(client)
 
 
 async def _account_login_email(client: httpx.AsyncClient) -> str:
     """E-mail konta z profiles (ten, na który założono restaurację)."""
-    try:
-        rows = await sb_get(
-            client,
-            "profiles",
-            params={
-                "select": "email",
-                "account_key": f"eq.{get_account_key()}",
-                "limit": "1",
-            },
-        ) or []
-        if rows:
-            return str(rows[0].get("email") or "").strip()
-    except Exception:  # noqa: BLE001
-        pass
-    return ""
+    row = await _auth_profiles_row(client)
+    return str(row.get("email") or "").strip()
 
 
 def _delivery_from_shipping_row(row: dict) -> str:
@@ -7782,35 +7772,64 @@ def _delivery_from_shipping_row(row: dict) -> str:
 
 
 async def _auth_profiles_row(client: httpx.AsyncClient) -> dict:
-    try:
-        rows = await sb_get(
-            client,
-            "profiles",
-            params={
-                "select": (
-                    "email,restaurant_name,shipping_phone,shipping_street,"
-                    "shipping_building,shipping_city,shipping_post_code,"
-                    "shipping_nip,shipping_regon"
-                ),
-                "account_key": f"eq.{get_account_key()}",
-                "limit": "1",
-            },
-        ) or []
-        if rows and isinstance(rows[0], dict):
-            return rows[0]
-    except Exception:  # noqa: BLE001
-        pass
+    selects = (
+        "id,email,restaurant_name,shipping_phone,shipping_street,"
+        "shipping_building,shipping_city,shipping_post_code,"
+        "shipping_nip,shipping_regon,lokal_profile_json",
+        "id,email,restaurant_name,shipping_phone,shipping_street,"
+        "shipping_building,shipping_city,shipping_post_code,"
+        "shipping_nip,shipping_regon",
+        "id,email,restaurant_name,shipping_phone,shipping_street,"
+        "shipping_building,shipping_city,shipping_post_code",
+        "id,email,restaurant_name",
+    )
+    ak = get_account_key()
+    for select in selects:
+        try:
+            rows = await sb_get(
+                client,
+                "profiles",
+                params={
+                    "select": select,
+                    "account_key": f"eq.{ak}",
+                    "limit": "1",
+                },
+            ) or []
+            if rows and isinstance(rows[0], dict):
+                return rows[0]
+        except Exception:  # noqa: BLE001
+            continue
     return {}
+
+
+def _merge_lokal_json(row: dict, profile: dict) -> dict:
+    raw = row.get("lokal_profile_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            raw = None
+    if not isinstance(raw, dict):
+        return profile
+    out = dict(profile)
+    for k in _PROFILE_KEYS:
+        val = str(raw.get(k) or "").strip()
+        if val:
+            out[k] = val
+    return out
 
 
 async def _enrich_restaurant_from_auth_profiles(
     client: httpx.AsyncClient, profile: dict
 ) -> dict:
-    """Uzupełnij company_name / adres z profiles (trwałe, nawet bez migracji billing)."""
+    """Uzupełnij / nadpisz z profiles — lokal_profile_json ma priorytet nad pustą tabelą."""
     out = dict(profile)
     row = await _auth_profiles_row(client)
     if not row:
         return out
+    out = _merge_lokal_json(row, out)
+    # Nazwa z formularza „Pełna nazwa firmy” trzymana też w restaurant_name po sync —
+    # ale lokal_json ma pierwszeństwo (już w _merge). Tu tylko gdy nadal pusto:
     if not (out.get("company_name") or "").strip():
         out["company_name"] = str(row.get("restaurant_name") or "").strip()
     if not (out.get("delivery_address") or "").strip():
@@ -7826,36 +7845,66 @@ async def _enrich_restaurant_from_auth_profiles(
     return out
 
 
+async def _patch_profiles(client: httpx.AsyncClient, row: dict, patch: dict) -> bool:
+    if not patch:
+        return False
+    filters = []
+    pid = row.get("id")
+    if pid:
+        filters.append({"id": f"eq.{pid}"})
+    filters.append({"account_key": f"eq.{get_account_key()}"})
+    for params in filters:
+        try:
+            await sb_patch(client, "profiles", params, patch)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("profiles patch %s failed: %s", list(patch.keys()), exc)
+    return False
+
+
 async def _sync_restaurant_to_auth_profiles(client: httpx.AsyncClient, merged: dict) -> None:
-    """Zapisz nazwę/adres też w profiles — źródło prawdy widoczne w app i LP."""
-    patch: dict = {}
+    """Zapisz dane lokalu w profiles (trwałe, niezależnie od restaurant_profile)."""
+    row = await _auth_profiles_row(client)
     company = (merged.get("company_name") or "").strip()
     delivery = (merged.get("delivery_address") or "").strip()
     phone = (merged.get("contact_phone") or "").strip()
     nip = (merged.get("nip") or "").strip()
     regon = (merged.get("regon") or "").strip()
-    if company:
-        patch["restaurant_name"] = company
+
+    # Warstwa 1: nazwa + adres + telefon (kolumny od dawna w profiles)
+    core = {
+        "restaurant_name": company,
+        "shipping_street": delivery,
+        "shipping_phone": phone,
+    }
+    # Czyść building/city/post gdy trzymamy pełną linię w shipping_street —
+    # inaczej _delivery_from_shipping_row skleja śmieci.
     if delivery:
-        # Pełna linia adresu — get składa z powrotem delivery_address
-        patch["shipping_street"] = delivery
-    if phone:
-        patch["shipping_phone"] = phone
+        core["shipping_building"] = ""
+        core["shipping_city"] = ""
+        core["shipping_post_code"] = ""
+    ok = await _patch_profiles(client, row, core)
+    if not ok:
+        # Minimalny zapis — sama nazwa i adres osobno
+        if company:
+            await _patch_profiles(client, row, {"restaurant_name": company})
+        if delivery:
+            await _patch_profiles(client, row, {"shipping_street": delivery})
+        if phone:
+            await _patch_profiles(client, row, {"shipping_phone": phone})
+
+    # Warstwa 2: pełny JSON (wymaga ADD_PROFILES_LOKAL_JSON.sql)
+    lokal = {k: (merged.get(k) or "") for k in _PROFILE_KEYS}
+    await _patch_profiles(client, row, {"lokal_profile_json": lokal})
+
+    # Warstwa 3: NIP/REGON (opcjonalne kolumny)
+    extra = {}
     if nip:
-        patch["shipping_nip"] = nip
+        extra["shipping_nip"] = nip
     if regon:
-        patch["shipping_regon"] = regon
-    if not patch:
-        return
-    try:
-        await sb_patch(
-            client,
-            "profiles",
-            {"account_key": f"eq.{get_account_key()}"},
-            patch,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sync restaurant → profiles failed: %s", exc)
+        extra["shipping_regon"] = regon
+    if extra:
+        await _patch_profiles(client, row, extra)
 
 
 def _order_footer(profile: dict, *, fallback_email: str = "") -> str:

@@ -22,7 +22,6 @@ import {
   fetchRestaurantProfile,
   type RestaurantProfile,
 } from '@/services/restaurantProfileService';
-import { useAuth } from '@/contexts/AuthContext';
 import { DS } from '@/constants/premiumTheme';
 import { manualPayStyles as styles } from '@/components/dealHunter/manualBankPaymentStyles';
 import { BankLogoBadge } from '@/components/dealHunter/BankLogoBadge';
@@ -60,7 +59,6 @@ type Props = {
 type CopyRow = ManualPayCopyRow;
 
 export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: Props) {
-  const { profile: authProfile } = useAuth();
   const [loading, setLoading] = useState(false);
   const [profile, setProfile] = useState<SupplierPayProfile | null>(null);
   const [restaurant, setRestaurant] = useState<RestaurantProfile | null>(null);
@@ -119,16 +117,13 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
   }, [visible, order]);
 
   const orderTitle = useMemo(() => {
-    const name =
-      (restaurant?.company_name || '').trim() ||
-      (authProfile?.restaurant_name || '').trim() ||
-      null;
+    const name = (restaurant?.company_name || '').trim() || null;
     const addr = (restaurant?.delivery_address || '').trim() || null;
     return buildManualOrderTitle({
       restaurantName: name,
       deliveryAddress: addr,
     });
-  }, [restaurant, authProfile?.restaurant_name]);
+  }, [restaurant]);
 
   const rows: CopyRow[] = useMemo(() => {
     if (!order) return [];

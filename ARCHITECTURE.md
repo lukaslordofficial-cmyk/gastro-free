@@ -20,6 +20,18 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-21 — Kęs: POS webhook out of server.py + fix bottleneck (`chore/split-monoliths`)
+
+- **Split:** `backend/pos_webhook_routes.py` + `backend/pos_webhook_consume.py`
+  (`POST /api/pos/webhook`); ContextVar tenanta z HMAC resetowany w `finally`.
+- **Bugfix:** usunięty drugi (martwy) `_recompute_menu_availability` w `server.py`,
+  który nadpisywał pełną implementację i cicho psuł POS Bottleneck (`TypeError`
+  na `changed_inventory_ids`). Helper `_availability_changed_count` dla call-site’ów
+  oczekujących int.
+- **Security:** `POST /api/menu/recompute-availability` wymaga
+  `require_tenant_account_key()`.
+- Testy: `backend/tests/test_pos_webhook_routes.py`.
+
 ### 2026-08-21 — Kęs: restaurant_profile out of server.py (`chore/split-monoliths`)
 
 - **Split:** `backend/restaurant_profile.py` (IO + sync profiles/disk) +

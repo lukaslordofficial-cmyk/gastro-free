@@ -59,6 +59,7 @@ from billing_routes import router as billing_router
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
 from pos_config_routes import router as pos_config_router
+from pos_webhook_routes import router as pos_webhook_router
 from restaurant_profile_routes import router as restaurant_profile_router
 from restaurant_profile import (
     account_login_email as _account_login_email,
@@ -197,6 +198,7 @@ app.add_middleware(
 app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
 app.include_router(pos_config_router)
+app.include_router(pos_webhook_router)
 app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
 
@@ -7340,284 +7342,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7) POS Webhook — pełen obieg: sprzedaż → magazyn → finanse
-# ─────────────────────────────────────────────────────────────────────────────
-from datetime import datetime, timezone  # noqa: E402
-
-
-class PosSaleItem(BaseModel):
-    pos_external_id: Optional[str] = None
-    dish_name: Optional[str] = None
-    quantity_sold: float = Field(gt=0)
-    unit_price_pln: Optional[float] = None  # jeśli null → pos_products.price_pln
-
-
-class PosWebhookRequest(BaseModel):
-    external_order_id: Optional[str] = None
-    items: list[PosSaleItem]
-
-
-@app.post("/api/pos/webhook")
-async def pos_webhook(request: Request, provider: Optional[str] = None):
-    """Odbiera uderzenie POS (kanoniczny JSON lub format konkretnego providera).
-
-    Query: ?provider=gopos|posbistro|dotykacka|… — normalizacja w pos_adapters.
-    Dla każdej pozycji: pos_products → recipes → inventory → revenue.
-    Wymaga tokenu HMAC w URL (account + token z Ustawień) albo nagłówka.
-    """
-    pos_account = require_pos_webhook_tenant(request)
-    _account_key_ctx.set(pos_account)
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Oczekiwano JSON body.")
-
-    from pos_adapters import normalize_pos_payload
-    from pydantic import ValidationError
-
-    canonical = normalize_pos_payload(provider, body if isinstance(body, dict) else {})
-    try:
-        req = PosWebhookRequest(**canonical)
-    except ValidationError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Niepoprawny payload POS po normalizacji ({provider or 'generic'}): {e.errors()[:3]}",
-        )
-
-    if not req.items:
-        raise HTTPException(status_code=400, detail="Brak pozycji w zamówieniu.")
-
-    now = datetime.now(timezone.utc)
-    year_month = now.strftime("%Y-%m")
-
-    processed: list[dict] = []
-    inventory_updates: list[dict] = []
-    warnings: list[str] = []
-    revenue_total = 0.0
-    sale_log_ids: list[str] = []
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        for it in req.items:
-            product: Optional[dict] = None
-
-            if it.pos_external_id:
-                rows = await sb_get(client, "pos_products", params={
-                    "select": "id,name,pos_external_id,price_pln",
-                    "pos_external_id": f"eq.{it.pos_external_id}",
-                    "limit": "1",
-                })
-                if rows:
-                    product = rows[0]
-            if product is None and it.dish_name:
-                rows = await sb_get(client, "pos_products", params={
-                    "select": "id,name,pos_external_id,price_pln",
-                    "name": f"ilike.{it.dish_name}",
-                    "limit": "1",
-                })
-                if rows:
-                    product = rows[0]
-
-            if (product is None):
-                key = it.pos_external_id or it.dish_name or "?"
-                # Fallback: menu_items.pos_id + recipe_ingredients (mapowanie w Ustawieniach)
-                menu_row = None
-                if it.pos_external_id:
-                    mrows = await sb_get(client, "menu_items", params={
-                        "select": "id,name,pos_id,price_pln",
-                        "pos_id": f"eq.{it.pos_external_id}",
-                        "is_active": "eq.true",
-                        "limit": "1",
-                    })
-                    if mrows:
-                        menu_row = mrows[0]
-                if menu_row is None and it.dish_name:
-                    mrows = await sb_get(client, "menu_items", params={
-                        "select": "id,name,pos_id,price_pln",
-                        "name": f"ilike.{it.dish_name}",
-                        "is_active": "eq.true",
-                        "limit": "1",
-                    })
-                    if mrows:
-                        menu_row = mrows[0]
-
-                if menu_row is None:
-                    warnings.append(f"Pominięto '{key}' — brak dopasowania w pos_products ani menu_items.")
-                    continue
-
-                qty = float(it.quantity_sold)
-                unit_price = float(it.unit_price_pln) if it.unit_price_pln is not None else float(menu_row.get("price_pln") or 0)
-                line_total = round(unit_price * qty, 2)
-                ings = await sb_get(client, "recipe_ingredients", params={
-                    "select": "id,ingredient_name,quantity,unit,warehouse_product_id",
-                    "menu_item_id": f"eq.{menu_row['id']}",
-                }) or []
-                item_consumed: list[dict] = []
-                mapped = [r for r in ings if r.get("warehouse_product_id")]
-                if not mapped:
-                    warnings.append(
-                        f"'{menu_row['name']}': brak zmapowanych składników (warehouse_product_id) — magazyn nie zaktualizowany."
-                    )
-                else:
-                    for r in mapped:
-                        inv_id = r["warehouse_product_id"]
-                        consume = float(r.get("quantity") or 0) * qty
-                        inv_rows = await sb_get(client, "inventory_items", params={
-                            "select": "id,name,quantity,unit,min_quantity",
-                            "id": f"eq.{inv_id}",
-                            "limit": "1",
-                        })
-                        if not inv_rows:
-                            warnings.append(f"'{menu_row['name']}': brak inventory_items id={inv_id}.")
-                            continue
-                        inv = inv_rows[0]
-                        before = float(inv["quantity"])
-                        after = round(before - consume, 4)
-                        try:
-                            await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": after})
-                        except httpx.HTTPStatusError as e:
-                            warnings.append(f"'{inv['name']}': nie zaktualizowano stanu ({e.response.text[:100]}).")
-                            continue
-                        min_qty = float(inv.get("min_quantity") or 0)
-                        status = "ok"
-                        if after <= 0:
-                            status = "out_of_stock"
-                        elif min_qty > 0 and after <= min_qty:
-                            status = "below_minimum"
-                        upd = {
-                            "inventory_id": inv["id"],
-                            "name": inv["name"],
-                            "unit": inv.get("unit") or r.get("unit") or "kg",
-                            "consumed": consume,
-                            "quantity_before": before,
-                            "quantity_after": after,
-                            "min_quantity": min_qty,
-                            "status": status,
-                        }
-                        inventory_updates.append(upd)
-                        item_consumed.append(upd)
-
-                processed.append({
-                    "pos_external_id": menu_row.get("pos_id") or it.pos_external_id,
-                    "name": menu_row["name"],
-                    "quantity": qty,
-                    "unit_price_pln": unit_price,
-                    "line_total_pln": line_total,
-                    "inventory_consumed": item_consumed,
-                })
-                revenue_total = round(revenue_total + line_total, 2)
-                continue
-
-            qty = float(it.quantity_sold)
-            unit_price = float(it.unit_price_pln) if it.unit_price_pln is not None else float(product.get("price_pln") or 0)
-            line_total = round(unit_price * qty, 2)
-
-            recipes = await sb_get(client, "recipes", params={
-                "select": "id,warehouse_product_id,quantity_per_portion,unit",
-                "pos_product_id": f"eq.{product['id']}",
-            })
-            item_consumed: list[dict] = []
-
-            if not recipes:
-                warnings.append(f"'{product['name']}': brak receptury (recipes) — magazyn nie zaktualizowany.")
-            else:
-                for r in recipes:
-                    inv_id = r["warehouse_product_id"]
-                    consume = float(r["quantity_per_portion"]) * qty
-                    inv_rows = await sb_get(client, "inventory_items", params={
-                        "select": "id,name,quantity,unit,min_quantity",
-                        "id": f"eq.{inv_id}",
-                        "limit": "1",
-                    })
-                    if not inv_rows:
-                        warnings.append(f"'{product['name']}': brak inventory_items id={inv_id}.")
-                        continue
-                    inv = inv_rows[0]
-                    before = float(inv["quantity"])
-                    after = round(before - consume, 4)
-                    try:
-                        await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": after})
-                    except httpx.HTTPStatusError as e:
-                        warnings.append(f"'{inv['name']}': nie zaktualizowano stanu ({e.response.text[:100]}).")
-                        continue
-
-                    min_qty = float(inv.get("min_quantity") or 0)
-                    status = "ok"
-                    if after <= 0:
-                        status = "out_of_stock"
-                    elif min_qty > 0 and after <= min_qty:
-                        status = "below_minimum"
-
-                    upd = {
-                        "inventory_id": inv["id"],
-                        "name": inv["name"],
-                        "unit": inv.get("unit") or r.get("unit") or "kg",
-                        "consumed": consume,
-                        "quantity_before": before,
-                        "quantity_after": after,
-                        "min_quantity": min_qty,
-                        "status": status,
-                    }
-                    inventory_updates.append(upd)
-                    item_consumed.append(upd)
-
-            try:
-                log_rows = await sb_post(client, "pos_sales_log", {
-                    "pos_external_id": product["pos_external_id"],
-                    "pos_product_id": product["id"],
-                    "quantity_sold": qty,
-                })
-                log_id = (log_rows[0] if isinstance(log_rows, list) else log_rows).get("id")
-                if log_id:
-                    sale_log_ids.append(log_id)
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"'{product['name']}': pos_sales_log — {e.response.text[:100]}")
-
-            processed.append({
-                "pos_external_id": product["pos_external_id"],
-                "name": product["name"],
-                "quantity": qty,
-                "unit_price_pln": unit_price,
-                "line_total_pln": line_total,
-                "inventory_consumed": item_consumed,
-            })
-            revenue_total = round(revenue_total + line_total, 2)
-
-        revenue_id: Optional[str] = None
-        if revenue_total > 0:
-            def _fmt_qty(q: float) -> str:
-                return str(int(q)) if float(q).is_integer() else f"{q:g}"
-            summary_items = ", ".join(f"{p['name']} × {_fmt_qty(p['quantity'])}" for p in processed)
-            desc = f"POS: {summary_items}"
-            if req.external_order_id:
-                desc = f"[{req.external_order_id}] {desc}"
-            try:
-                rev_rows = await sb_post(client, "revenue_entries", {
-                    "year_month": year_month,
-                    "description": desc[:255],
-                    "amount_pln": revenue_total,
-                })
-                revenue_id = (rev_rows[0] if isinstance(rev_rows, list) else rev_rows).get("id")
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"revenue_entries: {e.response.text[:120]}")
-
-        # POS Bottleneck Engine: przelicz dostępność dań po zjeździe stanu z POS.
-        if inventory_updates:
-            try:
-                await _recompute_menu_availability(client, changed_inventory_ids={u["inventory_id"] for u in inventory_updates})
-            except Exception as e:
-                logger.debug(f"_recompute_menu_availability skipped: {e}")
-
-    return {
-        "ok": True,
-        "external_order_id": req.external_order_id,
-        "processed_items": processed,
-        "inventory_updates": inventory_updates,
-        "revenue_added_pln": revenue_total,
-        "revenue_entry_id": revenue_id,
-        "sale_log_ids": sale_log_ids,
-        "warnings": warnings,
-    }
+# POS webhook: backend/pos_webhook_routes.py + pos_webhook_consume.py
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -11172,9 +10897,22 @@ async def _recompute_menu_availability(client: httpx.AsyncClient,
     return {"scanned": len(menu_rows), "changed": changed, "updates": updates}
 
 
+def _availability_changed_count(result) -> int:
+    """Pełne _recompute_menu_availability zwraca dict; stare call-site'y oczekują int."""
+    if isinstance(result, dict):
+        if result.get("skipped"):
+            return 0
+        return int(result.get("changed") or 0)
+    try:
+        return int(result or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @app.post("/api/menu/recompute-availability")
 async def menu_recompute_availability():
     """Ręczne przeliczenie POS Bottleneck Engine (blokowanie dań po brakach składników)."""
+    require_tenant_account_key()
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
         return await _recompute_menu_availability(client)
 
@@ -11839,7 +11577,7 @@ async def _exec_bulk_delete_inventory(client):
         n = len(rows)
         if n:
             await sb_delete(client, "inventory_items", _ALL_ROWS)
-        blocked = await _recompute_menu_availability(client)
+        blocked = _availability_changed_count(await _recompute_menu_availability(client))
         return {
             "ok": True, "action": "bulk_delete_inventory", "affected": n,
             "blocked_dishes": blocked, "restorable": False,
@@ -11851,7 +11589,7 @@ async def _exec_bulk_delete_inventory(client):
     n = len(rows)
     if n:
         await sb_patch(client, "inventory_items", {"is_active": "eq.true"}, {"is_active": False})
-    blocked = await _recompute_menu_availability(client)
+    blocked = _availability_changed_count(await _recompute_menu_availability(client))
     return {
         "ok": True, "action": "bulk_delete_inventory", "affected": n,
         "blocked_dishes": blocked, "restorable": True,
@@ -11892,7 +11630,7 @@ async def _exec_bulk_reset_inventory(client):
     n = len(rows)
     if n:
         await sb_patch(client, "inventory_items", _ALL_ROWS, {"quantity": 0})
-    blocked = await _recompute_menu_availability(client)
+    blocked = _availability_changed_count(await _recompute_menu_availability(client))
     return {"ok": True, "action": "bulk_reset_inventory", "affected": n, "blocked_dishes": blocked,
             "message": f"Wyzerowano stany {n} produktów. Zablokowano {blocked} dań (brak składników)."}
 
@@ -12083,26 +11821,8 @@ async def _exec_scale_recipe(client, p):
                        f"({len(scaled)} składników).{' Braki: ' + ', '.join(missing) if missing else ''}"}
 
 
-async def _recompute_menu_availability(client) -> int:
-    """POS Bottleneck: ustaw is_available=false dla dań, których składnik ma stan <= 0.
-    Zwraca liczbę zablokowanych dań. Best-effort."""
-    try:
-        recipes = await sb_get(client, "recipe_ingredients",
-                               params={"select": "menu_item_id,ingredient_name,quantity"}) or []
-        inv = await sb_get(client, "inventory_items", params={"select": "name,quantity"}) or []
-        blocked_ids: set[str] = set()
-        for r in recipes:
-            need = float(r.get("quantity") or 0)
-            hit, _ = _resolve_by_fuzzy(r.get("ingredient_name"), inv, threshold=70)
-            have = float(hit.get("quantity")) if hit else 0.0
-            if have < max(need, 0.0001):
-                if r.get("menu_item_id"):
-                    blocked_ids.add(r["menu_item_id"])
-        for mid in blocked_ids:
-            await sb_patch(client, "menu_items", {"id": f"eq.{mid}"}, {"is_available": False})
-        return len(blocked_ids)
-    except Exception:
-        return 0
+
+# stub _recompute_menu_availability usunięty — zostaje pełna wersja wyżej
 
 
 async def voice_dispatch_v2(intent: str, p: dict):

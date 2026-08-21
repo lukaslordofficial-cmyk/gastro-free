@@ -45,6 +45,7 @@ import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunt
 import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
+import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
 import {
   type OptimizeResult,
   type OfferItem,
@@ -1852,15 +1853,23 @@ export function DealHunterModal({
       const data = await res.json();
       const msgs: MessageCard[] = data.messages ?? [];
       setMessages(msgs);
+      const profileEmail = (
+        (data.profile?.contact_email as string | undefined)
+        || contactEmail
+        || ''
+      ).trim();
+      const preferredFrom = profileEmail || ASSISTANT_FROM_EMAIL;
+      const useAssistant = preferredFrom.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
       const initial: Record<string, string> = {};
       const subjectInit: Record<string, string> = {};
       const fromInit: Record<string, string> = {};
       const toInit: Record<string, string> = {};
       msgs.forEach((m) => {
         const key = m.supplier_id ?? m.supplier_name;
-        initial[key] = m.email_body_text ?? m.email_text ?? '';
+        const raw = m.email_body_text ?? m.email_text ?? '';
+        initial[key] = useAssistant ? raw : stripAssistantOrderFooter(raw);
         subjectInit[key] = m.email_subject ?? '';
-        fromInit[key] = ASSISTANT_FROM_EMAIL;
+        fromInit[key] = preferredFrom;
         toInit[key] = m.supplier_email ?? '';
       });
       setBodyText(initial);
@@ -1875,7 +1884,7 @@ export function DealHunterModal({
     } finally {
       setLoading(false);
     }
-  }, [selectedSuppliers, restaurantName, pendingGroups]);
+  }, [selectedSuppliers, restaurantName, pendingGroups, contactEmail]);
 
   const prepareEmailForGroups = useCallback(async (groups: SupplierGroup[]) => {
     if (!groups.length) return;
@@ -1951,7 +1960,9 @@ export function DealHunterModal({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/restaurant/profile`);
+      const res = await fetch(`${BACKEND_URL}/api/restaurant/profile`, {
+        headers: await apiJsonHeaders(),
+      });
       const data = await res.json();
       setContactEmail(data.contact_email ?? '');
       setContactPhone(data.contact_phone ?? '');
@@ -1983,7 +1994,7 @@ export function DealHunterModal({
     try {
       const res = await fetch(`${BACKEND_URL}/api/restaurant/profile`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({ contact_email: email, contact_phone: phone }),
       });
       if (!res.ok) throw new Error('Nie udało się zapisać danych.');
@@ -2079,10 +2090,11 @@ export function DealHunterModal({
       }
     };
     const usesAssistant = from.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
+    const bodyToSend = usesAssistant ? body : stripAssistantOrderFooter(body);
     if (!usesAssistant) {
       try {
         await Linking.openURL(
-          `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+          `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyToSend)}`,
         );
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
         await clearDraftsForSupplier();
@@ -2095,11 +2107,11 @@ export function DealHunterModal({
     try {
       const res = await fetch(`${BACKEND_URL}/api/orders/send-email`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await apiJsonHeaders(),
         body: JSON.stringify({
           to,
           subject,
-          body_text: body,
+          body_text: bodyToSend,
           from_email: ASSISTANT_FROM_EMAIL,
           supplier_name: m.supplier_name,
         }),
@@ -2763,7 +2775,15 @@ export function DealHunterModal({
                     <TextInput
                       style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}
                       value={fromEmails[key] ?? ASSISTANT_FROM_EMAIL}
-                      onChangeText={(t) => setFromEmails((b) => ({ ...b, [key]: t }))}
+                      onChangeText={(t) => {
+                        setFromEmails((b) => ({ ...b, [key]: t }));
+                        if (t.trim().toLowerCase() !== ASSISTANT_FROM_EMAIL.toLowerCase()) {
+                          setBodyText((b) => ({
+                            ...b,
+                            [key]: stripAssistantOrderFooter(b[key] ?? m.email_body_text ?? ''),
+                          }));
+                        }
+                      }}
                       autoCapitalize="none"
                       keyboardType="email-address"
                       placeholder={ASSISTANT_FROM_EMAIL}
@@ -2772,8 +2792,8 @@ export function DealHunterModal({
                     <Text style={{ fontSize: 11, color: C.textTertiary, marginBottom: 8 }}>
                       {(fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim().toLowerCase() ===
                       ASSISTANT_FROM_EMAIL.toLowerCase()
-                        ? 'Wysyłka przez asystenta dostaw (skrypt).'
-                        : 'Otworzymy Twoją aplikację pocztową z gotową treścią.'}
+                        ? 'Wysyłka przez asystenta dostaw (backend :8001).'
+                        : 'Otworzymy Twoją aplikację pocztową — bez stopki asystenta.'}
                     </Text>
                     <View style={styles.metaRow}>
                       <Text style={styles.metaLabel}>Odbiorca:</Text>

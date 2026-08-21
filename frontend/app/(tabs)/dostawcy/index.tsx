@@ -59,6 +59,7 @@ import {
 } from '@/components/dealHunter/ManualBankPaymentSheet';
 import { CatalogScanModal } from '@/components/CatalogScanModal';
 import { fetchOrderEmailTemplate, isInternalOrderNote } from '@/lib/orderEmailTemplate';
+import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
@@ -2016,13 +2017,14 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
       setEmailBusy(true);
       try {
         const { subject, body, email } = await buildOrderEmail(d);
+        const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL);
         setEmailDraftOrderId(d.id);
         setEmailDraft({
           supplierName: d.supplier_name,
           toEmail: email,
-          fromEmail: ASSISTANT_FROM_EMAIL,
+          fromEmail: resolved.fromEmail,
           subject,
-          body,
+          body: resolved.body,
           supplierId: d.supplier_id,
           totalPln: draftTotal(d),
         });
@@ -2060,13 +2062,14 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
                 // Wysyłamy kolejno; po każdym sukcesie koszyk draft znika (status=sent)
                 for (const d of draftOrders) {
                   const { subject, body, email } = await buildOrderEmail(d);
+                  const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL);
                   setEmailDraftOrderId(d.id);
                   setEmailDraft({
                     supplierName: d.supplier_name,
                     toEmail: email,
-                    fromEmail: ASSISTANT_FROM_EMAIL,
+                    fromEmail: resolved.fromEmail,
                     subject,
-                    body,
+                    body: resolved.body,
                     supplierId: d.supplier_id,
                     totalPln: draftTotal(d),
                   });

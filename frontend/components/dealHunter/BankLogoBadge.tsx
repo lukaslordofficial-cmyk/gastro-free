@@ -1,15 +1,28 @@
 /**
- * Proste marki banków (kolory marki + inicjały).
- * Oficjalne PNG/WebP wrzuć do assets/banks/{id}.png — wtedy kafel użyje Image.
+ * Miniatury banków z assets/banks/{id}.webp (fallback: kolor + inicjały).
  */
 import React from 'react';
 import { View, Text, StyleSheet, Image, type ImageSourcePropType } from 'react-native';
 import type { PolishBankLogin } from '@/lib/polishBankLogins';
 
-/** Opcjonalne lokalne miniatury — dodaj pliki, żeby włączyć prawdziwe logo. */
 export const BANK_LOGO_ASSETS: Partial<Record<string, ImageSourcePropType>> = {
-  // Przykład po wrzuceniu plików:
-  // mbank: require('@/assets/banks/mbank.png'),
+  mbank: require('@/assets/banks/mbank.webp'),
+  pko: require('@/assets/banks/pko.webp'),
+  santander: require('@/assets/banks/santander.webp'),
+  ing: require('@/assets/banks/ing.webp'),
+  pekao: require('@/assets/banks/pekao.webp'),
+  alior: require('@/assets/banks/alior.webp'),
+  millennium: require('@/assets/banks/millennium.webp'),
+  bnp: require('@/assets/banks/bnp.webp'),
+  bos: require('@/assets/banks/bos.webp'),
+  credit_agricole: require('@/assets/banks/credit_agricole.webp'),
+  velobank: require('@/assets/banks/velobank.webp'),
+  nest: require('@/assets/banks/nest.webp'),
+  raiffeisen: require('@/assets/banks/raiffeisen.webp'),
+  sgb: require('@/assets/banks/sgb.webp'),
+  inteligo: require('@/assets/banks/inteligo.webp'),
+  pocztowy: require('@/assets/banks/pocztowy.webp'),
+  toyota: require('@/assets/banks/toyota.webp'),
 };
 
 type Props = {
@@ -22,7 +35,7 @@ export function BankLogoBadge({ bank, size = 40 }: Props) {
   if (asset) {
     return (
       <View style={[styles.wrap, { width: size, height: size, borderRadius: size * 0.28 }]}>
-        <Image source={asset} style={{ width: size * 0.72, height: size * 0.72 }} resizeMode="contain" />
+        <Image source={asset} style={{ width: size, height: size }} resizeMode="cover" />
       </View>
     );
   }
@@ -49,7 +62,7 @@ const styles = StyleSheet.create({
   wrap: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#0A0A0A',
     overflow: 'hidden',
   },
   short: {

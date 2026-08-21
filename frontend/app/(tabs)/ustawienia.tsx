@@ -36,6 +36,7 @@ import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { PosProviderPicker } from '@/components/PosProviderPicker';
 import { PosInstructionBanner } from '@/components/settings/PosInstructionBanner';
 import { WebhookUrlRow } from '@/components/settings/WebhookUrlRow';
+import { RestaurantBillingForm } from '@/components/settings/RestaurantBillingForm';
 import { settingsScreenStyles as styles } from '@/components/settings/settingsScreenStyles';
 import { groupMenuItemsByCategory } from '@/lib/settingsMenuGroups';
 import {
@@ -296,6 +297,8 @@ export default function UstawieniaScreen() {
             </TouchableOpacity>
           </View>
         </View>
+
+        <RestaurantBillingForm />
 
         {/* ── POS Settings ── */}
         <View style={styles.section}>

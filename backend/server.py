@@ -7620,9 +7620,32 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
 RESEND_API_KEY = _resend_api_key()
 RESEND_FROM_EMAIL = _resend_from_email()
 
-# --- Profil restauracji (dane kontaktowe dla dostawców) ----------------------
-# Przechowujemy w Supabase (tabela restaurant_profile, singleton). Jeśli tabela
-# nie istnieje, korzystamy z lokalnego pliku fallback, aby funkcja działała od razu.
+# --- Profil restauracji (dane kontaktowe / firma / przelew) ------------------
+# Supabase restaurant_profile (tenant). Fallback: lokalny JSON per account_key.
+_PROFILE_KEYS = (
+    "contact_email",
+    "contact_phone",
+    "company_name",
+    "delivery_address",
+    "bank_account",
+    "nip",
+    "regon",
+)
+
+
+def _empty_restaurant_profile() -> dict:
+    return {k: "" for k in _PROFILE_KEYS}
+
+
+def _normalize_restaurant_profile(raw: dict | None) -> dict:
+    out = _empty_restaurant_profile()
+    if not raw:
+        return out
+    for k in _PROFILE_KEYS:
+        out[k] = str(raw.get(k) or "").strip()
+    return out
+
+
 def _profile_disk_path() -> Path:
     ak = (_account_key_ctx.get() or _ACCOUNT_KEY_DEFAULT).strip() or "default"
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", ak)[:80]
@@ -7634,47 +7657,86 @@ def _read_profile_disk() -> dict:
         path = _profile_disk_path()
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
-            return {"contact_email": data.get("contact_email", "") or "",
-                    "contact_phone": data.get("contact_phone", "") or ""}
+            return _normalize_restaurant_profile(data if isinstance(data, dict) else {})
     except Exception:  # noqa: BLE001
         pass
-    return {"contact_email": "", "contact_phone": ""}
+    return _empty_restaurant_profile()
 
 
-def _write_profile_disk(email: str, phone: str) -> None:
+def _write_profile_disk(profile: dict) -> None:
     try:
         _profile_disk_path().write_text(
-            json.dumps({"contact_email": email, "contact_phone": phone}), encoding="utf-8")
+            json.dumps(_normalize_restaurant_profile(profile), ensure_ascii=False),
+            encoding="utf-8",
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("Nie udało się zapisać profilu na dysku: %s", e)
 
 
 async def get_restaurant_profile(client: httpx.AsyncClient) -> dict:
+    select_full = ",".join(_PROFILE_KEYS)
     try:
-        rows = await sb_get(client, "restaurant_profile",
-                            params={"select": "contact_email,contact_phone", "limit": "1"})
+        try:
+            rows = await sb_get(
+                client,
+                "restaurant_profile",
+                params={"select": select_full, "limit": "1"},
+            )
+        except httpx.HTTPError:
+            # Stara tabela bez kolumn billing — tylko kontakt
+            rows = await sb_get(
+                client,
+                "restaurant_profile",
+                params={"select": "contact_email,contact_phone", "limit": "1"},
+            )
         if rows:
-            return {"contact_email": rows[0].get("contact_email") or "",
-                    "contact_phone": rows[0].get("contact_phone") or ""}
+            return _normalize_restaurant_profile(rows[0])
         disk = _read_profile_disk()
-        if disk["contact_email"] or disk["contact_phone"]:
+        if any(disk.values()):
             return disk
-        return {"contact_email": "", "contact_phone": ""}
+        return _empty_restaurant_profile()
     except httpx.HTTPError:
         return _read_profile_disk()
 
 
-async def set_restaurant_profile(client: httpx.AsyncClient, email: str, phone: str) -> None:
-    payload = {"contact_email": email, "contact_phone": phone,
-               "updated_at": datetime.now(timezone.utc).isoformat()}
+async def set_restaurant_profile(client: httpx.AsyncClient, updates: dict) -> dict:
+    """Merge partial updates into tenant restaurant_profile (or disk fallback)."""
+    current = await get_restaurant_profile(client)
+    merged = {**current}
+    for k in _PROFILE_KEYS:
+        if k in updates and updates[k] is not None:
+            merged[k] = str(updates[k]).strip()
+    payload_full = {
+        **merged,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Bez migracji ADD_RESTAURANT_PROFILE_BILLING — tylko kontakt
+    payload_min = {
+        "contact_email": merged["contact_email"],
+        "contact_phone": merged["contact_phone"],
+        "updated_at": payload_full["updated_at"],
+    }
     try:
         rows = await sb_get(client, "restaurant_profile", params={"select": "id", "limit": "1"})
-        if rows:
-            await sb_patch(client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload)
-        else:
-            await sb_post(client, "restaurant_profile", payload)
+        try:
+            if rows:
+                await sb_patch(
+                    client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload_full
+                )
+            else:
+                await sb_post(client, "restaurant_profile", payload_full)
+        except httpx.HTTPError:
+            if rows:
+                await sb_patch(
+                    client, "restaurant_profile", {"id": f"eq.{rows[0]['id']}"}, payload_min
+                )
+            else:
+                await sb_post(client, "restaurant_profile", payload_min)
+            _write_profile_disk(merged)
+        return merged
     except httpx.HTTPError:
-        _write_profile_disk(email, phone)
+        _write_profile_disk(merged)
+        return merged
 
 
 def _order_footer(profile: dict) -> str:
@@ -7686,8 +7748,13 @@ def _order_footer(profile: dict) -> str:
 
 
 class ProfilePayload(BaseModel):
-    contact_email: str = ""
-    contact_phone: str = ""
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    company_name: Optional[str] = None
+    delivery_address: Optional[str] = None
+    bank_account: Optional[str] = None
+    nip: Optional[str] = None
+    regon: Optional[str] = None
 
 
 @app.get("/api/restaurant/profile")
@@ -7700,15 +7767,18 @@ async def get_profile_endpoint():
 
 @app.put("/api/restaurant/profile")
 async def put_profile_endpoint(payload: ProfilePayload):
-    email = (payload.contact_email or "").strip()
-    phone = (payload.contact_phone or "").strip()
-    if not email or not phone:
-        raise HTTPException(status_code=400, detail="Podaj e-mail oraz telefon kontaktowy.")
-    if "@" not in email or "." not in email:
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="Brak pól do zapisania.")
+    email = (updates.get("contact_email") or "").strip() if "contact_email" in updates else None
+    if email is not None and email and ("@" not in email or "." not in email):
         raise HTTPException(status_code=400, detail="Podaj poprawny adres e-mail.")
     async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await set_restaurant_profile(client, email, phone)
-    return {"ok": True, "contact_email": email, "contact_phone": phone, "complete": True}
+        merged = await set_restaurant_profile(client, updates)
+    complete = bool(
+        (merged.get("contact_email") or "").strip() and (merged.get("contact_phone") or "").strip()
+    )
+    return {"ok": True, **merged, "complete": complete}
 
 # --- Jednostki: przeliczanie do wspólnej jednostki bazowej (kg / l / szt) ----
 # dim -> (base_dim, factor_do_bazowej)

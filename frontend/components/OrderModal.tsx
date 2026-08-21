@@ -34,6 +34,7 @@ import {
 } from '@/components/dealHunter/ManualBankPaymentSheet';
 import { formatPlnNumber } from '@/lib/format';
 import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
+import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 
 interface Props {
   supplierId: string;
@@ -261,12 +262,21 @@ export function OrderModal({
             e.item.price_pln != null ? e.item.price_pln * e.quantity : 0,
         })),
       });
+      let fromEmail = ASSISTANT_FROM_EMAIL;
+      let body = tpl.body;
+      try {
+        const resolved = await resolveOrderEmailFrom(tpl.body, ASSISTANT_FROM_EMAIL);
+        fromEmail = resolved.fromEmail;
+        body = resolved.body;
+      } catch {
+        /* asystent jako fallback */
+      }
       setEmailDraft({
         supplierName,
         toEmail: tpl.supplierEmail || supplierEmail || '',
-        fromEmail: ASSISTANT_FROM_EMAIL,
+        fromEmail,
         subject: tpl.subject,
-        body: tpl.body,
+        body,
         supplierId,
         totalPln: productsTotal ?? cartItems.reduce(
           (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),

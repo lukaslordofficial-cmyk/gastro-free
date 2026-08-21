@@ -13,6 +13,7 @@ import ssl
 def is_production_runtime() -> bool:
     env = (
         os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("RAILWAY_ENVIRONMENT_NAME")
         or os.environ.get("ENVIRONMENT")
         or ""
     ).strip().lower()

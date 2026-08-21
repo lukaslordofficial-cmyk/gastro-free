@@ -36,5 +36,7 @@ def test_tenant_params_injected(monkeypatch):
     sr.configure(get_account_key=lambda: "ak_test")
     out = sr._with_tenant_params("inventory_items", {"select": "id"})
     assert out["account_key"] == "eq.ak_test"
+    pos = sr._with_tenant_params("pos_sales_log", {"select": "id"})
+    assert pos["account_key"] == "eq.ak_test"
     # Non-tenant table unchanged
     assert sr._with_tenant_params("profiles", {"select": "id"}) == {"select": "id"}

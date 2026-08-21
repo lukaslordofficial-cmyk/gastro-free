@@ -130,6 +130,8 @@ Zachowanie 1:1, tylko przeniesienie kodu:
 - CORS → `backend/cors_config.py` (produkcja: ostrzeżenie gdy brak / `*`).
 - Cron `core-alerts-job`: pętla po tenantach + push tylko do tokenów użytkowników tenanta.
 - Menu: helpery składników (suggest/stock/patch) → `frontend/lib/menuScreenHelpers.ts`.
+- `pos_sales_log` w `_TENANT_TABLES` + migracja `ADD_POS_SALES_LOG_TENANT.sql`.
+- CORS prod: brak / `*` wymaga `CORS_ALLOW_STAR=1` (fail-closed przy starcie API).
 
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)
 

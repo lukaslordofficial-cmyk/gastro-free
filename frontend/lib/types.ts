@@ -385,6 +385,7 @@ export type PosSalesLog = {
   pos_product_id: string | null;
   quantity_sold: number;
   processed_at: string;
+  account_key?: string;
 }
 
 export type Subscription = {

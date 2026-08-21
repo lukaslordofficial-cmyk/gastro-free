@@ -50,6 +50,7 @@ htmlcov/
 backend/.inspiration_recipe_cache.json
 **/.inspiration_recipe_cache.json
 backend/.restaurant_profile.json
+backend/.restaurant_profile_*.json
 backend/scripts/_sim_*
 backend/scripts/_sim_*/
 *.env

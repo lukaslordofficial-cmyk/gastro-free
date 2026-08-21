@@ -20,6 +20,15 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-21 — Kęs: restaurant_profile out of server.py (`chore/split-monoliths`)
+
+- **Split:** `backend/restaurant_profile.py` (IO + sync profiles/disk) +
+  `backend/restaurant_profile_routes.py` (GET/PUT `/api/restaurant/profile`).
+- **Security:** endpointy profilu wymagają `require_tenant_account_key()` (blokada
+  zapisu/odczytu na shared `default` bez JWT/X-Account-Key).
+- **Hygiene:** `.restaurant_profile_*.json` w `.gitignore`; testy
+  `backend/tests/test_restaurant_profile.py`.
+
 ### 2026-08-20 — Kęs: fix Map shadow + split Ustawienia UI (`chore/split-monoliths`)
 
 - **Crash „constructor is not callable”:** ikona lucide `Map` zasłaniała globalny

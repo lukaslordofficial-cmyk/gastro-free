@@ -78,10 +78,16 @@ import {
   INV_UNIT_OPTIONS,
 } from '@/constants/menuUi';
 import {
+  dishToFormIngredients,
+  getIngredientStockStatus,
   makePosId,
   mapInvDbRow,
   newDraftIngredient,
   normIngredientName,
+  patchIngredientDraft,
+  removeIngredientDraft,
+  renameIngredientDraft,
+  suggestIngredientNames,
 } from '@/lib/menuScreenHelpers';
 import { buildIngredientRows, ensureWarehouseLinks as linkWarehouseIngredients } from '@/lib/menuWarehouseLinks';
 import type {
@@ -471,35 +477,23 @@ export default function MenuScreen() {
   // ── Ingredient autocomplete ───────────────────────────────────────────────
 
   function getSuggestions(draftName: string): string[] {
-    if (draftName.trim().length < 2) return [];
-    const q = draftName.trim().toLowerCase();
-    return inventory
-      .filter((i) => i.product_name.toLowerCase().includes(q))
-      .map((i) => i.product_name)
-      .slice(0, 6);
+    return suggestIngredientNames(inventory, draftName);
   }
 
-  // Status składnika względem magazynu (zielony ptaszek / czerwony X + dymek)
   function getStockStatus(name: string): StockStatus | null {
-    const trimmed = name.trim();
-    if (!trimmed) return null;
-    const match = inventory.find((i) => i.product_name.toLowerCase() === trimmed.toLowerCase());
-    if (match) return { found: true, qty: match.current_qty, unit: match.unit };
-    return { found: false, qty: 0, unit: '' };
+    return getIngredientStockStatus(inventory, name);
   }
-
-  // ── Ingredient form helpers ───────────────────────────────────────────────
 
   function handleIngredientChange(key: string, field: keyof IngredientDraft, value: string) {
-    setIngredients((prev) => prev.map((ing) => (ing.key === key ? { ...ing, [field]: value } : ing)));
+    setIngredients((prev) => patchIngredientDraft(prev, key, field, value));
   }
 
   function handleIngredientRemove(key: string) {
-    setIngredients((prev) => (prev.length === 1 ? prev : prev.filter((ing) => ing.key !== key)));
+    setIngredients((prev) => removeIngredientDraft(prev, key));
   }
 
   function handleSelectSuggestion(key: string, name: string) {
-    setIngredients((prev) => prev.map((ing) => (ing.key === key ? { ...ing, name } : ing)));
+    setIngredients((prev) => renameIngredientDraft(prev, key, name));
   }
 
   // ── Open / close modals ───────────────────────────────────────────────────
@@ -514,17 +508,7 @@ export default function MenuScreen() {
   function handleOpenEdit(dish: Dish) {
     setEditingDish(dish);
     setForm({ name: dish.name, category: dish.category, price: String(dish.price_pln) });
-    setIngredients(
-      dish.recipe.length > 0
-        ? dish.recipe.map((r) => ({
-            key: secureId('ing'),
-            name: r.name,
-            quantity: String(r.quantity),
-            unit: r.unit,
-            pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
-          }))
-        : [newDraftIngredient()]
-    );
+    setIngredients(dishToFormIngredients(dish));
     setShowAddModal(true);
   }
 

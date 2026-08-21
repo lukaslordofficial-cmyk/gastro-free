@@ -1,6 +1,13 @@
 import { ingredientDedupeKey } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
-import type { Dish, DishDbRow, IngredientDraft, InventoryDbRow, InventoryItem } from '@/types/menu';
+import type {
+  Dish,
+  DishDbRow,
+  IngredientDraft,
+  InventoryDbRow,
+  InventoryItem,
+  StockStatus,
+} from '@/types/menu';
 
 export function makePosId(category: string, total: number): string {
   const prefix: Record<string, string> = {
@@ -55,4 +62,56 @@ export function mapInvDbRow(row: unknown): InventoryItem {
     is_combo_półprodukt: r.is_combo_polprodukt ?? false,
     portion_size: r.portion_size != null ? Number(r.portion_size) : null,
   };
+}
+
+export function suggestIngredientNames(inventory: InventoryItem[], draftName: string): string[] {
+  if (draftName.trim().length < 2) return [];
+  const q = draftName.trim().toLowerCase();
+  return inventory
+    .filter((i) => i.product_name.toLowerCase().includes(q))
+    .map((i) => i.product_name)
+    .slice(0, 6);
+}
+
+export function getIngredientStockStatus(
+  inventory: InventoryItem[],
+  name: string,
+): StockStatus | null {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  const match = inventory.find((i) => i.product_name.toLowerCase() === trimmed.toLowerCase());
+  if (match) return { found: true, qty: match.current_qty, unit: match.unit };
+  return { found: false, qty: 0, unit: '' };
+}
+
+export function patchIngredientDraft(
+  ingredients: IngredientDraft[],
+  key: string,
+  field: keyof IngredientDraft,
+  value: string,
+): IngredientDraft[] {
+  return ingredients.map((ing) => (ing.key === key ? { ...ing, [field]: value } : ing));
+}
+
+export function removeIngredientDraft(ingredients: IngredientDraft[], key: string): IngredientDraft[] {
+  return ingredients.length === 1 ? ingredients : ingredients.filter((ing) => ing.key !== key);
+}
+
+export function renameIngredientDraft(
+  ingredients: IngredientDraft[],
+  key: string,
+  name: string,
+): IngredientDraft[] {
+  return ingredients.map((ing) => (ing.key === key ? { ...ing, name } : ing));
+}
+
+export function dishToFormIngredients(dish: Dish): IngredientDraft[] {
+  if (dish.recipe.length === 0) return [newDraftIngredient()];
+  return dish.recipe.map((r) => ({
+    key: secureId('ing'),
+    name: r.name,
+    quantity: String(r.quantity),
+    unit: r.unit,
+    pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
+  }));
 }

@@ -40,3 +40,5 @@ services:
         value: default
       - key: CORS_ALLOW_ORIGINS
         value: "*"
+      - key: CORS_ALLOW_STAR
+        value: "1"

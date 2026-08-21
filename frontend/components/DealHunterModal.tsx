@@ -34,6 +34,7 @@ import {
   ShoppingCart,
   Package,
   CreditCard,
+  Landmark,
 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
@@ -63,6 +64,10 @@ import {
   DEFAULT_DEAL_HUNTER_SEARCH_SCOPE,
 } from '@/lib/dealHunterSearchScope';
 import { LocalProducerCheckoutSheet } from '@/components/dealHunter/LocalProducerCheckoutSheet';
+import {
+  ManualBankPaymentSheet,
+  type ManualPaymentOrder,
+} from '@/components/dealHunter/ManualBankPaymentSheet';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -494,6 +499,13 @@ function themedStyles(C: DealColors) {
       backgroundColor: C.accentLight,
     },
     smsBtnText: { fontSize: 13, fontWeight: '700', color: C.accent },
+    payBtn: {
+      flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+      borderRadius: 12, paddingVertical: 13, marginTop: 10,
+      backgroundColor: C.isPremium ? 'rgba(92,255,176,0.14)' : C.accentLight,
+      borderWidth: 1.5, borderColor: C.accent,
+    },
+    payBtnText: { fontSize: 14, fontWeight: '800', color: C.accent },
     errRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
     emailError: { flex: 1, fontSize: 12, color: C.danger, lineHeight: 16 },
     doneBtn: {
@@ -1331,6 +1343,7 @@ export function DealHunterModal({
   const [pendingGroups, setPendingGroups] = useState<SupplierGroup[] | null>(null);
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [lpPayGroup, setLpPayGroup] = useState<SupplierGroup | null>(null);
+  const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
 
   const isBulkMode = !!initialCompare;
 
@@ -2304,6 +2317,24 @@ export function DealHunterModal({
                   </>
                 )}
               </TouchableOpacity>
+              {!g.is_local_producer && !blocked ? (
+                <TouchableOpacity
+                  style={styles.payBtn}
+                  onPress={() =>
+                    setManualPayOrder({
+                      supplierId: g.supplier_id,
+                      supplierName: (g.supplier_name || '').trim() || 'Dostawca',
+                      orderTitle: `Zamówienie — ${(g.supplier_name || '').trim() || 'Dostawca'}`,
+                      totalPln: Number(g.total_pln ?? g.subtotal_pln) || 0,
+                    })
+                  }
+                  activeOpacity={0.85}
+                  testID={`deal-hunter-cart-manual-pay-${g.supplier_id ?? gi}`}
+                >
+                  <Landmark size={16} color={C.accent} strokeWidth={2.2} />
+                  <Text style={styles.payBtnText}>Opłać zamówienie</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
             );
           })
@@ -2823,6 +2854,24 @@ export function DealHunterModal({
                         </TouchableOpacity>
                       </>
                     )}
+                    <TouchableOpacity
+                      style={styles.payBtn}
+                      onPress={() =>
+                        setManualPayOrder({
+                          supplierId: m.supplier_id,
+                          supplierName: m.supplier_name,
+                          orderTitle:
+                            (subjectText[key] ?? m.email_subject ?? '').trim()
+                            || `Zamówienie — ${m.supplier_name}`,
+                          totalPln: m.subtotal_pln,
+                        })
+                      }
+                      activeOpacity={0.85}
+                      testID={`deal-hunter-manual-pay-${m.supplier_name}`}
+                    >
+                      <Landmark size={16} color={C.accent} strokeWidth={2.2} />
+                      <Text style={styles.payBtnText}>Opłać zamówienie</Text>
+                    </TouchableOpacity>
                     {st === 'error' && (
                       <View style={styles.errRow}>
                         <CircleAlert size={13} color={C.danger} strokeWidth={2.2} />
@@ -2909,6 +2958,21 @@ export function DealHunterModal({
       group={lpPayGroup}
       colors={C}
       onClose={() => setLpPayGroup(null)}
+    />
+    <ManualBankPaymentSheet
+      visible={!!manualPayOrder}
+      order={manualPayOrder}
+      onClose={() => setManualPayOrder(null)}
+      colors={{
+        card: C.card,
+        text: C.textPrimary,
+        textSecondary: C.textSecondary,
+        textTertiary: C.textTertiary,
+        border: C.border,
+        accent: C.accent,
+        background: C.background,
+        isPremium: C.isPremium,
+      }}
     />
     </>
   );

@@ -146,6 +146,8 @@ export type Supplier = {
   free_shipping_threshold?: number | null;
   lead_time_days?: number | null;
   is_visible?: boolean | null;
+  address?: string | null;
+  bank_account?: string | null;
   created_at: string;
 }
 
@@ -385,6 +387,7 @@ export type PosSalesLog = {
   pos_product_id: string | null;
   quantity_sold: number;
   processed_at: string;
+  account_key?: string;
 }
 
 export type Subscription = {

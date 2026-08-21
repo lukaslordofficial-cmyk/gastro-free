@@ -53,6 +53,10 @@ import {
   type OrderEmailDraft,
   ASSISTANT_FROM_EMAIL,
 } from '@/components/OrderEmailComposer';
+import {
+  ManualBankPaymentSheet,
+  type ManualPaymentOrder,
+} from '@/components/dealHunter/ManualBankPaymentSheet';
 import { CatalogScanModal } from '@/components/CatalogScanModal';
 import { fetchOrderEmailTemplate, isInternalOrderNote } from '@/lib/orderEmailTemplate';
 import { Colors } from '@/constants/colors';
@@ -101,6 +105,8 @@ interface Supplier {
   shipping_cost: number;
   free_shipping_threshold: number;
   lead_time_days: number | null;
+  address: string;
+  bank_account: string;
   catalog: CatalogProduct[];
 }
 
@@ -147,6 +153,8 @@ function mapDbRow(row: any, menuIngredientNames: string[] = []): Supplier {
       row.lead_time_days != null && row.lead_time_days !== ''
         ? Number(row.lead_time_days)
         : null,
+    address: row.address ?? '',
+    bank_account: row.bank_account ?? '',
     catalog: (row.supplier_catalog ?? [])
       .sort((a: any, b: any) => a.sort_order - b.sort_order)
       .map((c: any): CatalogProduct => {
@@ -696,6 +704,29 @@ function SupplierCard({
                   <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>E-mail</Text>
                   <Text style={[cardStyles.dataValue, theme.isPremium && cardStyles.dataValuePrem]}>
                     {supplier.email}
+                  </Text>
+                </View>
+              )}
+              {!!supplier.address && (
+                <View style={cardStyles.dataRow} testID={`supplier-address-${supplier.id}`}>
+                  <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Adres</Text>
+                  <Text style={[cardStyles.dataValue, theme.isPremium && cardStyles.dataValuePrem]}>
+                    {supplier.address}
+                  </Text>
+                </View>
+              )}
+              {supplier.bank_account ? (
+                <View style={cardStyles.dataRow} testID={`supplier-bank-${supplier.id}`}>
+                  <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Konto</Text>
+                  <Text style={[cardStyles.dataValue, theme.isPremium && cardStyles.dataValuePrem]}>
+                    {supplier.bank_account}
+                  </Text>
+                </View>
+              ) : (
+                <View style={cardStyles.dataRow} testID={`supplier-bank-missing-${supplier.id}`}>
+                  <Text style={[cardStyles.dataLabel, theme.isPremium && cardStyles.dataLabelPrem]}>Konto</Text>
+                  <Text style={[cardStyles.dataValue, theme.isPremium && { color: DS.color.muted }]}>
+                    Uzupełnij numer konta (przelew z Łowcy)
                   </Text>
                 </View>
               )}
@@ -1880,6 +1911,7 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
   const [showEmail, setShowEmail] = useState(false);
   const [emailBusy, setEmailBusy] = useState(false);
   const [emailDraftOrderId, setEmailDraftOrderId] = useState<string | null>(null);
+  const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
 
   const accent = prem ? DS.color.greenEnd : Colors.accent;
   const text = prem ? DS.color.heading : Colors.textPrimary;
@@ -1991,6 +2023,8 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           fromEmail: ASSISTANT_FROM_EMAIL,
           subject,
           body,
+          supplierId: d.supplier_id,
+          totalPln: draftTotal(d),
         });
         setShowEmail(true);
       } catch (e: any) {
@@ -2033,6 +2067,8 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
                     fromEmail: ASSISTANT_FROM_EMAIL,
                     subject,
                     body,
+                    supplierId: d.supplier_id,
+                    totalPln: draftTotal(d),
                   });
                   setShowEmail(true);
                   await new Promise((r) => setTimeout(r, 600));
@@ -2274,6 +2310,32 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           }
           setEmailDraftOrderId(null);
         }}
+        onPayPress={
+          emailDraft
+            ? () =>
+                setManualPayOrder({
+                  supplierId: emailDraft.supplierId ?? null,
+                  supplierName: emailDraft.supplierName,
+                  orderTitle: emailDraft.subject || `Zamówienie — ${emailDraft.supplierName}`,
+                  totalPln: emailDraft.totalPln ?? 0,
+                })
+            : undefined
+        }
+      />
+      <ManualBankPaymentSheet
+        visible={!!manualPayOrder}
+        order={manualPayOrder}
+        onClose={() => setManualPayOrder(null)}
+        colors={{
+          card: cardBg,
+          text,
+          textSecondary: muted,
+          textTertiary: muted,
+          border,
+          accent,
+          background: bg,
+          isPremium: prem,
+        }}
       />
       {editingDraft && (
         <DraftCartEditor
@@ -2333,6 +2395,8 @@ export default function DostawcyScreen() {
   const [formEmail, setFormEmail] = useState('');
   const [formCategory, setFormCategory] = useState(CATEGORY_OPTIONS[0]);
   const [formNotes, setFormNotes] = useState('');
+  const [formAddress, setFormAddress] = useState('');
+  const [formBankAccount, setFormBankAccount] = useState('');
   const [formMinOrder, setFormMinOrder] = useState('');
   const [formMinOrderOn, setFormMinOrderOn] = useState(false);
   const [formShipping, setFormShipping] = useState('');
@@ -2449,6 +2513,7 @@ export default function DostawcyScreen() {
     setFormShipping(''); setFormFreeShipOn(false); setFormFreeShipFrom('');
     setFormLeadTime('');
     setFormCategory(CATEGORY_OPTIONS[0]); setFormNotes('');
+    setFormAddress(''); setFormBankAccount('');
   };
 
   const openAddSupplier = () => { resetForm(); setShowAddModal(true); };
@@ -2470,6 +2535,8 @@ export default function DostawcyScreen() {
     setFormLeadTime(
       s.lead_time_days != null && s.lead_time_days > 0 ? String(s.lead_time_days) : '',
     );
+    setFormAddress(s.address ?? '');
+    setFormBankAccount(s.bank_account ?? '');
     setShowAddModal(true);
   };
 
@@ -2497,6 +2564,8 @@ export default function DostawcyScreen() {
         email: formEmail.trim() || null,
         category: formCategory,
         notes: formNotes.trim() || null,
+        address: formAddress.trim() || null,
+        bank_account: formBankAccount.trim() || null,
         min_order_value: formMinOrderOn && isFinite(minVal) && minVal > 0 ? minVal : 0,
         shipping_cost: isFinite(shipVal) && shipVal > 0 ? shipVal : 0,
         free_shipping_threshold:
@@ -2841,6 +2910,33 @@ export default function DostawcyScreen() {
 
               <Text style={[mainStyles.fieldLabel, premLabel]}>Adres e-mail zamówień</Text>
               <TextInput style={[mainStyles.input, premInput]} value={formEmail} onChangeText={setFormEmail} placeholder="zamowienia@dostawca.pl" placeholderTextColor={premPh} keyboardType="email-address" autoCapitalize="none" testID="supplier-email-input" />
+
+              <Text style={[mainStyles.fieldLabel, premLabel]}>Adres dostawcy</Text>
+              <TextInput
+                style={[mainStyles.input, premInput]}
+                value={formAddress}
+                onChangeText={setFormAddress}
+                placeholder="ul. Przykładowa 1, 00-001 Warszawa"
+                placeholderTextColor={premPh}
+                testID="supplier-address-input"
+              />
+              <Text style={[mainStyles.toggleHint, prem && { color: DS.color.muted, marginBottom: 10 }]}>
+                Opcjonalnie — używane przy przelewie ręcznym z Łowcy okazji.
+              </Text>
+
+              <Text style={[mainStyles.fieldLabel, premLabel]}>Numer konta bankowego</Text>
+              <TextInput
+                style={[mainStyles.input, premInput]}
+                value={formBankAccount}
+                onChangeText={setFormBankAccount}
+                placeholder="PL00 0000 0000 0000 0000 0000 0000"
+                placeholderTextColor={premPh}
+                autoCapitalize="characters"
+                testID="supplier-bank-account-input"
+              />
+              <Text style={[mainStyles.toggleHint, prem && { color: DS.color.muted, marginBottom: 10 }]}>
+                Możesz wpisać ręcznie nawet po skanie faktury bez numeru konta. Potrzebne do „Opłać zamówienie”.
+              </Text>
 
               <View style={[mainStyles.toggleBlock, premTile]}>
                 <View style={mainStyles.toggleRow}>

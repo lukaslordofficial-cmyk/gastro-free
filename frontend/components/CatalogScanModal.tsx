@@ -88,6 +88,7 @@ export interface SupplierScanMeta {
   email?: string | null;
   contact_person?: string | null;
   address?: string | null;
+  bank_account?: string | null;
   payment_terms?: string | null;
   shipping_cost?: number | null;
   min_order_value?: number | null;
@@ -148,7 +149,7 @@ const SAVING_MESSAGES = [
 function normalizeSupplierMeta(raw: any): SupplierScanMeta | null {
   if (!raw || typeof raw !== 'object') return null;
   const out: SupplierScanMeta = {};
-  const strKeys = ['nip', 'phone', 'email', 'contact_person', 'address', 'payment_terms'] as const;
+  const strKeys = ['nip', 'phone', 'email', 'contact_person', 'address', 'bank_account', 'payment_terms'] as const;
   for (const k of strKeys) {
     const v = raw[k];
     if (v != null && String(v).trim()) out[k] = String(v).trim();
@@ -740,13 +741,13 @@ export function CatalogScanModal({
               Sprawdź ilość, cenę i kategorię. Możesz je poprawić przy każdej pozycji — AI mogło się pomylić przy niewyraźnych cyfrach.
             </Text>
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.previewContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-              {supplierMetaHasContent(invSupplierMeta) ? (
+              {invSupplierName || supplierMetaHasContent(invSupplierMeta) ? (
                 <View style={[styles.supplierMetaCard, { backgroundColor: C.card, borderColor: C.border }]} testID="invoice-supplier-meta">
                   <Text style={[styles.supplierMetaTitle, { color: C.text }]}>
                     Dane dostawcy{invSupplierName ? ` · ${invSupplierName}` : ''}
                   </Text>
                   <Text style={[styles.supplierMetaSub, { color: C.muted }]}>
-                    Zostaną zapisane w panelu Dostawcy (uzupełnienie bez kasowania istniejących pól).
+                    Zostaną zapisane w panelu Dostawcy. Numer konta możesz dopisać ręcznie, jeśli nie było go na dokumencie.
                   </Text>
                   <View style={styles.supplierMetaGrid}>
                     {!!invSupplierMeta?.nip && (
@@ -779,6 +780,28 @@ export function CatalogScanModal({
                         <Text style={[styles.supplierMetaValue, { color: C.body }]}>{invSupplierMeta.address}</Text>
                       </View>
                     )}
+                    <View style={{ marginTop: 4 }}>
+                      <Text style={[styles.supplierMetaLabel, { color: C.muted, marginBottom: 6 }]}>
+                        Numer konta bankowego
+                      </Text>
+                      <TextInput
+                        style={[
+                          styles.bankInput,
+                          { color: C.body, borderColor: C.border, backgroundColor: C.inputBg },
+                        ]}
+                        value={invSupplierMeta?.bank_account ?? ''}
+                        onChangeText={(t) =>
+                          setInvSupplierMeta((prev) => ({
+                            ...(prev ?? {}),
+                            bank_account: t,
+                          }))
+                        }
+                        placeholder="PL00 0000 0000 0000 0000 0000 0000"
+                        placeholderTextColor={C.muted}
+                        autoCapitalize="characters"
+                        testID="invoice-supplier-bank-account"
+                      />
+                    </View>
                     {!!invSupplierMeta?.payment_terms && (
                       <View style={styles.supplierMetaRow}>
                         <Text style={[styles.supplierMetaLabel, { color: C.muted }]}>Płatność</Text>
@@ -1163,6 +1186,14 @@ const styles = StyleSheet.create({
     paddingTop: 1,
   },
   supplierMetaValue: { flex: 1, fontSize: 13, fontWeight: '600', lineHeight: 18 },
+  bankInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontWeight: '600',
+  },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -126,6 +126,15 @@ Zachowanie 1:1, tylko przeniesienie kodu:
   Miniatury nadal przez `getMenuThumbSync` / `dishCustomImages` (bez mieszania z Inspiracjami).
 - Menu screen styles → `menuScreenStyles.ts`
 - Backend: liveness + auto-confirm + deep health → `backend/health_routes.py` (`APIRouter`).
+- Stripe billing (checkout / confirm / portal / webhook / status) → `backend/billing_routes.py`.
+- CORS → `backend/cors_config.py` (produkcja: ostrzeżenie gdy brak / `*`).
+- Cron `core-alerts-job`: pętla po tenantach + push tylko do tokenów użytkowników tenanta.
+- Menu: helpery składników (suggest/stock/patch) → `frontend/lib/menuScreenHelpers.ts`.
+- `pos_sales_log` w `_TENANT_TABLES` + migracja `ADD_POS_SALES_LOG_TENANT.sql`.
+- CORS prod: brak / `*` wymaga `CORS_ALLOW_STAR=1` (fail-closed przy starcie API).
+- Łowca: ręczna płatność przelewem (`ManualBankPaymentSheet`) pod wygenerowanym
+  zamówieniem hurtowym — kopiowanie danych + kafelki banków PL (bez bramek).
+  Kolumny `suppliers.address` / `bank_account` → `ADD_SUPPLIER_MANUAL_PAYMENT.sql`.
 
 ### 2026-08-20 — Kęs: hardening przed rynkiem (`chore/release-hardening`)
 

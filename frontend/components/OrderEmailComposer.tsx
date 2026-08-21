@@ -17,7 +17,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Linking from 'expo-linking';
-import { X, Send, Mail } from 'lucide-react-native';
+import { X, Send, Mail, Landmark } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
@@ -35,6 +35,9 @@ export type OrderEmailDraft = {
   fromEmail?: string;
   subject: string;
   body: string;
+  /** Do przycisku „Opłać zamówienie” (przelew ręczny). */
+  supplierId?: string | null;
+  totalPln?: number;
 };
 
 type Props = {
@@ -42,9 +45,10 @@ type Props = {
   draft: OrderEmailDraft | null;
   onClose: () => void;
   onSent?: () => void;
+  onPayPress?: () => void;
 };
 
-export function OrderEmailComposer({ visible, draft, onClose, onSent }: Props) {
+export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress }: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
   const { alert } = usePremiumAlert();
@@ -220,6 +224,19 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent }: Props) {
         </ScrollView>
 
         <View style={[styles.footer, { borderTopColor: border, backgroundColor: card }]}>
+          {onPayPress ? (
+            <TouchableOpacity
+              onPress={onPayPress}
+              activeOpacity={0.85}
+              style={[styles.payBtn, { borderColor: prem ? DS.color.greenEnd : Colors.accent }]}
+              testID="order-email-manual-pay"
+            >
+              <Landmark size={16} color={prem ? DS.color.greenEnd : Colors.accent} strokeWidth={2.2} />
+              <Text style={[styles.payBtnText, { color: prem ? DS.color.greenEnd : Colors.accent }]}>
+                Opłać zamówienie
+              </Text>
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity
             onPress={() => void send()}
             disabled={sending}
@@ -275,7 +292,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   bodyInput: { minHeight: 220, paddingTop: 12 },
-  footer: { padding: 16, borderTopWidth: 1, paddingBottom: Platform.OS === 'ios' ? 28 : 16 },
+  footer: { padding: 16, borderTopWidth: 1, paddingBottom: Platform.OS === 'ios' ? 28 : 16, gap: 10 },
+  payBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 14,
+    paddingVertical: 13,
+    borderWidth: 1.5,
+  },
+  payBtnText: { fontSize: 14, fontWeight: '800' },
   sendWrap: { borderRadius: 14, overflow: 'hidden' },
   sendGrad: {
     flexDirection: 'row',

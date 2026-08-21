@@ -13,7 +13,6 @@ import {
   Alert,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import * as Linking from 'expo-linking';
 import {
   X,
   Sparkles,
@@ -47,6 +46,7 @@ import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
+import { openMailCompose } from '@/lib/openMailCompose';
 import {
   type OptimizeResult,
   type OfferItem,
@@ -2082,31 +2082,17 @@ export function DealHunterModal({
       Alert.alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy.');
       return;
     }
-    const clearDraftsForSupplier = async () => {
-      if (!m.supplier_id) return;
-      try {
-        const { data } = await supabase
-          .from('supplier_orders')
-          .select('id')
-          .eq('supplier_id', m.supplier_id)
-          .eq('status', 'draft');
-        const ids = (data || []).map((r: { id: string }) => r.id);
-        if (ids.length) {
-          await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
-        }
-      } catch {
-        /* best-effort */
-      }
-    };
     const usesAssistant = from.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
     const bodyToSend = usesAssistant ? body : stripAssistantOrderFooter(body);
     if (!usesAssistant) {
       try {
-        await Linking.openURL(
-          `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyToSend)}`,
-        );
+        await openMailCompose({
+          fromEmail: from,
+          to,
+          subject,
+          body: bodyToSend,
+        });
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-        await clearDraftsForSupplier();
       } catch {
         setSendStatus((s) => ({ ...s, [key]: 'error' }));
       }
@@ -2127,7 +2113,6 @@ export function DealHunterModal({
       });
       if (!res.ok) throw new Error();
       setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-      await clearDraftsForSupplier();
     } catch {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
     }

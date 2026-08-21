@@ -1,7 +1,8 @@
 /**
  * Edytowalny szablon e-maila zamówienia (Łowca Okazji + zamówienie ręczne).
  * — Nadawca = asystent.dostaw@… → wysyłka przez Resend (backend)
- * — Inny nadawca (np. mail restauracji) → klient poczty telefonu (mailto), bez stopki asystenta
+ * — Inny nadawca → kompozytor wg domeny (Gmail/Yahoo/Outlook/…) bez stopki asystenta
+ * — Otwarcie zewnętrznej poczty NIE usuwa zamówienia z koszyka
  */
 import React, { useMemo, useState } from 'react';
 import {
@@ -16,7 +17,6 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import * as Linking from 'expo-linking';
 import { X, Send, Mail, Landmark } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Colors } from '@/constants/colors';
@@ -26,6 +26,7 @@ import { usePremiumAlert } from '@/components/PremiumAlert';
 import { fetchJson } from '@/lib/safeFetch';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
+import { mailProviderLabel, openMailCompose } from '@/lib/openMailCompose';
 
 export const ASSISTANT_FROM_EMAIL = 'asystent.dostaw@gastromanager.org';
 
@@ -37,7 +38,6 @@ export type OrderEmailDraft = {
   fromEmail?: string;
   subject: string;
   body: string;
-  /** Do przycisku „Opłać zamówienie” (przelew ręczny). */
   supplierId?: string | null;
   totalPln?: number;
 };
@@ -46,7 +46,10 @@ type Props = {
   visible: boolean;
   draft: OrderEmailDraft | null;
   onClose: () => void;
+  /** Potwierdzona wysyłka przez asystenta (Resend). */
   onSent?: () => void;
+  /** Otwarto zewnętrzną skrzynkę — zamówienie zostaje w koszyku. */
+  onMailClientOpened?: () => void;
   onPayPress?: () => void;
 };
 
@@ -54,7 +57,14 @@ function isAssistantFrom(email: string): boolean {
   return email.trim().toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
 }
 
-export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress }: Props) {
+export function OrderEmailComposer({
+  visible,
+  draft,
+  onClose,
+  onSent,
+  onMailClientOpened,
+  onPayPress,
+}: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
   const { alert } = usePremiumAlert();
@@ -82,6 +92,7 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
   const inputBg = prem ? DS.color.bgTertiary : Colors.borderLight;
 
   const usesAssistant = useMemo(() => isAssistantFrom(fromEmail), [fromEmail]);
+  const providerLabel = useMemo(() => mailProviderLabel(fromEmail), [fromEmail]);
 
   const onChangeFrom = (next: string) => {
     setFromEmail(next);
@@ -109,11 +120,14 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
     const bodyToSend = isAssistantFrom(from) ? body : stripAssistantOrderFooter(body);
 
     if (!isAssistantFrom(from)) {
-      const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyToSend)}`;
       try {
-        await Linking.openURL(url);
-        onSent?.();
-        onClose();
+        await openMailCompose({ fromEmail: from, to, subject, body: bodyToSend });
+        onMailClientOpened?.();
+        alert(
+          `Otworzono ${providerLabel}`,
+          'Wróć tu po wysłaniu — zamówienie zostaje w koszyku, aż usuniesz je ręcznie.',
+          [{ text: 'OK', style: 'primary' }],
+        );
       } catch (e: any) {
         alert('Błąd', e?.message || 'Nie udało się otworzyć aplikacji pocztowej.');
       }
@@ -199,7 +213,7 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
           <Text style={[styles.hint, { color: muted }]}>
             {usesAssistant
               ? 'Wiadomość wyśle skrypt z adresu asystenta dostaw (wymaga backendu :8001).'
-              : 'Otworzymy Twoją aplikację pocztową z gotową treścią (bez stopki asystenta).'}
+              : `Otworzymy ${providerLabel} z gotową treścią (zamówienie zostanie w koszyku).`}
           </Text>
 
           <Text style={[styles.label, { color: muted }]}>Odbiorca (dostawca)</Text>
@@ -273,7 +287,9 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
                 <>
                   <Send size={16} color="#0A0A0A" strokeWidth={2.4} />
                   <Text style={styles.sendText}>
-                    {usesAssistant ? 'Wyślij maila (asystent)' : 'Otwórz pocztę i wyślij'}
+                    {usesAssistant
+                      ? 'Wyślij maila (asystent)'
+                      : `Otwórz ${providerLabel} i wyślij`}
                   </Text>
                 </>
               )}

@@ -2002,17 +2002,6 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
     };
   };
 
-  const markDraftSent = async (orderId: string) => {
-    try {
-      await supplierOrdersService.markDraftSent(orderId);
-      setDraftOrders((prev) => prev.filter((x) => x.id !== orderId));
-      setReloadKey((k) => k + 1);
-    } catch {
-      /* best-effort — koszyk i tak odświeżymy */
-      setReloadKey((k) => k + 1);
-    }
-  };
-
   const openDraftEmailTemplate = (d: DraftOrder) => {
     void (async () => {
       setEmailBusy(true);
@@ -2306,13 +2295,14 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           setShowEmail(false);
           setEmailDraft(null);
           setEmailDraftOrderId(null);
+          setReloadKey((k) => k + 1);
         }}
         onSent={() => {
-          const id = emailDraftOrderId;
-          if (id) {
-            void markDraftSent(id);
-          }
-          setEmailDraftOrderId(null);
+          // Tylko asystent (Resend) — i tak nie usuwamy z koszyka (status draft zostaje)
+          setReloadKey((k) => k + 1);
+        }}
+        onMailClientOpened={() => {
+          setReloadKey((k) => k + 1);
         }}
         onPayPress={
           emailDraft

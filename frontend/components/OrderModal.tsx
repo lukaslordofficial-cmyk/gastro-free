@@ -232,7 +232,7 @@ export function OrderModal({
         .from('supplier_orders')
         .insert({
           supplier_id: supplierId,
-          status: 'sent',
+          status: 'draft',
           notes: notes.trim() || null,
         })
         .select()
@@ -595,12 +595,15 @@ export function OrderModal({
         visible={showEmail}
         draft={emailDraft}
         onClose={() => {
+          // Zostaw OrderModal otwarty — użytkownik wraca do złożonego zamówienia / koszyka
           setShowEmail(false);
-          onClose();
         }}
         onSent={() => {
+          // Asystent: treść poszła; draft zostaje w koszyku aż do ręcznego usunięcia
           setShowEmail(false);
-          onClose();
+        }}
+        onMailClientOpened={() => {
+          // Zewnętrzna skrzynka — szablon zostaje na ekranie po powrocie
         }}
         onPayPress={
           emailDraft

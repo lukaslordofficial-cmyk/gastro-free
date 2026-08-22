@@ -5,6 +5,7 @@
 import { supabase } from '@/lib/supabase';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
 import { secureRandomIndex } from '@/lib/secureId';
+import { fetchSupplierOrderTotals } from '@/services/supplierSpendService';
 import type { Database, SupplierOffer, SupplierOfferItem } from '@/lib/types';
 
 type SupplierRow = Database['public']['Tables']['suppliers']['Row'] & {
@@ -104,16 +105,7 @@ export async function fetchSuppliersData(ak: string): Promise<SuppliersData> {
     void supabase.from('supplier_catalog').update({ is_visible: true }).in('id', toReveal);
   }
 
-  const { data: costs } = await supabase
-    .from('variable_cost_entries')
-    .select('amount_pln, note')
-    .eq('account_key', ak)
-    .eq('type', 'materials');
-  const orderTotals: Record<string, number> = {};
-  (costs ?? []).forEach((c) => {
-    const m = /supplier:([0-9a-fA-F-]{36})/.exec(c.note ?? '');
-    if (m) orderTotals[m[1]] = (orderTotals[m[1]] ?? 0) + Number(c.amount_pln ?? 0);
-  });
+  const orderTotals = await fetchSupplierOrderTotals(ak);
 
   return {
     rows,

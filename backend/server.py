@@ -63,6 +63,7 @@ from pos_webhook_routes import router as pos_webhook_router
 from order_email_routes import router as order_email_router
 from voice_transcribe_routes import router as voice_transcribe_router
 from voice_crud_routes import router as voice_crud_router
+from supplier_min_order_routes import router as supplier_min_order_router
 from restaurant_profile_routes import router as restaurant_profile_router
 from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
@@ -201,6 +202,7 @@ app.include_router(pos_webhook_router)
 app.include_router(order_email_router)
 app.include_router(voice_transcribe_router)
 app.include_router(voice_crud_router)
+app.include_router(supplier_min_order_router)
 app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
 
@@ -10879,89 +10881,7 @@ async def supplier_predictive_restock(req: PredictiveRestockRequest):
         }
 
 
-class CheckMinOrderRequest(BaseModel):
-    supplier_id: Optional[str] = None
-    supplier_name: Optional[str] = None
-    current_cart_total: float = 0.0
-    category: Optional[str] = None
-
-
-@app.post("/api/suppliers/check-minimum-order")
-async def supplier_check_min_order(req: CheckMinOrderRequest):
-    """Sprawdza logistyczne minimum dostawy dostawcy (suppliers.min_order_value)
-    i sugeruje produkty do dorzucenia (sypkie / napoje) w celu darmowego transportu."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
-        # Graceful fallback: jeśli kolumna min_order_value nie istnieje w schemacie,
-        # wybieramy tylko id,name i przyjmujemy min_order_value=0.
-        has_min_col = True
-        select_cols = "id,name,min_order_value"
-        try:
-            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
-        except Exception:
-            has_min_col = False
-            select_cols = "id,name"
-
-        supplier = None
-        if req.supplier_id:
-            rows = await sb_get(client, "suppliers", params={
-                "select": select_cols, "id": f"eq.{req.supplier_id}", "limit": "1"}) or []
-            if rows:
-                supplier = rows[0]
-        if not supplier and req.supplier_name:
-            all_sup = await sb_get(client, "suppliers",
-                                   params={"select": select_cols, "limit": "500"}) or []
-            hit, _ = _resolve_by_fuzzy(req.supplier_name, all_sup)
-            supplier = hit
-        if not supplier:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-
-        min_val = float(supplier.get("min_order_value") or 0) if has_min_col else 0.0
-        gap = round(max(0.0, min_val - float(req.current_cart_total or 0)), 2)
-
-        suggestions = []
-        if gap > 0:
-            catalog = await sb_get(client, "supplier_catalog", params={
-                "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
-                "supplier_id": f"eq.{supplier['id']}",
-            }) or []
-            # Preferuj produkty sypkie/napoje (proste dorzucki).
-            keywords = ["ryż", "mąka", "sól", "cukier", "olej", "woda", "napój", "sok",
-                        "makaron", "ocet", "cola", "sprite", "pepsi"]
-
-            def score(name: str) -> int:
-                nl = (name or "").lower()
-                return sum(1 for k in keywords if k in nl)
-
-            candidates = sorted(
-                [c for c in catalog if c.get("is_visible") is not False and float(c.get("price_pln") or 0) > 0],
-                key=lambda c: (-score(c["name"]), float(c["price_pln"] or 0))
-            )
-            running = 0.0
-            for c in candidates:
-                price = float(c.get("price_pln") or 0)
-                if running >= gap:
-                    break
-                suggestions.append({
-                    "id": c["id"], "name": c["name"], "price_pln": price,
-                    "unit": c.get("unit"), "variant": c.get("variant"),
-                })
-                running += price
-
-        warnings: list[str] = []
-        if not has_min_col:
-            warnings.append("Kolumna suppliers.min_order_value nie istnieje — "
-                            "uruchom migrację ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql. "
-                            "Zwracam min_order_value=0.")
-
-        return {
-            "supplier": {"id": supplier["id"], "name": supplier["name"], "min_order_value": min_val},
-            "current_cart_total": float(req.current_cart_total or 0),
-            "gap_to_min": gap,
-            "meets_minimum": gap == 0,
-            "suggestions": suggestions,
-            "warnings": warnings,
-        }
+# check-minimum-order: backend/supplier_min_order_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11574,6 +11494,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             weeks_back=4, day_of_week=None, supplier_id=p.get("supplier_id"),
         ))
     if it == "check_minimum_order_value":
+        from supplier_min_order_routes import CheckMinOrderRequest, supplier_check_min_order
         return await supplier_check_min_order(CheckMinOrderRequest(
             supplier_id=p.get("supplier_id"),
             supplier_name=p.get("supplier_name") or p.get("supplier_name_resolved"),

@@ -314,6 +314,17 @@ export async function receiveSupplierOrder(
         amount_pln: Math.round(total * 100) / 100,
         note,
       });
+      // Best-effort: nagłówek w tabeli invoices (jak skan AI)
+      try {
+        await supabase.from('invoices').insert({
+          supplier_id: order.supplier_id,
+          supplier_name: supplierName,
+          total_cost: Math.round(total * 100) / 100,
+          note: 'Zamówienie ręczne — zrealizowane',
+        } as never);
+      } catch {
+        /* tabela/migracja opcjonalna */
+      }
     }
   }
   const { error } = await supabase

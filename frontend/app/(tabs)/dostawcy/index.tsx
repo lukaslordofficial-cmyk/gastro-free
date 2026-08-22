@@ -51,6 +51,7 @@ import * as supplierOrdersService from '@/services/supplierOrdersService';
 import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { OrderModal } from '@/components/OrderModal';
+import { SupplierInvoicesModal } from '@/components/suppliers/SupplierInvoicesModal';
 import {
   OrderEmailComposer,
   type OrderEmailDraft,
@@ -357,6 +358,7 @@ function SupplierCard({
   const [extraOffersOpen, setExtraOffersOpen] = useState(true);
   const [showManualModal, setShowManualModal] = useState(false);
   const [showOrderModal, setShowOrderModal] = useState(false);
+  const [showInvoices, setShowInvoices] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
   const [manualName, setManualName] = useState('');
   const [manualPrice, setManualPrice] = useState('');
@@ -634,6 +636,27 @@ function SupplierCard({
                   ]}
                 >
                   Edytuj
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  cardStyles.managePanelBtn,
+                  theme.isPremium
+                    ? { backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: DS.color.borderSubtle }
+                    : { backgroundColor: Colors.borderLight, borderWidth: 1, borderColor: Colors.border },
+                ]}
+                onPress={() => setShowInvoices(true)}
+                activeOpacity={0.7}
+                testID={`invoices-supplier-${supplier.id}`}
+              >
+                <FileText size={13} color={theme.isPremium ? DS.color.heading : Colors.textPrimary} strokeWidth={2.4} />
+                <Text
+                  style={[
+                    cardStyles.managePanelBtnText,
+                    { color: theme.isPremium ? DS.color.heading : Colors.textPrimary },
+                  ]}
+                >
+                  Faktury
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -1345,6 +1368,13 @@ function SupplierCard({
         onClose={() => setShowOrderModal(false)}
       />
 
+      <SupplierInvoicesModal
+        visible={showInvoices}
+        supplierId={supplier.id}
+        supplierName={supplier.name}
+        onClose={() => setShowInvoices(false)}
+      />
+
       {/* AI catalog scan modal (GPT-4o Vision) */}
       <CatalogScanModal
         supplierId={supplier.id}
@@ -1411,7 +1441,7 @@ const cardStyles = StyleSheet.create({
     paddingVertical: 12,
     marginTop: 2,
   },
-  managePanelBtnText: { fontSize: 12, fontWeight: '800' },
+  managePanelBtnText: { fontSize: 11, fontWeight: '800' },
   dataBlock: {
     borderRadius: 10,
     paddingVertical: 12,
@@ -2723,7 +2753,7 @@ export default function DostawcyScreen() {
                     key={supplier.id}
                     supplier={supplier}
                     totalAnalysesUsed={totalAnalyses}
-                    orderTotal={orderTotals[supplier.id] ?? 0}
+                    orderTotal={orderTotals[(supplier.id || '').toLowerCase()] ?? 0}
                     onPhone={(phone) => Linking.openURL(`tel:${phone}`)}
                     onEmail={(email) => Linking.openURL(`mailto:${email}`)}
                     onUpload={handleUpload}
@@ -2845,7 +2875,7 @@ export default function DostawcyScreen() {
               key={supplier.id}
               supplier={supplier}
               totalAnalysesUsed={totalAnalyses}
-              orderTotal={orderTotals[supplier.id] ?? 0}
+              orderTotal={orderTotals[(supplier.id || '').toLowerCase()] ?? 0}
               onPhone={(phone) => Linking.openURL(`tel:${phone}`)}
               onEmail={(email) => Linking.openURL(`mailto:${email}`)}
               onUpload={handleUpload}

@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Faktury dostawcy + sumy wydatków + min-order extract (`chore/split-monoliths`)
+
+- **UX:** kafelek „Faktury” obok Edytuj/Usuń; lista chronologiczna + suma wydatków
+  (`SupplierInvoicesModal` + `supplierSpendService`).
+- **Fix:** notatka kosztu przy odbiorze zamówienia ma `supplier:{uuid}` — badge „Zamówiono”
+  liczy też ręczne dostawy (nie tylko skany AI).
+- **Split + security:** `supplier_min_order_routes.py` (`check-minimum-order` + `require_tenant`).
+
 ### 2026-08-22 — Mail sheet UX + voice CRUD out of server.py (`chore/split-monoliths`)
 
 - **UX:** sheet wysyłki: Aplikacja pocztowa / Tylko logowanie / Asystent dostaw (potwierdzenie + Reply-To);

@@ -356,7 +356,7 @@ async def apply_lp_inventory_and_cost(
             price = 0.0
         category = str(p.get("category") or "Inne").strip() or "Inne"
         cat_id = await _resolve_category_id(client, sb_get, sb_post, category, cat_cache)
-        match = find_inventory_match(name, inv_rows)
+        match = find_inventory_match(name, inv_rows, for_invoice=True)
 
         if match and match.get("id"):
             item_id = str(match["id"])
@@ -481,7 +481,7 @@ async def apply_lp_inventory_and_cost(
                 warnings.append(f"Nie udało się dopisać kosztu zmiennego: {_http_body(e)[:120]}")
 
     found_all = all(
-        find_inventory_match(str(p.get("product_name") or ""), inv_rows)
+        find_inventory_match(str(p.get("product_name") or ""), inv_rows, for_invoice=True)
         for p in invoice_products
         if str(p.get("product_name") or "").strip()
     )

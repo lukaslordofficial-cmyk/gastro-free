@@ -79,6 +79,8 @@ interface InvoiceProduct {
   price_netto: number;
   unit: string;
   category: string;
+  matched_inventory_name?: string | null;
+  will_update_existing?: boolean;
 }
 
 /** Pola panelu Dostawcy wyodrębnione ze skanu (podgląd + zapis). */
@@ -103,6 +105,9 @@ interface DocResult {
   supplier_fields_updated?: string[];
   items_updated?: number;
   items_created?: number;
+  products_on_invoice?: number;
+  updated?: Array<{ name?: string; merged_from?: string | null; added?: number; unit?: string }>;
+  created?: Array<{ name?: string; quantity?: number; unit?: string; category?: string }>;
   total_amount?: number;
   products_total?: number;
   visible_count?: number;
@@ -436,6 +441,8 @@ export function CatalogScanModal({
               price_netto: Number(p.price_netto ?? 0),
               unit: p.unit ?? 'szt',
               category: p.category ?? 'Inne',
+              matched_inventory_name: p.matched_inventory_name ?? null,
+              will_update_existing: Boolean(p.will_update_existing),
             }))
           );
           setStage('invoice_preview');
@@ -852,6 +859,15 @@ export function CatalogScanModal({
                 <View key={`${p.product_name}-${idx}`} style={[styles.row, { backgroundColor: C.card, borderColor: C.border }]} testID={`invoice-row-${idx}`}>
                   <View style={{ flex: 1, gap: 8 }}>
                     <Text style={[styles.rowName, { color: C.text }]}>{p.product_name}</Text>
+                    {p.will_update_existing && p.matched_inventory_name ? (
+                      <Text style={[styles.editLabel, { color: C.muted }]}>
+                        Zwiększy stan: „{p.matched_inventory_name}”
+                      </Text>
+                    ) : (
+                      <Text style={[styles.editLabel, { color: C.green }]}>
+                        Nowy produkt w magazynie
+                      </Text>
+                    )}
 
                     <View style={styles.editFieldsRow}>
                       <View style={styles.editField}>
@@ -967,7 +983,29 @@ export function CatalogScanModal({
                 </View>
                 <Text style={[styles.resultNote, { color: C.body }]}>
                   {result.items_created ?? 0} nowych · {result.items_updated ?? 0} zwiększonych
+                  {result.products_on_invoice != null
+                    ? ` · z faktury: ${result.products_on_invoice}`
+                    : ''}
                 </Text>
+                {(result.created?.length ?? 0) > 0 && (
+                  <Text style={[styles.resultNote, { color: C.muted, marginTop: 6 }]}>
+                    Nowe: {(result.created ?? []).map((c) => c.name).filter(Boolean).join(', ')}
+                  </Text>
+                )}
+                {(result.updated ?? []).some((u) => u.merged_from) && (
+                  <Text style={[styles.resultNote, { color: C.muted, marginTop: 4 }]}>
+                    Scalono:{' '}
+                    {(result.updated ?? [])
+                      .filter((u) => u.merged_from)
+                      .map((u) => `„${u.merged_from}” → „${u.name}”`)
+                      .join('; ')}
+                  </Text>
+                )}
+                {(result.warnings?.length ?? 0) > 0 && (
+                  <Text style={[styles.resultNote, { color: C.danger, marginTop: 6 }]}>
+                    {result.warnings!.slice(0, 4).join('\n')}
+                  </Text>
+                )}
               </>
             ) : (
               <>

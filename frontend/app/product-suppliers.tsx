@@ -28,6 +28,7 @@ import {
   RefreshCw,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { OrderModal } from '@/components/OrderModal';
 import { ProductExpiryEditor } from '@/components/ProductExpiryEditor';
@@ -134,7 +135,9 @@ export default function ProductSuppliersScreen() {
     if (!productId) return;
     setLoadingYield(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/inventory/${productId}/portions-yield`);
+      const res = await fetch(`${BACKEND_URL}/api/inventory/${productId}/portions-yield`, {
+        headers: await apiJsonHeaders(),
+      });
       if (res.ok) {
         setYieldData(await res.json());
       }

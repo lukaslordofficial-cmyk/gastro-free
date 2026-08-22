@@ -71,6 +71,11 @@ from admin_routes import router as admin_router
 from restaurant_profile_routes import router as restaurant_profile_router
 from subscription_routes import router as subscription_router
 from reports_routes import router as reports_router
+from stripe_connect_routes import router as stripe_connect_router
+from inventory_yield_routes import router as inventory_yield_router
+from documents_routes import router as documents_router
+from supplier_catalog_scan_routes import router as supplier_catalog_scan_router
+from inventory_expiry_scan_routes import router as inventory_expiry_scan_router
 from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
     assert_safe_redirect_url,
@@ -217,6 +222,11 @@ app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
 app.include_router(subscription_router)
 app.include_router(reports_router)
+app.include_router(stripe_connect_router)
+app.include_router(inventory_yield_router)
+app.include_router(documents_router)
+app.include_router(supplier_catalog_scan_router)
+app.include_router(inventory_expiry_scan_router)
 
 
 @app.middleware("http")
@@ -1614,6 +1624,7 @@ class InterpretRequest(BaseModel):
 
 @app.post("/api/voice/interpret", response_model=VoiceInterpretation)
 async def interpret(payload: InterpretRequest):
+    require_tenant_account_key()
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Brak tekstu wejściowego.")
@@ -3182,52 +3193,7 @@ async def _openai_vision_json_batches(
     return merged, billing
 
 
-@app.post("/api/suppliers/{supplier_id}/upload-catalog", response_model=CatalogExtractionResponse)
-async def upload_catalog(supplier_id: str, file: UploadFile = File(...)):
-    """Skanuje cennik (obraz lub PDF) GPT-4o Vision i zwraca podgląd produktów.
-    Zapis do bazy następuje dopiero po zatwierdzeniu (confirm-catalog)."""
-    client = _openai()
-    await _guard_ai()
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Pusty plik.")
-
-    # verify supplier exists + get name
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        rows = await sb_get(httpx_c, "suppliers",
-                            params={"select": "id,name", "id": f"eq.{supplier_id}", "limit": "1"})
-    if not rows:
-        raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-    supplier_name = rows[0]["name"]
-
-    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
-    contents = b""
-
-    data, billing = await _openai_vision_json_batches(
-        client,
-        image_uris=image_uris,
-        system_prompt=_CATALOG_SYSTEM_PROMPT,
-        json_schema=_CATALOG_JSON_SCHEMA,
-        endpoint=f"/api/suppliers/{supplier_id}/upload-catalog",
-        user_text=(
-            "Oto cennik/oferta dostawcy. Wyodrębnij wszystkie produkty z tych stron. "
-            f"(Dokument ma {pages_meta.get('pages_total')} stron; "
-            f"analizuję {pages_meta.get('pages_rendered')}.)"
-        ),
-        pages_meta=pages_meta,
-        merge_fn=_merge_catalog_vision_batches,
-    )
-    image_uris = []
-
-    products = [CatalogProduct(**p) for p in (data.get("products") or [])]
-    return CatalogExtractionResponse(
-        supplier_id=supplier_id,
-        supplier_name=data.get("supplier_name") or supplier_name,
-        product_count=len(products),
-        products=products,
-        credits_deducted=int(billing.get("credits_deducted") or 0),
-        credits_remaining=billing.get("credits_remaining"),
-    )
+# upload-catalog: backend/supplier_catalog_scan_routes.py (include_router)
 
 
 _catalog_extra_cols: Optional[bool] = None
@@ -3302,6 +3268,8 @@ _TOKEN_SYNONYMS = {
     "smietany": "smietana", "mleka": "mleko",
     "masla": "maslo", "maslem": "maslo",
     "sera": "ser", "serem": "ser",
+    "mozarella": "mozzarella", "mozzarelli": "mozzarella", "mozarell": "mozzarella",
+    "mozzarella": "mozzarella", "mozz": "mozzarella", "buffalo": "buffalo",
     "jajka": "jajko", "jajek": "jajko", "jaja": "jajko",
     "koper": "koper", "koperek": "koper", "koperki": "koper", "kopru": "koper", "koprem": "koper",
     "marchewka": "marchew", "marchewki": "marchew", "marchewek": "marchew", "marchew": "marchew",
@@ -3504,77 +3472,7 @@ def _yield_available(stock_qty: float, stock_unit: str,
     return None, False
 
 
-@app.post("/api/suppliers/{supplier_id}/confirm-catalog")
-async def confirm_catalog(supplier_id: str, req: ConfirmCatalogRequest):
-    """Zapisuje zatwierdzone produkty do supplier_catalog.
-    Jeśli produkt (po nazwie) już istnieje u dostawcy → aktualizuje cenę netto."""
-    if not req.products:
-        raise HTTPException(status_code=400, detail="Brak produktów do zapisania.")
-
-    inserted = 0
-    updated = 0
-    warnings: list[str] = []
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        sup = await sb_get(client, "suppliers", params={"select": "id", "id": f"eq.{supplier_id}", "limit": "1"})
-        if not sup:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-
-        has_extra = await _has_catalog_extra_cols(client)
-
-        existing = await sb_get(client, "supplier_catalog",
-                                params={"select": "id,name,sort_order", "supplier_id": f"eq.{supplier_id}"})
-        by_name = {_norm(r["name"]): r for r in (existing or [])}
-        max_sort = max((int(r.get("sort_order") or 0) for r in (existing or [])), default=0)
-
-        for prod in req.products:
-            name = (prod.product_name or "").strip()
-            if not name:
-                continue
-            price = float(prod.price_netto or 0)
-            volume_label = (prod.volume_label or "").strip()
-            unit = (prod.unit or "szt").strip()
-            variant = volume_label or unit or name
-
-            payload: dict = {
-                "supplier_id": supplier_id,
-                "name": name,
-                "variant": variant,
-                "volume_label": volume_label,
-                "price_pln": price,
-                "unit_count": 1,
-                "liters_total": 0,
-            }
-            if has_extra:
-                payload["unit"] = unit
-                payload["product_code"] = (prod.product_code or None)
-
-            match = by_name.get(_norm(name))
-            try:
-                if match:
-                    update_payload = {"price_pln": price, "variant": variant, "volume_label": volume_label}
-                    if has_extra:
-                        update_payload["unit"] = unit
-                        update_payload["product_code"] = (prod.product_code or None)
-                    await sb_patch(client, "supplier_catalog", {"id": f"eq.{match['id']}"}, update_payload)
-                    updated += 1
-                else:
-                    max_sort += 1
-                    payload["sort_order"] = max_sort
-                    row = await sb_post(client, "supplier_catalog", payload)
-                    if row:
-                        by_name[_norm(name)] = (row[0] if isinstance(row, list) else row)
-                    inserted += 1
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"{name}: {e.response.text[:120]}")
-
-    return {
-        "ok": True,
-        "inserted": inserted,
-        "updated": updated,
-        "saved": inserted + updated,
-        "warnings": warnings,
-    }
+# confirm-catalog: backend/supplier_catalog_scan_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3673,9 +3571,15 @@ _DOCUMENT_SYSTEM_PROMPT = (
     "  * lead_time_days — czas realizacji / dostawy w dniach (liczba, np. '1-2 dni robocze' → 2).\n"
     "  Gdy pola NIE ma na dokumencie → null (NIE zgaduj, NIE wstawiaj 0).\n"
     "  Dla MENU_RESTAURACYJNE wszystkie pola supplier → null.\n"
-    "- products[]: dla faktury/oferty pozycje towarowe; dla MENU_RESTAURACYJNE wpisz potrawy "
-    "(product_name = nazwa dania, price_netto = cena dla gościa, quantity=0, unit='szt', "
-    "category najlepiej dopasuj lub 'Inne').\n\n"
+    "- products[]: dla faktury/oferty WSZYSTKIE pozycje towarowe z tabeli (każdy wiersz osobno).\n"
+    "  NIGDY nie pomijaj nabiału, serów (mozzarella/mozarella, feta, parmezan…), ziół, przypraw, "
+    "opakowań ani pozycji o niskiej kwocie — każda linia faktury = jeden element products[].\n"
+    "  Jeśli w nazwie jest odmiana sera (mozzarella, feta, kozi…) — product_name MUSI zawierać "
+    "tę odmianę w całości (NIGDY nie skracaj 'Ser mozzarella' / 'Mozzarella' do samego 'Ser').\n"
+    "  product_name: nazwa towaru JAK NA FAKTURZE (zachowaj wariant: 'Ser mozzarella', nie skracaj do 'Ser').\n"
+    "  quantity / unit / price_netto: z wiersza; jeśli ilość nieczytelna → quantity=1, unit='szt'.\n"
+    "  Dla MENU_RESTAURACYJNE wpisz potrawy (product_name = nazwa dania, price_netto = cena dla gościa, "
+    "quantity=0, unit='szt', category najlepiej dopasuj lub 'Inne').\n\n"
     "KATEGORYZACJA (pole category): dozwolone: 'Mięso i wędliny', 'Ryby i owoce morza', "
     "'Nabiał', 'Warzywa i owoce', 'Pieczywo', 'Suchy magazyn', 'Oleje i tłuszcze', "
     "'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole', 'Wywary i sosy', 'Chemia i czystość', "
@@ -4191,6 +4095,24 @@ def _food_match_key(text: str) -> str:
     return " ".join(sorted(set(out)))
 
 
+from inventory_invoice_match import (
+    GENERIC_FOOD_ONE_TOKEN as _GENERIC_FOOD_ONE_TOKEN,
+    find_inventory_duplicate as _find_inventory_duplicate_impl,
+    inventory_names_same_product as _inventory_names_same_product_impl,
+    normalize_invoice_line_name as _normalize_invoice_line_name,
+)
+
+
+def _inventory_names_same_product(invoice_name: str, stock_name: str) -> bool:
+    """Czy pozycja z faktury to TEN SAM towar co w magazynie (do zwiększenia stanu)."""
+    return _inventory_names_same_product_impl(
+        invoice_name,
+        stock_name,
+        food_match_key=_food_match_key,
+        norm_fn=_norm,
+    )
+
+
 def _keyword_token_hit(word: str, key: str) -> bool:
     """Tokenowe dopasowanie słowa kluczowego.
 
@@ -4279,44 +4201,24 @@ def _find_inventory_duplicate(
     name: str,
     inv_rows: list[dict],
     *,
-    threshold: int = 82,
+    threshold: int = 88,
+    for_invoice: bool = False,
 ) -> Optional[dict]:
-    """Szuka istniejącego produktu (pomidor ≈ Pomidory świeże)."""
-    if not name or not inv_rows:
-        return None
-    # 1) exact _norm
-    n = _norm(name)
-    for r in inv_rows:
-        if _norm(r.get("name") or "") == n:
-            return r
-    # 2) ten sam food stem
-    fk = _food_match_key(name)
-    if fk:
-        stem_hits = [r for r in inv_rows if _food_match_key(r.get("name") or "") == fk]
-        if len(stem_hits) == 1:
-            return stem_hits[0]
-        if len(stem_hits) > 1:
-            # najkrótsza kanoniczna nazwa
-            return min(stem_hits, key=lambda r: len(r.get("name") or ""))
-    # 2b) odmiany PL / synonimy (marchew ↔ marchewka, bakłażan ↔ bakłażany)
-    compat_hits = [
-        r for r in inv_rows
-        if _food_names_compatible(name, str(r.get("name") or ""))
-    ]
-    if len(compat_hits) == 1:
-        return compat_hits[0]
-    if len(compat_hits) > 1:
-        return min(compat_hits, key=lambda r: len(r.get("name") or ""))
-    # 3) rapidfuzz
-    hit, score = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=threshold)
-    if hit and score >= threshold:
-        return hit
-    # 4) luźniej dla krótkich nazw warzyw (pomidor/pomidory)
-    if len(_norm_pl(name).split()) <= 2:
-        hit2, score2 = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=74)
-        if hit2 and score2 >= 74:
-            return hit2
-    return None
+    """Szuka istniejącego produktu (pomidor ≈ Pomidory świeże).
+
+    for_invoice=True: ostrzejsze reguły — „ser mozzarella” NIE scala się z „ser”.
+    """
+    return _find_inventory_duplicate_impl(
+        name,
+        inv_rows,
+        threshold=threshold,
+        for_invoice=for_invoice,
+        food_match_key=_food_match_key,
+        norm_fn=_norm,
+        norm_pl_fn=_norm_pl,
+        fuzz_token_sort_ratio=fuzz.token_sort_ratio,
+        resolve_by_fuzzy=_resolve_by_fuzzy,
+    )
 
 
 async def _load_user_inventory_categories(client: httpx.AsyncClient) -> list[dict]:
@@ -4822,20 +4724,32 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
         cat_cache["_max_sort"] = max((int(r.get("sort_order") or 0) for r in user_cats), default=0)
         cat_cache["_loaded"] = True
 
-        # id → nazwa kategorii (do dziedziczenia z dopasowanego produktu)
         cat_id_to_name = {str(c["id"]): c["name"] for c in user_cats if c.get("id")}
-        inv_all = await sb_get(client, "inventory_items", params={
-            "select": "id,name,quantity,unit,unit_cost,category_id",
-            "limit": "5000",
-        }) or []
-        inv_rows = list(inv_all)
+        # Tylko aktywne pozycje tenanta — soft-delete / obce konta nie połykają dostaw z faktury.
+        try:
+            inv_all = await sb_get(client, "inventory_items", params={
+                "select": "id,name,quantity,unit,unit_cost,category_id,is_active",
+                "is_active": "eq.true",
+                "limit": "5000",
+            }) or []
+        except httpx.HTTPStatusError as e:
+            txt = e.response.text or ""
+            if "is_active" in txt:
+                inv_all = await sb_get(client, "inventory_items", params={
+                    "select": "id,name,quantity,unit,unit_cost,category_id",
+                    "limit": "5000",
+                }) or []
+            else:
+                raise
+        inv_rows = [r for r in inv_all if r.get("is_active") is not False]
 
+        ak = (get_account_key() or "").strip()
         for p in products:
-            name = (p.get("product_name") or "").strip()
+            name = _normalize_invoice_line_name(p.get("product_name") or "")
             if not name:
                 continue
             qty = float(p.get("quantity") or 0)
-            unit = (p.get("unit") or "szt").strip()
+            unit = (p.get("unit") or "szt").strip() or "szt"
             price = float(p.get("price_netto") or 0)
             ai_cat = (p.get("category") or "").strip() or "Inne"
             alert_days = p.get("alert_days") or [7, 3, 1]
@@ -4845,7 +4759,13 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
             if not alert_days:
                 alert_days = [7, 3, 1]
 
-            inv = _find_inventory_duplicate(name, inv_rows, threshold=82)
+            inv = _find_inventory_duplicate(name, inv_rows, threshold=88, for_invoice=True)
+            # Pas bezpieczeństwa: nigdy nie zwiększaj „Ser” gdy faktura ma mozzarella/feta/…
+            if inv and not _inventory_names_same_product(name, str(inv.get("name") or "")):
+                warnings.append(
+                    f"„{name}”: nie scalono z „{inv.get('name')}” — dodano jako nowy produkt."
+                )
+                inv = None
             item_id: Optional[str] = None
             if inv:
                 item_id = str(inv["id"])
@@ -4854,7 +4774,7 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                 if conv is None and _norm(unit) != _norm(inv["unit"]):
                     warnings.append(f"{name}: dodano {qty} {unit} bez konwersji do {inv['unit']} (połączono z „{inv['name']}”).")
                 new_qty = float(inv["quantity"] or 0) + float(delta)
-                patch_payload: dict = {"quantity": new_qty}
+                patch_payload: dict = {"quantity": new_qty, "is_active": True}
                 # odśwież unit_cost gdy znamy cenę z faktury
                 if price > 0:
                     patch_payload["unit_cost"] = price
@@ -4905,13 +4825,15 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                     "default_alert_days": alert_days,
                     "is_active": True,
                 }
+                if ak and ak != "default":
+                    payload["account_key"] = ak
                 try:
                     row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e:
                     body = e.response.text or ""
                     drop_keys = (
                         "default_alert_days", "safety_buffer_percent",
-                        "is_combo_polprodukt", "min_quantity",
+                        "is_combo_polprodukt", "min_quantity", "account_key",
                     )
                     dropped = False
                     for key in drop_keys:
@@ -4923,25 +4845,31 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                             row = await sb_post(client, "inventory_items", payload)
                         except httpx.HTTPStatusError as e2:
                             try:
-                                row = await sb_post(client, "inventory_items", {
+                                minimal = {
                                     "name": name, "quantity": qty, "unit": unit,
                                     "is_active": True,
-                                })
+                                }
+                                if ak and ak != "default" and "account_key" not in (e2.response.text or ""):
+                                    minimal["account_key"] = ak
+                                row = await sb_post(client, "inventory_items", minimal)
                             except httpx.HTTPStatusError as e3:
                                 warnings.append(f"{name}: nie dodano do magazynu ({e3.response.text[:80]}).")
                                 continue
                     else:
                         try:
-                            row = await sb_post(client, "inventory_items", {
+                            soft = {
                                 "name": name, "quantity": qty, "unit": unit,
                                 "unit_cost": price, "is_active": True,
-                            })
+                            }
+                            if ak and ak != "default":
+                                soft["account_key"] = ak
+                            row = await sb_post(client, "inventory_items", soft)
                         except httpx.HTTPStatusError:
                             warnings.append(f"{name}: nie dodano do magazynu ({body[:80]}).")
                             continue
                 item_id = str((row[0] if isinstance(row, list) else row).get("id"))
                 created.append({"name": name, "quantity": qty, "unit": unit, "category": category})
-                new_row = {"id": item_id, "name": name, "quantity": qty, "unit": unit, "category_id": cat_id, "unit_cost": price}
+                new_row = {"id": item_id, "name": name, "quantity": qty, "unit": unit, "category_id": cat_id, "unit_cost": price, "is_active": True}
                 inv_rows.append(new_row)
 
             # Partie dat ważności
@@ -5131,307 +5059,20 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
         "total_amount": total,
         "cost_id": cost_id,
         "warnings": warnings,
+        "products_on_invoice": len(
+            [p for p in products if (p.get("product_name") or "").strip()]
+        ) if dest == "inventory" else 0,
     }
 
 
-@app.post("/api/documents/process")
-async def process_document(supplier_id: Optional[str] = Form(None), file: UploadFile = File(...)):
-    """Uniwersalny procesor: GPT-4o rozpoznaje typ dokumentu.
-    - FAKTURA → zwraca podgląd (bez zapisu) do zatwierdzenia z edycją kategorii.
-    - OFERTA → od razu zapisuje do katalogu dostawcy.
-    supplier_id jest opcjonalny — jeśli brak, dostawca zostanie rozpoznany/utworzony z dokumentu.
-    Plik żyje wyłącznie w RAM i jest niszczony po zakończeniu funkcji."""
-    require_tenant_account_key()
-    client = _openai()
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Pusty plik.")
+# documents/process + confirm-invoice: backend/documents_routes.py (include_router)
 
-    if supplier_id:
-        async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
-            sup = await sb_get(httpx_c, "suppliers",
-                               params={"select": "id,name", "id": f"eq.{supplier_id}", "limit": "1"})
-            if not sup:
-                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-
-    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
-    contents = b""  # zwolnij bajty pliku
-
-    data, billing = await _openai_vision_json_batches(
-        client,
-        image_uris=image_uris,
-        system_prompt=_DOCUMENT_SYSTEM_PROMPT,
-        json_schema=_DOCUMENT_JSON_SCHEMA,
-        endpoint="/api/documents/process",
-        user_text=(
-            "Rozpoznaj typ tego dokumentu i wyodrębnij dane zgodnie ze schematem. "
-            f"Dokument PDF/zdjęcie: {pages_meta.get('pages_rendered')} stron"
-            f"{' (z ' + str(pages_meta.get('pages_total')) + ')' if pages_meta.get('truncated') else ''}."
-        ),
-        pages_meta=pages_meta,
-        merge_fn=_merge_document_vision_batches,
-    )
-    image_uris = []
-
-    doc_type = data.get("document_type") or "OFERTA_HANDLOWA"
-    supplier_name = data.get("supplier_name")
-    supplier_meta = _normalize_supplier_scan_meta(data.get("supplier"))
-    pages_info = {
-        "pages_total": pages_meta.get("pages_total"),
-        "pages_processed": pages_meta.get("pages_rendered"),
-        "pages_truncated": bool(pages_meta.get("truncated")),
-    }
-
-    if doc_type == "MENU_RESTAURACYJNE":
-        # Menu restauracji → NIE twórz dostawcy / katalogu. FE otworzy skaner menu.
-        dishes_preview = []
-        for p in (data.get("products") or [])[:80]:
-            nm = (p.get("product_name") or "").strip()
-            if not nm:
-                continue
-            dishes_preview.append({
-                "name": nm,
-                "price_pln": float(p.get("price_netto") or 0),
-                "category": p.get("category") or "Inne",
-            })
-        return _with_billing({
-            "document_type": "MENU_RESTAURACYJNE",
-            "open_menu_scan": True,
-            "dishes_preview": dishes_preview,
-            **pages_info,
-            "message": (
-                "Rozpoznano kartę dań (menu restauracji). "
-                "Otwórz „Skanuj menu”, aby wgrać potrawy — nie dodano dostawcy ani katalogu."
-            ),
-        }, billing)
-
-    if doc_type == "FAKTURA_ZAKUPOWA":
-        # PODGLĄD — nic nie zapisujemy; darmowa kategoryzacja pod kategorie użytkownika
-        raw_products = data.get("products") or []
-        enriched: list[dict] = []
-        user_cat_names: list[str] = []
-        async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client_db:
-            await _ensure_warehouse_categories(client_db)
-            user_cats = await _load_user_inventory_categories(client_db)
-            user_cat_names = [c.get("name") for c in user_cats if c.get("name")]
-            inv_all = await sb_get(client_db, "inventory_items", params={
-                "select": "id,name,category_id", "limit": "5000",
-            }) or []
-            cat_id_to_name = {str(c["id"]): c["name"] for c in user_cats if c.get("id")}
-            for p in raw_products:
-                if not isinstance(p, dict):
-                    continue
-                pname = (p.get("product_name") or "").strip()
-                if not pname:
-                    continue
-                neighbor = _find_inventory_duplicate(pname, inv_all, threshold=82)
-                neighbor_cat = None
-                if neighbor and neighbor.get("category_id"):
-                    neighbor_cat = cat_id_to_name.get(str(neighbor["category_id"]))
-                guessed = _guess_category_free(
-                    pname,
-                    ai_category=p.get("category"),
-                    user_categories=user_cats,
-                    neighbor_category=neighbor_cat,
-                )
-                out = dict(p)
-                out["category"] = guessed
-                if neighbor:
-                    out["matched_inventory_name"] = neighbor.get("name")
-                enriched.append(out)
-        return _with_billing({
-            "document_type": doc_type,
-            "supplier_id": supplier_id,
-            "supplier_name": supplier_name,
-            "supplier": supplier_meta_preview(supplier_meta),
-            "total_amount": float(data.get("total_amount") or 0),
-            "products": enriched or raw_products,
-            "user_categories": user_cat_names,
-            **pages_info,
-        }, billing)
-
-    # OFERTA → rozpoznaj/utwórz dostawcę, uzupełnij panel Dostawcy, zapisz katalog
-    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client_db:
-        if supplier_id:
-            resolved_id, resolved_name = supplier_id, (data.get("supplier_name") or "")
-        else:
-            resolved_id, resolved_name = await _find_or_create_supplier(
-                client_db, supplier_name, nip=supplier_meta.get("nip"),
-            )
-        meta_result = await _apply_supplier_scan_meta(client_db, resolved_id, supplier_meta)
-        result = await _process_offer(client_db, resolved_id, data)
-        return _with_billing({
-            "document_type": doc_type,
-            "supplier_id": resolved_id,
-            "supplier_name": resolved_name or supplier_name,
-            "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
-            "supplier_fields_updated": meta_result.get("updated_fields") or [],
-            **pages_info,
-            **result,
-        }, billing)
-
-
-@app.post("/api/documents/confirm-invoice")
-async def confirm_invoice(req: ConfirmInvoiceRequest):
-    """Zatwierdzenie faktury z podglądu (po ewentualnej korekcie kategorii).
-    Zawsze: aktualizacja/utworzenie produktów w magazynie + koszt zmienny (materiały).
-    Tworzy dostawcę jeśli podano tylko nazwę; dopisuje pozycje do katalogu dostawcy;
-    uzupełnia pola panelu Dostawcy (NIP, telefon, dostawa, min. zamówienie itd.)."""
-    require_tenant_account_key()
-    if not req.products:
-        raise HTTPException(status_code=400, detail="Brak pozycji do zaksięgowania.")
-
-    # Złóż meta z obiektu `supplier` lub płaskich pól FE
-    flat_meta = {
-        "nip": req.supplier_nip,
-        "phone": req.supplier_phone,
-        "email": req.supplier_email,
-        "contact_person": req.supplier_contact_person,
-        "address": req.supplier_address,
-        "bank_account": req.supplier_bank_account,
-        "payment_terms": req.supplier_payment_terms,
-        "shipping_cost": req.supplier_shipping_cost,
-        "min_order_value": req.supplier_min_order_value,
-        "free_shipping_threshold": req.supplier_free_shipping_threshold,
-        "lead_time_days": req.supplier_lead_time_days,
-    }
-    if isinstance(req.supplier, dict):
-        merged_src = {**flat_meta, **{k: v for k, v in req.supplier.items() if v is not None}}
-    else:
-        merged_src = flat_meta
-    supplier_meta = _normalize_supplier_scan_meta(merged_src)
-
-    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
-        if req.supplier_id:
-            sup = await sb_get(client, "suppliers",
-                               params={"select": "id,name", "id": f"eq.{req.supplier_id}", "limit": "1"})
-            if not sup:
-                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-            supplier_id, supplier_name = sup[0]["id"], sup[0]["name"]
-        else:
-            supplier_id, supplier_name = await _find_or_create_supplier(
-                client, req.supplier_name, nip=supplier_meta.get("nip"),
-            )
-
-        meta_result = await _apply_supplier_scan_meta(client, supplier_id, supplier_meta)
-
-        products = [p.model_dump() for p in req.products]
-        # Zakupy: magazyn + koszt zmienny (ignorujemy stare destination tiles z FE).
-        result = await _save_invoice(
-            client, supplier_id, supplier_name, products, float(req.total_amount or 0),
-            destination="inventory",
-        )
-    return {
-        "document_type": "FAKTURA_ZAKUPOWA",
-        "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
-        "supplier_fields_updated": meta_result.get("updated_fields") or [],
-        **result,
-    }
+# confirm-invoice: backend/documents_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5) Dynamic Portions Yield — na ile porcji każdej potrawy wystarczy zapas
+# 5) Dynamic Portions Yield — endpoint: inventory_yield_routes.py
 # ─────────────────────────────────────────────────────────────────────────────
-
-@app.get("/api/inventory/{item_id}/portions-yield")
-async def portions_yield(item_id: str):
-    """Dla danego surowca liczy, na ile porcji każdej powiązanej potrawy wystarczy
-    aktualny stan magazynowy (stan / gramatura z receptury)."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            rows = await sb_get(client, "inventory_items",
-                                params={"select": "id,name,quantity,unit,unit_weight_volume,weight_volume_unit",
-                                        "id": f"eq.{item_id}", "limit": "1"})
-        except httpx.HTTPStatusError as e:
-            # kolumny unit_weight_volume/weight_volume_unit jeszcze nie dodane
-            if "unit_weight_volume" in (e.response.text or "") or "weight_volume_unit" in (e.response.text or ""):
-                rows = await sb_get(client, "inventory_items",
-                                    params={"select": "id,name,quantity,unit", "id": f"eq.{item_id}", "limit": "1"})
-            else:
-                raise
-        if not rows:
-            raise HTTPException(status_code=404, detail="Nie znaleziono produktu.")
-        item = rows[0]
-        item_name = item["name"]
-        stock_qty = float(item["quantity"] or 0)
-        stock_unit = item["unit"] or ""
-        uwv = item.get("unit_weight_volume")
-        wvu = item.get("weight_volume_unit")
-
-        # recipe_ingredients łączy się z magazynem po NAZWIE (fuzzy)
-        try:
-            recipes = await sb_get(client, "recipe_ingredients",
-                                   params={"select": "menu_item_id,ingredient_name,quantity,unit,piece_weight_g"})
-        except httpx.HTTPStatusError as e:
-            if "piece_weight_g" in (e.response.text or ""):
-                recipes = await sb_get(client, "recipe_ingredients",
-                                       params={"select": "menu_item_id,ingredient_name,quantity,unit"})
-            else:
-                raise
-        key = _norm(item_name)
-        key_pl = _norm_pl(item_name)
-        matched = []
-        for r in (recipes or []):
-            ing = r.get("ingredient_name") or ""
-            if (
-                _norm(ing) == key
-                or key in _norm(ing)
-                or _norm(ing) in key
-                or _norm_pl(ing) == key_pl
-            ):
-                matched.append(r)
-                continue
-            # Lekki fuzzy token-set (bez partial) — filet↔pierś
-            hit, _score = _fuzzy_match_token_only(key_pl, [_norm_pl(ing)], threshold=74)
-            if hit is not None:
-                matched.append(r)
-
-        # nazwy potraw
-        menu_ids = list({r["menu_item_id"] for r in matched})
-        menu_map: dict = {}
-        if menu_ids:
-            id_filter = "in.(" + ",".join(menu_ids) + ")"
-            menu_rows = await sb_get(client, "menu_items",
-                                     params={"select": "id,name,is_active", "id": id_filter})
-            menu_map = {m["id"]: m for m in (menu_rows or [])}
-
-    dishes = []
-    for r in matched:
-        per_portion = float(r["quantity"] or 0)
-        recipe_unit = r["unit"] or stock_unit
-        if per_portion <= 0:
-            continue
-        # Gdy receptura w szt a mamy wzorcową wagę — użyj jej jako unit_size
-        piece_wt = r.get("piece_weight_g")
-        use_uwv = uwv
-        use_wvu = wvu
-        try:
-            if piece_wt is not None and float(piece_wt) > 0 and _is_piece_unit(recipe_unit):
-                use_uwv = float(piece_wt)
-                use_wvu = "g"
-        except (TypeError, ValueError):
-            pass
-        available, convertible = _yield_available(stock_qty, stock_unit, use_uwv, use_wvu, recipe_unit)
-        portions = int(available // per_portion) if available is not None else 0
-        menu = menu_map.get(r["menu_item_id"])
-        dishes.append({
-            "menu_item_id": r["menu_item_id"],
-            "dish_name": (menu or {}).get("name") or "Danie",
-            "is_active": (menu or {}).get("is_active", True),
-            "per_portion_qty": per_portion,
-            "unit": recipe_unit,
-            "portions": max(0, portions),
-            "convertible": convertible,
-        })
-
-    dishes.sort(key=lambda d: d["portions"])
-    return {
-        "item_id": item_id,
-        "item_name": item_name,
-        "stock_quantity": stock_qty,
-        "stock_unit": stock_unit,
-        "dishes": dishes,
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5660,159 +5301,7 @@ class ExpiryScanResponse(BaseModel):
     credits_remaining: Optional[int] = None
 
 
-@app.post("/api/inventory/scan-expiration", response_model=ExpiryScanResponse)
-async def scan_expiration(
-    file: UploadFile = File(...),
-    quantity: float = Form(...),
-    restaurant_id: Optional[str] = Form(None),
-    unit: str = Form("szt"),
-):
-    """Zdjecie etykiety → GPT-4o Vision → zapis partii w warehouse_inventory (+ bump stanu)."""
-    if quantity <= 0:
-        raise HTTPException(status_code=400, detail="Ilość musi być > 0.")
-
-    client = _openai()
-    await _guard_ai()
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Pusty plik.")
-
-    image_uris, _pages_meta = _images_from_upload(
-        contents, file.content_type or "", file.filename or "", max_pages=2,
-    )
-    contents = b""
-
-    user_content: list[dict] = [
-        {"type": "text", "text": "Extract product name and expiration date from this package photo."}
-    ]
-    for uri in image_uris:
-        user_content.append({"type": "image_url", "image_url": {"url": uri}})
-
-    try:
-        resp = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": _EXPIRY_SCAN_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_schema", "json_schema": _EXPIRY_SCAN_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-    finally:
-        image_uris = []
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/inventory/scan-expiration", model=VISION_MODEL,
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
-
-    product_name = str(data.get("product_name") or "").strip()
-    expiration_date = str(data.get("expiration_date") or "").strip()
-    confidence = float(data.get("confidence_score") or 0)
-    if not product_name or not re.match(r"^\d{4}-\d{2}-\d{2}$", expiration_date):
-        raise HTTPException(status_code=422, detail="Nie udało się odczytać nazwy lub daty ważności.")
-
-    status = _expiry_status(expiration_date)
-    unit_clean = (unit or "szt").strip() or "szt"
-
-    inventory_item_id: Optional[str] = None
-    inventory_matched_name: Optional[str] = None
-    batch_id: Optional[str] = None
-
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        inv_all = await sb_get(
-            httpx_c, "inventory_items",
-            params={"select": "id,name,quantity,unit", "limit": "2000"},
-        ) or []
-        best_id = None
-        best_score = 0.0
-        best_name = None
-        best_qty = 0.0
-        qn = _norm_pl(product_name)
-        for row in inv_all:
-            cand = _norm_pl(str(row.get("name") or ""))
-            if not cand:
-                continue
-            score = max(
-                float(fuzz.token_set_ratio(qn, cand)),
-                float(fuzz.partial_ratio(qn, cand)),
-            )
-            if score > best_score:
-                best_score = score
-                best_id = row.get("id")
-                best_name = row.get("name")
-                best_qty = float(row.get("quantity") or 0)
-        if best_id and best_score >= FUZZY_MATCH_THRESHOLD:
-            inventory_item_id = str(best_id)
-            inventory_matched_name = str(best_name or "")
-            try:
-                await sb_patch(
-                    httpx_c,
-                    "inventory_items",
-                    {"id": f"eq.{inventory_item_id}"},
-                    {"quantity": best_qty + float(quantity)},
-                )
-            except Exception:
-                logging.exception("expiry scan: failed to bump inventory quantity")
-
-        payload = {
-            "restaurant_id": restaurant_id or None,
-            "inventory_item_id": inventory_item_id,
-            "product_name": product_name,
-            "quantity": float(quantity),
-            "unit": unit_clean,
-            "expiration_date": expiration_date,
-            "status": status,
-            "confidence_score": confidence,
-            "source": "vision_scan",
-        }
-        try:
-            inserted = await sb_post(httpx_c, "warehouse_inventory", payload)
-            if isinstance(inserted, list) and inserted:
-                batch_id = inserted[0].get("id")
-            elif isinstance(inserted, dict):
-                batch_id = inserted.get("id")
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Nie zapisano partii — uruchom migrację ADD_WAREHOUSE_INVENTORY_EXPIRY.sql. "
-                    f"Szczegóły: {e}"
-                ),
-            ) from e
-
-    msg = (
-        f"Dodano {quantity:g} {unit_clean} · {product_name} "
-        f"(ważne do {expiration_date}, status: {status})"
-    )
-    if inventory_matched_name:
-        msg += f". Dopasowano do magazynu: {inventory_matched_name}."
-
-    return ExpiryScanResponse(
-        product_name=product_name,
-        expiration_date=expiration_date,
-        confidence_score=confidence,
-        status=status,
-        quantity=float(quantity),
-        unit=unit_clean,
-        inventory_item_id=inventory_item_id,
-        inventory_matched_name=inventory_matched_name,
-        batch_id=batch_id,
-        message=msg,
-        credits_deducted=int(billing.get("credits_deducted") or 0),
-        credits_remaining=billing.get("credits_remaining"),
-    )
+# scan-expiration: backend/inventory_expiry_scan_routes.py (include_router)
 
 
 async def _list_tenant_account_keys(client: httpx.AsyncClient) -> list[str]:
@@ -7395,31 +6884,25 @@ def _food_names_compatible(req_name: str, cand_name: str) -> bool:
     """Czy nazwy mogą być tym samym towarem (stem / kolejność słów / prefiks).
 
     Przykłady OK: batat↔bataty, filet z kurczaka↔kurczak filet, pomidor↔pomidory.
-    Blokuje luźne literówki bez wspólnego rdzenia (grzanek ↛ granulat).
+    Blokuje ser↔ser mozzarella oraz luźne literówki (grzanek ↛ granulat).
     """
+    if _inventory_names_same_product(req_name or "", cand_name or ""):
+        return True
     ka = _food_match_key(req_name or "")
     kb = _food_match_key(cand_name or "")
     if not ka or not kb:
         return False
-    if ka == kb:
-        return True
     ta, tb = set(ka.split()), set(kb.split())
-    if not ta or not tb:
-        return False
-    # Wspólny stem ≥4 LUB pełne pokrycie tokenów zapytania w ofercie
-    shared = ta & tb
-    if shared and any(len(t) >= 4 for t in shared):
-        return True
-    if ta.issubset(tb) or tb.issubset(ta):
-        return True
-    # Prefiks stemów: batat ⊂ bataty / cukin ⊂ cukinia (po key)
-    for a in ta:
-        for b in tb:
-            if len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a)):
-                return True
-    # Jednoznaczne zawieranie całych kluczy
-    if len(ka) >= 5 and len(kb) >= 5 and (ka in kb or kb in ka):
-        return True
+    # Prefiks jednego tokenu: batat↔bataty (bez rodzajowych „ser”/„mleko”)
+    if len(ta) == 1 and len(tb) == 1:
+        a, b = next(iter(ta)), next(iter(tb))
+        if (
+            len(a) >= 4 and len(b) >= 4
+            and (a.startswith(b) or b.startswith(a))
+            and a not in _GENERIC_FOOD_ONE_TOKEN
+            and b not in _GENERIC_FOOD_ONE_TOKEN
+        ):
+            return True
     return False
 
 
@@ -13230,13 +12713,8 @@ def _aggregate_credit_history(items: list[dict], *, window_sec: int = 150) -> li
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stripe Connect Express — onboarding dystrybutorów (panel WWW)
+# Stripe Connect — helpers (endpointy: stripe_connect_routes.py)
 # ─────────────────────────────────────────────────────────────────────────────
-
-class StripeConnectRequest(BaseModel):
-    producer_id: str
-    email: Optional[str] = None
-
 
 async def _auth_user_id_from_request(request: Request) -> Optional[str]:
     """Supabase Auth user id z Bearer JWT (panel WWW / apka)."""
@@ -13260,167 +12738,7 @@ async def _auth_user_id_from_request(request: Request) -> Optional[str]:
     return None
 
 
-async def _run_stripe_connect_onboard(pid: str, *, require_owner_uid: Optional[str]) -> dict:
-    from billing_stripe import stripe_configured
-    from stripe_connect import start_connect_onboarding
-
-    if not stripe_configured():
-        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
-    pid = (pid or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="Brak producer_id")
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "local_producers", params={
-            "select": "id,auth_user_id,email,company_name,stripe_connect_id,stripe_account_id",
-            "id": f"eq.{pid}",
-            "limit": "1",
-        })
-        if not rows:
-            raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
-        owner = (rows[0].get("auth_user_id") or "").strip()
-        if require_owner_uid is not None:
-            if not require_owner_uid:
-                raise HTTPException(status_code=401, detail="Zaloguj się (Bearer JWT)")
-            if owner and owner != require_owner_uid:
-                raise HTTPException(status_code=403, detail="To nie jest Twój profil dystrybutora")
-        try:
-            return await start_connect_onboarding(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                producer_id=pid,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            logger.exception("stripe connect onboard failed")
-            raise HTTPException(status_code=502, detail=str(e)[:300])
-
-
-@app.post("/api/stripe/connect")
-async def stripe_connect_onboard_post(request: Request, body: StripeConnectRequest):
-    """
-    Tworzy Stripe Express (PL) + Account Link onboarding.
-    Panel WWW: POST JSON { producer_id } z Bearer JWT właściciela.
-    """
-    uid = await _auth_user_id_from_request(request)
-    return await _run_stripe_connect_onboard(body.producer_id, require_owner_uid=uid)
-
-
-@app.get("/api/stripe/connect")
-async def stripe_connect_onboard_get(
-    producer_id: str,
-    refresh: Optional[int] = None,
-    token: Optional[str] = None,
-):
-    """Refresh URL z Stripe Account Link — tylko z HMAC z refresh_url."""
-    from fastapi.responses import RedirectResponse
-    from stripe_connect import verify_connect_refresh_token
-    if not verify_connect_refresh_token(producer_id, token):
-        raise HTTPException(status_code=401, detail="Brak tokenu odświeżenia Connect.")
-    result = await _run_stripe_connect_onboard(producer_id, require_owner_uid=None)
-    if result.get("url"):
-        return RedirectResponse(url=result["url"], status_code=303)
-    return result
-
-
-@app.get("/api/stripe/connect/callback")
-async def stripe_connect_callback(
-    producer_id: Optional[str] = None,
-    account_id: Optional[str] = None,
-):
-    """
-    Return URL po onboardingu Stripe — pobiera acct_... i zapisuje stripe_connect_id.
-    """
-    from fastapi.responses import RedirectResponse, HTMLResponse
-    from stripe_connect import sync_connect_account_to_producer, connect_www_success_url
-    import html as html_lib
-
-    pid = (producer_id or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="Brak producer_id")
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        try:
-            synced = await sync_connect_account_to_producer(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                producer_id=pid,
-                account_id=(account_id or "").strip() or None,
-            )
-        except Exception as e:
-            logger.exception("stripe connect callback failed")
-            return HTMLResponse(
-                content=(
-                    "<html><body style='font-family:sans-serif;padding:2rem'>"
-                    "<h1>Stripe Connect — błąd</h1>"
-                    f"<p>{html_lib.escape(str(e)[:300])}</p>"
-                    "</body></html>"
-                ),
-                status_code=502,
-            )
-
-    success = connect_www_success_url()
-    if success.startswith("http"):
-        success = assert_safe_redirect_url(success)
-        sep = "&" if "?" in success else "?"
-        return RedirectResponse(
-            url=f"{success}{sep}producer_id={pid}&stripe_connect_id={synced.get('stripe_connect_id','')}",
-            status_code=303,
-        )
-    return {
-        "ok": True,
-        "message": "Konto Stripe Connect zapisane. Możesz wrócić do panelu WWW.",
-        **synced,
-    }
-
-
-@app.get("/api/stripe/connect/done")
-async def stripe_connect_done(
-    producer_id: Optional[str] = None,
-    stripe_connect_id: Optional[str] = None,
-):
-    """Prosta strona sukcesu (gdy brak STRIPE_CONNECT_WWW_SUCCESS_URL)."""
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(
-        content=(
-            "<html><body style='font-family:sans-serif;padding:2rem'>"
-            "<h1>Stripe połączony</h1>"
-            f"<p>Dystrybutor: <code>{producer_id or '—'}</code></p>"
-            f"<p>Konto: <code>{stripe_connect_id or '—'}</code></p>"
-            "<p>Produkty będą widoczne dla restauratorów po zatwierdzeniu profilu.</p>"
-            "</body></html>"
-        )
-    )
-
-
-@app.get("/api/stripe/connect/status")
-async def stripe_connect_status(producer_id: str, request: Request):
-    """Status Connect dystrybutora (panel WWW)."""
-    pid = (producer_id or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="Brak producer_id")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "local_producers", params={
-            "select": "id,stripe_connect_id,stripe_account_id,payouts_enabled,stripe_onboarding_complete",
-            "id": f"eq.{pid}",
-            "limit": "1",
-        })
-    if not rows:
-        raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
-    p = rows[0]
-    from stripe_connect import producer_connect_id
-    acct = producer_connect_id(p)
-    return {
-        "ok": True,
-        "producer_id": pid,
-        "stripe_connect_id": acct or None,
-        "connected": bool(acct),
-        "payouts_enabled": bool(p.get("payouts_enabled")),
-        "stripe_onboarding_complete": bool(p.get("stripe_onboarding_complete")),
-    }
+# Stripe Connect endpoints: backend/stripe_connect_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

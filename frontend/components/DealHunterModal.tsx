@@ -44,6 +44,10 @@ import { useAuth } from '@/contexts/AuthContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
 import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
 import { openMailInBrowser } from '@/lib/openMailCompose';
@@ -2121,6 +2125,18 @@ export function DealHunterModal({
     if (!to) {
       Alert.alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy.');
       return;
+    }
+    if (m.supplier_id) {
+      const check = await checkSupplierMinOrder({
+        supplierId: m.supplier_id,
+        subtotalPln: Number(m.subtotal_pln) || 0,
+        supplierName: m.supplier_name,
+      });
+      if (!check.ok) {
+        const copy = minOrderAlertCopy(check);
+        premiumAlert(copy.title, copy.message);
+        return;
+      }
     }
     const usesAssistant = from.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
     const bodyToSend = usesAssistant ? body : stripAssistantOrderFooter(body);

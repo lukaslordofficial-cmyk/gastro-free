@@ -25,6 +25,10 @@ import { fetchJson } from '@/lib/safeFetch';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { stripAssistantOrderFooter, withAssistantFooterIfNeeded } from '@/lib/orderEmailFooter';
 import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
+import {
   mailProviderLabel,
   openMailInApp,
   openMailLoginOnly,
@@ -244,6 +248,22 @@ export function OrderEmailComposer({
     ]);
   };
 
+  const ensureMinOrderMet = async (): Promise<boolean> => {
+    const sid = (draft?.supplierId || '').trim();
+    if (!sid) return true;
+    const subtotal = Number(draft?.totalPln);
+    if (!Number.isFinite(subtotal)) return true;
+    const check = await checkSupplierMinOrder({
+      supplierId: sid,
+      subtotalPln: subtotal,
+      supplierName: draft?.supplierName,
+    });
+    if (check.ok) return true;
+    const copy = minOrderAlertCopy(check);
+    alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+    return false;
+  };
+
   const send = async () => {
     const to = toEmail.trim();
     if (!to) {
@@ -258,6 +278,7 @@ export function OrderEmailComposer({
       ]);
       return;
     }
+    if (!(await ensureMinOrderMet())) return;
     setShowSendMethod(true);
   };
 
@@ -364,7 +385,12 @@ export function OrderEmailComposer({
         <View style={[styles.footer, { borderTopColor: border, backgroundColor: card }]}>
           {onPayPress ? (
             <TouchableOpacity
-              onPress={onPayPress}
+              onPress={() => {
+                void (async () => {
+                  if (!(await ensureMinOrderMet())) return;
+                  onPayPress();
+                })();
+              }}
               activeOpacity={0.85}
               style={[styles.payBtn, { borderColor: prem ? DS.color.greenEnd : Colors.accent }]}
               testID="order-email-manual-pay"

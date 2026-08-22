@@ -79,6 +79,10 @@ import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { SupplierOrdersModal } from '@/components/SupplierOrdersModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { formatPln, formatPlnNumber } from '@/lib/format';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
 import type { SupplierOffer, SupplierOfferItem } from '@/lib/types';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
@@ -2086,6 +2090,18 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
     void (async () => {
       setEmailBusy(true);
       try {
+        if (d.supplier_id) {
+          const check = await checkSupplierMinOrder({
+            supplierId: d.supplier_id,
+            subtotalPln: draftTotal(d),
+            supplierName: d.supplier_name,
+          });
+          if (!check.ok) {
+            const copy = minOrderAlertCopy(check);
+            alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+            return;
+          }
+        }
         const { subject, body, email } = await buildOrderEmail(d);
         const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
         setEmailDraftOrderId(d.id);
@@ -2129,8 +2145,19 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
             void (async () => {
               setEmailBusy(true);
               try {
-                // Wysyłamy kolejno; po każdym sukcesie koszyk draft znika (status=sent)
                 for (const d of draftOrders) {
+                  if (d.supplier_id) {
+                    const check = await checkSupplierMinOrder({
+                      supplierId: d.supplier_id,
+                      subtotalPln: draftTotal(d),
+                      supplierName: d.supplier_name,
+                    });
+                    if (!check.ok) {
+                      const copy = minOrderAlertCopy(check);
+                      alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+                      continue;
+                    }
+                  }
                   const { subject, body, email } = await buildOrderEmail(d);
                   const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
                   setEmailDraftOrderId(d.id);

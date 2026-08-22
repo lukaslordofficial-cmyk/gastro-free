@@ -78,7 +78,7 @@ async def generate_messages(req: GenerateMessagesRequest):
                     _c,
                     "suppliers",
                     params={
-                        "select": "id,name,email,contact_person",
+                        "select": "id,name,email,contact_person,min_order_value",
                         "id": f"eq.{sid}",
                         "limit": "1",
                     },
@@ -86,7 +86,20 @@ async def generate_messages(req: GenerateMessagesRequest):
                 if rows:
                     resolved_suppliers[sid] = rows[0]
             except Exception as e:  # noqa: BLE001
-                logger.warning("generate-messages resolve supplier %s: %s", sid, e)
+                try:
+                    rows = await sb_get(
+                        _c,
+                        "suppliers",
+                        params={
+                            "select": "id,name,email,contact_person",
+                            "id": f"eq.{sid}",
+                            "limit": "1",
+                        },
+                    ) or []
+                    if rows:
+                        resolved_suppliers[sid] = rows[0]
+                except Exception as e2:  # noqa: BLE001
+                    logger.warning("generate-messages resolve supplier %s: %s / %s", sid, e, e2)
 
     restaurant = resolve_restaurant_label(
         profile=profile, req_restaurant_name=req.restaurant_name,
@@ -112,6 +125,25 @@ async def generate_messages(req: GenerateMessagesRequest):
         )
         sid = (g.supplier_id or "").strip()
         db_sup = resolved_suppliers.get(sid) if sid else None
+        min_val = 0.0
+        try:
+            min_val = float((db_sup or {}).get("min_order_value") or 0)
+        except (TypeError, ValueError):
+            min_val = 0.0
+        if min_val > 0 and subtotal + 1e-6 < min_val:
+            gap = round(min_val - subtotal, 2)
+            name = (
+                ((db_sup or {}).get("name") or "").strip()
+                or (g.supplier_name or "").strip()
+                or "dostawcy"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Minimalne zamówienie u „{name}” to {min_val:.2f} zł. "
+                    f"Brakuje {gap:.2f} zł. Dodaj produkty i zamów ponownie."
+                ),
+            )
         supplier_hello = (
             ((db_sup or {}).get("name") or "").strip()
             or (g.supplier_name or "").strip()

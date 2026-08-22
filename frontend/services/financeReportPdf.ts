@@ -7,6 +7,7 @@ import * as Sharing from 'expo-sharing';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { parseInvoiceCostNote } from '@/lib/invoiceCostNote';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
 
@@ -472,12 +473,11 @@ export async function fetchComprehensiveReport(
   if (!BACKEND_URL) {
     throw new Error('Brak EXPO_PUBLIC_BACKEND_URL — nie mogę pobrać raportu zbiorczego.');
   }
+  // Bearer JWT + X-Account-Key — inaczej middleware traktuje POST jako zapis na „default”.
+  const headers = await apiJsonHeaders();
   const res = await fetch(`${BACKEND_URL}/api/reports/comprehensive`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Account-Key': getAccountKey(),
-    },
+    headers,
     body: JSON.stringify({
       from_date: range.from,
       to_date: range.to,

@@ -38,6 +38,10 @@ import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
 import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
 import { useAuth } from '@/contexts/AuthContext';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
 
 interface Props {
   supplierId: string;
@@ -106,6 +110,7 @@ export function OrderModal({
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
   const [shippingCost, setShippingCost] = useState(0);
   const [freeShipFrom, setFreeShipFrom] = useState(0);
+  const [minOrderValue, setMinOrderValue] = useState(0);
 
   const cartItems = useMemo(() => Array.from(cart.values()), [cart]);
   const cartCount = cartItems.length;
@@ -113,18 +118,28 @@ export function OrderModal({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const { data: sup } = await supabase
+      let { data: sup, error: supErr } = await supabase
         .from('suppliers')
-        .select('shipping_cost, free_shipping_threshold')
+        .select('shipping_cost, free_shipping_threshold, min_order_value')
         .eq('id', supplierId)
         .maybeSingle();
+      if (supErr && /min_order_value/.test(supErr.message ?? '')) {
+        const retry = await supabase
+          .from('suppliers')
+          .select('shipping_cost, free_shipping_threshold')
+          .eq('id', supplierId)
+          .maybeSingle();
+        sup = retry.data as typeof sup;
+      }
       setShippingCost(Number((sup as { shipping_cost?: number } | null)?.shipping_cost) || 0);
       setFreeShipFrom(
         Number((sup as { free_shipping_threshold?: number } | null)?.free_shipping_threshold) || 0,
       );
+      setMinOrderValue(Number((sup as { min_order_value?: number } | null)?.min_order_value) || 0);
     } catch {
       setShippingCost(0);
       setFreeShipFrom(0);
+      setMinOrderValue(0);
     }
     let rows: any[] | null = null;
     const full = await supabase
@@ -276,11 +291,29 @@ export function OrderModal({
     }
   };
 
+  const ensureMinOrderMet = async (): Promise<boolean> => {
+    const subtotal = productsTotal ?? cartItems.reduce(
+      (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+      0,
+    );
+    const check = await checkSupplierMinOrder({
+      supplierId,
+      subtotalPln: subtotal,
+      minOrderValue,
+      supplierName,
+    });
+    if (check.ok) return true;
+    const copy = minOrderAlertCopy(check);
+    alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+    return false;
+  };
+
   const placeOrder = async () => {
     if (cart.size === 0) {
       alert('Puste zamówienie', 'Dodaj produkty do zamówienia.');
       return;
     }
+    if (!(await ensureMinOrderMet())) return;
     setSaving(true);
     try {
       // status=sent → panel Zamówienia / Przygotowywane (po przejściu do maila)
@@ -642,17 +675,20 @@ export function OrderModal({
             </View>
             <TouchableOpacity
               style={[styles.manualPayBtn, { borderColor: accent }]}
-              onPress={() =>
-                setManualPayOrder({
-                  supplierId,
-                  supplierName,
-                  orderTitle: `Zamówienie — ${supplierName}`,
-                  totalPln: grandTotal ?? cartItems.reduce(
-                    (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
-                    0,
-                  ) + deliveryFee,
-                })
-              }
+              onPress={() => {
+                void (async () => {
+                  if (!(await ensureMinOrderMet())) return;
+                  setManualPayOrder({
+                    supplierId,
+                    supplierName,
+                    orderTitle: `Zamówienie — ${supplierName}`,
+                    totalPln: grandTotal ?? cartItems.reduce(
+                      (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+                      0,
+                    ) + deliveryFee,
+                  });
+                })();
+              }}
               activeOpacity={0.85}
               testID="order-modal-manual-pay"
             >

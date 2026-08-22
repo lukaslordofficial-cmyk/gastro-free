@@ -1,22 +1,26 @@
 /**
- * Lista faktur / dostaw u dostawcy (chronologicznie) + suma wydatków.
+ * Faktury u dostawcy — drzewo rok/miesiąc/tydzień, kafelek ze skrótem, szczegóły po kliknięciu.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Modal,
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  FlatList,
   ActivityIndicator,
   Platform,
+  ScrollView,
 } from 'react-native';
 import { FileText, X } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { formatPln } from '@/lib/format';
+import {
+  ExpandableDateJournal,
+  type JournalLeaf,
+} from '@/components/ExpandableDateJournal';
 import {
   fetchSupplierInvoices,
   type SupplierInvoiceEntry,
@@ -36,6 +40,45 @@ function formatWhen(iso: string): string {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const yyyy = d.getFullYear();
   return `${dd}.${mm}.${yyyy}`;
+}
+
+function productCountLabel(n: number): string {
+  if (n <= 0) return 'Zakup — szczegóły po kliknięciu';
+  if (n === 1) return 'Zamówiono 1 produkt';
+  if (n >= 2 && n <= 4) return `Zamówiono ${n} produkty`;
+  return `Zamówiono ${n} produktów`;
+}
+
+function toJournalLeaves(entries: SupplierInvoiceEntry[]): JournalLeaf[] {
+  return entries.map((e) => {
+    const n = e.lines.length;
+    const source =
+      e.source === 'invoice' ? 'faktura' : 'dostawa / koszt zmienny';
+    const summary = productCountLabel(n);
+    const detailLines =
+      n > 0
+        ? [
+            `Data: ${formatWhen(e.created_at)}`,
+            `Źródło: ${source}`,
+            `Podsumowanie: ${summary}`,
+            '—',
+            ...e.lines,
+          ]
+        : [
+            `Data: ${formatWhen(e.created_at)}`,
+            `Źródło: ${source}`,
+            `Kwota: ${formatPln(e.amount_pln)}`,
+            e.notePreview || 'Brak rozbicia pozycji (np. starszy zapis).',
+          ];
+    return {
+      id: e.id,
+      created_at: e.created_at,
+      title: e.title,
+      amount: e.amount_pln,
+      meta: `${formatWhen(e.created_at)} · ${summary}`,
+      detailLines,
+    };
+  });
 }
 
 export function SupplierInvoicesModal({
@@ -79,6 +122,8 @@ export function SupplierInvoicesModal({
     if (visible) void load();
   }, [visible, load]);
 
+  const leaves = useMemo(() => toJournalLeaves(entries), [entries]);
+
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <View style={[styles.wrap, { backgroundColor: bg }]}>
@@ -99,61 +144,37 @@ export function SupplierInvoicesModal({
           </TouchableOpacity>
         </View>
 
-        <View style={[styles.sumCard, { backgroundColor: card, borderColor: border }]}>
-          <Text style={[styles.sumLabel, { color: muted }]} allowFontScaling={false}>
-            Suma wydatków u dostawcy
-          </Text>
-          <Text style={[styles.sumValue, { color: accent }]} allowFontScaling={false}>
-            {formatPln(total)}
-          </Text>
-          <Text style={[styles.sumHint, { color: muted }]} allowFontScaling={false}>
-            Skany AI + zrealizowane zamówienia ręczne
-          </Text>
-        </View>
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.scrollBody}
+          showsVerticalScrollIndicator
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={[styles.sumCard, { backgroundColor: card, borderColor: border }]}>
+            <Text style={[styles.sumLabel, { color: muted }]} allowFontScaling={false}>
+              Suma wydatków u dostawcy
+            </Text>
+            <Text style={[styles.sumValue, { color: accent }]} allowFontScaling={false}>
+              {formatPln(total)}
+            </Text>
+            <Text style={[styles.sumHint, { color: muted }]} allowFontScaling={false}>
+              Od najnowszych · zwijane: rok → miesiąc → tydzień → dzień
+            </Text>
+          </View>
 
-        {loading ? (
-          <ActivityIndicator style={{ marginTop: 32 }} color={accent} />
-        ) : error ? (
-          <Text style={[styles.empty, { color: muted }]}>{error}</Text>
-        ) : (
-          <FlatList
-            data={entries}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.list}
-            ListEmptyComponent={
-              <Text style={[styles.empty, { color: muted }]}>
-                Brak faktur i dostaw dla tego dostawcy.
-              </Text>
-            }
-            renderItem={({ item }) => (
-              <View style={[styles.row, { backgroundColor: card, borderColor: border }]}>
-                <View style={{ flex: 1, minWidth: 0, paddingRight: 8 }}>
-                  <Text style={[styles.rowTitle, { color: text }]} numberOfLines={2} allowFontScaling={false}>
-                    {item.title}
-                  </Text>
-                  <Text style={[styles.rowMeta, { color: muted }]} allowFontScaling={false}>
-                    {formatWhen(item.created_at)}
-                    {item.source === 'invoice' ? ' · faktura' : ' · koszt zmienny'}
-                    {item.notePreview ? ` · ${item.notePreview}` : ''}
-                  </Text>
-                  {item.lines.slice(0, 4).map((line) => (
-                    <Text key={line} style={[styles.line, { color: muted }]} numberOfLines={1}>
-                      {line}
-                    </Text>
-                  ))}
-                  {item.lines.length > 4 ? (
-                    <Text style={[styles.line, { color: muted }]}>
-                      +{item.lines.length - 4} poz.
-                    </Text>
-                  ) : null}
-                </View>
-                <Text style={[styles.amt, { color: text }]} allowFontScaling={false}>
-                  {formatPln(item.amount_pln)}
-                </Text>
-              </View>
-            )}
-          />
-        )}
+          {loading ? (
+            <ActivityIndicator style={{ marginTop: 32 }} color={accent} />
+          ) : error ? (
+            <Text style={[styles.empty, { color: muted }]}>{error}</Text>
+          ) : (
+            <ExpandableDateJournal
+              items={leaves}
+              emptyText="Brak faktur i dostaw dla tego dostawcy."
+              formatAmount={formatPln}
+            />
+          )}
+          <View style={{ height: 40 }} />
+        </ScrollView>
       </View>
     </Modal>
   );
@@ -172,29 +193,16 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 17, fontWeight: '800' },
   sub: { fontSize: 12, marginTop: 2 },
+  scrollBody: { paddingHorizontal: 12, paddingBottom: 24 },
   sumCard: {
-    marginHorizontal: 16,
     marginTop: 14,
-    marginBottom: 8,
+    marginBottom: 12,
     borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 14,
   },
   sumLabel: { fontSize: 11, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase' },
   sumValue: { fontSize: 24, fontWeight: '800', marginTop: 4 },
-  sumHint: { fontSize: 11, marginTop: 4 },
-  list: { padding: 16, paddingTop: 8, gap: 10, paddingBottom: 40 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: 12,
-    marginBottom: 10,
-  },
-  rowTitle: { fontSize: 14, fontWeight: '700' },
-  rowMeta: { fontSize: 11, marginTop: 3 },
-  line: { fontSize: 11, marginTop: 2 },
-  amt: { fontSize: 14, fontWeight: '800' },
+  sumHint: { fontSize: 11, marginTop: 4, lineHeight: 15 },
   empty: { textAlign: 'center', marginTop: 40, fontSize: 13, paddingHorizontal: 24 },
 });

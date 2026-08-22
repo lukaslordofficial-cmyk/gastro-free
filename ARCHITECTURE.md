@@ -20,6 +20,13 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Faktury drzewo + supplier intents extract (`chore/split-monoliths`)
+
+- **UX:** `SupplierInvoicesModal` → `ExpandableDateJournal` (rok/miesiąc/tydzień/dzień);
+  kafelek ze skrótem „Zamówiono N produktów”; pełne pozycje po kliknięciu (scroll).
+- **Split + security:** `supplier_intent_routes.py` — flip/budget/top-savings/predictive
+  z `require_tenant` (+ deal-hunter na top-savings).
+
 ### 2026-08-22 — Faktury dostawcy + sumy wydatków + min-order extract (`chore/split-monoliths`)
 
 - **UX:** kafelek „Faktury” obok Edytuj/Usuń; lista chronologiczna + suma wydatków

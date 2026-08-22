@@ -204,7 +204,7 @@ export function ExpandableDateJournal({
                                         const leaf = leafById.get(entry.id);
                                         if (!leaf) return null;
                                         const hasDetails =
-                                          !!leaf.detailLines && leaf.detailLines.length > 0;
+                                          Array.isArray(leaf.detailLines);
                                         const main = (
                                           <>
                                             <View style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
@@ -216,7 +216,7 @@ export function ExpandableDateJournal({
                                               >
                                                 {entry.time}
                                                 {leaf.meta ? ` · ${leaf.meta}` : ''}
-                                                {hasDetails ? ' · podgląd pozycji' : ''}
+                                                {hasDetails ? ' · dotknij → szczegóły' : ''}
                                               </Text>
                                             </View>
                                             <Text

@@ -62,6 +62,7 @@ from pos_config_routes import router as pos_config_router
 from pos_webhook_routes import router as pos_webhook_router
 from order_email_routes import router as order_email_router
 from voice_transcribe_routes import router as voice_transcribe_router
+from voice_crud_routes import router as voice_crud_router
 from restaurant_profile_routes import router as restaurant_profile_router
 from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
@@ -199,6 +200,7 @@ app.include_router(pos_config_router)
 app.include_router(pos_webhook_router)
 app.include_router(order_email_router)
 app.include_router(voice_transcribe_router)
+app.include_router(voice_crud_router)
 app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
 
@@ -10554,176 +10556,7 @@ def _availability_changed_count(result) -> int:
         return 0
 
 
-@app.post("/api/menu/recompute-availability")
-async def menu_recompute_availability():
-    """Ręczne przeliczenie POS Bottleneck Engine (blokowanie dań po brakach składników)."""
-    require_tenant_account_key()
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        return await _recompute_menu_availability(client)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CRUD wykonawczy dla intencji głosowych.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class SetMenuPriceRequest(BaseModel):
-    dish_name: Optional[str] = None
-    dish_id: Optional[str] = None
-    new_price: float
-
-
-@app.post("/api/menu/set-price")
-async def set_menu_price(req: SetMenuPriceRequest):
-    """Zmienia cenę dania. Wymagany dish_id LUB dish_name (fuzzy-matched na backendzie)."""
-    if req.new_price is None or req.new_price < 0:
-        raise HTTPException(status_code=400, detail="Nieprawidłowa cena.")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        dish_id = req.dish_id
-        matched_name: Optional[str] = None
-        matched_score = 0.0
-        if not dish_id and req.dish_name:
-            rows = await sb_get(client, "menu_items",
-                                params={"select": "id,name", "is_active": "eq.true", "limit": "1000"}) or []
-            hit, score = _resolve_by_fuzzy(req.dish_name, rows)
-            if hit:
-                dish_id = hit["id"]
-                matched_name = hit["name"]
-                matched_score = score
-        if not dish_id:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dania (brak dish_id i fuzzy).")
-        try:
-            row = await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"},
-                                 {"price_pln": float(req.new_price)})
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
-        return {
-            "ok": True, "dish_id": dish_id, "new_price": float(req.new_price),
-            "matched_name": matched_name, "matched_score": round(matched_score, 1),
-            "row": row[0] if isinstance(row, list) and row else row,
-        }
-
-
-class SetRecipeIngredientRequest(BaseModel):
-    dish_name: Optional[str] = None
-    dish_id: Optional[str] = None
-    ingredient_name: str
-    quantity: float
-    unit: Optional[str] = None
-    mode: Literal["upsert", "edit_qty"] = "upsert"  # upsert = add or edit
-
-
-@app.post("/api/recipes/set-ingredient")
-async def set_recipe_ingredient(req: SetRecipeIngredientRequest):
-    """Dodaje LUB aktualizuje składnik receptury dania.
-    mode='upsert' → dodaje jeśli brak, aktualizuje qty/unit jeśli istnieje.
-    mode='edit_qty' → tylko aktualizuje qty (błąd 404 gdy brak)."""
-    if req.quantity is None or req.quantity < 0:
-        raise HTTPException(status_code=400, detail="Nieprawidłowa ilość.")
-    if not (req.ingredient_name or "").strip():
-        raise HTTPException(status_code=400, detail="Brak nazwy składnika.")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        dish_id = req.dish_id
-        matched_dish: Optional[str] = None
-        if not dish_id and req.dish_name:
-            rows = await sb_get(client, "menu_items",
-                                params={"select": "id,name", "is_active": "eq.true", "limit": "1000"}) or []
-            hit, _ = _resolve_by_fuzzy(req.dish_name, rows)
-            if hit:
-                dish_id = hit["id"]
-                matched_dish = hit["name"]
-        if not dish_id:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dania.")
-
-        # Fuzzy-match ingredient_name do istniejącego składnika w recepturze.
-        existing = await sb_get(client, "recipe_ingredients",
-                                params={"select": "id,ingredient_name,quantity,unit",
-                                        "menu_item_id": f"eq.{dish_id}"}) or []
-        hit, _score = _resolve_by_fuzzy(req.ingredient_name, existing,
-                                        key="ingredient_name", threshold=70)
-        unit = (req.unit or (hit or {}).get("unit") or "g").strip()
-
-        try:
-            if hit:
-                await sb_patch(client, "recipe_ingredients", {"id": f"eq.{hit['id']}"},
-                               {"quantity": float(req.quantity), "unit": unit})
-                action = "updated"
-            else:
-                if req.mode == "edit_qty":
-                    raise HTTPException(status_code=404, detail=f"Składnik '{req.ingredient_name}' nie występuje w recepturze.")
-                await sb_post(client, "recipe_ingredients", {
-                    "menu_item_id": dish_id,
-                    "ingredient_name": req.ingredient_name.strip(),
-                    "quantity": float(req.quantity),
-                    "unit": unit,
-                })
-                action = "created"
-        except HTTPException:
-            raise
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
-
-        # Po zmianie receptury: przelicz dostępność.
-        avail = await _recompute_menu_availability(client)
-        return {
-            "ok": True, "action": action, "dish_id": dish_id,
-            "matched_dish": matched_dish, "matched_ingredient": (hit or {}).get("ingredient_name"),
-            "quantity": float(req.quantity), "unit": unit,
-            "menu_availability": avail,
-        }
-
-
-class SetInventoryThresholdsRequest(BaseModel):
-    item_name: Optional[str] = None
-    inventory_id: Optional[str] = None
-    min_quantity: Optional[float] = None
-    current_quantity: Optional[float] = None
-    safety_buffer_percent: Optional[float] = None
-
-
-@app.post("/api/inventory/set-thresholds")
-async def set_inventory_thresholds(req: SetInventoryThresholdsRequest):
-    """Zmienia parametry produktu w magazynie (min_quantity, current_quantity, safety_buffer_percent)."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        inv_id = req.inventory_id
-        matched: Optional[str] = None
-        if not inv_id and req.item_name:
-            rows = await sb_get(client, "inventory_items",
-                                params={"select": "id,name", "limit": "5000"}) or []
-            hit, _ = _resolve_by_fuzzy(req.item_name, rows)
-            if hit:
-                inv_id = hit["id"]
-                matched = hit["name"]
-        if not inv_id:
-            raise HTTPException(status_code=404, detail="Nie znaleziono produktu w magazynie.")
-
-        updates: dict = {}
-        if req.min_quantity is not None:
-            updates["min_quantity"] = float(req.min_quantity)
-        if req.current_quantity is not None:
-            updates["quantity"] = float(req.current_quantity)
-        if req.safety_buffer_percent is not None:
-            updates["safety_buffer_percent"] = float(req.safety_buffer_percent)
-        if not updates:
-            raise HTTPException(status_code=400, detail="Brak parametrów do aktualizacji.")
-
-        try:
-            row = await sb_patch(client, "inventory_items", {"id": f"eq.{inv_id}"}, updates)
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
-
-        # POS Bottleneck: przelicz dostępność jeżeli zmieniono current_quantity.
-        avail = None
-        if "quantity" in updates:
-            avail = await _recompute_menu_availability(client, changed_inventory_ids={inv_id})
-
-        return {
-            "ok": True, "inventory_id": inv_id, "matched_name": matched,
-            "updates": updates, "row": row[0] if isinstance(row, list) and row else row,
-            "menu_availability": avail,
-        }
-
-
+# CRUD głosowy: backend/voice_crud_routes.py (include_router)
 # ─────────────────────────────────────────────────────────────────────────────
 # SUPPLIER INTENTS — 5 endpointów dla intencji dostawców
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11689,11 +11522,13 @@ async def voice_dispatch(req: VoiceDispatchRequest):
     if v2 is not None:
         return v2
     if it == "edit_menu_item_price":
+        from voice_crud_routes import SetMenuPriceRequest, set_menu_price
         return await set_menu_price(SetMenuPriceRequest(
             dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
             new_price=float(p.get("new_price") or 0),
         ))
     if it == "add_recipe_ingredient":
+        from voice_crud_routes import SetRecipeIngredientRequest, set_recipe_ingredient
         return await set_recipe_ingredient(SetRecipeIngredientRequest(
             dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
             ingredient_name=(p.get("ingredient_name") or p.get("ingredient_name_resolved") or "").strip(),
@@ -11702,6 +11537,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             mode="upsert",
         ))
     if it == "edit_recipe_ingredient_qty":
+        from voice_crud_routes import SetRecipeIngredientRequest, set_recipe_ingredient
         return await set_recipe_ingredient(SetRecipeIngredientRequest(
             dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
             ingredient_name=(p.get("ingredient_name") or p.get("ingredient_name_resolved") or "").strip(),
@@ -11710,6 +11546,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             mode="edit_qty",
         ))
     if it == "edit_inventory_item":
+        from voice_crud_routes import SetInventoryThresholdsRequest, set_inventory_thresholds
         return await set_inventory_thresholds(SetInventoryThresholdsRequest(
             inventory_id=p.get("inventory_id"),
             item_name=p.get("item_name") or p.get("item_name_resolved"),

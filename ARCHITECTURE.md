@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Mail sheet UX + voice CRUD out of server.py (`chore/split-monoliths`)
+
+- **UX:** sheet wysyłki: Aplikacja pocztowa / Tylko logowanie / Asystent dostaw (potwierdzenie + Reply-To);
+  usunięty zdublowany „Gotowa wiadomość”; alert po app bez zbędnego opisu szkicu.
+- **Split + security:** `backend/voice_crud_routes.py` — `set-price` / `set-ingredient` /
+  `set-thresholds` / `recompute-availability` z `require_tenant_account_key()` na wszystkich.
+- Testy: `backend/tests/test_voice_crud_routes.py`.
+
 ### 2026-08-22 — Prefill maila, plurals magazynu, szczegóły dostawy, banki A/B (`chore/split-monoliths`)
 
 - **Mail:** Onet/WP/… bez API compose → `mailto:` z adresatem/tematem/treścią (+ schowek);

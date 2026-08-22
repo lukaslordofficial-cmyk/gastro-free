@@ -23,14 +23,16 @@ import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { fetchJson } from '@/lib/safeFetch';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
-import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
+import { stripAssistantOrderFooter, withAssistantFooterIfNeeded } from '@/lib/orderEmailFooter';
 import {
   mailProviderLabel,
   openMailInApp,
-  openMailInBrowser,
   openMailLoginOnly,
 } from '@/lib/openMailCompose';
-import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
+import {
+  fetchRestaurantProfile,
+  resolveOrderEmailFrom,
+} from '@/services/restaurantProfileService';
 import { useAuth } from '@/contexts/AuthContext';
 import { MailSendMethodSheet } from '@/components/MailSendMethodSheet';
 
@@ -111,7 +113,6 @@ export function OrderEmailComposer({
   const muted = prem ? DS.color.muted : Colors.textSecondary;
   const inputBg = prem ? DS.color.bgTertiary : Colors.borderLight;
 
-  const usesAssistant = useMemo(() => isAssistantFrom(fromEmail), [fromEmail]);
   const providerLabel = useMemo(() => mailProviderLabel(fromEmail), [fromEmail]);
 
   const onChangeFrom = (next: string) => {
@@ -128,46 +129,12 @@ export function OrderEmailComposer({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const afterExternalOpen = (opts?: {
-    copiedForPaste?: boolean;
-    providerLabel?: string;
-    corporateDomain?: boolean;
-    usedMailtoPrefill?: boolean;
-    loginOnly?: boolean;
-  }) => {
+  const afterExternalOpen = (opts?: { loginOnly?: boolean }) => {
     onMailClientOpened?.();
-    let extra = '';
-    if (opts?.loginOnly) {
-      extra =
-        '\n\nTreść jest w schowku. Po zalogowaniu: Nowa wiadomość → wklej (długie przytrzymanie).';
-    } else if (opts?.usedMailtoPrefill) {
-      extra =
-        '\n\nOtwarto szkic z adresatem, tematem i treścią zamówienia. Kopia jest też w schowku (gdy portal web nie wspiera compose).';
-    } else if (opts?.corporateDomain) {
-      extra =
-        '\n\nTreść skopiowana. To domena firmowa — wklej wiadomość w panelu poczty firmy.';
-    } else if (opts?.copiedForPaste) {
-      extra = `\n\nTreść skopiowana do schowka — zapas przy ${opts.providerLabel || 'poczcie'}.`;
-    }
+    const extra = opts?.loginOnly
+      ? '\n\nTreść jest w schowku. Po zalogowaniu: Nowa wiadomość → wklej (długie przytrzymanie).'
+      : '';
     alert('Zamówienie', `${PREP_MSG}${extra}`, [{ text: 'OK', style: 'primary' }]);
-  };
-
-  const sendViaPrepared = async () => {
-    setShowSendMethod(false);
-    const to = toEmail.trim();
-    const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
-    try {
-      const res = await openMailInBrowser({
-        fromEmail: from,
-        to,
-        subject: subject.trim(),
-        body: stripAssistantOrderFooter(body),
-      });
-      afterExternalOpen(res);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć poczty.';
-      alert('Błąd', msg);
-    }
   };
 
   const sendViaApp = async () => {
@@ -175,13 +142,13 @@ export function OrderEmailComposer({
     const to = toEmail.trim();
     const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
     try {
-      const res = await openMailInApp({
+      await openMailInApp({
         fromEmail: from,
         to,
         subject: subject.trim(),
         body: stripAssistantOrderFooter(body),
       });
-      afterExternalOpen(res);
+      afterExternalOpen();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć aplikacji pocztowej.';
       alert('Błąd', msg);
@@ -196,35 +163,15 @@ export function OrderEmailComposer({
       await Clipboard.setStringAsync(
         `Do: ${to}\nTemat: ${subject.trim()}\n\n${stripAssistantOrderFooter(body)}`,
       );
-      const res = await openMailLoginOnly(from);
-      afterExternalOpen({ ...res, copiedForPaste: true, loginOnly: true });
+      await openMailLoginOnly(from);
+      afterExternalOpen({ loginOnly: true });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć strony logowania.';
       alert('Błąd', msg);
     }
   };
 
-  const send = async () => {
-    const to = toEmail.trim();
-    const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
-    if (!to) {
-      alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy (odbiorca).', [
-        { text: 'OK', style: 'primary' },
-      ]);
-      return;
-    }
-    if (!subject.trim() || !body.trim()) {
-      alert('Uzupełnij wiadomość', 'Temat i treść nie mogą być puste.', [
-        { text: 'OK', style: 'primary' },
-      ]);
-      return;
-    }
-
-    if (!isAssistantFrom(from)) {
-      setShowSendMethod(true);
-      return;
-    }
-
+  const sendViaAssistant = async () => {
     if (!BACKEND_URL) {
       alert(
         'Brak backendu',
@@ -232,18 +179,30 @@ export function OrderEmailComposer({
       );
       return;
     }
-
     setSending(true);
     try {
+      let footerHint = '';
+      try {
+        const profile = await fetchRestaurantProfile();
+        const mail = (profile.contact_email || '').trim() || (user?.email || '').trim() || '(brak)';
+        const phone = (profile.contact_phone || '').trim() || '(brak)';
+        footerHint =
+          `--- Wiadomość wygenerowana automatycznie przez asystenta AI Gastro-Manager. `
+          + `Prosimy NIE ODPOWIADAĆ na tego maila. Kontakt z restauracją wyłącznie pod adresem: `
+          + `${mail} lub numerem telefonu: ${phone}. ---`;
+      } catch {
+        /* body bez stopki jeśli profil niedostępny */
+      }
+      const bodyText = withAssistantFooterIfNeeded(body, true, footerHint);
       const res = await fetchJson<{ ok?: boolean; detail?: string; id?: string }>(
         `${BACKEND_URL}/api/orders/send-email`,
         {
           method: 'POST',
           headers: await apiJsonHeaders(),
           body: JSON.stringify({
-            to,
-            subject,
-            body_text: body,
+            to: toEmail.trim(),
+            subject: subject.trim(),
+            body_text: bodyText,
             from_email: ASSISTANT_FROM_EMAIL,
             supplier_name: draft?.supplierName,
           }),
@@ -259,6 +218,47 @@ export function OrderEmailComposer({
     } finally {
       setSending(false);
     }
+  };
+
+  const confirmAssistantSend = async () => {
+    setShowSendMethod(false);
+    let mail = (user?.email || '').trim() || '—';
+    let phone = '—';
+    try {
+      const profile = await fetchRestaurantProfile();
+      mail = (profile.contact_email || '').trim() || mail;
+      phone = (profile.contact_phone || '').trim() || '—';
+    } catch {
+      /* użyj fallbacku */
+    }
+    const msg =
+      `Wiadomość zostanie wysłana z adresu ${ASSISTANT_FROM_EMAIL} w imieniu Twojej restauracji.\n\n`
+      + `Dostawca zobaczy w treści dane kontaktowe do spraw tego zamówienia:\n`
+      + `• e-mail: ${mail}\n`
+      + `• telefon: ${phone}\n\n`
+      + `Przypis: wiadomość wygenerowana automatycznie. Odpowiedzi na ${ASSISTANT_FROM_EMAIL} `
+      + `zostaną przekierowane na adres restauracji (${mail}).`;
+    alert('Asystent dostaw', msg, [
+      { text: 'Anuluj', style: 'cancel' },
+      { text: 'Wyślij', style: 'primary', onPress: () => void sendViaAssistant() },
+    ]);
+  };
+
+  const send = async () => {
+    const to = toEmail.trim();
+    if (!to) {
+      alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy (odbiorca).', [
+        { text: 'OK', style: 'primary' },
+      ]);
+      return;
+    }
+    if (!subject.trim() || !body.trim()) {
+      alert('Uzupełnij wiadomość', 'Temat i treść nie mogą być puste.', [
+        { text: 'OK', style: 'primary' },
+      ]);
+      return;
+    }
+    setShowSendMethod(true);
   };
 
   if (!draft) return null;
@@ -301,9 +301,7 @@ export function OrderEmailComposer({
             testID="order-email-from"
           />
           <Text style={[styles.hint, { color: muted }]}>
-            {usesAssistant
-              ? 'Wiadomość wyśle skrypt z adresu asystenta dostaw (wymaga backendu :8001).'
-              : `Po „Wyślij mail” wybierzesz przeglądarkę (${providerLabel}) lub aplikację pocztową.`}
+            Po „Wyślij mail” wybierzesz: aplikację pocztową, logowanie {providerLabel}, albo wysyłkę przez Asystenta dostaw.
           </Text>
 
           <Text style={[styles.label, { color: muted }]}>Odbiorca (dostawca)</Text>
@@ -407,9 +405,9 @@ export function OrderEmailComposer({
         visible={showSendMethod}
         fromEmail={fromEmail}
         onClose={() => setShowSendMethod(false)}
-        onPickPrepared={() => void sendViaPrepared()}
         onPickApp={() => void sendViaApp()}
         onPickLoginPage={() => void sendViaLoginPage()}
+        onPickAssistant={() => void confirmAssistantSend()}
       />
     </Modal>
   );

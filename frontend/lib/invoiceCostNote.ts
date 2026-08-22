@@ -17,6 +17,24 @@ export type InvoiceCostPayload = {
   lines: InvoiceCostLine[];
 };
 
+/** Buduje notatkę kosztu zmiennego ze szczegółami pozycji (klik → podgląd). */
+export function buildInvoiceCostNote(input: {
+  supplier_id?: string;
+  supplier_name?: string;
+  total?: number;
+  lines: InvoiceCostLine[];
+}): string {
+  const payload: InvoiceCostPayload = {
+    v: 1,
+    kind: 'invoice_lines',
+    supplier_id: input.supplier_id,
+    supplier_name: input.supplier_name,
+    total: input.total,
+    lines: input.lines.filter((l) => l.name),
+  };
+  return `GM_INVOICE_LINES:${JSON.stringify(payload)}`;
+}
+
 export function parseInvoiceCostNote(note: string | null | undefined): InvoiceCostPayload | null {
   const raw = (note || '').trim();
   if (!raw) return null;

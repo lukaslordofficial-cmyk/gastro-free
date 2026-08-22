@@ -98,6 +98,11 @@ const SYNONYM: Record<string, string> = {
   marchewka: 'marchew',
   marchewke: 'marchew',
   marchew: 'marchew',
+  bataty: 'batat',
+  batatow: 'batat',
+  batata: 'batat',
+  batatem: 'batat',
+  batat: 'batat',
   bob: 'bob',
   bobu: 'bob',
   bobem: 'bob',
@@ -207,10 +212,10 @@ function lightStem(token: string): string {
       return SYNONYM[stem] ?? stem;
     }
   }
-  // końcówki 1-literowe tylko dla dłuższych słów
-  if (token.length >= 6 && /[ayiue]$/.test(token)) {
+  // końcówki 1-literowe: bataty→batat, pomidory→pomidor (len≥5)
+  if (token.length >= 5 && /[ayiue]$/.test(token)) {
     const stem = token.slice(0, -1);
-    return SYNONYM[stem] ?? stem;
+    if (stem.length >= 4) return SYNONYM[stem] ?? stem;
   }
   return token;
 }
@@ -244,6 +249,7 @@ const SINGULAR_DISPLAY: Record<string, string> = {
   jajko: 'jajko',
   ziemniak: 'ziemniak',
   marchew: 'marchew',
+  batat: 'batat',
   bob: 'bób',
   fasol: 'fasola',
   ogorek: 'ogórek',

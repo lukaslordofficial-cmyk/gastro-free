@@ -1,6 +1,7 @@
 /**
- * Otwiera pocztę: przeglądarka (wg domeny From) albo aplikacja / mailto.
- * Domeny firmowe: bez fałszywego linku do Orange/Gmail — tylko schowek + instrukcja.
+ * Otwiera pocztę z gotową wiadomością (adresat + temat + treść) dla KAŻDEGO dostawcy.
+ * Portale bez API compose (Onet, WP, …) → mailto: (uniwersalny prefill) + schowek.
+ * Gmail/Outlook/Yahoo → compose w przeglądarce gdy dostępne.
  */
 import * as Linking from 'expo-linking';
 import * as Clipboard from 'expo-clipboard';
@@ -22,10 +23,12 @@ export type OpenMailResult = {
   opened: string;
   mode: 'browser' | 'app' | 'clipboard';
   providerLabel: string;
-  /** true gdy web nie wspiera prefill — treść skopiowana do schowka. */
+  /** true gdy treść też w schowku (wklejanie zapasowe). */
   copiedForPaste: boolean;
-  /** Domena firmowa / nieznana — brak zewnętrznego logowania. */
+  /** Domena firmowa / nieznana. */
   corporateDomain?: boolean;
+  /** Prefill przez mailto (portale bez web compose). */
+  usedMailtoPrefill?: boolean;
 };
 
 export { mailProviderLabel, findMailProvider, hasKnownMailLogin } from '@/lib/mailProviders';
@@ -53,8 +56,8 @@ async function copyComposePayload(to: string, subject: string, body: string): Pr
 }
 
 /**
- * Przeglądarka: wyłącznie strona dostawcy z From (compose jeśli dostępne).
- * Nie używa mailto → nie otworzy przypadkowo Gmaila jako domyślnej aplikacji.
+ * Zawsze przygotowuje wiadomość: web compose URL albo mailto z to/temat/treść.
+ * Kopiuje też do schowka jako zapas.
  */
 export async function openMailInBrowser(input: MailComposeInput): Promise<OpenMailResult> {
   const from = (input.fromEmail || '').trim();
@@ -65,35 +68,44 @@ export async function openMailInBrowser(input: MailComposeInput): Promise<OpenMa
   const provider = findMailProvider(from);
   const label = provider?.label ?? mailProviderLabel(from);
 
-  if (!provider) {
-    await copyComposePayload(to, subject, body);
+  await copyComposePayload(to, subject, body);
+
+  if (provider?.webComposeUrl) {
+    const url = provider.webComposeUrl(to, subject, body);
+    const ok = await tryOpen(url);
+    if (!ok) throw new Error(`Nie udało się otworzyć ${label} w przeglądarce.`);
+    return {
+      opened: url,
+      mode: 'browser',
+      providerLabel: label,
+      copiedForPaste: true,
+    };
+  }
+
+  // Onet / WP / o2 / Interia / … — brak publicznego compose URL → mailto (gotowy szkic)
+  const mail = mailtoUrl(to, subject, body);
+  const ok = await tryOpen(mail);
+  if (!ok) {
     return {
       opened: '',
       mode: 'clipboard',
       providerLabel: label,
       copiedForPaste: true,
-      corporateDomain: true,
+      corporateDomain: !provider,
+      usedMailtoPrefill: false,
     };
   }
-
-  let copiedForPaste = false;
-  let url: string;
-  if (provider.webComposeUrl) {
-    url = provider.webComposeUrl(to, subject, body);
-  } else {
-    await copyComposePayload(to, subject, body);
-    copiedForPaste = true;
-    url = provider.webInboxUrl;
-  }
-
-  const ok = await tryOpen(url);
-  if (!ok) throw new Error(`Nie udało się otworzyć ${label} w przeglądarce.`);
-  return { opened: url, mode: 'browser', providerLabel: label, copiedForPaste };
+  return {
+    opened: mail,
+    mode: 'app',
+    providerLabel: label,
+    copiedForPaste: true,
+    corporateDomain: !provider,
+    usedMailtoPrefill: true,
+  };
 }
 
-/**
- * Aplikacje pocztowe: deep-link dostawcy (jeśli jest) + mailto (wybór systemu).
- */
+/** Aplikacje pocztowe: deep-link dostawcy (jeśli jest) + mailto. */
 export async function openMailInApp(input: MailComposeInput): Promise<OpenMailResult> {
   const from = (input.fromEmail || '').trim();
   const to = (input.to || '').trim();
@@ -102,6 +114,8 @@ export async function openMailInApp(input: MailComposeInput): Promise<OpenMailRe
   const body = input.body || '';
   const provider = findMailProvider(from);
   const label = provider?.label ?? 'aplikacji pocztowej';
+
+  await copyComposePayload(to, subject, body);
 
   const candidates: string[] = [];
   if (provider?.appSchemes) {
@@ -115,7 +129,13 @@ export async function openMailInApp(input: MailComposeInput): Promise<OpenMailRe
       if (!can && !url.startsWith('mailto:')) continue;
       const ok = await tryOpen(url);
       if (ok) {
-        return { opened: url, mode: 'app', providerLabel: label, copiedForPaste: false };
+        return {
+          opened: url,
+          mode: 'app',
+          providerLabel: label,
+          copiedForPaste: true,
+          usedMailtoPrefill: url.startsWith('mailto:'),
+        };
       }
     } catch {
       /* kolejny kandydat */
@@ -124,7 +144,22 @@ export async function openMailInApp(input: MailComposeInput): Promise<OpenMailRe
   throw new Error('Nie udało się otworzyć aplikacji pocztowej.');
 }
 
-/** Kompatybilność: przeglądarka dostawcy; domena firmowa → tylko schowek. */
+/** Tylko strona logowania portalu (bez prefill) — opcjonalny zapas po mailto. */
+export async function openMailLoginOnly(fromEmail: string): Promise<OpenMailResult> {
+  const provider = findMailProvider(fromEmail);
+  if (!provider) {
+    throw new Error('Brak strony logowania dla tej domeny — użyj aplikacji pocztowej.');
+  }
+  const ok = await tryOpen(provider.webInboxUrl);
+  if (!ok) throw new Error(`Nie udało się otworzyć ${provider.label}.`);
+  return {
+    opened: provider.webInboxUrl,
+    mode: 'browser',
+    providerLabel: provider.label,
+    copiedForPaste: false,
+  };
+}
+
 export async function openMailCompose(input: MailComposeInput): Promise<OpenMailResult> {
   return openMailInBrowser(input);
 }

@@ -65,7 +65,13 @@ export function insertFixedCost(payload: { year_month: string; type: string; nam
   return insertWithAccountKeyFallback('fixed_costs', payload);
 }
 
-export function insertVariableCost(payload: { year_month: string; type: string; name: string; amount_pln: number }): Promise<void> {
+export function insertVariableCost(payload: {
+  year_month: string;
+  type: string;
+  name: string;
+  amount_pln: number;
+  note?: string | null;
+}): Promise<void> {
   return insertWithAccountKeyFallback('variable_cost_entries', payload);
 }
 

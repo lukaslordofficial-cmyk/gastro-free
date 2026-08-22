@@ -501,7 +501,7 @@ export const VEGETABLE_CATALOG: ProductImageEntry[] = [
     slug: 'batat_slodki_ziemniak',
     category: 'warzywa',
     labelPl: 'Batat',
-    aliases: ['batat', 'słodki ziemniak', 'sweet potato'],
+    aliases: ['batat', 'bataty', 'batatów', 'słodki ziemniak', 'sweet potato'],
     storagePath: 'warzywa/batat_slodki_ziemniak.png',
     localAsset: require('@/assets/premium/vegetables/batat_slodki_ziemniak.webp'),
   },

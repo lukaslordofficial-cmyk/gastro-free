@@ -24,7 +24,12 @@ import { usePremiumAlert } from '@/components/PremiumAlert';
 import { fetchJson } from '@/lib/safeFetch';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
-import { mailProviderLabel, openMailInApp, openMailInBrowser } from '@/lib/openMailCompose';
+import {
+  mailProviderLabel,
+  openMailInApp,
+  openMailInBrowser,
+  openMailLoginOnly,
+} from '@/lib/openMailCompose';
 import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 import { useAuth } from '@/contexts/AuthContext';
 import { MailSendMethodSheet } from '@/components/MailSendMethodSheet';
@@ -127,19 +132,27 @@ export function OrderEmailComposer({
     copiedForPaste?: boolean;
     providerLabel?: string;
     corporateDomain?: boolean;
+    usedMailtoPrefill?: boolean;
+    loginOnly?: boolean;
   }) => {
     onMailClientOpened?.();
     let extra = '';
-    if (opts?.corporateDomain) {
+    if (opts?.loginOnly) {
       extra =
-        '\n\nTreść skopiowana. To domena firmowa — zaloguj się w panelu poczty swojej firmy i wklej wiadomość (Ctrl+V / wklej).';
+        '\n\nTreść jest w schowku. Po zalogowaniu: Nowa wiadomość → wklej (długie przytrzymanie).';
+    } else if (opts?.usedMailtoPrefill) {
+      extra =
+        '\n\nOtwarto szkic z adresatem, tematem i treścią zamówienia. Kopia jest też w schowku (gdy portal web nie wspiera compose).';
+    } else if (opts?.corporateDomain) {
+      extra =
+        '\n\nTreść skopiowana. To domena firmowa — wklej wiadomość w panelu poczty firmy.';
     } else if (opts?.copiedForPaste) {
-      extra = `\n\nTreść skopiowana do schowka — wklej w ${opts.providerLabel || 'poczcie'} po zalogowaniu.`;
+      extra = `\n\nTreść skopiowana do schowka — zapas przy ${opts.providerLabel || 'poczcie'}.`;
     }
     alert('Zamówienie', `${PREP_MSG}${extra}`, [{ text: 'OK', style: 'primary' }]);
   };
 
-  const sendViaBrowser = async () => {
+  const sendViaPrepared = async () => {
     setShowSendMethod(false);
     const to = toEmail.trim();
     const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
@@ -152,7 +165,7 @@ export function OrderEmailComposer({
       });
       afterExternalOpen(res);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć przeglądarki.';
+      const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć poczty.';
       alert('Błąd', msg);
     }
   };
@@ -162,15 +175,31 @@ export function OrderEmailComposer({
     const to = toEmail.trim();
     const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
     try {
-      await openMailInApp({
+      const res = await openMailInApp({
         fromEmail: from,
         to,
         subject: subject.trim(),
         body: stripAssistantOrderFooter(body),
       });
-      afterExternalOpen();
+      afterExternalOpen(res);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć aplikacji pocztowej.';
+      alert('Błąd', msg);
+    }
+  };
+
+  const sendViaLoginPage = async () => {
+    setShowSendMethod(false);
+    const to = toEmail.trim();
+    const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
+    try {
+      await Clipboard.setStringAsync(
+        `Do: ${to}\nTemat: ${subject.trim()}\n\n${stripAssistantOrderFooter(body)}`,
+      );
+      const res = await openMailLoginOnly(from);
+      afterExternalOpen({ ...res, copiedForPaste: true, loginOnly: true });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć strony logowania.';
       alert('Błąd', msg);
     }
   };
@@ -378,8 +407,9 @@ export function OrderEmailComposer({
         visible={showSendMethod}
         fromEmail={fromEmail}
         onClose={() => setShowSendMethod(false)}
-        onPickBrowser={() => void sendViaBrowser()}
+        onPickPrepared={() => void sendViaPrepared()}
         onPickApp={() => void sendViaApp()}
+        onPickLoginPage={() => void sendViaLoginPage()}
       />
     </Modal>
   );

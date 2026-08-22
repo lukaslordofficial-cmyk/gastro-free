@@ -1,131 +1,181 @@
-/** Oficjalne strony logowania banków PL — otwierane w przeglądarce (bez bramek płatności). */
+/**
+ * Polskie banki — logowanie osobiste / firmowe (płatność manualna).
+ * Wariant A: wybór typu konta. Wariant B: jeden wspólny link.
+ */
+
+export type BankAccountOption = {
+  id: 'personal' | 'business';
+  /** np. „Konto osobiste” / „Konto firmowe (mBank CompanyNet)” */
+  label: string;
+  url: string;
+};
+
 export type PolishBankLogin = {
   id: string;
   name: string;
   short: string;
-  /** Kolor akcentu kafelka (hex) — fallback gdy brak miniatury */
   color: string;
+  /**
+   * null = Wariant B (jedna URL → od razu przeglądarka).
+   * tablica = Wariant A (najpierw wybór osobiste / firmowe).
+   */
+  accounts: BankAccountOption[] | null;
+  /** Wariant B — wspólny adres; przy A nieużywane (patrz accounts). */
   loginUrl: string;
 };
 
+function single(url: string): Pick<PolishBankLogin, 'accounts' | 'loginUrl'> {
+  return { accounts: null, loginUrl: url };
+}
+
+function dual(
+  personalUrl: string,
+  businessUrl: string,
+  businessPlatform: string,
+): Pick<PolishBankLogin, 'accounts' | 'loginUrl'> {
+  return {
+    loginUrl: personalUrl,
+    accounts: [
+      { id: 'personal', label: 'Konto osobiste', url: personalUrl },
+      {
+        id: 'business',
+        label: `Konto firmowe (${businessPlatform})`,
+        url: businessUrl,
+      },
+    ],
+  };
+}
+
+/** 18 banków — kolejność jak w specyfikacji produktu. */
 export const POLISH_BANK_LOGINS: PolishBankLogin[] = [
   {
     id: 'mbank',
     name: 'mBank',
     short: 'mB',
     color: '#000000',
-    loginUrl: 'https://www.mbank.pl/serwis-transakcyjny/login',
+    ...dual('https://online.mbank.pl', 'https://companynet.mbank.pl', 'mBank CompanyNet'),
   },
   {
     id: 'pko',
     name: 'PKO BP',
     short: 'PKO',
     color: '#003399',
-    loginUrl: 'https://www.ipko.pl/',
+    ...dual('https://www.ipko.pl', 'https://www.ipkobiznes.pl', 'iPKO biznes'),
   },
   {
     id: 'santander',
     name: 'Santander',
     short: 'SA',
     color: '#EC0000',
-    loginUrl: 'https://www.santander.pl/klient-indywidualny/bankowosc-internetowa',
-  },
-  {
-    id: 'ing',
-    name: 'ING',
-    short: 'ING',
-    color: '#FF6200',
-    loginUrl: 'https://login.ingbank.pl/',
+    ...dual('https://santander.pl', 'https://ibiznes24.pl', 'iBiznes24'),
   },
   {
     id: 'pekao',
-    name: 'Pekao',
+    name: 'Bank Pekao S.A.',
     short: 'PE',
     color: '#A11117',
-    loginUrl: 'https://www.pekao24.pl/',
-  },
-  {
-    id: 'alior',
-    name: 'Alior',
-    short: 'AL',
-    color: '#C4A35A',
-    loginUrl: 'https://system.aliorbank.pl/',
-  },
-  {
-    id: 'millennium',
-    name: 'Millennium',
-    short: 'ML',
-    color: '#E6007E',
-    loginUrl: 'https://www.bankmillennium.pl/logowanie',
+    ...dual('https://pekao24.pl', 'https://pekaobiznes24.pl', 'PekaoBiznes24'),
   },
   {
     id: 'bnp',
     name: 'BNP Paribas',
     short: 'BNP',
     color: '#00915A',
-    loginUrl: 'https://login.bnpparibas.pl/',
+    ...dual('https://bnpparibas.pl', 'https://bnpparibas.pl', 'BiznesPl@net'),
   },
   {
-    id: 'bos',
-    name: 'BOŚ Bank',
-    short: 'BOŚ',
-    color: '#2E7D32',
-    loginUrl: 'https://www.bosbank.pl/klient-indywidualny/bankowosc-internetowa',
+    id: 'inteligo',
+    name: 'PKO BP (Inteligo)',
+    short: 'INT',
+    color: '#003399',
+    ...dual('https://inteligo.pl', 'https://inteligo.pl', 'Inteligo Firma'),
+  },
+  {
+    id: 'ing',
+    name: 'ING Bank Śląski',
+    short: 'ING',
+    color: '#FF6200',
+    ...single('https://ingbank.pl'),
+  },
+  {
+    id: 'millennium',
+    name: 'Millennium Bank',
+    short: 'ML',
+    color: '#E6007E',
+    ...single('https://bankmillennium.pl'),
+  },
+  {
+    id: 'alior',
+    name: 'Alior Bank',
+    short: 'AL',
+    color: '#C4A35A',
+    ...single('https://aliorbank.pl'),
   },
   {
     id: 'credit_agricole',
     name: 'Credit Agricole',
     short: 'CA',
     color: '#006633',
-    loginUrl: 'https://www.credit-agricole.pl/klient-indywidualny/bankowosc-elektroniczna',
+    ...single('https://credit-agricole.pl'),
   },
   {
     id: 'velobank',
     name: 'VeloBank',
     short: 'VB',
     color: '#E30613',
-    loginUrl: 'https://www.velobank.pl/klient-indywidualny/bankowosc-elektroniczna',
+    ...single('https://velobank.pl'),
+  },
+  {
+    id: 'bos',
+    name: 'BOŚ Bank',
+    short: 'BOŚ',
+    color: '#2E7D32',
+    ...single('https://bosbank24.pl'),
   },
   {
     id: 'nest',
     name: 'Nest Bank',
     short: 'NB',
     color: '#5B8C3E',
-    loginUrl: 'https://www.nestbank.pl/klient-indywidualny/bankowosc-internetowa',
+    ...single('https://nestbank.pl'),
   },
   {
     id: 'raiffeisen',
-    name: 'Raiffeisen Digital',
+    name: 'Raiffeisen Digital Bank',
     short: 'RDB',
     color: '#FFED00',
-    loginUrl: 'https://www.raiffeisen-digital.com/pl/login',
-  },
-  {
-    id: 'sgb',
-    name: 'SGB',
-    short: 'SGB',
-    color: '#C8102E',
-    loginUrl: 'https://www.sgb.pl/klient-indywidualny/bankowosc-elektroniczna/',
-  },
-  {
-    id: 'inteligo',
-    name: 'Inteligo',
-    short: 'INT',
-    color: '#003399',
-    loginUrl: 'https://www.inteligo.pl/secure/login.html',
+    ...single('https://raiffeisendigital.com'),
   },
   {
     id: 'pocztowy',
     name: 'Bank Pocztowy',
     short: 'BP',
     color: '#C2185B',
-    loginUrl: 'https://www.pocztowy.pl/klient-indywidualny/bankowosc-internetowa',
+    ...single('https://pocztowy.pl'),
   },
   {
     id: 'toyota',
     name: 'Toyota Bank',
     short: 'TB',
     color: '#4CAF50',
-    loginUrl: 'https://www.toyotabank.pl/klient-indywidualny',
+    ...single('https://toyotabank.pl'),
+  },
+  {
+    id: 'sgb',
+    name: 'SGB',
+    short: 'SGB',
+    color: '#C8102E',
+    ...single('https://sgb24.pl'),
+  },
+  {
+    id: 'bps',
+    name: 'BPS',
+    short: 'BPS',
+    color: '#1A237E',
+    ...single('https://e-bps.pl'),
   },
 ];
+
+export function bankNeedsAccountChoice(bank: PolishBankLogin): boolean {
+  return Array.isArray(bank.accounts) && bank.accounts.length > 0;
+}

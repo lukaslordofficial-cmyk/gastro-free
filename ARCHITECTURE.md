@@ -20,11 +20,19 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Prefill maila, plurals magazynu, szczegóły dostawy, banki A/B (`chore/split-monoliths`)
+
+- **Mail:** Onet/WP/… bez API compose → `mailto:` z adresatem/tematem/treścią (+ schowek);
+  opcjonalnie „Tylko logowanie” na stronę portalu.
+- **Magazyn:** mocniejsze stemowanie plurals (`bataty`↔`batat`); próg match 58; kategorie przez te same tokeny.
+- **Koszty zmienne:** odbiór dostawy zapisuje `GM_INVOICE_LINES` → klik pokazuje pozycje.
+- **Banki:** 18 kafelków; Wariant A (osobiste/firmowe) vs B (jedna URL); `BankAccountTypeSheet`.
+
 ### 2026-08-22 — Fuzzy oferty + mail PL + koszyk + kategorie magazynu (`chore/split-monoliths`)
 
 - **Magazyn→dostawcy:** `namesMatch` / synonimy (`marchewka`↔`marchew`) + niższy próg w `product-suppliers`.
 - **Mail:** `mailProviders` — `op.pl`→Onet (`poczta.onet.pl`); WP/o2/Interia/Gazeta/Proton/Tuta/GMX;
-  domena firmowa → bez linku do obcego portalu (tylko schowek / app).
+  domena firmowa → bez linku do obcego portalu.
 - **Koszyk:** przejście zamówienia do `sent` (Przygotowywane) czyści drafty dostawcy + event `SUPPLIER_BASKET_CHANGED`.
 - **Odbiór dostawy:** `applyOrderItemsToInventory` + `guessWarehouseCategory` (np. bób→Warzywa) + fuzzy nazwa + obrazki po aliasach.
 

@@ -1,7 +1,8 @@
 /**
  * Heurystyka kategorii magazynowej z nazwy produktu (bez LLM).
- * Zsynchronizowana z backend `_CAT_KEYWORDS` (server.py).
+ * Używa tych samych tokenów/stemów co fuzzyProductMatch (bataty → batat).
  */
+import { productTokens } from '@/lib/fuzzyProductMatch';
 import { normCategoryName } from '@/lib/warehouseCategories';
 
 const CAT_KEYWORDS: Array<{ category: string; words: string[] }> = [
@@ -67,20 +68,10 @@ const CAT_KEYWORDS: Array<{ category: string; words: string[] }> = [
   },
 ];
 
-function normKey(s: string): string {
-  return s
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function tokenHit(word: string, key: string): boolean {
+function tokenHit(word: string, tokens: string[]): boolean {
   const w = (word || '').trim().toLowerCase();
-  if (!w || !key) return false;
-  for (const t of key.split(' ')) {
+  if (!w || !tokens.length) return false;
+  for (const t of tokens) {
     if (t === w) return true;
     if (w.length >= 3 && t.startsWith(w)) return true;
     if (w.length >= 4 && w.startsWith(t) && t.length >= 3) return true;
@@ -88,16 +79,14 @@ function tokenHit(word: string, key: string): boolean {
   return false;
 }
 
-/**
- * Zwraca nazwę kategorii do mapowania na inventory_categories użytkownika.
- */
+/** Zwraca nazwę kategorii do mapowania na inventory_categories użytkownika. */
 export function guessWarehouseCategoryName(productName: string): string {
-  const key = normKey(productName);
-  if (!key) return 'Inne';
+  const tokens = productTokens(productName);
+  if (!tokens.length) return 'Inne';
   let best: string | null = null;
   let bestScore = 0;
   for (const { category, words } of CAT_KEYWORDS) {
-    const hits = words.filter((w) => tokenHit(w, key));
+    const hits = words.filter((w) => tokenHit(w, tokens));
     if (!hits.length) continue;
     const score = hits.length * 10 + Math.max(...hits.map((h) => h.length));
     if (score > bestScore) {
@@ -122,7 +111,6 @@ export function mapGuessToUserCategory(
     const n = normCategoryName(c.name);
     if (g && n && (g.includes(n) || n.includes(g))) return c;
   }
-  // „Warzywa” → „Warzywa i owoce”
   if (g.includes('warzyw') || g.includes('owoc')) {
     const hit = userCategories.find((c) => {
       const n = normCategoryName(c.name);

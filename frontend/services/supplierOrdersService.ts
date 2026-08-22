@@ -5,12 +5,13 @@ import { DeviceEventEmitter } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { insertVariableCost } from '@/services/financeService';
-import { namesMatch } from '@/lib/fuzzyProductMatch';
+import { namesMatch, productMatchKey, bestProductMatch } from '@/lib/fuzzyProductMatch';
 import {
   guessWarehouseCategoryName,
   mapGuessToUserCategory,
 } from '@/lib/guessWarehouseCategory';
 import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
+import { buildInvoiceCostNote } from '@/lib/invoiceCostNote';
 
 /** Odśwież koszyk globalny po przejściu draft → przygotowywane. */
 export const SUPPLIER_BASKET_CHANGED = 'gm/supplier-basket-changed';
@@ -229,9 +230,17 @@ export async function applyOrderItemsToInventory(
 
     let invId = (it.warehouse_product_id || '').trim() || null;
     let matched = invId ? inventory.find((r) => r.id === invId) : undefined;
+    // ID wskazujące nieistniejący produkt → fuzzy po nazwie
+    if (invId && !matched) invId = null;
 
     if (!matched) {
-      matched = inventory.find((r) => namesMatch(name, r.name, 72));
+      const key = productMatchKey(name);
+      matched =
+        (key
+          ? inventory.find((r) => productMatchKey(r.name) === key)
+          : undefined) ||
+        bestProductMatch(name, inventory, (r) => r.name, 58)?.item ||
+        inventory.find((r) => namesMatch(name, r.name, 58));
       if (matched) invId = matched.id;
     }
 
@@ -283,14 +292,27 @@ export async function receiveSupplierOrder(
     await applyOrderItemsToInventory(order.supplier_order_items || []);
   }
   if (opts.applyVariableCost) {
-    const total = orderLineTotal(order.supplier_order_items || []);
+    const items = order.supplier_order_items || [];
+    const total = orderLineTotal(items);
     if (total > 0) {
       const supplierName = order.suppliers?.name || 'Dostawca';
+      const note = buildInvoiceCostNote({
+        supplier_id: order.supplier_id,
+        supplier_name: supplierName,
+        total: Math.round(total * 100) / 100,
+        lines: items.map((it) => ({
+          name: (it.raw_product_name || '').trim(),
+          qty: Number(it.quantity_ordered) || 0,
+          unit: (it.unit || 'szt').trim() || 'szt',
+          price_netto: it.price_net != null ? Number(it.price_net) : 0,
+        })),
+      });
       await insertVariableCost({
         year_month: yearMonthNow(),
         type: 'materials',
         name: `Dostawa — ${supplierName}`,
         amount_pln: Math.round(total * 100) / 100,
+        note,
       });
     }
   }

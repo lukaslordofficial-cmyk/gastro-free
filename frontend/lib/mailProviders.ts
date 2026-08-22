@@ -11,7 +11,7 @@ export type MailProvider = {
   webInboxUrl: string;
   /**
    * Compose w przeglądarce z prefill (to, subject, body).
-   * null = brak API — otwieramy inbox + kopiujemy treść.
+   * null = brak publicznego API → openMailCompose używa mailto: (gotowy szkic).
    */
   webComposeUrl: ((to: string, subject: string, body: string) => string) | null;
   /** Opcjonalne deep-linki aplikacji natywnych. */

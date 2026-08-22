@@ -76,6 +76,9 @@ from inventory_yield_routes import router as inventory_yield_router
 from documents_routes import router as documents_router
 from supplier_catalog_scan_routes import router as supplier_catalog_scan_router
 from inventory_expiry_scan_routes import router as inventory_expiry_scan_router
+from cron_jobs_routes import router as cron_jobs_router
+from menu_vision_routes import router as menu_vision_router
+from voice_interpret_routes import router as voice_interpret_router
 from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
     assert_safe_redirect_url,
@@ -227,6 +230,9 @@ app.include_router(inventory_yield_router)
 app.include_router(documents_router)
 app.include_router(supplier_catalog_scan_router)
 app.include_router(inventory_expiry_scan_router)
+app.include_router(cron_jobs_router)
+app.include_router(menu_vision_router)
+app.include_router(voice_interpret_router)
 
 
 @app.middleware("http")
@@ -1622,7 +1628,6 @@ class InterpretRequest(BaseModel):
     text: str
 
 
-@app.post("/api/voice/interpret", response_model=VoiceInterpretation)
 async def interpret(payload: InterpretRequest):
     require_tenant_account_key()
     text = (payload.text or "").strip()
@@ -1780,7 +1785,6 @@ class WasteInterpretationLegacy(BaseModel):
     notes: Optional[str] = None
 
 
-@app.post("/api/voice/interpret-waste", response_model=WasteInterpretationLegacy)
 async def interpret_waste_legacy(payload: InterpretRequest):
     resp = await interpret(payload)
     p = resp.payload
@@ -5067,8 +5071,6 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
 
 # documents/process + confirm-invoice: backend/documents_routes.py (include_router)
 
-# confirm-invoice: backend/documents_routes.py (include_router)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5) Dynamic Portions Yield — endpoint: inventory_yield_routes.py
@@ -5461,7 +5463,6 @@ async def _run_expiry_alerts_for_tenant(
     return alerts, dish
 
 
-@app.get("/api/inventory/expiry-daily-job")
 async def expiry_daily_job(request: Request):
     """Scheduler: odśwież statusy; alert gdy days_left ∈ alert_triggers (domyślnie 7/3/1)."""
     require_cron_secret(request)
@@ -5508,7 +5509,6 @@ async def expiry_daily_job(request: Request):
     }
 
 
-@app.get("/api/manager/core-alerts-job")
 async def manager_core_alerts_job(request: Request, push: bool = True):
     """Cron: alerty CORE dla każdego tenanta osobno (+ opcjonalny Expo Push)."""
     require_cron_secret(request)
@@ -5601,7 +5601,6 @@ async def manager_core_alerts_job(request: Request, push: bool = True):
     }
 
 
-@app.post("/api/menu/scan", response_model=MenuScanResponse)
 async def menu_scan(file: UploadFile = File(...)):
     """Skanuje wgrane menu (obraz lub PDF) modelem GPT-4o Vision i zwraca podgląd potraw.
     Nic nie zapisuje — użytkownik zatwierdza po edycji (potwierdzenie w /menu/confirm-scan)."""
@@ -5682,9 +5681,9 @@ class RecipeOcrResponse(BaseModel):
     credits_remaining: Optional[int] = None
 
 
-@app.post("/api/recipes/ocr-text", response_model=RecipeOcrResponse)
 async def recipe_ocr_text(file: UploadFile = File(...)):
     """Odczytuje tekst przepisu z zdjęcia notatek (odręczne lub drukowane)."""
+    require_tenant_account_key()
     client = _openai()
     await _guard_ai()
     contents = await file.read()
@@ -5851,7 +5850,6 @@ _MENU_SUGGEST_SYSTEM_PROMPT = (
 )
 
 
-@app.post("/api/menu/suggest-recipe", response_model=SuggestRecipeResponse)
 async def menu_suggest_recipe(req: SuggestRecipeRequest):
     """Dla listy potraw AI proponuje brakujące składniki i/lub gramaturę.
     Dla każdej potrawy:
@@ -5862,6 +5860,7 @@ async def menu_suggest_recipe(req: SuggestRecipeRequest):
 
     Przetwarzanie partiami (max 4 dania / call OpenAI), żeby uniknąć timeoutów proxy Railway.
     """
+    require_tenant_account_key()
     if not req.dishes:
         raise HTTPException(status_code=400, detail="Brak potraw do przetworzenia.")
 
@@ -6097,7 +6096,6 @@ class InspirationRecipeResponse(BaseModel):
     credits_remaining: Optional[int] = None
 
 
-@app.post("/api/inspirations/recipe", response_model=InspirationRecipeResponse)
 async def inspiration_recipe(req: InspirationRecipeRequest):
     """Pełny przepis JSON dla modułu Inspiracje — z cache po slug/nazwie."""
     # Wymuś prawdziwy tenant (X-Account-Key / JWT) — nigdy nie debituj shared „default”.
@@ -6593,7 +6591,6 @@ async def _fill_empty_ingredients_for_confirm(
                 pass
 
 
-@app.post("/api/menu/confirm-scan")
 async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     """Zapisuje zatwierdzone potrawy do bazy (menu_items + recipe_ingredients).
     Wielkość porcji jest zapisywana jako parametr nadrzędny w

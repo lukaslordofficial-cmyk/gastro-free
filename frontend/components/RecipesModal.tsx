@@ -246,8 +246,10 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
       const nameGuess = uri.split('/').pop() || 'recipe.jpg';
       // @ts-expect-error RN FormData file
       form.append('file', { uri, name: nameGuess, type: 'image/jpeg' });
+      const { apiMultipartHeaders } = await import('@/lib/apiHeaders');
       const result = await fetchJson<{ text?: string }>(`${BACKEND_URL}/api/recipes/ocr-text`, {
         method: 'POST',
+        headers: await apiMultipartHeaders(),
         body: form,
       });
       if (!result.ok) throw new Error(result.error || 'Błąd OCR');

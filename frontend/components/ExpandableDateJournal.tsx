@@ -12,7 +12,7 @@ import {
   ScrollView,
   Pressable,
 } from 'react-native';
-import { ChevronDown, ChevronRight, X } from 'lucide-react-native';
+import { ChevronDown, ChevronRight, X, Trash2 } from 'lucide-react-native';
 import {
   buildUsageTree,
   fmtDayLabel,
@@ -42,6 +42,9 @@ type Props = {
   formatAmount: (n: number) => string;
   renderActions?: (item: JournalLeaf) => React.ReactNode;
   amountPositive?: boolean;
+  /** Usuń pozycję (np. zdublowana faktura) — przycisk w podglądzie.
+   *  Zwróć true gdy usunięto (modal się zamknie). */
+  onDeleteLeaf?: (item: JournalLeaf) => boolean | Promise<boolean>;
 };
 
 function toPseudoUsage(items: JournalLeaf[]) {
@@ -67,6 +70,7 @@ export function ExpandableDateJournal({
   formatAmount,
   renderActions,
   amountPositive,
+  onDeleteLeaf,
 }: Props) {
   const t = useAppTheme();
   const [openYear, setOpenYear] = useState<number | null>(null);
@@ -75,6 +79,7 @@ export function ExpandableDateJournal({
   const [openDay, setOpenDay] = useState<string | null>(null);
   /** Podgląd faktury w osobnym oknie. */
   const [previewLeaf, setPreviewLeaf] = useState<JournalLeaf | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const tree: UsageTree = useMemo(() => buildUsageTree(toPseudoUsage(items) as any), [items]);
   const years = Array.from(tree.keys()).sort((a, b) => b - a);
@@ -204,7 +209,7 @@ export function ExpandableDateJournal({
                                         const leaf = leafById.get(entry.id);
                                         if (!leaf) return null;
                                         const hasDetails =
-                                          !!leaf.detailLines && leaf.detailLines.length > 0;
+                                          Array.isArray(leaf.detailLines);
                                         const main = (
                                           <>
                                             <View style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
@@ -216,7 +221,7 @@ export function ExpandableDateJournal({
                                               >
                                                 {entry.time}
                                                 {leaf.meta ? ` · ${leaf.meta}` : ''}
-                                                {hasDetails ? ' · podgląd pozycji' : ''}
+                                                {hasDetails ? ' · dotknij → szczegóły' : ''}
                                               </Text>
                                             </View>
                                             <Text
@@ -314,6 +319,33 @@ export function ExpandableDateJournal({
               </View>
             ))}
           </ScrollView>
+          {onDeleteLeaf && previewLeaf ? (
+            <View style={[styles.modalFooter, { borderTopColor: t.border }]}>
+              <TouchableOpacity
+                style={[styles.deleteBtn, { opacity: deleting ? 0.6 : 1 }]}
+                disabled={deleting}
+                testID={`journal-delete-${previewLeaf.id}`}
+                onPress={() => {
+                  const leaf = previewLeaf;
+                  void (async () => {
+                    setDeleting(true);
+                    try {
+                      const ok = await onDeleteLeaf(leaf);
+                      if (ok) setPreviewLeaf(null);
+                    } finally {
+                      setDeleting(false);
+                    }
+                  })();
+                }}
+                activeOpacity={0.85}
+              >
+                <Trash2 size={16} color="#fff" strokeWidth={2.2} />
+                <Text style={styles.deleteBtnText}>
+                  {deleting ? 'Usuwanie…' : 'Usuń tę fakturę'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
         </SafeAreaView>
       </Modal>
     </View>
@@ -418,4 +450,19 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   modalLineText: { fontSize: 15, lineHeight: 22, fontWeight: '500' },
+  modalFooter: {
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  deleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#DC2626',
+    borderRadius: 12,
+    paddingVertical: 13,
+  },
+  deleteBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 });

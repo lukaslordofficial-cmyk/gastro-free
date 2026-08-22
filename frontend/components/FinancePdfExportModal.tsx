@@ -9,13 +9,13 @@ import {
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
   Platform,
   ScrollView,
 } from 'react-native';
 import { FileDown, FileSpreadsheet, X } from 'lucide-react-native';
 import { PremiumColors, PremiumTokens, DS } from '@/constants/premiumTheme';
 import { ExpiryDateField } from '@/components/ExpiryDateField';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
   generateAndShareFinancePdf,
   type FinancePdfReportKind,
@@ -62,6 +62,7 @@ const KINDS: { key: FinancePdfReportKind; title: string; subtitle: string }[] = 
 ];
 
 export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props) {
+  const { alert } = usePremiumAlert();
   const initial = useMemo(() => monthBounds(defaultMonth), [defaultMonth]);
   const [kind, setKind] = useState<FinancePdfReportKind>('comprehensive');
   const [format, setFormat] = useState<ExportFormat>('pdf');
@@ -79,11 +80,11 @@ export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props)
   const onGenerate = async () => {
     if (busy) return;
     if (!from || !to) {
-      Alert.alert('Zakres dat', 'Wybierz datę początkową i końcową.');
+      alert('Zakres dat', 'Wybierz datę początkową i końcową.');
       return;
     }
     if (from > to) {
-      Alert.alert('Zakres dat', 'Data „od” nie może być późniejsza niż „do”.');
+      alert('Zakres dat', 'Data „od” nie może być późniejsza niż „do”.');
       return;
     }
     setBusy(true);
@@ -101,7 +102,7 @@ export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props)
           : format === 'excel'
             ? 'Nie udało się wygenerować Excela.'
             : 'Nie udało się wygenerować PDF.';
-      Alert.alert(format === 'excel' ? 'Eksport Excel' : 'Eksport PDF', msg);
+      alert(format === 'excel' ? 'Eksport Excel' : 'Eksport PDF', msg);
     } finally {
       setBusy(false);
     }

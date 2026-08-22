@@ -1,7 +1,5 @@
 /**
  * Edytowalny szablon e-maila zamówienia (Łowca Okazji + zamówienie ręczne).
- * — Nadawca = asystent.dostaw@… → wysyłka przez Resend (backend)
- * — Inny nadawca (np. mail restauracji) → klient poczty telefonu (mailto), bez stopki asystenta
  */
 import React, { useMemo, useState } from 'react';
 import {
@@ -16,20 +14,36 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import * as Linking from 'expo-linking';
-import { X, Send, Mail, Landmark } from 'lucide-react-native';
+import { X, Send, Mail, Landmark, Copy, Check } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Clipboard from 'expo-clipboard';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { fetchJson } from '@/lib/safeFetch';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
-import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
+import { stripAssistantOrderFooter, withAssistantFooterIfNeeded } from '@/lib/orderEmailFooter';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
+import {
+  mailProviderLabel,
+  openMailInApp,
+  openMailLoginOnly,
+} from '@/lib/openMailCompose';
+import {
+  fetchRestaurantProfile,
+  resolveOrderEmailFrom,
+} from '@/services/restaurantProfileService';
+import { useAuth } from '@/contexts/AuthContext';
+import { MailSendMethodSheet } from '@/components/MailSendMethodSheet';
 
 export const ASSISTANT_FROM_EMAIL = 'asystent.dostaw@gastromanager.org';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/$/, '');
+const PREP_MSG = 'Twoje zamówienie trafiło do zakładki Dostawy - Przygotowywane';
 
 export type OrderEmailDraft = {
   supplierName: string;
@@ -37,7 +51,6 @@ export type OrderEmailDraft = {
   fromEmail?: string;
   subject: string;
   body: string;
-  /** Do przycisku „Opłać zamówienie” (przelew ręczny). */
   supplierId?: string | null;
   totalPln?: number;
 };
@@ -47,6 +60,7 @@ type Props = {
   draft: OrderEmailDraft | null;
   onClose: () => void;
   onSent?: () => void;
+  onMailClientOpened?: () => void;
   onPayPress?: () => void;
 };
 
@@ -54,25 +68,47 @@ function isAssistantFrom(email: string): boolean {
   return email.trim().toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
 }
 
-export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress }: Props) {
+export function OrderEmailComposer({
+  visible,
+  draft,
+  onClose,
+  onSent,
+  onMailClientOpened,
+  onPayPress,
+}: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
   const { alert } = usePremiumAlert();
+  const { user } = useAuth();
   const [fromEmail, setFromEmail] = useState(ASSISTANT_FROM_EMAIL);
   const [toEmail, setToEmail] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showSendMethod, setShowSendMethod] = useState(false);
 
   React.useEffect(() => {
     if (!visible || !draft) return;
-    const from = (draft.fromEmail || ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
-    setFromEmail(from);
+    let cancelled = false;
+    const rawBody = draft.body || '';
+    const seedFrom = (draft.fromEmail || ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
     setToEmail(draft.toEmail || '');
     setSubject(draft.subject || '');
-    const rawBody = draft.body || '';
-    setBody(isAssistantFrom(from) ? rawBody : stripAssistantOrderFooter(rawBody));
-  }, [visible, draft]);
+    setFromEmail(seedFrom);
+    setBody(isAssistantFrom(seedFrom) ? rawBody : stripAssistantOrderFooter(rawBody));
+    setCopied(false);
+
+    // Zawsze odśwież From z aktualnych ustawień restauracji (nie trzymaj starego Gmaila)
+    void resolveOrderEmailFrom(rawBody, ASSISTANT_FROM_EMAIL, user?.email).then((resolved) => {
+      if (cancelled) return;
+      setFromEmail(resolved.fromEmail);
+      setBody(isAssistantFrom(resolved.fromEmail) ? rawBody : resolved.body);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, draft, user?.email]);
 
   const bg = prem ? DS.color.bgPrimary : Colors.background;
   const card = prem ? DS.color.surfaceCard : Colors.card;
@@ -81,7 +117,7 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
   const muted = prem ? DS.color.muted : Colors.textSecondary;
   const inputBg = prem ? DS.color.bgTertiary : Colors.borderLight;
 
-  const usesAssistant = useMemo(() => isAssistantFrom(fromEmail), [fromEmail]);
+  const providerLabel = useMemo(() => mailProviderLabel(fromEmail), [fromEmail]);
 
   const onChangeFrom = (next: string) => {
     setFromEmail(next);
@@ -90,9 +126,146 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
     }
   };
 
-  const send = async () => {
+  const copyBody = async () => {
+    const payload = `Do: ${toEmail.trim()}\nTemat: ${subject.trim()}\n\n${body}`;
+    await Clipboard.setStringAsync(payload);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const afterExternalOpen = (opts?: { loginOnly?: boolean }) => {
+    onMailClientOpened?.();
+    const extra = opts?.loginOnly
+      ? '\n\nTreść jest w schowku. Po zalogowaniu: Nowa wiadomość → wklej (długie przytrzymanie).'
+      : '';
+    alert('Zamówienie', `${PREP_MSG}${extra}`, [{ text: 'OK', style: 'primary' }]);
+  };
+
+  const sendViaApp = async () => {
+    setShowSendMethod(false);
     const to = toEmail.trim();
     const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
+    try {
+      await openMailInApp({
+        fromEmail: from,
+        to,
+        subject: subject.trim(),
+        body: stripAssistantOrderFooter(body),
+      });
+      afterExternalOpen();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć aplikacji pocztowej.';
+      alert('Błąd', msg);
+    }
+  };
+
+  const sendViaLoginPage = async () => {
+    setShowSendMethod(false);
+    const to = toEmail.trim();
+    const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
+    try {
+      await Clipboard.setStringAsync(
+        `Do: ${to}\nTemat: ${subject.trim()}\n\n${stripAssistantOrderFooter(body)}`,
+      );
+      await openMailLoginOnly(from);
+      afterExternalOpen({ loginOnly: true });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Nie udało się otworzyć strony logowania.';
+      alert('Błąd', msg);
+    }
+  };
+
+  const sendViaAssistant = async () => {
+    if (!BACKEND_URL) {
+      alert(
+        'Brak backendu',
+        'Ustaw EXPO_PUBLIC_BACKEND_URL na port 8001 (uvicorn), nie 8081 (Expo), aby wysłać z adresu asystenta.',
+      );
+      return;
+    }
+    setSending(true);
+    try {
+      let footerHint = '';
+      try {
+        const profile = await fetchRestaurantProfile();
+        const mail = (profile.contact_email || '').trim() || (user?.email || '').trim() || '(brak)';
+        const phone = (profile.contact_phone || '').trim() || '(brak)';
+        footerHint =
+          `--- Wiadomość wygenerowana automatycznie przez asystenta AI Gastro-Manager. `
+          + `Prosimy NIE ODPOWIADAĆ na tego maila. Kontakt z restauracją wyłącznie pod adresem: `
+          + `${mail} lub numerem telefonu: ${phone}. ---`;
+      } catch {
+        /* body bez stopki jeśli profil niedostępny */
+      }
+      const bodyText = withAssistantFooterIfNeeded(body, true, footerHint);
+      const res = await fetchJson<{ ok?: boolean; detail?: string; id?: string }>(
+        `${BACKEND_URL}/api/orders/send-email`,
+        {
+          method: 'POST',
+          headers: await apiJsonHeaders(),
+          body: JSON.stringify({
+            to: toEmail.trim(),
+            subject: subject.trim(),
+            body_text: bodyText,
+            from_email: ASSISTANT_FROM_EMAIL,
+            supplier_name: draft?.supplierName,
+          }),
+        },
+      );
+      if (!res.ok) throw new Error(res.error || 'Błąd wysyłki');
+      alert('Wysłano', PREP_MSG, [{ text: 'OK', style: 'primary' }]);
+      onSent?.();
+      onClose();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Nie udało się wysłać maila przez asystenta.';
+      alert('Błąd wysyłki', msg);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const confirmAssistantSend = async () => {
+    setShowSendMethod(false);
+    let mail = (user?.email || '').trim() || '—';
+    let phone = '—';
+    try {
+      const profile = await fetchRestaurantProfile();
+      mail = (profile.contact_email || '').trim() || mail;
+      phone = (profile.contact_phone || '').trim() || '—';
+    } catch {
+      /* użyj fallbacku */
+    }
+    const msg =
+      `Wiadomość zostanie wysłana z adresu ${ASSISTANT_FROM_EMAIL} w imieniu Twojej restauracji.\n\n`
+      + `Dostawca zobaczy w treści dane kontaktowe do spraw tego zamówienia:\n`
+      + `• e-mail: ${mail}\n`
+      + `• telefon: ${phone}\n\n`
+      + `Przypis: wiadomość wygenerowana automatycznie. Odpowiedzi na ${ASSISTANT_FROM_EMAIL} `
+      + `zostaną przekierowane na adres restauracji (${mail}).`;
+    alert('Asystent dostaw', msg, [
+      { text: 'Anuluj', style: 'cancel' },
+      { text: 'Wyślij', style: 'primary', onPress: () => void sendViaAssistant() },
+    ]);
+  };
+
+  const ensureMinOrderMet = async (): Promise<boolean> => {
+    const sid = (draft?.supplierId || '').trim();
+    if (!sid) return true;
+    const subtotal = Number(draft?.totalPln);
+    if (!Number.isFinite(subtotal)) return true;
+    const check = await checkSupplierMinOrder({
+      supplierId: sid,
+      subtotalPln: subtotal,
+      supplierName: draft?.supplierName,
+    });
+    if (check.ok) return true;
+    const copy = minOrderAlertCopy(check);
+    alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+    return false;
+  };
+
+  const send = async () => {
+    const to = toEmail.trim();
     if (!to) {
       alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy (odbiorca).', [
         { text: 'OK', style: 'primary' },
@@ -105,56 +278,8 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
       ]);
       return;
     }
-
-    const bodyToSend = isAssistantFrom(from) ? body : stripAssistantOrderFooter(body);
-
-    if (!isAssistantFrom(from)) {
-      const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyToSend)}`;
-      try {
-        await Linking.openURL(url);
-        onSent?.();
-        onClose();
-      } catch (e: any) {
-        alert('Błąd', e?.message || 'Nie udało się otworzyć aplikacji pocztowej.');
-      }
-      return;
-    }
-
-    if (!BACKEND_URL) {
-      alert(
-        'Brak backendu',
-        'Ustaw EXPO_PUBLIC_BACKEND_URL na port 8001 (uvicorn), nie 8081 (Expo), aby wysłać z adresu asystenta.',
-      );
-      return;
-    }
-
-    setSending(true);
-    try {
-      const res = await fetchJson<{ ok?: boolean; detail?: string; id?: string }>(
-        `${BACKEND_URL}/api/orders/send-email`,
-        {
-          method: 'POST',
-          headers: await apiJsonHeaders(),
-          body: JSON.stringify({
-            to,
-            subject,
-            body_text: bodyToSend,
-            from_email: ASSISTANT_FROM_EMAIL,
-            supplier_name: draft?.supplierName,
-          }),
-        },
-      );
-      if (!res.ok) throw new Error(res.error || 'Błąd wysyłki');
-      alert('Wysłano', `Wiadomość poszła z ${ASSISTANT_FROM_EMAIL} do ${to}.`, [
-        { text: 'OK', style: 'primary' },
-      ]);
-      onSent?.();
-      onClose();
-    } catch (e: any) {
-      alert('Błąd wysyłki', e?.message || 'Nie udało się wysłać maila przez asystenta.');
-    } finally {
-      setSending(false);
-    }
+    if (!(await ensureMinOrderMet())) return;
+    setShowSendMethod(true);
   };
 
   if (!draft) return null;
@@ -197,9 +322,7 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
             testID="order-email-from"
           />
           <Text style={[styles.hint, { color: muted }]}>
-            {usesAssistant
-              ? 'Wiadomość wyśle skrypt z adresu asystenta dostaw (wymaga backendu :8001).'
-              : 'Otworzymy Twoją aplikację pocztową z gotową treścią (bez stopki asystenta).'}
+            Po „Wyślij mail” wybierzesz: aplikację pocztową, logowanie {providerLabel}, albo wysyłkę przez Asystenta dostaw.
           </Text>
 
           <Text style={[styles.label, { color: muted }]}>Odbiorca (dostawca)</Text>
@@ -223,7 +346,26 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
             placeholderTextColor={muted}
           />
 
-          <Text style={[styles.label, { color: muted }]}>Treść zamówienia</Text>
+          <View style={styles.bodyLabelRow}>
+            <Text style={[styles.label, { color: muted, marginTop: 0, marginBottom: 0 }]}>
+              Treść zamówienia
+            </Text>
+            <TouchableOpacity
+              onPress={() => void copyBody()}
+              style={[styles.copyBtn, { borderColor: border }]}
+              activeOpacity={0.85}
+              testID="order-email-copy"
+            >
+              {copied ? (
+                <Check size={14} color={prem ? DS.color.greenEnd : Colors.accent} strokeWidth={2.5} />
+              ) : (
+                <Copy size={14} color={muted} strokeWidth={2.2} />
+              )}
+              <Text style={[styles.copyText, { color: copied ? (prem ? DS.color.greenEnd : Colors.accent) : muted }]}>
+                {copied ? 'Skopiowano' : 'Kopiuj'}
+              </Text>
+            </TouchableOpacity>
+          </View>
           <TextInput
             style={[
               styles.input,
@@ -243,7 +385,12 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
         <View style={[styles.footer, { borderTopColor: border, backgroundColor: card }]}>
           {onPayPress ? (
             <TouchableOpacity
-              onPress={onPayPress}
+              onPress={() => {
+                void (async () => {
+                  if (!(await ensureMinOrderMet())) return;
+                  onPayPress();
+                })();
+              }}
               activeOpacity={0.85}
               style={[styles.payBtn, { borderColor: prem ? DS.color.greenEnd : Colors.accent }]}
               testID="order-email-manual-pay"
@@ -272,15 +419,22 @@ export function OrderEmailComposer({ visible, draft, onClose, onSent, onPayPress
               ) : (
                 <>
                   <Send size={16} color="#0A0A0A" strokeWidth={2.4} />
-                  <Text style={styles.sendText}>
-                    {usesAssistant ? 'Wyślij maila (asystent)' : 'Otwórz pocztę i wyślij'}
-                  </Text>
+                  <Text style={styles.sendText}>Wyślij mail</Text>
                 </>
               )}
             </LinearGradient>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      <MailSendMethodSheet
+        visible={showSendMethod}
+        fromEmail={fromEmail}
+        onClose={() => setShowSendMethod(false)}
+        onPickApp={() => void sendViaApp()}
+        onPickLoginPage={() => void sendViaLoginPage()}
+        onPickAssistant={() => void confirmAssistantSend()}
+      />
     </Modal>
   );
 }
@@ -300,6 +454,23 @@ const styles = StyleSheet.create({
   sub: { fontSize: 12, marginTop: 2 },
   body: { padding: 16, paddingBottom: 40, gap: 4 },
   label: { fontSize: 12, fontWeight: '700', marginTop: 10, marginBottom: 6 },
+  bodyLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  copyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  copyText: { fontSize: 12, fontWeight: '700' },
   hint: { fontSize: 11, lineHeight: 15, marginBottom: 4 },
   input: {
     borderWidth: 1,

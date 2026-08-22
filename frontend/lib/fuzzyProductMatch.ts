@@ -12,6 +12,8 @@ const STOP = new Set([
   'rolka', 'rolki', 'rolke', 'kostka', 'kostki', 'blok', 'bloki', 'plastry',
   'plaster', 'krazek', 'krazki', 'kreg', 'kregi', 'tacka', 'tacki', 'luz',
   'luzem', 'porcja', 'porcje', 'opakowanie', 'paczk', 'paczka', 'szt', 'sztuka',
+  // Formy sprzedaży / wiązki — „koperek pęczek” ↔ magazyn „koper”
+  'peczek', 'peczki', 'peczka', 'wiazka', 'wiazki', 'bunch', 'bunches',
 ]);
 
 /** Synonimy kulinarne → kanoniczny token (po normalizacji). */
@@ -95,7 +97,22 @@ const SYNONYM: Record<string, string> = {
   yolk: 'jajko',
   marchewki: 'marchew',
   marchewek: 'marchew',
+  marchewka: 'marchew',
+  marchewke: 'marchew',
   marchew: 'marchew',
+  bataty: 'batat',
+  batatow: 'batat',
+  batata: 'batat',
+  batatem: 'batat',
+  batat: 'batat',
+  bob: 'bob',
+  bobu: 'bob',
+  bobem: 'bob',
+  bobow: 'bob',
+  fasolki: 'fasol',
+  fasolka: 'fasol',
+  fasoli: 'fasol',
+  fasola: 'fasol',
   ogorki: 'ogorek',
   ogorkow: 'ogorek',
   papryki: 'papryka',
@@ -135,8 +152,14 @@ const SYNONYM: Record<string, string> = {
   kaparow: 'kapar',
   bazylie: 'bazylia',
   pietruszki: 'pietruszka',
-  koperki: 'koperek',
+  // koper ≈ koperek (zioło) — bez tego „koper” i „koperek” to osobne klucze
+  koper: 'koper',
+  koperek: 'koper',
+  koperki: 'koper',
+  kopru: 'koper',
+  koprem: 'koper',
   szczypiorki: 'szczypiorek',
+  szczypiorek: 'szczypiorek',
   ryze: 'ryz',
   makarony: 'makaron',
   bulki: 'bulka',
@@ -197,10 +220,10 @@ function lightStem(token: string): string {
       return SYNONYM[stem] ?? stem;
     }
   }
-  // końcówki 1-literowe tylko dla dłuższych słów
-  if (token.length >= 6 && /[ayiue]$/.test(token)) {
+  // końcówki 1-literowe: bataty→batat, pomidory→pomidor (len≥5)
+  if (token.length >= 5 && /[ayiue]$/.test(token)) {
     const stem = token.slice(0, -1);
-    return SYNONYM[stem] ?? stem;
+    if (stem.length >= 4) return SYNONYM[stem] ?? stem;
   }
   return token;
 }
@@ -234,6 +257,9 @@ const SINGULAR_DISPLAY: Record<string, string> = {
   jajko: 'jajko',
   ziemniak: 'ziemniak',
   marchew: 'marchew',
+  batat: 'batat',
+  bob: 'bób',
+  fasol: 'fasola',
   ogorek: 'ogórek',
   papryka: 'papryka',
   cukinia: 'cukinia',
@@ -256,7 +282,8 @@ const SINGULAR_DISPLAY: Record<string, string> = {
   kapar: 'kapar',
   bazylia: 'bazylia',
   pietruszka: 'pietruszka',
-  koperek: 'koperek',
+  koper: 'koper',
+  koperek: 'koper',
   szczypiorek: 'szczypiorek',
   ryz: 'ryż',
   makaron: 'makaron',
@@ -383,6 +410,14 @@ export function scoreProductNames(a: string, b: string): number {
   }
   if (shorter.length === 1 && longer.includes(shorter[0]) && longer.length <= 3) {
     score = Math.max(score, 82);
+  }
+  // Prefiks / odmiana: marchew ⊂ marchewka, bob ⊂ bobu (gdy synonim nie złapał)
+  if (shorter.length === 1 && longer.length === 1) {
+    const a = shorter[0];
+    const b = longer[0];
+    if (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) {
+      score = Math.max(score, 90);
+    }
   }
   // „ser kozi” ⊂ „ser kozi rolka” (po odfiltrowaniu form opakowania w STOP)
   if (shorter.length >= 2 && shorter.every((t) => longer.includes(t)) && longer.length - shorter.length <= 2) {

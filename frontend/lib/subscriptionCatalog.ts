@@ -63,7 +63,6 @@ export const FEATURE_CATALOG = [
   { key: 'voice', icon: '🎙️', name: 'Szybka komenda głosowa', cost: '~1-2 kredyty', requires_deal_hunter: false },
   { key: 'invoice', icon: '🧾', name: 'Skanowanie i księgowanie faktury', cost: '~15-20 kredytów', requires_deal_hunter: false },
   { key: 'menu', icon: '🥗', name: 'Analiza karty menu i receptur', cost: '~25-30 kredytów', requires_deal_hunter: false },
-  { key: 'trend', icon: '📊', name: 'Analiza trendów AI', cost: '~5-10 kredytów', requires_deal_hunter: false },
   { key: 'deal_hunter', icon: '🏷️', name: 'Łowca Okazji (porównywarka ofert)', cost: '~3-8 kredytów', requires_deal_hunter: true },
 ];
 

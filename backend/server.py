@@ -59,12 +59,24 @@ from billing_routes import router as billing_router
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
 from pos_config_routes import router as pos_config_router
+from pos_webhook_routes import router as pos_webhook_router
+from order_email_routes import router as order_email_router
+from voice_transcribe_routes import router as voice_transcribe_router
+from voice_crud_routes import router as voice_crud_router
+from supplier_min_order_routes import router as supplier_min_order_router
+from supplier_intent_routes import router as supplier_intent_router
+from daily_report_routes import router as daily_report_router
+from supplier_catalog_view_routes import router as supplier_catalog_view_router
+from admin_routes import router as admin_router
 from restaurant_profile_routes import router as restaurant_profile_router
-from restaurant_profile import (
-    account_login_email as _account_login_email,
-    get_restaurant_profile,
-    order_footer as _order_footer,
-)
+from subscription_routes import router as subscription_router
+from reports_routes import router as reports_router
+from stripe_connect_routes import router as stripe_connect_router
+from inventory_yield_routes import router as inventory_yield_router
+from documents_routes import router as documents_router
+from supplier_catalog_scan_routes import router as supplier_catalog_scan_router
+from inventory_expiry_scan_routes import router as inventory_expiry_scan_router
+from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
     assert_safe_redirect_url,
     checkout_redirect_public_base,
@@ -197,8 +209,24 @@ app.add_middleware(
 app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
 app.include_router(pos_config_router)
+app.include_router(pos_webhook_router)
+app.include_router(order_email_router)
+app.include_router(voice_transcribe_router)
+app.include_router(voice_crud_router)
+app.include_router(supplier_min_order_router)
+app.include_router(supplier_intent_router)
+app.include_router(daily_report_router)
+app.include_router(supplier_catalog_view_router)
+app.include_router(admin_router)
 app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
+app.include_router(subscription_router)
+app.include_router(reports_router)
+app.include_router(stripe_connect_router)
+app.include_router(inventory_yield_router)
+app.include_router(documents_router)
+app.include_router(supplier_catalog_scan_router)
+app.include_router(inventory_expiry_scan_router)
 
 
 @app.middleware("http")
@@ -690,66 +718,7 @@ class ApplyResponse(BaseModel):
 
 # Health + auto-confirm: backend/health_routes.py (app.include_router)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1) Voice transcription  — official openai SDK
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TranscribeResponse(BaseModel):
-    text: str
-    credits_deducted: int = 0
-    credits_remaining: Optional[int] = None
-
-
-@app.post("/api/voice/transcribe", response_model=TranscribeResponse)
-async def transcribe(audio: UploadFile = File(...), language: str = Form("pl")):
-    client = _openai()
-    await _guard_ai()
-    contents = await audio.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Puste nagranie audio.")
-
-    filename = audio.filename or "audio.webm"
-    if "." not in filename:
-        ct = (audio.content_type or "").lower()
-        ext = ("webm" if "webm" in ct
-               else "wav" if "wav" in ct
-               else "mp3" if ("mpeg" in ct or "mp3" in ct)
-               else "m4a" if ("m4a" in ct or "mp4" in ct or "aac" in ct)
-               else "webm")
-        filename = f"{filename}.{ext}"
-
-    buf = io.BytesIO(contents)
-    buf.name = filename  # SDK uses `.name` for MIME detection
-
-    try:
-        resp = await client.audio.transcriptions.create(
-            model=STT_MODEL,
-            file=buf,
-            language=language or "pl",
-            prompt=(
-                "Kontekst: restauracja / gastronomia. Raportowanie strat magazynowych, "
-                "dodawanie kosztów, przychodów, produktów magazynowych, dań z menu, "
-                "dostawców. Ilości w kg, litrach, sztukach. Ceny w PLN."
-            ),
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"Whisper API: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"Whisper: {e}") from e
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/voice/transcribe", model=STT_MODEL,
-            extras={"filename": filename},
-        )
-
-    return TranscribeResponse(
-        text=(getattr(resp, "text", "") or "").strip(),
-        credits_deducted=int(billing.get("credits_deducted") or 0),
-        credits_remaining=billing.get("credits_remaining"),
-    )
-
+# Voice STT: backend/voice_transcribe_routes.py
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2) Interpret voice → intent + payload
@@ -1655,6 +1624,7 @@ class InterpretRequest(BaseModel):
 
 @app.post("/api/voice/interpret", response_model=VoiceInterpretation)
 async def interpret(payload: InterpretRequest):
+    require_tenant_account_key()
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Brak tekstu wejściowego.")
@@ -3223,52 +3193,7 @@ async def _openai_vision_json_batches(
     return merged, billing
 
 
-@app.post("/api/suppliers/{supplier_id}/upload-catalog", response_model=CatalogExtractionResponse)
-async def upload_catalog(supplier_id: str, file: UploadFile = File(...)):
-    """Skanuje cennik (obraz lub PDF) GPT-4o Vision i zwraca podgląd produktów.
-    Zapis do bazy następuje dopiero po zatwierdzeniu (confirm-catalog)."""
-    client = _openai()
-    await _guard_ai()
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Pusty plik.")
-
-    # verify supplier exists + get name
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        rows = await sb_get(httpx_c, "suppliers",
-                            params={"select": "id,name", "id": f"eq.{supplier_id}", "limit": "1"})
-    if not rows:
-        raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-    supplier_name = rows[0]["name"]
-
-    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
-    contents = b""
-
-    data, billing = await _openai_vision_json_batches(
-        client,
-        image_uris=image_uris,
-        system_prompt=_CATALOG_SYSTEM_PROMPT,
-        json_schema=_CATALOG_JSON_SCHEMA,
-        endpoint=f"/api/suppliers/{supplier_id}/upload-catalog",
-        user_text=(
-            "Oto cennik/oferta dostawcy. Wyodrębnij wszystkie produkty z tych stron. "
-            f"(Dokument ma {pages_meta.get('pages_total')} stron; "
-            f"analizuję {pages_meta.get('pages_rendered')}.)"
-        ),
-        pages_meta=pages_meta,
-        merge_fn=_merge_catalog_vision_batches,
-    )
-    image_uris = []
-
-    products = [CatalogProduct(**p) for p in (data.get("products") or [])]
-    return CatalogExtractionResponse(
-        supplier_id=supplier_id,
-        supplier_name=data.get("supplier_name") or supplier_name,
-        product_count=len(products),
-        products=products,
-        credits_deducted=int(billing.get("credits_deducted") or 0),
-        credits_remaining=billing.get("credits_remaining"),
-    )
+# upload-catalog: backend/supplier_catalog_scan_routes.py (include_router)
 
 
 _catalog_extra_cols: Optional[bool] = None
@@ -3343,7 +3268,11 @@ _TOKEN_SYNONYMS = {
     "smietany": "smietana", "mleka": "mleko",
     "masla": "maslo", "maslem": "maslo",
     "sera": "ser", "serem": "ser",
+    "mozarella": "mozzarella", "mozzarelli": "mozzarella", "mozarell": "mozzarella",
+    "mozzarella": "mozzarella", "mozz": "mozzarella", "buffalo": "buffalo",
     "jajka": "jajko", "jajek": "jajko", "jaja": "jajko",
+    "koper": "koper", "koperek": "koper", "koperki": "koper", "kopru": "koper", "koprem": "koper",
+    "marchewka": "marchew", "marchewki": "marchew", "marchewek": "marchew", "marchew": "marchew",
 }
 
 
@@ -3512,7 +3441,10 @@ async def _load_matchable_terms(client: httpx.AsyncClient) -> dict:
     return {"inv_terms": inv_terms, "recipe_terms": recipe_terms}
 
 
-_PIECE_UNITS = {"szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie"}
+_PIECE_UNITS = {
+    "szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie",
+    "peczek", "peczki", "peczka", "wiazka", "wiazki", "bunch", "bunches",
+}
 
 
 def _is_piece_unit(u: str) -> bool:
@@ -3540,77 +3472,7 @@ def _yield_available(stock_qty: float, stock_unit: str,
     return None, False
 
 
-@app.post("/api/suppliers/{supplier_id}/confirm-catalog")
-async def confirm_catalog(supplier_id: str, req: ConfirmCatalogRequest):
-    """Zapisuje zatwierdzone produkty do supplier_catalog.
-    Jeśli produkt (po nazwie) już istnieje u dostawcy → aktualizuje cenę netto."""
-    if not req.products:
-        raise HTTPException(status_code=400, detail="Brak produktów do zapisania.")
-
-    inserted = 0
-    updated = 0
-    warnings: list[str] = []
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        sup = await sb_get(client, "suppliers", params={"select": "id", "id": f"eq.{supplier_id}", "limit": "1"})
-        if not sup:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-
-        has_extra = await _has_catalog_extra_cols(client)
-
-        existing = await sb_get(client, "supplier_catalog",
-                                params={"select": "id,name,sort_order", "supplier_id": f"eq.{supplier_id}"})
-        by_name = {_norm(r["name"]): r for r in (existing or [])}
-        max_sort = max((int(r.get("sort_order") or 0) for r in (existing or [])), default=0)
-
-        for prod in req.products:
-            name = (prod.product_name or "").strip()
-            if not name:
-                continue
-            price = float(prod.price_netto or 0)
-            volume_label = (prod.volume_label or "").strip()
-            unit = (prod.unit or "szt").strip()
-            variant = volume_label or unit or name
-
-            payload: dict = {
-                "supplier_id": supplier_id,
-                "name": name,
-                "variant": variant,
-                "volume_label": volume_label,
-                "price_pln": price,
-                "unit_count": 1,
-                "liters_total": 0,
-            }
-            if has_extra:
-                payload["unit"] = unit
-                payload["product_code"] = (prod.product_code or None)
-
-            match = by_name.get(_norm(name))
-            try:
-                if match:
-                    update_payload = {"price_pln": price, "variant": variant, "volume_label": volume_label}
-                    if has_extra:
-                        update_payload["unit"] = unit
-                        update_payload["product_code"] = (prod.product_code or None)
-                    await sb_patch(client, "supplier_catalog", {"id": f"eq.{match['id']}"}, update_payload)
-                    updated += 1
-                else:
-                    max_sort += 1
-                    payload["sort_order"] = max_sort
-                    row = await sb_post(client, "supplier_catalog", payload)
-                    if row:
-                        by_name[_norm(name)] = (row[0] if isinstance(row, list) else row)
-                    inserted += 1
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"{name}: {e.response.text[:120]}")
-
-    return {
-        "ok": True,
-        "inserted": inserted,
-        "updated": updated,
-        "saved": inserted + updated,
-        "warnings": warnings,
-    }
+# confirm-catalog: backend/supplier_catalog_scan_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3709,9 +3571,15 @@ _DOCUMENT_SYSTEM_PROMPT = (
     "  * lead_time_days — czas realizacji / dostawy w dniach (liczba, np. '1-2 dni robocze' → 2).\n"
     "  Gdy pola NIE ma na dokumencie → null (NIE zgaduj, NIE wstawiaj 0).\n"
     "  Dla MENU_RESTAURACYJNE wszystkie pola supplier → null.\n"
-    "- products[]: dla faktury/oferty pozycje towarowe; dla MENU_RESTAURACYJNE wpisz potrawy "
-    "(product_name = nazwa dania, price_netto = cena dla gościa, quantity=0, unit='szt', "
-    "category najlepiej dopasuj lub 'Inne').\n\n"
+    "- products[]: dla faktury/oferty WSZYSTKIE pozycje towarowe z tabeli (każdy wiersz osobno).\n"
+    "  NIGDY nie pomijaj nabiału, serów (mozzarella/mozarella, feta, parmezan…), ziół, przypraw, "
+    "opakowań ani pozycji o niskiej kwocie — każda linia faktury = jeden element products[].\n"
+    "  Jeśli w nazwie jest odmiana sera (mozzarella, feta, kozi…) — product_name MUSI zawierać "
+    "tę odmianę w całości (NIGDY nie skracaj 'Ser mozzarella' / 'Mozzarella' do samego 'Ser').\n"
+    "  product_name: nazwa towaru JAK NA FAKTURZE (zachowaj wariant: 'Ser mozzarella', nie skracaj do 'Ser').\n"
+    "  quantity / unit / price_netto: z wiersza; jeśli ilość nieczytelna → quantity=1, unit='szt'.\n"
+    "  Dla MENU_RESTAURACYJNE wpisz potrawy (product_name = nazwa dania, price_netto = cena dla gościa, "
+    "quantity=0, unit='szt', category najlepiej dopasuj lub 'Inne').\n\n"
     "KATEGORYZACJA (pole category): dozwolone: 'Mięso i wędliny', 'Ryby i owoce morza', "
     "'Nabiał', 'Warzywa i owoce', 'Pieczywo', 'Suchy magazyn', 'Oleje i tłuszcze', "
     "'Przyprawy', 'Mrożonki', 'Napoje', 'Alkohole', 'Wywary i sosy', 'Chemia i czystość', "
@@ -4129,8 +3997,9 @@ _CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
         "pomidor", "cebula", "czosnek", "salat", "ogorek", "baklazan", "jabl", "banan",
         "cytryn", "marchew", "ziemniak", "papryk", "brokul", "kalafior", "burak", "kapust",
         "szpinak", "awokado", "grzyb", "pieczark", "owoc", "warzyw", "por", "seler", "pietruszk",
-        "koperek", "bazyl", "natk", "rzodkiew", "cukini", "dyni", "gruszk", "truskawk", "malin",
+        "koper", "koperek", "bazyl", "natk", "rzodkiew", "cukini", "dyni", "gruszk", "truskawk", "malin",
         "borowk", "jagod", "winogron", "arbuz", "melon", "ananas", "mango", "kiwi", "batat",
+        "bob", "fasol", "groch", "groszek", "kalarep", "bruksel",
     )),
     ("Nabiał", (
         "mleko", "ser", "smietan", "jogurt", "maslo", "twarog", "mozarella", "mozzarella",
@@ -4226,6 +4095,24 @@ def _food_match_key(text: str) -> str:
     return " ".join(sorted(set(out)))
 
 
+from inventory_invoice_match import (
+    GENERIC_FOOD_ONE_TOKEN as _GENERIC_FOOD_ONE_TOKEN,
+    find_inventory_duplicate as _find_inventory_duplicate_impl,
+    inventory_names_same_product as _inventory_names_same_product_impl,
+    normalize_invoice_line_name as _normalize_invoice_line_name,
+)
+
+
+def _inventory_names_same_product(invoice_name: str, stock_name: str) -> bool:
+    """Czy pozycja z faktury to TEN SAM towar co w magazynie (do zwiększenia stanu)."""
+    return _inventory_names_same_product_impl(
+        invoice_name,
+        stock_name,
+        food_match_key=_food_match_key,
+        norm_fn=_norm,
+    )
+
+
 def _keyword_token_hit(word: str, key: str) -> bool:
     """Tokenowe dopasowanie słowa kluczowego.
 
@@ -4314,44 +4201,24 @@ def _find_inventory_duplicate(
     name: str,
     inv_rows: list[dict],
     *,
-    threshold: int = 82,
+    threshold: int = 88,
+    for_invoice: bool = False,
 ) -> Optional[dict]:
-    """Szuka istniejącego produktu (pomidor ≈ Pomidory świeże)."""
-    if not name or not inv_rows:
-        return None
-    # 1) exact _norm
-    n = _norm(name)
-    for r in inv_rows:
-        if _norm(r.get("name") or "") == n:
-            return r
-    # 2) ten sam food stem
-    fk = _food_match_key(name)
-    if fk:
-        stem_hits = [r for r in inv_rows if _food_match_key(r.get("name") or "") == fk]
-        if len(stem_hits) == 1:
-            return stem_hits[0]
-        if len(stem_hits) > 1:
-            # najkrótsza kanoniczna nazwa
-            return min(stem_hits, key=lambda r: len(r.get("name") or ""))
-    # 2b) odmiany PL / synonimy (marchew ↔ marchewka, bakłażan ↔ bakłażany)
-    compat_hits = [
-        r for r in inv_rows
-        if _food_names_compatible(name, str(r.get("name") or ""))
-    ]
-    if len(compat_hits) == 1:
-        return compat_hits[0]
-    if len(compat_hits) > 1:
-        return min(compat_hits, key=lambda r: len(r.get("name") or ""))
-    # 3) rapidfuzz
-    hit, score = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=threshold)
-    if hit and score >= threshold:
-        return hit
-    # 4) luźniej dla krótkich nazw warzyw (pomidor/pomidory)
-    if len(_norm_pl(name).split()) <= 2:
-        hit2, score2 = _resolve_by_fuzzy(name, inv_rows, key="name", threshold=74)
-        if hit2 and score2 >= 74:
-            return hit2
-    return None
+    """Szuka istniejącego produktu (pomidor ≈ Pomidory świeże).
+
+    for_invoice=True: ostrzejsze reguły — „ser mozzarella” NIE scala się z „ser”.
+    """
+    return _find_inventory_duplicate_impl(
+        name,
+        inv_rows,
+        threshold=threshold,
+        for_invoice=for_invoice,
+        food_match_key=_food_match_key,
+        norm_fn=_norm,
+        norm_pl_fn=_norm_pl,
+        fuzz_token_sort_ratio=fuzz.token_sort_ratio,
+        resolve_by_fuzzy=_resolve_by_fuzzy,
+    )
 
 
 async def _load_user_inventory_categories(client: httpx.AsyncClient) -> list[dict]:
@@ -4857,20 +4724,32 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
         cat_cache["_max_sort"] = max((int(r.get("sort_order") or 0) for r in user_cats), default=0)
         cat_cache["_loaded"] = True
 
-        # id → nazwa kategorii (do dziedziczenia z dopasowanego produktu)
         cat_id_to_name = {str(c["id"]): c["name"] for c in user_cats if c.get("id")}
-        inv_all = await sb_get(client, "inventory_items", params={
-            "select": "id,name,quantity,unit,unit_cost,category_id",
-            "limit": "5000",
-        }) or []
-        inv_rows = list(inv_all)
+        # Tylko aktywne pozycje tenanta — soft-delete / obce konta nie połykają dostaw z faktury.
+        try:
+            inv_all = await sb_get(client, "inventory_items", params={
+                "select": "id,name,quantity,unit,unit_cost,category_id,is_active",
+                "is_active": "eq.true",
+                "limit": "5000",
+            }) or []
+        except httpx.HTTPStatusError as e:
+            txt = e.response.text or ""
+            if "is_active" in txt:
+                inv_all = await sb_get(client, "inventory_items", params={
+                    "select": "id,name,quantity,unit,unit_cost,category_id",
+                    "limit": "5000",
+                }) or []
+            else:
+                raise
+        inv_rows = [r for r in inv_all if r.get("is_active") is not False]
 
+        ak = (get_account_key() or "").strip()
         for p in products:
-            name = (p.get("product_name") or "").strip()
+            name = _normalize_invoice_line_name(p.get("product_name") or "")
             if not name:
                 continue
             qty = float(p.get("quantity") or 0)
-            unit = (p.get("unit") or "szt").strip()
+            unit = (p.get("unit") or "szt").strip() or "szt"
             price = float(p.get("price_netto") or 0)
             ai_cat = (p.get("category") or "").strip() or "Inne"
             alert_days = p.get("alert_days") or [7, 3, 1]
@@ -4880,7 +4759,13 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
             if not alert_days:
                 alert_days = [7, 3, 1]
 
-            inv = _find_inventory_duplicate(name, inv_rows, threshold=82)
+            inv = _find_inventory_duplicate(name, inv_rows, threshold=88, for_invoice=True)
+            # Pas bezpieczeństwa: nigdy nie zwiększaj „Ser” gdy faktura ma mozzarella/feta/…
+            if inv and not _inventory_names_same_product(name, str(inv.get("name") or "")):
+                warnings.append(
+                    f"„{name}”: nie scalono z „{inv.get('name')}” — dodano jako nowy produkt."
+                )
+                inv = None
             item_id: Optional[str] = None
             if inv:
                 item_id = str(inv["id"])
@@ -4889,7 +4774,7 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                 if conv is None and _norm(unit) != _norm(inv["unit"]):
                     warnings.append(f"{name}: dodano {qty} {unit} bez konwersji do {inv['unit']} (połączono z „{inv['name']}”).")
                 new_qty = float(inv["quantity"] or 0) + float(delta)
-                patch_payload: dict = {"quantity": new_qty}
+                patch_payload: dict = {"quantity": new_qty, "is_active": True}
                 # odśwież unit_cost gdy znamy cenę z faktury
                 if price > 0:
                     patch_payload["unit_cost"] = price
@@ -4940,13 +4825,15 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                     "default_alert_days": alert_days,
                     "is_active": True,
                 }
+                if ak and ak != "default":
+                    payload["account_key"] = ak
                 try:
                     row = await sb_post(client, "inventory_items", payload)
                 except httpx.HTTPStatusError as e:
                     body = e.response.text or ""
                     drop_keys = (
                         "default_alert_days", "safety_buffer_percent",
-                        "is_combo_polprodukt", "min_quantity",
+                        "is_combo_polprodukt", "min_quantity", "account_key",
                     )
                     dropped = False
                     for key in drop_keys:
@@ -4958,25 +4845,31 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
                             row = await sb_post(client, "inventory_items", payload)
                         except httpx.HTTPStatusError as e2:
                             try:
-                                row = await sb_post(client, "inventory_items", {
+                                minimal = {
                                     "name": name, "quantity": qty, "unit": unit,
                                     "is_active": True,
-                                })
+                                }
+                                if ak and ak != "default" and "account_key" not in (e2.response.text or ""):
+                                    minimal["account_key"] = ak
+                                row = await sb_post(client, "inventory_items", minimal)
                             except httpx.HTTPStatusError as e3:
                                 warnings.append(f"{name}: nie dodano do magazynu ({e3.response.text[:80]}).")
                                 continue
                     else:
                         try:
-                            row = await sb_post(client, "inventory_items", {
+                            soft = {
                                 "name": name, "quantity": qty, "unit": unit,
                                 "unit_cost": price, "is_active": True,
-                            })
+                            }
+                            if ak and ak != "default":
+                                soft["account_key"] = ak
+                            row = await sb_post(client, "inventory_items", soft)
                         except httpx.HTTPStatusError:
                             warnings.append(f"{name}: nie dodano do magazynu ({body[:80]}).")
                             continue
                 item_id = str((row[0] if isinstance(row, list) else row).get("id"))
                 created.append({"name": name, "quantity": qty, "unit": unit, "category": category})
-                new_row = {"id": item_id, "name": name, "quantity": qty, "unit": unit, "category_id": cat_id, "unit_cost": price}
+                new_row = {"id": item_id, "name": name, "quantity": qty, "unit": unit, "category_id": cat_id, "unit_cost": price, "is_active": True}
                 inv_rows.append(new_row)
 
             # Partie dat ważności
@@ -5166,307 +5059,20 @@ async def _save_invoice(client: httpx.AsyncClient, supplier_id: str, supplier_na
         "total_amount": total,
         "cost_id": cost_id,
         "warnings": warnings,
+        "products_on_invoice": len(
+            [p for p in products if (p.get("product_name") or "").strip()]
+        ) if dest == "inventory" else 0,
     }
 
 
-@app.post("/api/documents/process")
-async def process_document(supplier_id: Optional[str] = Form(None), file: UploadFile = File(...)):
-    """Uniwersalny procesor: GPT-4o rozpoznaje typ dokumentu.
-    - FAKTURA → zwraca podgląd (bez zapisu) do zatwierdzenia z edycją kategorii.
-    - OFERTA → od razu zapisuje do katalogu dostawcy.
-    supplier_id jest opcjonalny — jeśli brak, dostawca zostanie rozpoznany/utworzony z dokumentu.
-    Plik żyje wyłącznie w RAM i jest niszczony po zakończeniu funkcji."""
-    require_tenant_account_key()
-    client = _openai()
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Pusty plik.")
+# documents/process + confirm-invoice: backend/documents_routes.py (include_router)
 
-    if supplier_id:
-        async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
-            sup = await sb_get(httpx_c, "suppliers",
-                               params={"select": "id,name", "id": f"eq.{supplier_id}", "limit": "1"})
-            if not sup:
-                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-
-    image_uris, pages_meta = _images_from_upload(contents, file.content_type or "", file.filename or "")
-    contents = b""  # zwolnij bajty pliku
-
-    data, billing = await _openai_vision_json_batches(
-        client,
-        image_uris=image_uris,
-        system_prompt=_DOCUMENT_SYSTEM_PROMPT,
-        json_schema=_DOCUMENT_JSON_SCHEMA,
-        endpoint="/api/documents/process",
-        user_text=(
-            "Rozpoznaj typ tego dokumentu i wyodrębnij dane zgodnie ze schematem. "
-            f"Dokument PDF/zdjęcie: {pages_meta.get('pages_rendered')} stron"
-            f"{' (z ' + str(pages_meta.get('pages_total')) + ')' if pages_meta.get('truncated') else ''}."
-        ),
-        pages_meta=pages_meta,
-        merge_fn=_merge_document_vision_batches,
-    )
-    image_uris = []
-
-    doc_type = data.get("document_type") or "OFERTA_HANDLOWA"
-    supplier_name = data.get("supplier_name")
-    supplier_meta = _normalize_supplier_scan_meta(data.get("supplier"))
-    pages_info = {
-        "pages_total": pages_meta.get("pages_total"),
-        "pages_processed": pages_meta.get("pages_rendered"),
-        "pages_truncated": bool(pages_meta.get("truncated")),
-    }
-
-    if doc_type == "MENU_RESTAURACYJNE":
-        # Menu restauracji → NIE twórz dostawcy / katalogu. FE otworzy skaner menu.
-        dishes_preview = []
-        for p in (data.get("products") or [])[:80]:
-            nm = (p.get("product_name") or "").strip()
-            if not nm:
-                continue
-            dishes_preview.append({
-                "name": nm,
-                "price_pln": float(p.get("price_netto") or 0),
-                "category": p.get("category") or "Inne",
-            })
-        return _with_billing({
-            "document_type": "MENU_RESTAURACYJNE",
-            "open_menu_scan": True,
-            "dishes_preview": dishes_preview,
-            **pages_info,
-            "message": (
-                "Rozpoznano kartę dań (menu restauracji). "
-                "Otwórz „Skanuj menu”, aby wgrać potrawy — nie dodano dostawcy ani katalogu."
-            ),
-        }, billing)
-
-    if doc_type == "FAKTURA_ZAKUPOWA":
-        # PODGLĄD — nic nie zapisujemy; darmowa kategoryzacja pod kategorie użytkownika
-        raw_products = data.get("products") or []
-        enriched: list[dict] = []
-        user_cat_names: list[str] = []
-        async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client_db:
-            await _ensure_warehouse_categories(client_db)
-            user_cats = await _load_user_inventory_categories(client_db)
-            user_cat_names = [c.get("name") for c in user_cats if c.get("name")]
-            inv_all = await sb_get(client_db, "inventory_items", params={
-                "select": "id,name,category_id", "limit": "5000",
-            }) or []
-            cat_id_to_name = {str(c["id"]): c["name"] for c in user_cats if c.get("id")}
-            for p in raw_products:
-                if not isinstance(p, dict):
-                    continue
-                pname = (p.get("product_name") or "").strip()
-                if not pname:
-                    continue
-                neighbor = _find_inventory_duplicate(pname, inv_all, threshold=82)
-                neighbor_cat = None
-                if neighbor and neighbor.get("category_id"):
-                    neighbor_cat = cat_id_to_name.get(str(neighbor["category_id"]))
-                guessed = _guess_category_free(
-                    pname,
-                    ai_category=p.get("category"),
-                    user_categories=user_cats,
-                    neighbor_category=neighbor_cat,
-                )
-                out = dict(p)
-                out["category"] = guessed
-                if neighbor:
-                    out["matched_inventory_name"] = neighbor.get("name")
-                enriched.append(out)
-        return _with_billing({
-            "document_type": doc_type,
-            "supplier_id": supplier_id,
-            "supplier_name": supplier_name,
-            "supplier": supplier_meta_preview(supplier_meta),
-            "total_amount": float(data.get("total_amount") or 0),
-            "products": enriched or raw_products,
-            "user_categories": user_cat_names,
-            **pages_info,
-        }, billing)
-
-    # OFERTA → rozpoznaj/utwórz dostawcę, uzupełnij panel Dostawcy, zapisz katalog
-    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client_db:
-        if supplier_id:
-            resolved_id, resolved_name = supplier_id, (data.get("supplier_name") or "")
-        else:
-            resolved_id, resolved_name = await _find_or_create_supplier(
-                client_db, supplier_name, nip=supplier_meta.get("nip"),
-            )
-        meta_result = await _apply_supplier_scan_meta(client_db, resolved_id, supplier_meta)
-        result = await _process_offer(client_db, resolved_id, data)
-        return _with_billing({
-            "document_type": doc_type,
-            "supplier_id": resolved_id,
-            "supplier_name": resolved_name or supplier_name,
-            "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
-            "supplier_fields_updated": meta_result.get("updated_fields") or [],
-            **pages_info,
-            **result,
-        }, billing)
-
-
-@app.post("/api/documents/confirm-invoice")
-async def confirm_invoice(req: ConfirmInvoiceRequest):
-    """Zatwierdzenie faktury z podglądu (po ewentualnej korekcie kategorii).
-    Zawsze: aktualizacja/utworzenie produktów w magazynie + koszt zmienny (materiały).
-    Tworzy dostawcę jeśli podano tylko nazwę; dopisuje pozycje do katalogu dostawcy;
-    uzupełnia pola panelu Dostawcy (NIP, telefon, dostawa, min. zamówienie itd.)."""
-    require_tenant_account_key()
-    if not req.products:
-        raise HTTPException(status_code=400, detail="Brak pozycji do zaksięgowania.")
-
-    # Złóż meta z obiektu `supplier` lub płaskich pól FE
-    flat_meta = {
-        "nip": req.supplier_nip,
-        "phone": req.supplier_phone,
-        "email": req.supplier_email,
-        "contact_person": req.supplier_contact_person,
-        "address": req.supplier_address,
-        "bank_account": req.supplier_bank_account,
-        "payment_terms": req.supplier_payment_terms,
-        "shipping_cost": req.supplier_shipping_cost,
-        "min_order_value": req.supplier_min_order_value,
-        "free_shipping_threshold": req.supplier_free_shipping_threshold,
-        "lead_time_days": req.supplier_lead_time_days,
-    }
-    if isinstance(req.supplier, dict):
-        merged_src = {**flat_meta, **{k: v for k, v in req.supplier.items() if v is not None}}
-    else:
-        merged_src = flat_meta
-    supplier_meta = _normalize_supplier_scan_meta(merged_src)
-
-    async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
-        if req.supplier_id:
-            sup = await sb_get(client, "suppliers",
-                               params={"select": "id,name", "id": f"eq.{req.supplier_id}", "limit": "1"})
-            if not sup:
-                raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-            supplier_id, supplier_name = sup[0]["id"], sup[0]["name"]
-        else:
-            supplier_id, supplier_name = await _find_or_create_supplier(
-                client, req.supplier_name, nip=supplier_meta.get("nip"),
-            )
-
-        meta_result = await _apply_supplier_scan_meta(client, supplier_id, supplier_meta)
-
-        products = [p.model_dump() for p in req.products]
-        # Zakupy: magazyn + koszt zmienny (ignorujemy stare destination tiles z FE).
-        result = await _save_invoice(
-            client, supplier_id, supplier_name, products, float(req.total_amount or 0),
-            destination="inventory",
-        )
-    return {
-        "document_type": "FAKTURA_ZAKUPOWA",
-        "supplier": meta_result.get("supplier_meta") or supplier_meta_preview(supplier_meta),
-        "supplier_fields_updated": meta_result.get("updated_fields") or [],
-        **result,
-    }
+# confirm-invoice: backend/documents_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5) Dynamic Portions Yield — na ile porcji każdej potrawy wystarczy zapas
+# 5) Dynamic Portions Yield — endpoint: inventory_yield_routes.py
 # ─────────────────────────────────────────────────────────────────────────────
-
-@app.get("/api/inventory/{item_id}/portions-yield")
-async def portions_yield(item_id: str):
-    """Dla danego surowca liczy, na ile porcji każdej powiązanej potrawy wystarczy
-    aktualny stan magazynowy (stan / gramatura z receptury)."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            rows = await sb_get(client, "inventory_items",
-                                params={"select": "id,name,quantity,unit,unit_weight_volume,weight_volume_unit",
-                                        "id": f"eq.{item_id}", "limit": "1"})
-        except httpx.HTTPStatusError as e:
-            # kolumny unit_weight_volume/weight_volume_unit jeszcze nie dodane
-            if "unit_weight_volume" in (e.response.text or "") or "weight_volume_unit" in (e.response.text or ""):
-                rows = await sb_get(client, "inventory_items",
-                                    params={"select": "id,name,quantity,unit", "id": f"eq.{item_id}", "limit": "1"})
-            else:
-                raise
-        if not rows:
-            raise HTTPException(status_code=404, detail="Nie znaleziono produktu.")
-        item = rows[0]
-        item_name = item["name"]
-        stock_qty = float(item["quantity"] or 0)
-        stock_unit = item["unit"] or ""
-        uwv = item.get("unit_weight_volume")
-        wvu = item.get("weight_volume_unit")
-
-        # recipe_ingredients łączy się z magazynem po NAZWIE (fuzzy)
-        try:
-            recipes = await sb_get(client, "recipe_ingredients",
-                                   params={"select": "menu_item_id,ingredient_name,quantity,unit,piece_weight_g"})
-        except httpx.HTTPStatusError as e:
-            if "piece_weight_g" in (e.response.text or ""):
-                recipes = await sb_get(client, "recipe_ingredients",
-                                       params={"select": "menu_item_id,ingredient_name,quantity,unit"})
-            else:
-                raise
-        key = _norm(item_name)
-        key_pl = _norm_pl(item_name)
-        matched = []
-        for r in (recipes or []):
-            ing = r.get("ingredient_name") or ""
-            if (
-                _norm(ing) == key
-                or key in _norm(ing)
-                or _norm(ing) in key
-                or _norm_pl(ing) == key_pl
-            ):
-                matched.append(r)
-                continue
-            # Lekki fuzzy token-set (bez partial) — filet↔pierś
-            hit, _score = _fuzzy_match_token_only(key_pl, [_norm_pl(ing)], threshold=74)
-            if hit is not None:
-                matched.append(r)
-
-        # nazwy potraw
-        menu_ids = list({r["menu_item_id"] for r in matched})
-        menu_map: dict = {}
-        if menu_ids:
-            id_filter = "in.(" + ",".join(menu_ids) + ")"
-            menu_rows = await sb_get(client, "menu_items",
-                                     params={"select": "id,name,is_active", "id": id_filter})
-            menu_map = {m["id"]: m for m in (menu_rows or [])}
-
-    dishes = []
-    for r in matched:
-        per_portion = float(r["quantity"] or 0)
-        recipe_unit = r["unit"] or stock_unit
-        if per_portion <= 0:
-            continue
-        # Gdy receptura w szt a mamy wzorcową wagę — użyj jej jako unit_size
-        piece_wt = r.get("piece_weight_g")
-        use_uwv = uwv
-        use_wvu = wvu
-        try:
-            if piece_wt is not None and float(piece_wt) > 0 and _is_piece_unit(recipe_unit):
-                use_uwv = float(piece_wt)
-                use_wvu = "g"
-        except (TypeError, ValueError):
-            pass
-        available, convertible = _yield_available(stock_qty, stock_unit, use_uwv, use_wvu, recipe_unit)
-        portions = int(available // per_portion) if available is not None else 0
-        menu = menu_map.get(r["menu_item_id"])
-        dishes.append({
-            "menu_item_id": r["menu_item_id"],
-            "dish_name": (menu or {}).get("name") or "Danie",
-            "is_active": (menu or {}).get("is_active", True),
-            "per_portion_qty": per_portion,
-            "unit": recipe_unit,
-            "portions": max(0, portions),
-            "convertible": convertible,
-        })
-
-    dishes.sort(key=lambda d: d["portions"])
-    return {
-        "item_id": item_id,
-        "item_name": item_name,
-        "stock_quantity": stock_qty,
-        "stock_unit": stock_unit,
-        "dishes": dishes,
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5695,159 +5301,7 @@ class ExpiryScanResponse(BaseModel):
     credits_remaining: Optional[int] = None
 
 
-@app.post("/api/inventory/scan-expiration", response_model=ExpiryScanResponse)
-async def scan_expiration(
-    file: UploadFile = File(...),
-    quantity: float = Form(...),
-    restaurant_id: Optional[str] = Form(None),
-    unit: str = Form("szt"),
-):
-    """Zdjecie etykiety → GPT-4o Vision → zapis partii w warehouse_inventory (+ bump stanu)."""
-    if quantity <= 0:
-        raise HTTPException(status_code=400, detail="Ilość musi być > 0.")
-
-    client = _openai()
-    await _guard_ai()
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Pusty plik.")
-
-    image_uris, _pages_meta = _images_from_upload(
-        contents, file.content_type or "", file.filename or "", max_pages=2,
-    )
-    contents = b""
-
-    user_content: list[dict] = [
-        {"type": "text", "text": "Extract product name and expiration date from this package photo."}
-    ]
-    for uri in image_uris:
-        user_content.append({"type": "image_url", "image_url": {"url": uri}})
-
-    try:
-        resp = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": _EXPIRY_SCAN_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_schema", "json_schema": _EXPIRY_SCAN_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI Vision: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-    finally:
-        image_uris = []
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/inventory/scan-expiration", model=VISION_MODEL,
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
-
-    product_name = str(data.get("product_name") or "").strip()
-    expiration_date = str(data.get("expiration_date") or "").strip()
-    confidence = float(data.get("confidence_score") or 0)
-    if not product_name or not re.match(r"^\d{4}-\d{2}-\d{2}$", expiration_date):
-        raise HTTPException(status_code=422, detail="Nie udało się odczytać nazwy lub daty ważności.")
-
-    status = _expiry_status(expiration_date)
-    unit_clean = (unit or "szt").strip() or "szt"
-
-    inventory_item_id: Optional[str] = None
-    inventory_matched_name: Optional[str] = None
-    batch_id: Optional[str] = None
-
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        inv_all = await sb_get(
-            httpx_c, "inventory_items",
-            params={"select": "id,name,quantity,unit", "limit": "2000"},
-        ) or []
-        best_id = None
-        best_score = 0.0
-        best_name = None
-        best_qty = 0.0
-        qn = _norm_pl(product_name)
-        for row in inv_all:
-            cand = _norm_pl(str(row.get("name") or ""))
-            if not cand:
-                continue
-            score = max(
-                float(fuzz.token_set_ratio(qn, cand)),
-                float(fuzz.partial_ratio(qn, cand)),
-            )
-            if score > best_score:
-                best_score = score
-                best_id = row.get("id")
-                best_name = row.get("name")
-                best_qty = float(row.get("quantity") or 0)
-        if best_id and best_score >= FUZZY_MATCH_THRESHOLD:
-            inventory_item_id = str(best_id)
-            inventory_matched_name = str(best_name or "")
-            try:
-                await sb_patch(
-                    httpx_c,
-                    "inventory_items",
-                    {"id": f"eq.{inventory_item_id}"},
-                    {"quantity": best_qty + float(quantity)},
-                )
-            except Exception:
-                logging.exception("expiry scan: failed to bump inventory quantity")
-
-        payload = {
-            "restaurant_id": restaurant_id or None,
-            "inventory_item_id": inventory_item_id,
-            "product_name": product_name,
-            "quantity": float(quantity),
-            "unit": unit_clean,
-            "expiration_date": expiration_date,
-            "status": status,
-            "confidence_score": confidence,
-            "source": "vision_scan",
-        }
-        try:
-            inserted = await sb_post(httpx_c, "warehouse_inventory", payload)
-            if isinstance(inserted, list) and inserted:
-                batch_id = inserted[0].get("id")
-            elif isinstance(inserted, dict):
-                batch_id = inserted.get("id")
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Nie zapisano partii — uruchom migrację ADD_WAREHOUSE_INVENTORY_EXPIRY.sql. "
-                    f"Szczegóły: {e}"
-                ),
-            ) from e
-
-    msg = (
-        f"Dodano {quantity:g} {unit_clean} · {product_name} "
-        f"(ważne do {expiration_date}, status: {status})"
-    )
-    if inventory_matched_name:
-        msg += f". Dopasowano do magazynu: {inventory_matched_name}."
-
-    return ExpiryScanResponse(
-        product_name=product_name,
-        expiration_date=expiration_date,
-        confidence_score=confidence,
-        status=status,
-        quantity=float(quantity),
-        unit=unit_clean,
-        inventory_item_id=inventory_item_id,
-        inventory_matched_name=inventory_matched_name,
-        batch_id=batch_id,
-        message=msg,
-        credits_deducted=int(billing.get("credits_deducted") or 0),
-        credits_remaining=billing.get("credits_remaining"),
-    )
+# scan-expiration: backend/inventory_expiry_scan_routes.py (include_router)
 
 
 async def _list_tenant_account_keys(client: httpx.AsyncClient) -> list[str]:
@@ -7340,284 +6794,7 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7) POS Webhook — pełen obieg: sprzedaż → magazyn → finanse
-# ─────────────────────────────────────────────────────────────────────────────
-from datetime import datetime, timezone  # noqa: E402
-
-
-class PosSaleItem(BaseModel):
-    pos_external_id: Optional[str] = None
-    dish_name: Optional[str] = None
-    quantity_sold: float = Field(gt=0)
-    unit_price_pln: Optional[float] = None  # jeśli null → pos_products.price_pln
-
-
-class PosWebhookRequest(BaseModel):
-    external_order_id: Optional[str] = None
-    items: list[PosSaleItem]
-
-
-@app.post("/api/pos/webhook")
-async def pos_webhook(request: Request, provider: Optional[str] = None):
-    """Odbiera uderzenie POS (kanoniczny JSON lub format konkretnego providera).
-
-    Query: ?provider=gopos|posbistro|dotykacka|… — normalizacja w pos_adapters.
-    Dla każdej pozycji: pos_products → recipes → inventory → revenue.
-    Wymaga tokenu HMAC w URL (account + token z Ustawień) albo nagłówka.
-    """
-    pos_account = require_pos_webhook_tenant(request)
-    _account_key_ctx.set(pos_account)
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Oczekiwano JSON body.")
-
-    from pos_adapters import normalize_pos_payload
-    from pydantic import ValidationError
-
-    canonical = normalize_pos_payload(provider, body if isinstance(body, dict) else {})
-    try:
-        req = PosWebhookRequest(**canonical)
-    except ValidationError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Niepoprawny payload POS po normalizacji ({provider or 'generic'}): {e.errors()[:3]}",
-        )
-
-    if not req.items:
-        raise HTTPException(status_code=400, detail="Brak pozycji w zamówieniu.")
-
-    now = datetime.now(timezone.utc)
-    year_month = now.strftime("%Y-%m")
-
-    processed: list[dict] = []
-    inventory_updates: list[dict] = []
-    warnings: list[str] = []
-    revenue_total = 0.0
-    sale_log_ids: list[str] = []
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        for it in req.items:
-            product: Optional[dict] = None
-
-            if it.pos_external_id:
-                rows = await sb_get(client, "pos_products", params={
-                    "select": "id,name,pos_external_id,price_pln",
-                    "pos_external_id": f"eq.{it.pos_external_id}",
-                    "limit": "1",
-                })
-                if rows:
-                    product = rows[0]
-            if product is None and it.dish_name:
-                rows = await sb_get(client, "pos_products", params={
-                    "select": "id,name,pos_external_id,price_pln",
-                    "name": f"ilike.{it.dish_name}",
-                    "limit": "1",
-                })
-                if rows:
-                    product = rows[0]
-
-            if (product is None):
-                key = it.pos_external_id or it.dish_name or "?"
-                # Fallback: menu_items.pos_id + recipe_ingredients (mapowanie w Ustawieniach)
-                menu_row = None
-                if it.pos_external_id:
-                    mrows = await sb_get(client, "menu_items", params={
-                        "select": "id,name,pos_id,price_pln",
-                        "pos_id": f"eq.{it.pos_external_id}",
-                        "is_active": "eq.true",
-                        "limit": "1",
-                    })
-                    if mrows:
-                        menu_row = mrows[0]
-                if menu_row is None and it.dish_name:
-                    mrows = await sb_get(client, "menu_items", params={
-                        "select": "id,name,pos_id,price_pln",
-                        "name": f"ilike.{it.dish_name}",
-                        "is_active": "eq.true",
-                        "limit": "1",
-                    })
-                    if mrows:
-                        menu_row = mrows[0]
-
-                if menu_row is None:
-                    warnings.append(f"Pominięto '{key}' — brak dopasowania w pos_products ani menu_items.")
-                    continue
-
-                qty = float(it.quantity_sold)
-                unit_price = float(it.unit_price_pln) if it.unit_price_pln is not None else float(menu_row.get("price_pln") or 0)
-                line_total = round(unit_price * qty, 2)
-                ings = await sb_get(client, "recipe_ingredients", params={
-                    "select": "id,ingredient_name,quantity,unit,warehouse_product_id",
-                    "menu_item_id": f"eq.{menu_row['id']}",
-                }) or []
-                item_consumed: list[dict] = []
-                mapped = [r for r in ings if r.get("warehouse_product_id")]
-                if not mapped:
-                    warnings.append(
-                        f"'{menu_row['name']}': brak zmapowanych składników (warehouse_product_id) — magazyn nie zaktualizowany."
-                    )
-                else:
-                    for r in mapped:
-                        inv_id = r["warehouse_product_id"]
-                        consume = float(r.get("quantity") or 0) * qty
-                        inv_rows = await sb_get(client, "inventory_items", params={
-                            "select": "id,name,quantity,unit,min_quantity",
-                            "id": f"eq.{inv_id}",
-                            "limit": "1",
-                        })
-                        if not inv_rows:
-                            warnings.append(f"'{menu_row['name']}': brak inventory_items id={inv_id}.")
-                            continue
-                        inv = inv_rows[0]
-                        before = float(inv["quantity"])
-                        after = round(before - consume, 4)
-                        try:
-                            await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": after})
-                        except httpx.HTTPStatusError as e:
-                            warnings.append(f"'{inv['name']}': nie zaktualizowano stanu ({e.response.text[:100]}).")
-                            continue
-                        min_qty = float(inv.get("min_quantity") or 0)
-                        status = "ok"
-                        if after <= 0:
-                            status = "out_of_stock"
-                        elif min_qty > 0 and after <= min_qty:
-                            status = "below_minimum"
-                        upd = {
-                            "inventory_id": inv["id"],
-                            "name": inv["name"],
-                            "unit": inv.get("unit") or r.get("unit") or "kg",
-                            "consumed": consume,
-                            "quantity_before": before,
-                            "quantity_after": after,
-                            "min_quantity": min_qty,
-                            "status": status,
-                        }
-                        inventory_updates.append(upd)
-                        item_consumed.append(upd)
-
-                processed.append({
-                    "pos_external_id": menu_row.get("pos_id") or it.pos_external_id,
-                    "name": menu_row["name"],
-                    "quantity": qty,
-                    "unit_price_pln": unit_price,
-                    "line_total_pln": line_total,
-                    "inventory_consumed": item_consumed,
-                })
-                revenue_total = round(revenue_total + line_total, 2)
-                continue
-
-            qty = float(it.quantity_sold)
-            unit_price = float(it.unit_price_pln) if it.unit_price_pln is not None else float(product.get("price_pln") or 0)
-            line_total = round(unit_price * qty, 2)
-
-            recipes = await sb_get(client, "recipes", params={
-                "select": "id,warehouse_product_id,quantity_per_portion,unit",
-                "pos_product_id": f"eq.{product['id']}",
-            })
-            item_consumed: list[dict] = []
-
-            if not recipes:
-                warnings.append(f"'{product['name']}': brak receptury (recipes) — magazyn nie zaktualizowany.")
-            else:
-                for r in recipes:
-                    inv_id = r["warehouse_product_id"]
-                    consume = float(r["quantity_per_portion"]) * qty
-                    inv_rows = await sb_get(client, "inventory_items", params={
-                        "select": "id,name,quantity,unit,min_quantity",
-                        "id": f"eq.{inv_id}",
-                        "limit": "1",
-                    })
-                    if not inv_rows:
-                        warnings.append(f"'{product['name']}': brak inventory_items id={inv_id}.")
-                        continue
-                    inv = inv_rows[0]
-                    before = float(inv["quantity"])
-                    after = round(before - consume, 4)
-                    try:
-                        await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": after})
-                    except httpx.HTTPStatusError as e:
-                        warnings.append(f"'{inv['name']}': nie zaktualizowano stanu ({e.response.text[:100]}).")
-                        continue
-
-                    min_qty = float(inv.get("min_quantity") or 0)
-                    status = "ok"
-                    if after <= 0:
-                        status = "out_of_stock"
-                    elif min_qty > 0 and after <= min_qty:
-                        status = "below_minimum"
-
-                    upd = {
-                        "inventory_id": inv["id"],
-                        "name": inv["name"],
-                        "unit": inv.get("unit") or r.get("unit") or "kg",
-                        "consumed": consume,
-                        "quantity_before": before,
-                        "quantity_after": after,
-                        "min_quantity": min_qty,
-                        "status": status,
-                    }
-                    inventory_updates.append(upd)
-                    item_consumed.append(upd)
-
-            try:
-                log_rows = await sb_post(client, "pos_sales_log", {
-                    "pos_external_id": product["pos_external_id"],
-                    "pos_product_id": product["id"],
-                    "quantity_sold": qty,
-                })
-                log_id = (log_rows[0] if isinstance(log_rows, list) else log_rows).get("id")
-                if log_id:
-                    sale_log_ids.append(log_id)
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"'{product['name']}': pos_sales_log — {e.response.text[:100]}")
-
-            processed.append({
-                "pos_external_id": product["pos_external_id"],
-                "name": product["name"],
-                "quantity": qty,
-                "unit_price_pln": unit_price,
-                "line_total_pln": line_total,
-                "inventory_consumed": item_consumed,
-            })
-            revenue_total = round(revenue_total + line_total, 2)
-
-        revenue_id: Optional[str] = None
-        if revenue_total > 0:
-            def _fmt_qty(q: float) -> str:
-                return str(int(q)) if float(q).is_integer() else f"{q:g}"
-            summary_items = ", ".join(f"{p['name']} × {_fmt_qty(p['quantity'])}" for p in processed)
-            desc = f"POS: {summary_items}"
-            if req.external_order_id:
-                desc = f"[{req.external_order_id}] {desc}"
-            try:
-                rev_rows = await sb_post(client, "revenue_entries", {
-                    "year_month": year_month,
-                    "description": desc[:255],
-                    "amount_pln": revenue_total,
-                })
-                revenue_id = (rev_rows[0] if isinstance(rev_rows, list) else rev_rows).get("id")
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"revenue_entries: {e.response.text[:120]}")
-
-        # POS Bottleneck Engine: przelicz dostępność dań po zjeździe stanu z POS.
-        if inventory_updates:
-            try:
-                await _recompute_menu_availability(client, changed_inventory_ids={u["inventory_id"] for u in inventory_updates})
-            except Exception as e:
-                logger.debug(f"_recompute_menu_availability skipped: {e}")
-
-    return {
-        "ok": True,
-        "external_order_id": req.external_order_id,
-        "processed_items": processed,
-        "inventory_updates": inventory_updates,
-        "revenue_added_pln": revenue_total,
-        "revenue_entry_id": revenue_id,
-        "sale_log_ids": sale_log_ids,
-        "warnings": warnings,
-    }
+# POS webhook: backend/pos_webhook_routes.py + pos_webhook_consume.py
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -7707,31 +6884,25 @@ def _food_names_compatible(req_name: str, cand_name: str) -> bool:
     """Czy nazwy mogą być tym samym towarem (stem / kolejność słów / prefiks).
 
     Przykłady OK: batat↔bataty, filet z kurczaka↔kurczak filet, pomidor↔pomidory.
-    Blokuje luźne literówki bez wspólnego rdzenia (grzanek ↛ granulat).
+    Blokuje ser↔ser mozzarella oraz luźne literówki (grzanek ↛ granulat).
     """
+    if _inventory_names_same_product(req_name or "", cand_name or ""):
+        return True
     ka = _food_match_key(req_name or "")
     kb = _food_match_key(cand_name or "")
     if not ka or not kb:
         return False
-    if ka == kb:
-        return True
     ta, tb = set(ka.split()), set(kb.split())
-    if not ta or not tb:
-        return False
-    # Wspólny stem ≥4 LUB pełne pokrycie tokenów zapytania w ofercie
-    shared = ta & tb
-    if shared and any(len(t) >= 4 for t in shared):
-        return True
-    if ta.issubset(tb) or tb.issubset(ta):
-        return True
-    # Prefiks stemów: batat ⊂ bataty / cukin ⊂ cukinia (po key)
-    for a in ta:
-        for b in tb:
-            if len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a)):
-                return True
-    # Jednoznaczne zawieranie całych kluczy
-    if len(ka) >= 5 and len(kb) >= 5 and (ka in kb or kb in ka):
-        return True
+    # Prefiks jednego tokenu: batat↔bataty (bez rodzajowych „ser”/„mleko”)
+    if len(ta) == 1 and len(tb) == 1:
+        a, b = next(iter(ta)), next(iter(tb))
+        if (
+            len(a) >= 4 and len(b) >= 4
+            and (a.startswith(b) or b.startswith(a))
+            and a not in _GENERIC_FOOD_ONE_TOKEN
+            and b not in _GENERIC_FOOD_ONE_TOKEN
+        ):
+            return True
     return False
 
 
@@ -8065,12 +7236,7 @@ def _pack_mismatch_note(product: str, needed_base: float, ordered_base: float, d
     )
 
 
-def _fmt_pln(v: float) -> str:
-    return f"{v:.2f}".replace(".", ",") + " zł"
-
-
-def _fmt_qty(q: float) -> str:
-    return (f"{q:.0f}" if float(q).is_integer() else f"{q:.2f}".replace(".", ","))
+# _fmt_pln / _fmt_qty: order_email_format (import wyżej)
 
 
 # --- Schematy ----------------------------------------------------------------
@@ -8094,31 +7260,6 @@ class CompareOffersRequest(BaseModel):
     cart_objective: Optional[str] = None
     # Gdzie Łowca szuka ofert: suppliers_only | local_producers_only | both
     search_scope: Optional[str] = "suppliers_only"
-
-
-class MessageSupplierGroup(BaseModel):
-    supplier_id: Optional[str] = None
-    supplier_name: str
-    supplier_email: Optional[str] = None
-    subtotal_pln: float = 0.0
-    items: list[dict] = Field(default_factory=list)
-
-
-class GenerateMessagesRequest(BaseModel):
-    suppliers: list[MessageSupplierGroup]
-    restaurant_name: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class SendEmailRequest(BaseModel):
-    to: str
-    subject: str
-    html: Optional[str] = None
-    body_text: Optional[str] = None
-    supplier_name: Optional[str] = None
-    # nadpisania (opcjonalne, domyślnie centralny klucz/adres systemowy)
-    api_key: Optional[str] = None
-    from_email: Optional[str] = None
 
 
 class InterpretOrderRequest(BaseModel):
@@ -10754,274 +9895,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
     }
 
 
-def _is_internal_order_note(notes: Optional[str]) -> bool:
-    """Notatki wewnętrzne (koszyk / draft) — nie trafiają do maila do dostawcy."""
-    t = (notes or "").strip().lower()
-    if not t:
-        return True
-    markers = (
-        "łowca okazji",
-        "lowca okazji",
-        "zapisane na później",
-        "zapisane na pozniej",
-        "na później",
-        "na pozniej",
-        "[internal]",
-    )
-    return any(m in t for m in markers)
-
-@app.post("/api/orders/generate-messages")
-async def generate_messages(req: GenerateMessagesRequest):
-    if not req.suppliers:
-        raise HTTPException(status_code=400, detail="Brak dostawców do wygenerowania wiadomości.")
-    today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as _c:
-        profile = await get_restaurant_profile(_c)
-        login_email = await _account_login_email(_c)
-        # Uzupełnij nazwy/e-maile dostawców z DB (FE czasem wysyła puste / „Dostawca”)
-        resolved_suppliers: dict[str, dict] = {}
-        for g in req.suppliers:
-            sid = (g.supplier_id or "").strip()
-            if not sid or sid in resolved_suppliers:
-                continue
-            try:
-                rows = await sb_get(
-                    _c, "suppliers",
-                    params={"select": "id,name,email,contact_person", "id": f"eq.{sid}", "limit": "1"},
-                ) or []
-                if rows:
-                    resolved_suppliers[sid] = rows[0]
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"generate-messages resolve supplier {sid}: {e}")
-
-    company = (profile.get("company_name") or "").strip()
-    delivery = (profile.get("delivery_address") or "").strip()
-    req_name = (req.restaurant_name or "").strip()
-    if not req_name or req_name.lower() in ("nasza restauracja", "restauracja"):
-        restaurant = company or req_name or "Nasza restauracja"
-    else:
-        restaurant = req_name
-
-    contact_email = (profile.get("contact_email") or "").strip() or login_email
-    contact_phone = (profile.get("contact_phone") or "").strip()
-    footer = _order_footer(profile, fallback_email=login_email)
-    contact_block = ""
-    if contact_email or contact_phone:
-        parts = []
-        if contact_email:
-            parts.append(f"e-mail: {contact_email}")
-        if contact_phone:
-            parts.append(f"tel.: {contact_phone}")
-        contact_block = "W razie pytań prosimy o kontakt: " + ", ".join(parts) + "."
-
-    delivery_block = ""
-    if delivery:
-        delivery_block = f"<p style='margin:0 0 14px 0;color:#64748B;font-size:13px'>Adres dostawy: <strong>{delivery}</strong></p>"
-    delivery_text = f"Adres dostawy: {delivery}\n" if delivery else ""
-
-    messages = []
-    for g in req.suppliers:
-        items = g.items or []
-        subtotal = g.subtotal_pln or round(sum(float(i.get("line_total") or 0) for i in items), 2)
-        sid = (g.supplier_id or "").strip()
-        db_sup = resolved_suppliers.get(sid) if sid else None
-        supplier_hello = (
-            ((db_sup or {}).get("name") or "").strip()
-            or (g.supplier_name or "").strip()
-            or "Państwa firmę"
-        )
-        if supplier_hello == "Dostawca" and (db_sup or {}).get("name"):
-            supplier_hello = str(db_sup.get("name")).strip()
-        supplier_email = (
-            ((db_sup or {}).get("email") or "").strip()
-            or (g.supplier_email or "").strip()
-            or None
-        )
-
-        rows_html = ""
-        for i in items:
-            qty = _fmt_qty(float(i.get("quantity") or 0))
-            unit = i.get("unit", "")
-            name = i.get("matched_name") or i.get("product_name", "")
-            line = float(i.get("line_total") or 0)
-            rows_html += (
-                f"<tr>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0'>{name}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:center'>{qty} {unit}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:right'>{_fmt_pln(line)}</td>"
-                f"</tr>"
-            )
-
-        safe_notes = (req.notes or "").strip()
-        if _is_internal_order_note(safe_notes):
-            safe_notes = ""
-        notes_html = (
-            f'<p style="margin-top:12px"><strong>Uwagi do zamówienia:</strong> {safe_notes}</p>'
-            if safe_notes else ""
-        )
-        email_html = f"""<div style="font-family:Arial,Helvetica,sans-serif;color:#0F172A;max-width:640px;line-height:1.5">
-  <p>Szanowni Państwo (<strong>{supplier_hello}</strong>),</p>
-  <p>
-    w imieniu restauracji <strong>{restaurant}</strong> przesyłamy do firmy
-    <strong>{supplier_hello}</strong> zamówienie towaru z prośbą o potwierdzenie realizacji.
-  </p>
-  <p style="margin:0 0 4px 0;color:#64748B;font-size:13px">Data zamówienia: {today}</p>
-  <p style="margin:0 0 14px 0;color:#64748B;font-size:13px">Odbiorca / hurtownia: <strong>{supplier_hello}</strong></p>
-  {delivery_block}
-  <table style="border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:14px">
-    <thead>
-      <tr style="background:#F1F5F9">
-        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:left">Pozycja</th>
-        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:center">Ilość</th>
-        <th style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right">Wartość orientacyjna</th>
-      </tr>
-    </thead>
-    <tbody>{rows_html}</tbody>
-    <tfoot>
-      <tr>
-        <td colspan="2" style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right;font-weight:700">
-          Łączna wartość orientacyjna
-        </td>
-        <td style="padding:10px 12px;border:1px solid #E2E8F0;text-align:right;font-weight:700">{_fmt_pln(subtotal)}</td>
-      </tr>
-    </tfoot>
-  </table>
-  <p>
-    Prosimy o potwierdzenie: <strong>dostępności produktów</strong>, ostatecznych cen netto
-    oraz <strong>terminu i formy dostawy</strong>.
-    Podane kwoty mają charakter orientacyjny (na podstawie aktualnego cennika) —
-    wiążące będą ceny potwierdzone przez Państwa.
-  </p>
-  {notes_html}
-  <p>{contact_block}</p>
-  <p style="margin-top:20px">
-    Z poważaniem,<br/>
-    <strong>{restaurant}</strong>
-  </p>
-  <p style="color:#94A3B8;font-size:12px;border-top:1px solid #E2E8F0;padding-top:12px;margin-top:20px">{footer}</p>
-</div>"""
-
-        email_text_lines = [
-            f"Szanowni Państwo ({supplier_hello}),",
-            "",
-            f"W imieniu restauracji {restaurant} przesyłamy do firmy {supplier_hello} "
-            f"zamówienie towaru (data: {today}) z prośbą o potwierdzenie realizacji.",
-            f"Hurtownia: {supplier_hello}",
-        ]
-        if delivery_text:
-            email_text_lines.append(delivery_text.strip())
-        email_text_lines += [
-            "",
-            "Zamawiane pozycje:",
-        ]
-        for i in items:
-            pname = i.get("matched_name") or i.get("product_name", "")
-            email_text_lines.append(
-                f"• {pname} — {_fmt_qty(float(i.get('quantity') or 0))} {i.get('unit', '')} "
-                f"(orient. {_fmt_pln(float(i.get('line_total') or 0))})"
-            )
-        email_text_lines += [
-            "",
-            f"Łączna wartość orientacyjna: {_fmt_pln(subtotal)}",
-            "",
-            "Prosimy o potwierdzenie dostępności, ostatecznych cen netto oraz terminu i formy dostawy.",
-            "Podane kwoty mają charakter orientacyjny — wiążące będą ceny potwierdzone przez Państwa.",
-        ]
-        if safe_notes:
-            email_text_lines += ["", f"Uwagi: {safe_notes}"]
-        if contact_block:
-            email_text_lines += ["", contact_block]
-        email_text_lines += ["", "Z poważaniem,", restaurant, "", footer]
-        email_text = "\n".join(email_text_lines)
-
-        sms_items = "; ".join(
-            f"{_fmt_qty(float(i.get('quantity') or 0))} {i.get('unit', '')} "
-            f"{(i.get('matched_name') or i.get('product_name') or '')}"
-            for i in items
-        )
-        sms_text = (
-            f"{restaurant} — zamówienie ({today}): {sms_items}. "
-            f"Orient. {_fmt_pln(subtotal)}. Prosimy o potwierdzenie dostępności i terminu dostawy."
-        )
-        if contact_phone:
-            sms_text += f" Kontakt: {contact_phone}."
-
-        messages.append({
-            "supplier_id": g.supplier_id or sid or None,
-            "supplier_name": supplier_hello,
-            "supplier_email": supplier_email,
-            "email_subject": f"Zamówienie towaru — {restaurant} → {supplier_hello} | {today}",
-            "email_html": email_html,
-            "email_text": email_text,
-            "email_body_text": email_text,
-            "sms_text": sms_text,
-            "subtotal_pln": subtotal,
-        })
-
-    return {"messages": messages, "profile": profile,
-            "profile_complete": bool(contact_email and contact_phone)}
-
-
-
-# --- Wysyłka e-mail przez Resend ---------------------------------------------
-
-@app.post("/api/orders/send-email")
-async def send_order_email(req: SendEmailRequest):
-    api_key = (req.api_key or _resend_api_key() or RESEND_API_KEY).strip()
-    from_email = (req.from_email or _resend_from_email() or RESEND_FROM_EMAIL).strip()
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Brak klucza Resend (RESEND_API_KEY). "
-                "Dodaj go w backend/.env i zrestartuj uvicorn (zmiana .env wymaga pełnego restartu)."
-            ),
-        )
-    if not req.to:
-        raise HTTPException(status_code=400, detail="Brak adresu odbiorcy (supplier email).")
-
-    # Treść: jeśli podano edytowalny body_text, budujemy z niego HTML (zachowując
-    # łamanie linii). W przeciwnym razie używamy gotowego HTML.
-    html = req.html
-    if req.body_text:
-        safe = (req.body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-        html = ("<div style=\"font-family:Arial,Helvetica,sans-serif;color:#0F172A;"
-                "white-space:pre-wrap;line-height:1.5\">" + safe.replace("\n", "<br>") + "</div>")
-    if not html:
-        raise HTTPException(status_code=400, detail="Brak treści wiadomości.")
-
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        profile = await get_restaurant_profile(client)
-        login_email = await _account_login_email(client)
-        payload = {
-            "from": f"Gastro Manager <{from_email}>",
-            "to": [req.to],
-            "subject": req.subject,
-            "html": html,
-        }
-        # reply_to = e-mail restauratora → odpowiedź hurtowni trafia do niego, nie do nas
-        reply_to = (profile.get("contact_email") or "").strip() or login_email
-        if reply_to:
-            payload["reply_to"] = reply_to
-        try:
-            r = await client.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Błąd połączenia z Resend: {e}") from e
-
-    if r.status_code >= 400:
-        detail = r.text
-        try:
-            detail = r.json().get("message", detail)
-        except Exception:
-            pass
-        raise HTTPException(status_code=502, detail=f"Resend odrzucił wysyłkę: {detail}")
-
-    data = r.json() if r.text else {}
-    return {"ok": True, "id": data.get("id"), "to": req.to}
+# Order email: backend/order_email_routes.py + order_email_format.py
 
 
 # --- Intencja głosowa Jarvisa: order_product ---------------------------------
@@ -11172,590 +10046,27 @@ async def _recompute_menu_availability(client: httpx.AsyncClient,
     return {"scanned": len(menu_rows), "changed": changed, "updates": updates}
 
 
-@app.post("/api/menu/recompute-availability")
-async def menu_recompute_availability():
-    """Ręczne przeliczenie POS Bottleneck Engine (blokowanie dań po brakach składników)."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        return await _recompute_menu_availability(client)
+def _availability_changed_count(result) -> int:
+    """Pełne _recompute_menu_availability zwraca dict; stare call-site'y oczekują int."""
+    if isinstance(result, dict):
+        if result.get("skipped"):
+            return 0
+        return int(result.get("changed") or 0)
+    try:
+        return int(result or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# CRUD głosowy: backend/voice_crud_routes.py (include_router)
+# Supplier intents: backend/supplier_intent_routes.py (include_router)
+# check-minimum-order: backend/supplier_min_order_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CRUD wykonawczy dla intencji głosowych.
+# Soft-delete helpers (shared) + Voice CRUD DISPATCH
+# Voice CRUD v2 exec: backend/voice_crud_v2_routes.py
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-class SetMenuPriceRequest(BaseModel):
-    dish_name: Optional[str] = None
-    dish_id: Optional[str] = None
-    new_price: float
-
-
-@app.post("/api/menu/set-price")
-async def set_menu_price(req: SetMenuPriceRequest):
-    """Zmienia cenę dania. Wymagany dish_id LUB dish_name (fuzzy-matched na backendzie)."""
-    if req.new_price is None or req.new_price < 0:
-        raise HTTPException(status_code=400, detail="Nieprawidłowa cena.")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        dish_id = req.dish_id
-        matched_name: Optional[str] = None
-        matched_score = 0.0
-        if not dish_id and req.dish_name:
-            rows = await sb_get(client, "menu_items",
-                                params={"select": "id,name", "is_active": "eq.true", "limit": "1000"}) or []
-            hit, score = _resolve_by_fuzzy(req.dish_name, rows)
-            if hit:
-                dish_id = hit["id"]
-                matched_name = hit["name"]
-                matched_score = score
-        if not dish_id:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dania (brak dish_id i fuzzy).")
-        try:
-            row = await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"},
-                                 {"price_pln": float(req.new_price)})
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
-        return {
-            "ok": True, "dish_id": dish_id, "new_price": float(req.new_price),
-            "matched_name": matched_name, "matched_score": round(matched_score, 1),
-            "row": row[0] if isinstance(row, list) and row else row,
-        }
-
-
-class SetRecipeIngredientRequest(BaseModel):
-    dish_name: Optional[str] = None
-    dish_id: Optional[str] = None
-    ingredient_name: str
-    quantity: float
-    unit: Optional[str] = None
-    mode: Literal["upsert", "edit_qty"] = "upsert"  # upsert = add or edit
-
-
-@app.post("/api/recipes/set-ingredient")
-async def set_recipe_ingredient(req: SetRecipeIngredientRequest):
-    """Dodaje LUB aktualizuje składnik receptury dania.
-    mode='upsert' → dodaje jeśli brak, aktualizuje qty/unit jeśli istnieje.
-    mode='edit_qty' → tylko aktualizuje qty (błąd 404 gdy brak)."""
-    if req.quantity is None or req.quantity < 0:
-        raise HTTPException(status_code=400, detail="Nieprawidłowa ilość.")
-    if not (req.ingredient_name or "").strip():
-        raise HTTPException(status_code=400, detail="Brak nazwy składnika.")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        dish_id = req.dish_id
-        matched_dish: Optional[str] = None
-        if not dish_id and req.dish_name:
-            rows = await sb_get(client, "menu_items",
-                                params={"select": "id,name", "is_active": "eq.true", "limit": "1000"}) or []
-            hit, _ = _resolve_by_fuzzy(req.dish_name, rows)
-            if hit:
-                dish_id = hit["id"]
-                matched_dish = hit["name"]
-        if not dish_id:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dania.")
-
-        # Fuzzy-match ingredient_name do istniejącego składnika w recepturze.
-        existing = await sb_get(client, "recipe_ingredients",
-                                params={"select": "id,ingredient_name,quantity,unit",
-                                        "menu_item_id": f"eq.{dish_id}"}) or []
-        hit, _score = _resolve_by_fuzzy(req.ingredient_name, existing,
-                                        key="ingredient_name", threshold=70)
-        unit = (req.unit or (hit or {}).get("unit") or "g").strip()
-
-        try:
-            if hit:
-                await sb_patch(client, "recipe_ingredients", {"id": f"eq.{hit['id']}"},
-                               {"quantity": float(req.quantity), "unit": unit})
-                action = "updated"
-            else:
-                if req.mode == "edit_qty":
-                    raise HTTPException(status_code=404, detail=f"Składnik '{req.ingredient_name}' nie występuje w recepturze.")
-                await sb_post(client, "recipe_ingredients", {
-                    "menu_item_id": dish_id,
-                    "ingredient_name": req.ingredient_name.strip(),
-                    "quantity": float(req.quantity),
-                    "unit": unit,
-                })
-                action = "created"
-        except HTTPException:
-            raise
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
-
-        # Po zmianie receptury: przelicz dostępność.
-        avail = await _recompute_menu_availability(client)
-        return {
-            "ok": True, "action": action, "dish_id": dish_id,
-            "matched_dish": matched_dish, "matched_ingredient": (hit or {}).get("ingredient_name"),
-            "quantity": float(req.quantity), "unit": unit,
-            "menu_availability": avail,
-        }
-
-
-class SetInventoryThresholdsRequest(BaseModel):
-    item_name: Optional[str] = None
-    inventory_id: Optional[str] = None
-    min_quantity: Optional[float] = None
-    current_quantity: Optional[float] = None
-    safety_buffer_percent: Optional[float] = None
-
-
-@app.post("/api/inventory/set-thresholds")
-async def set_inventory_thresholds(req: SetInventoryThresholdsRequest):
-    """Zmienia parametry produktu w magazynie (min_quantity, current_quantity, safety_buffer_percent)."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        inv_id = req.inventory_id
-        matched: Optional[str] = None
-        if not inv_id and req.item_name:
-            rows = await sb_get(client, "inventory_items",
-                                params={"select": "id,name", "limit": "5000"}) or []
-            hit, _ = _resolve_by_fuzzy(req.item_name, rows)
-            if hit:
-                inv_id = hit["id"]
-                matched = hit["name"]
-        if not inv_id:
-            raise HTTPException(status_code=404, detail="Nie znaleziono produktu w magazynie.")
-
-        updates: dict = {}
-        if req.min_quantity is not None:
-            updates["min_quantity"] = float(req.min_quantity)
-        if req.current_quantity is not None:
-            updates["quantity"] = float(req.current_quantity)
-        if req.safety_buffer_percent is not None:
-            updates["safety_buffer_percent"] = float(req.safety_buffer_percent)
-        if not updates:
-            raise HTTPException(status_code=400, detail="Brak parametrów do aktualizacji.")
-
-        try:
-            row = await sb_patch(client, "inventory_items", {"id": f"eq.{inv_id}"}, updates)
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Supabase: {e.response.text[:200]}") from e
-
-        # POS Bottleneck: przelicz dostępność jeżeli zmieniono current_quantity.
-        avail = None
-        if "quantity" in updates:
-            avail = await _recompute_menu_availability(client, changed_inventory_ids={inv_id})
-
-        return {
-            "ok": True, "inventory_id": inv_id, "matched_name": matched,
-            "updates": updates, "row": row[0] if isinstance(row, list) and row else row,
-            "menu_availability": avail,
-        }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SUPPLIER INTENTS — 5 endpointów dla intencji dostawców
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class FlipOrderRequest(BaseModel):
-    from_supplier: str
-    to_supplier: str
-    category: Optional[str] = None
-    items: Optional[list[dict]] = None  # opcjonalna lista {product_name, quantity, unit}
-
-
-@app.post("/api/suppliers/flip-order")
-async def supplier_flip_order(req: FlipOrderRequest):
-    """Przerzuca koszyk z jednego dostawcy do drugiego (fuzzy match po nazwach produktów).
-    Zwraca porównanie cen i sugerowany nowy koszyk u to_supplier."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
-        suppliers = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "500"}) or []
-        src, _ = _resolve_by_fuzzy(req.from_supplier, suppliers)
-        dst, _ = _resolve_by_fuzzy(req.to_supplier, suppliers)
-        if not src:
-            raise HTTPException(status_code=404, detail=f"Nie znaleziono dostawcy: {req.from_supplier}")
-        if not dst:
-            raise HTTPException(status_code=404, detail=f"Nie znaleziono dostawcy: {req.to_supplier}")
-
-        src_catalog = await sb_get(client, "supplier_catalog", params={
-            "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
-            "supplier_id": f"eq.{src['id']}",
-        }) or []
-        dst_catalog = await sb_get(client, "supplier_catalog", params={
-            "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
-            "supplier_id": f"eq.{dst['id']}",
-        }) or []
-
-        # Jeśli podano items — porównaj tylko te, w innym razie: cały koszyk jawny.
-        if req.items:
-            comparison = []
-            for it in req.items:
-                pname = (it.get("product_name") or "").strip()
-                qty = float(it.get("quantity") or 1)
-                src_hit, _ = _resolve_by_fuzzy(pname, src_catalog, key="name")
-                dst_hit, _ = _resolve_by_fuzzy(pname, dst_catalog, key="name")
-                comparison.append({
-                    "product_name": pname, "quantity": qty,
-                    "from": {"name": (src_hit or {}).get("name"),
-                             "price_pln": float((src_hit or {}).get("price_pln") or 0)} if src_hit else None,
-                    "to": {"name": (dst_hit or {}).get("name"),
-                           "price_pln": float((dst_hit or {}).get("price_pln") or 0)} if dst_hit else None,
-                    "matched_at_target": bool(dst_hit),
-                })
-        else:
-            # Cały jawny koszyk from_supplier → próbujemy zmapować na to_supplier.
-            comparison = []
-            for r in src_catalog:
-                if r.get("is_visible") is False:
-                    continue
-                dst_hit, _ = _resolve_by_fuzzy(r["name"], dst_catalog, key="name")
-                comparison.append({
-                    "product_name": r["name"], "quantity": 1,
-                    "from": {"name": r["name"], "price_pln": float(r.get("price_pln") or 0)},
-                    "to": ({"name": dst_hit["name"], "price_pln": float(dst_hit.get("price_pln") or 0)}
-                           if dst_hit else None),
-                    "matched_at_target": bool(dst_hit),
-                })
-
-        total_from = sum((c["from"] or {}).get("price_pln", 0) * c["quantity"] for c in comparison if c["from"])
-        total_to = sum((c["to"] or {}).get("price_pln", 0) * c["quantity"] for c in comparison if c["to"])
-        saving = total_from - total_to
-        matched = sum(1 for c in comparison if c["matched_at_target"])
-
-        return {
-            "from_supplier": {"id": src["id"], "name": src["name"]},
-            "to_supplier": {"id": dst["id"], "name": dst["name"]},
-            "category": req.category,
-            "items_matched": matched, "items_total": len(comparison),
-            "total_from_pln": round(total_from, 2),
-            "total_to_pln": round(total_to, 2),
-            "saving_pln": round(saving, 2),
-            "comparison": comparison,
-        }
-
-
-class BudgetCapOrderRequest(BaseModel):
-    max_budget: float
-    category: Optional[str] = None
-    supplier_id: Optional[str] = None
-
-
-@app.post("/api/suppliers/budget-cap-order")
-async def supplier_budget_cap_order(req: BudgetCapOrderRequest):
-    """Kompletuje zamówienie priorytetyzując najpilniejsze braki magazynowe (najniższy
-    stosunek quantity/min_quantity) do LIMITU KWOTOWEGO."""
-    if req.max_budget is None or req.max_budget <= 0:
-        raise HTTPException(status_code=400, detail="Nieprawidłowy budżet.")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
-        # 1) Ranking produktów magazynowych po pilności (im niższy stan / min, tym pilniej).
-        inv = await sb_get(client, "inventory_items", params={
-            "select": "id,name,quantity,min_quantity,safety_buffer_percent,unit",
-            "limit": "5000"
-        }) or []
-        prioritized = []
-        for r in inv:
-            q = float(r.get("quantity") or 0)
-            m = float(r.get("min_quantity") or 0)
-            sb = float(r.get("safety_buffer_percent") or 20) / 100.0
-            target = m * (1.0 + sb) if m > 0 else max(q * 1.5, 1.0)
-            deficit = max(0.0, target - q)
-            urgency = (q / m) if m > 0 else 999.0  # niższe = pilniejsze
-            prioritized.append({**r, "deficit": deficit, "urgency": urgency, "target": target})
-        prioritized = [p for p in prioritized if p["deficit"] > 0]
-        prioritized.sort(key=lambda x: x["urgency"])
-
-        # 2) Ceny — bierzemy najtańszą pozycję z supplier_catalog per produkt (fuzzy match).
-        cat_params = {"select": "id,supplier_id,name,price_pln,unit,volume_label,is_visible", "limit": "10000"}
-        if req.supplier_id:
-            cat_params["supplier_id"] = f"eq.{req.supplier_id}"
-        catalog = await sb_get(client, "supplier_catalog", params=cat_params) or []
-        catalog = [c for c in catalog if c.get("is_visible") is not False]
-
-        # 3) Wybieramy od najpilniejszych, aż wyczerpiemy budżet.
-        cart = []
-        spent = 0.0
-        for p in prioritized:
-            hit, _ = _resolve_by_fuzzy(p["name"], catalog, key="name", threshold=70)
-            if not hit:
-                continue
-            unit_price = float(hit.get("price_pln") or 0)
-            if unit_price <= 0:
-                continue
-            qty = p["deficit"]
-            line = qty * unit_price
-            if spent + line > req.max_budget:
-                # dorzuć tyle ile się zmieści
-                max_qty = max(0.0, (req.max_budget - spent) / unit_price)
-                if max_qty < 0.05:
-                    continue
-                qty = round(max_qty, 2)
-                line = qty * unit_price
-            cart.append({
-                "inventory_id": p["id"], "product_name": p["name"], "quantity": round(qty, 3),
-                "unit": p.get("unit"), "unit_price_pln": unit_price,
-                "line_total_pln": round(line, 2), "supplier_id": hit.get("supplier_id"),
-                "supplier_product_id": hit.get("id"), "urgency_score": round(p["urgency"], 3),
-            })
-            spent += line
-            if spent >= req.max_budget:
-                break
-
-        return {
-            "max_budget_pln": req.max_budget,
-            "category": req.category,
-            "items_count": len(cart),
-            "total_pln": round(spent, 2),
-            "remaining_pln": round(req.max_budget - spent, 2),
-            "cart": cart,
-        }
-
-
-@app.get("/api/suppliers/top-savings")
-async def supplier_top_savings(limit: int = 5):
-    """Zwraca TOP-{limit} największych rabatów procentowych — porównuje aktualną cenę
-    w `supplier_catalog` z historyczną (średnia z `pos_sales_log` / `cost_history` /
-    wcześniejsze wpisy tego samego produktu). Fallback: pokazuje najniższe ceny per produkt."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        catalog = await sb_get(client, "supplier_catalog", params={
-            "select": "id,supplier_id,name,price_pln,is_visible", "limit": "10000"
-        }) or []
-        catalog = [c for c in catalog if c.get("is_visible") is not False]
-        suppliers = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "500"}) or []
-        sup_by_id = {s["id"]: s["name"] for s in suppliers}
-
-        # Grupujemy po norm nazwy produktu; dla każdej grupy liczymy % różnicy vs. mediana.
-        groups: dict[str, list[dict]] = {}
-        for c in catalog:
-            k = _norm_pl(c.get("name") or "")
-            if not k:
-                continue
-            price = float(c.get("price_pln") or 0)
-            if price <= 0:
-                continue
-            groups.setdefault(k, []).append({**c, "_norm_name": k})
-
-        savings = []
-        for k, rows in groups.items():
-            if len(rows) < 2:
-                continue
-            prices = sorted(float(r["price_pln"]) for r in rows)
-            best = prices[0]
-            median = prices[len(prices) // 2]
-            if median <= 0:
-                continue
-            discount_pct = round((median - best) / median * 100.0, 1)
-            if discount_pct < 3:
-                continue  # nieznaczące
-            best_row = min(rows, key=lambda r: float(r["price_pln"]))
-            savings.append({
-                "product_name": best_row.get("name"),
-                "best_price_pln": best,
-                "median_price_pln": median,
-                "discount_pct": discount_pct,
-                "supplier_id": best_row.get("supplier_id"),
-                "supplier_name": sup_by_id.get(best_row.get("supplier_id"), "?"),
-                "compared_count": len(rows),
-            })
-        savings.sort(key=lambda x: -x["discount_pct"])
-        return {"top": savings[:limit], "compared_products": len(groups)}
-
-
-class PredictiveRestockRequest(BaseModel):
-    weeks_back: int = 4
-    day_of_week: Optional[int] = None  # 0=Mon..6=Sun. Domyślnie: dziś.
-    supplier_id: Optional[str] = None
-
-
-@app.post("/api/suppliers/predictive-restock")
-async def supplier_predictive_restock(req: PredictiveRestockRequest):
-    """Wylicza sugerowane zamówienie na podstawie sprzedaży POS z analogicznych dni tygodnia
-    z poprzednich `weeks_back` tygodni. Rozbija dania na składniki (recipe_ingredients)
-    i sumuje potrzebne surowce."""
-    await _guard_ai(needs_credits=False, needs_deal_hunter=True)
-    from datetime import datetime, timezone, timedelta
-    now = datetime.now(timezone.utc)
-    target_dow = req.day_of_week if req.day_of_week is not None else now.weekday()
-    weeks = max(1, min(int(req.weeks_back or 4), 12))
-
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        # Pobieramy sprzedaż z pos_sales_log od `weeks*7 + 3` dni wstecz.
-        since = (now - timedelta(days=weeks * 7 + 3)).isoformat()
-        sales = await sb_get(client, "pos_sales_log", params={
-            "select": "pos_external_id,pos_product_id,quantity_sold,processed_at",
-            "processed_at": f"gte.{since}", "limit": "20000",
-        }) or []
-
-        # Filtrujemy do analogicznych dni tygodnia (target_dow).
-        filtered = []
-        for s in sales:
-            try:
-                dt = datetime.fromisoformat(str(s["processed_at"]).replace("Z", "+00:00"))
-                if dt.weekday() == target_dow:
-                    filtered.append(s)
-            except Exception:
-                continue
-
-        # Mapujemy pos_external_id → menu_items.
-        menu_all = await sb_get(client, "menu_items",
-                                params={"select": "id,name,pos_id", "is_active": "eq.true", "limit": "5000"}) or []
-        by_pos = {m.get("pos_id"): m for m in menu_all if m.get("pos_id")}
-        by_id = {m["id"]: m for m in menu_all}
-
-        # Sumujemy sprzedaż per menu_item.
-        dish_totals: dict[str, float] = {}
-        for s in filtered:
-            mid = None
-            pos_ext = s.get("pos_external_id")
-            if pos_ext and pos_ext in by_pos:
-                mid = by_pos[pos_ext]["id"]
-            elif s.get("pos_product_id") in by_id:
-                mid = s["pos_product_id"]
-            if not mid:
-                continue
-            dish_totals[mid] = dish_totals.get(mid, 0.0) + float(s.get("quantity_sold") or 0)
-
-        # Średnia sprzedaż per dzień = suma / weeks.
-        forecasts = [{"menu_item_id": mid, "name": by_id[mid]["name"],
-                      "avg_daily_qty": round(qty / weeks, 2)}
-                     for mid, qty in dish_totals.items()]
-        forecasts.sort(key=lambda x: -x["avg_daily_qty"])
-
-        # Rozbicie na składniki (recipe_ingredients).
-        ri = await sb_get(client, "recipe_ingredients", params={"select": "menu_item_id,ingredient_name,quantity,unit",
-                                                                "limit": "20000"}) or []
-        by_menu: dict[str, list[dict]] = {}
-        for r in ri:
-            by_menu.setdefault(r["menu_item_id"], []).append(r)
-
-        # Sumujemy zapotrzebowanie na składniki (fuzzy do inventory dla obecnego stanu).
-        inv = await sb_get(client, "inventory_items",
-                           params={"select": "id,name,quantity,unit", "limit": "5000"}) or []
-        inv_norm = {_norm_pl(r["name"]): r for r in inv if r.get("name")}
-
-        needs: dict[str, dict] = {}  # klucz = norm ingredient_name
-        for f in forecasts:
-            for ing in by_menu.get(f["menu_item_id"], []):
-                key = _norm_pl(ing.get("ingredient_name") or "")
-                if not key:
-                    continue
-                need_qty = float(ing.get("quantity") or 0) * f["avg_daily_qty"]
-                if key not in needs:
-                    matched_inv = inv_norm.get(key)
-                    if not matched_inv:
-                        # fuzzy
-                        hit, _ = _fuzzy_match(key, list(inv_norm.keys()), threshold=70)
-                        matched_inv = inv_norm.get(hit) if hit else None
-                    needs[key] = {
-                        "ingredient_name": ing.get("ingredient_name"),
-                        "unit": ing.get("unit"),
-                        "forecast_qty": 0.0,
-                        "current_stock": float((matched_inv or {}).get("quantity") or 0),
-                        "inventory_id": (matched_inv or {}).get("id"),
-                        "inventory_name": (matched_inv or {}).get("name"),
-                    }
-                needs[key]["forecast_qty"] = round(needs[key]["forecast_qty"] + need_qty, 3)
-
-        # Sugerowane dorzucenia: forecast - current_stock (jeśli > 0).
-        suggestions = []
-        for n in needs.values():
-            gap = round(n["forecast_qty"] - n["current_stock"], 3)
-            if gap > 0:
-                suggestions.append({**n, "suggested_order_qty": gap})
-        suggestions.sort(key=lambda x: -x["suggested_order_qty"])
-
-        return {
-            "day_of_week": target_dow,
-            "weeks_analyzed": weeks,
-            "sales_records": len(filtered),
-            "dish_forecasts": forecasts[:15],
-            "ingredient_suggestions": suggestions[:30],
-        }
-
-
-class CheckMinOrderRequest(BaseModel):
-    supplier_id: Optional[str] = None
-    supplier_name: Optional[str] = None
-    current_cart_total: float = 0.0
-    category: Optional[str] = None
-
-
-@app.post("/api/suppliers/check-minimum-order")
-async def supplier_check_min_order(req: CheckMinOrderRequest):
-    """Sprawdza logistyczne minimum dostawy dostawcy (suppliers.min_order_value)
-    i sugeruje produkty do dorzucenia (sypkie / napoje) w celu darmowego transportu."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        await _check_ai_access(client, needs_credits=False, needs_deal_hunter=True)
-        # Graceful fallback: jeśli kolumna min_order_value nie istnieje w schemacie,
-        # wybieramy tylko id,name i przyjmujemy min_order_value=0.
-        has_min_col = True
-        select_cols = "id,name,min_order_value"
-        try:
-            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
-        except Exception:
-            has_min_col = False
-            select_cols = "id,name"
-
-        supplier = None
-        if req.supplier_id:
-            rows = await sb_get(client, "suppliers", params={
-                "select": select_cols, "id": f"eq.{req.supplier_id}", "limit": "1"}) or []
-            if rows:
-                supplier = rows[0]
-        if not supplier and req.supplier_name:
-            all_sup = await sb_get(client, "suppliers",
-                                   params={"select": select_cols, "limit": "500"}) or []
-            hit, _ = _resolve_by_fuzzy(req.supplier_name, all_sup)
-            supplier = hit
-        if not supplier:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-
-        min_val = float(supplier.get("min_order_value") or 0) if has_min_col else 0.0
-        gap = round(max(0.0, min_val - float(req.current_cart_total or 0)), 2)
-
-        suggestions = []
-        if gap > 0:
-            catalog = await sb_get(client, "supplier_catalog", params={
-                "select": "id,name,price_pln,variant,unit,volume_label,is_visible",
-                "supplier_id": f"eq.{supplier['id']}",
-            }) or []
-            # Preferuj produkty sypkie/napoje (proste dorzucki).
-            keywords = ["ryż", "mąka", "sól", "cukier", "olej", "woda", "napój", "sok",
-                        "makaron", "ocet", "cola", "sprite", "pepsi"]
-
-            def score(name: str) -> int:
-                nl = (name or "").lower()
-                return sum(1 for k in keywords if k in nl)
-
-            candidates = sorted(
-                [c for c in catalog if c.get("is_visible") is not False and float(c.get("price_pln") or 0) > 0],
-                key=lambda c: (-score(c["name"]), float(c["price_pln"] or 0))
-            )
-            running = 0.0
-            for c in candidates:
-                price = float(c.get("price_pln") or 0)
-                if running >= gap:
-                    break
-                suggestions.append({
-                    "id": c["id"], "name": c["name"], "price_pln": price,
-                    "unit": c.get("unit"), "variant": c.get("variant"),
-                })
-                running += price
-
-        warnings: list[str] = []
-        if not has_min_col:
-            warnings.append("Kolumna suppliers.min_order_value nie istnieje — "
-                            "uruchom migrację ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql. "
-                            "Zwracam min_order_value=0.")
-
-        return {
-            "supplier": {"id": supplier["id"], "name": supplier["name"], "min_order_value": min_val},
-            "current_cart_total": float(req.current_cart_total or 0),
-            "gap_to_min": gap,
-            "meets_minimum": gap == 0,
-            "suggestions": suggestions,
-            "warnings": warnings,
-        }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BULK / DELETE / AVAILABILITY / SCALING / NAWIGACJA — nowe intencje Voice CRUD v2
-# Soft-delete: menu_items.is_active (istnieje), suppliers/inventory_items.is_active
-# (wymaga migracji ADD_SOFT_DELETE.sql — fallback z ostrzeżeniem gdy brak kolumny).
-# ─────────────────────────────────────────────────────────────────────────────
-
-_ALL_ROWS = {"id": "not.is.null"}  # PostgREST: filtr dopasowujący WSZYSTKIE wiersze
-
 
 def _is_missing_column_error(exc: httpx.HTTPStatusError) -> bool:
     body = (exc.response.text or "").lower()
@@ -11773,393 +10084,6 @@ def _cat_matches(row_cat: str, wanted: str, threshold: int = 72) -> bool:
     return a == b or b in a or a in b or fuzz.WRatio(a, b) >= threshold
 
 
-async def _menu_id_from_payload(client, p):
-    """Zwraca (dish_id, dish_name) z payloadu; fallback ilike po nazwie."""
-    dish_id = p.get("dish_id")
-    name = p.get("dish_name_resolved") or p.get("dish_name")
-    if not dish_id and name:
-        rows = await sb_get(client, "menu_items",
-                            params={"select": "id,name", "name": f"ilike.%{name}%", "limit": "1"})
-        if rows:
-            dish_id, name = rows[0]["id"], rows[0]["name"]
-    return dish_id, name
-
-
-async def _exec_bulk_delete_menu(client):
-    """Trwałe usunięcie całego menu (bez soft-restore / „przywróć ukryte”)."""
-    rows = await sb_get(client, "menu_items", params={"select": "id", "limit": "10000"}) or []
-    n = len(rows)
-    if n:
-        ids = [r["id"] for r in rows if r.get("id")]
-        # Najpierw receptury (FK), potem dania.
-        for mid in ids:
-            try:
-                await sb_delete(client, "recipe_ingredients", {"menu_item_id": f"eq.{mid}"})
-            except httpx.HTTPStatusError:
-                pass
-        await sb_delete(client, "menu_items", _ALL_ROWS)
-    return {"ok": True, "action": "bulk_delete_menu", "affected": n, "restorable": False,
-            "message": f"Usunięto trwale {n} pozycji z menu. Przywrócenie nie jest możliwe."}
-
-
-async def _exec_restore_menu(client):
-    return {
-        "ok": False,
-        "action": "restore_last_deleted_menu",
-        "affected": 0,
-        "message": (
-            "Przywracanie usuniętego menu zostało wyłączone. "
-            "Usunięte dania nie wracają ze skanu ani komendy głosowej — dodaj je ponownie."
-        ),
-    }
-
-
-async def _exec_bulk_delete_suppliers(client):
-    rows = await sb_get(client, "suppliers", params={"select": "id"}) or []
-    n = len(rows)
-    if n:
-        # Usuń najpierw powiązane katalogi (na wypadek FK), potem dostawców — twarde usunięcie.
-        try:
-            await sb_delete(client, "supplier_catalog", _ALL_ROWS)
-        except httpx.HTTPStatusError:
-            pass
-        await sb_delete(client, "suppliers", _ALL_ROWS)
-    return {"ok": True, "action": "bulk_delete_suppliers", "affected": n,
-            "message": f"Usunięto {n} dostawców."}
-
-
-async def _exec_bulk_delete_inventory(client):
-    """Soft-delete: is_active=false (przywracalne). Fallback: twarde usunięcie gdy brak kolumny."""
-    try:
-        rows = await sb_get(client, "inventory_items", params={
-            "select": "id", "is_active": "eq.true", "limit": "10000",
-        }) or []
-    except httpx.HTTPStatusError:
-        rows = await sb_get(client, "inventory_items", params={"select": "id", "limit": "10000"}) or []
-        n = len(rows)
-        if n:
-            await sb_delete(client, "inventory_items", _ALL_ROWS)
-        blocked = await _recompute_menu_availability(client)
-        return {
-            "ok": True, "action": "bulk_delete_inventory", "affected": n,
-            "blocked_dishes": blocked, "restorable": False,
-            "message": (
-                f"Usunięto {n} produktów z magazynu (trwale — baza bez soft-delete). "
-                "Przywrócenie niemożliwe."
-            ),
-        }
-    n = len(rows)
-    if n:
-        await sb_patch(client, "inventory_items", {"is_active": "eq.true"}, {"is_active": False})
-    blocked = await _recompute_menu_availability(client)
-    return {
-        "ok": True, "action": "bulk_delete_inventory", "affected": n,
-        "blocked_dishes": blocked, "restorable": True,
-        "message": (
-            f"Usunięto {n} produktów z magazynu (ukryte). "
-            "Powiedz „przywróć magazyn”, aby cofnąć."
-        ),
-    }
-
-
-async def _exec_restore_inventory(client):
-    try:
-        rows = await sb_get(client, "inventory_items", params={
-            "select": "id", "is_active": "eq.false", "limit": "10000",
-        }) or []
-    except httpx.HTTPStatusError:
-        return {
-            "ok": False, "action": "restore_deleted_inventory", "affected": 0,
-            "message": (
-                "Nie da się przywrócić magazynu — produkty zostały usunięte trwale "
-                "(brak soft-delete). Dodaj je ręcznie lub zeskanuj fakturę."
-            ),
-        }
-    n = len(rows)
-    if n:
-        await sb_patch(client, "inventory_items", {"is_active": "eq.false"}, {"is_active": True})
-    return {
-        "ok": True, "action": "restore_deleted_inventory", "affected": n,
-        "message": (
-            f"Przywrócono {n} produktów magazynu."
-            if n else "Brak ukrytych produktów magazynu do przywrócenia."
-        ),
-    }
-
-
-async def _exec_bulk_reset_inventory(client):
-    rows = await sb_get(client, "inventory_items", params={"select": "id", "limit": "10000"}) or []
-    n = len(rows)
-    if n:
-        await sb_patch(client, "inventory_items", _ALL_ROWS, {"quantity": 0})
-    blocked = await _recompute_menu_availability(client)
-    return {"ok": True, "action": "bulk_reset_inventory", "affected": n, "blocked_dishes": blocked,
-            "message": f"Wyzerowano stany {n} produktów. Zablokowano {blocked} dań (brak składników)."}
-
-
-async def _exec_delete_menu_item(client, p):
-    dish_id, name = await _menu_id_from_payload(client, p)
-    if not dish_id:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}” w menu.")
-    try:
-        await sb_delete(client, "recipe_ingredients", {"menu_item_id": f"eq.{dish_id}"})
-    except httpx.HTTPStatusError:
-        pass
-    await sb_delete(client, "menu_items", {"id": f"eq.{dish_id}"})
-    return {"ok": True, "action": "delete_menu_item", "dish_id": dish_id, "restorable": False,
-            "message": f"Usunięto trwale danie: {name}."}
-
-
-async def _exec_delete_supplier(client, p):
-    sid = p.get("supplier_name_id") or p.get("supplier_id")
-    name = p.get("supplier_name_resolved") or p.get("supplier_name")
-    if not sid and name:
-        rows = await sb_get(client, "suppliers",
-                            params={"select": "id,name", "name": f"ilike.%{name}%", "limit": "1"})
-        if rows:
-            sid, name = rows[0]["id"], rows[0]["name"]
-    if not sid:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono dostawcy „{name or '?'}”.")
-    try:
-        await sb_delete(client, "supplier_catalog", {"supplier_id": f"eq.{sid}"})
-    except httpx.HTTPStatusError:
-        pass
-    await sb_delete(client, "suppliers", {"id": f"eq.{sid}"})
-    return {"ok": True, "action": "delete_supplier", "message": f"Usunięto dostawcę: {name}."}
-
-
-async def _exec_delete_inventory_item(client, p):
-    iid = p.get("inventory_id") or p.get("item_name_id")
-    name = p.get("item_name_resolved") or p.get("item_name")
-    if not iid and name:
-        rows = await sb_get(client, "inventory_items",
-                            params={"select": "id,name", "name": f"ilike.%{name}%", "limit": "1"})
-        if rows:
-            iid, name = rows[0]["id"], rows[0]["name"]
-    if not iid:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono produktu „{name or '?'}” w magazynie.")
-    # Soft-delete jak bulk_delete_inventory — umożliwia „przywróć magazyn”
-    try:
-        await sb_patch(client, "inventory_items", {"id": f"eq.{iid}"}, {"is_active": False})
-        return {
-            "ok": True, "action": "delete_inventory_item", "restorable": True,
-            "message": f"Usunięto produkt: {name} (ukryty — powiedz „przywróć magazyn”, aby cofnąć).",
-        }
-    except httpx.HTTPStatusError:
-        await sb_delete(client, "inventory_items", {"id": f"eq.{iid}"})
-        return {
-            "ok": True, "action": "delete_inventory_item", "restorable": False,
-            "message": f"Usunięto produkt: {name}.",
-        }
-
-
-async def _exec_toggle_availability(client, p):
-    dish_id, name = await _menu_id_from_payload(client, p)
-    if not dish_id:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
-    available = bool(p.get("available")) if p.get("available") is not None else False
-    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"}, {"is_available": available})
-    verb = "Włączono" if available else "Wyłączono (zablokowano)"
-    return {"ok": True, "action": "toggle_menu_item_availability", "available": available,
-            "message": f"{verb} danie: {name}."}
-
-
-async def _exec_bulk_menu_prices(client, p, mode: str):
-    """mode: 'pct' | 'fixed'."""
-    category = (p.get("category") or "").strip()
-    action = (p.get("action") or "increase").lower()
-    sign = -1 if action == "decrease" else 1
-    rows = await sb_get(client, "menu_items",
-                        params={"select": "id,name,price_pln,category", "is_active": "eq.true"}) or []
-    rows = [r for r in rows if _cat_matches(r.get("category", ""), category)]
-    if mode == "pct":
-        factor = 1 + sign * float(p.get("percentage") or 0) / 100.0
-    else:
-        delta = sign * float(p.get("amount") or 0)
-    changed = []
-    for r in rows:
-        old = float(r.get("price_pln") or 0)
-        new = old * factor if mode == "pct" else old + delta
-        new = round(max(0.0, new), 2)
-        if new == old:
-            continue
-        await sb_patch(client, "menu_items", {"id": f"eq.{r['id']}"}, {"price_pln": new})
-        changed.append({"name": r["name"], "old": old, "new": new})
-    detail = (f"{p.get('percentage')}%" if mode == "pct" else f"{p.get('amount')} zł")
-    verb = "Obniżono" if sign < 0 else "Podniesiono"
-    scope = f" w kategorii „{category}”" if category else ""
-    return {"ok": True, "action": f"bulk_edit_menu_prices_{mode}", "affected": len(changed),
-            "changes": changed[:20],
-            "message": f"{verb} ceny {len(changed)} dań{scope} o {detail}."}
-
-
-async def _exec_bulk_inventory_buffers(client, p):
-    category = (p.get("category") or "").strip()
-    action = (p.get("action") or "increase").lower()
-    sign = -1 if action == "decrease" else 1
-    pts = sign * float(p.get("percentage") or 0)
-    cat_id = None
-    if category:
-        cats = await sb_get(client, "inventory_categories", params={"select": "id,name"}) or []
-        hit, _ = _resolve_by_fuzzy(category, cats, threshold=65)
-        cat_id = hit["id"] if hit else None
-        if category and not cat_id:
-            return {"ok": False, "action": "bulk_edit_inventory_buffers", "affected": 0,
-                    "message": f"Nie rozpoznano kategorii magazynu „{category}”."}
-    params = {"select": "id,name,safety_buffer_percent,category_id"}
-    if cat_id:
-        params["category_id"] = f"eq.{cat_id}"
-    rows = await sb_get(client, "inventory_items", params=params) or []
-    changed = []
-    for r in rows:
-        old = float(r.get("safety_buffer_percent") or 20)
-        new = round(max(10.0, old + pts), 1)
-        if new == old:
-            continue
-        try:
-            await sb_patch(client, "inventory_items", {"id": f"eq.{r['id']}"},
-                           {"safety_buffer_percent": new})
-            changed.append({"name": r["name"], "old": old, "new": new})
-        except httpx.HTTPStatusError:
-            pass
-    verb = "Zmniejszono" if sign < 0 else "Zwiększono"
-    scope = f" (kategoria „{category}”)" if category else ""
-    return {"ok": True, "action": "bulk_edit_inventory_buffers", "affected": len(changed),
-            "changes": changed[:20],
-            "message": f"{verb} bufory bezpieczeństwa {len(changed)} produktów{scope} o {abs(pts)} p.p."}
-
-
-async def _exec_edit_menu_category(client, p):
-    dish_id, name = await _menu_id_from_payload(client, p)
-    new_cat = (p.get("new_category") or p.get("category") or "").strip()
-    if not dish_id:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
-    if not new_cat:
-        raise HTTPException(status_code=400, detail="Brak nowej kategorii.")
-    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"}, {"category": new_cat})
-    return {"ok": True, "action": "edit_menu_item_category", "dish_id": dish_id,
-            "message": f"Zmieniono kategorię „{name}” → „{new_cat}”."}
-
-
-async def _exec_rename_menu_item(client, p):
-    dish_id, name = await _menu_id_from_payload(client, p)
-    new_name = (p.get("new_name") or "").strip()
-    if not dish_id:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
-    if not new_name:
-        raise HTTPException(status_code=400, detail="Brak nowej nazwy dania.")
-    await sb_patch(client, "menu_items", {"id": f"eq.{dish_id}"}, {"name": new_name})
-    return {"ok": True, "action": "rename_menu_item", "dish_id": dish_id,
-            "message": f"Zmieniono nazwę „{name}” → „{new_name}”."}
-
-
-async def _exec_scale_recipe(client, p):
-    dish_id, name = await _menu_id_from_payload(client, p)
-    portions = float(p.get("portions") or 0)
-    if not dish_id:
-        raise HTTPException(status_code=404, detail=f"Nie znaleziono dania „{name or '?'}”.")
-    if portions <= 0:
-        raise HTTPException(status_code=400, detail="Podaj liczbę porcji > 0.")
-    ings = await sb_get(client, "recipe_ingredients", params={
-        "select": "ingredient_name,quantity,unit", "menu_item_id": f"eq.{dish_id}"}) or []
-    inv = await sb_get(client, "inventory_items", params={"select": "name,quantity,unit"}) or []
-    scaled = []
-    for ing in ings:
-        need = round(float(ing.get("quantity") or 0) * portions, 2)
-        hit, _ = _resolve_by_fuzzy(ing.get("ingredient_name"), inv, threshold=70)
-        have = float(hit.get("quantity")) if hit else None
-        scaled.append({
-            "ingredient_name": ing.get("ingredient_name"),
-            "unit": ing.get("unit"),
-            "per_portion": float(ing.get("quantity") or 0),
-            "total_needed": need,
-            "in_stock": have,
-            "enough": (have is not None and have >= need),
-        })
-    missing = [s["ingredient_name"] for s in scaled if not s["enough"]]
-    return {"ok": True, "action": "scale_recipe", "dish_id": dish_id, "dish_name": name,
-            "portions": portions, "ingredients": scaled, "missing": missing,
-            "message": f"Przeliczono „{name}” na {int(portions)} porcji "
-                       f"({len(scaled)} składników).{' Braki: ' + ', '.join(missing) if missing else ''}"}
-
-
-async def _recompute_menu_availability(client) -> int:
-    """POS Bottleneck: ustaw is_available=false dla dań, których składnik ma stan <= 0.
-    Zwraca liczbę zablokowanych dań. Best-effort."""
-    try:
-        recipes = await sb_get(client, "recipe_ingredients",
-                               params={"select": "menu_item_id,ingredient_name,quantity"}) or []
-        inv = await sb_get(client, "inventory_items", params={"select": "name,quantity"}) or []
-        blocked_ids: set[str] = set()
-        for r in recipes:
-            need = float(r.get("quantity") or 0)
-            hit, _ = _resolve_by_fuzzy(r.get("ingredient_name"), inv, threshold=70)
-            have = float(hit.get("quantity")) if hit else 0.0
-            if have < max(need, 0.0001):
-                if r.get("menu_item_id"):
-                    blocked_ids.add(r["menu_item_id"])
-        for mid in blocked_ids:
-            await sb_patch(client, "menu_items", {"id": f"eq.{mid}"}, {"is_available": False})
-        return len(blocked_ids)
-    except Exception:
-        return 0
-
-
-async def voice_dispatch_v2(intent: str, p: dict):
-    """Router nowych intencji v2. Zwraca dict wyniku lub None jeśli intencja nieobsługiwana tutaj."""
-    # Intencje UI — wykonywane na froncie, backend zwraca tylko potwierdzenie.
-    if intent == "navigate_screen":
-        return {"ok": True, "action": "navigate_screen", "screen": p.get("screen"),
-                "message": f"Nawigacja: {p.get('screen')}"}
-    if intent == "filter_ui_inventory":
-        return {"ok": True, "action": "filter_ui_inventory",
-                "category": p.get("category"), "supplier_id": p.get("supplier_id"),
-                "message": f"Filtr magazynu: {p.get('category')}"}
-    if intent == "filter_ui_menu_blocked":
-        return {"ok": True, "action": "filter_ui_menu_blocked", "message": "Filtr menu: zablokowane"}
-
-    async with httpx.AsyncClient(timeout=45.0, verify=_httpx_verify()) as client:
-        if intent == "bulk_delete_menu":
-            return await _exec_bulk_delete_menu(client)
-        if intent == "bulk_delete_suppliers":
-            return await _exec_bulk_delete_suppliers(client)
-        if intent == "bulk_reset_inventory":
-            return await _exec_bulk_reset_inventory(client)
-        if intent == "bulk_delete_inventory":
-            return await _exec_bulk_delete_inventory(client)
-        if intent == "restore_last_deleted_menu":
-            return await _exec_restore_menu(client)
-        if intent == "restore_deleted_inventory":
-            return await _exec_restore_inventory(client)
-        if intent == "delete_menu_item":
-            return await _exec_delete_menu_item(client, p)
-        if intent == "delete_supplier":
-            return await _exec_delete_supplier(client, p)
-        if intent == "delete_inventory_item":
-            return await _exec_delete_inventory_item(client, p)
-        if intent == "toggle_menu_item_availability":
-            return await _exec_toggle_availability(client, p)
-        if intent == "bulk_edit_menu_prices_percentage":
-            return await _exec_bulk_menu_prices(client, p, "pct")
-        if intent == "bulk_edit_menu_prices_fixed":
-            return await _exec_bulk_menu_prices(client, p, "fixed")
-        if intent == "bulk_edit_inventory_buffers":
-            return await _exec_bulk_inventory_buffers(client, p)
-        if intent == "edit_menu_item_category":
-            return await _exec_edit_menu_category(client, p)
-        if intent == "rename_menu_item":
-            return await _exec_rename_menu_item(client, p)
-        if intent == "scale_recipe":
-            return await _exec_scale_recipe(client, p)
-    return None
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Voice CRUD DISPATCH — wykonanie intencji z /api/voice/interpret za jednym zamachem.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class VoiceDispatchRequest(BaseModel):
     intent: Intent
     payload: dict
@@ -12169,6 +10093,7 @@ class VoiceDispatchRequest(BaseModel):
 async def voice_dispatch(req: VoiceDispatchRequest):
     """Wykonanie intencji rozpoznanej przez /api/voice/interpret. Router do właściwego
     endpointu wykonawczego. Frontend może użyć zamiast wywołania /interpret + drugiego call."""
+    require_tenant_account_key()
     p = req.payload or {}
     it = req.intent
     def _period_hint_from_payload(pl: dict) -> Optional[str]:
@@ -12320,15 +10245,18 @@ async def voice_dispatch(req: VoiceDispatchRequest):
                 )
             ),
         }
+    from voice_crud_v2_routes import voice_dispatch_v2
     v2 = await voice_dispatch_v2(it, p)
     if v2 is not None:
         return v2
     if it == "edit_menu_item_price":
+        from voice_crud_routes import SetMenuPriceRequest, set_menu_price
         return await set_menu_price(SetMenuPriceRequest(
             dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
             new_price=float(p.get("new_price") or 0),
         ))
     if it == "add_recipe_ingredient":
+        from voice_crud_routes import SetRecipeIngredientRequest, set_recipe_ingredient
         return await set_recipe_ingredient(SetRecipeIngredientRequest(
             dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
             ingredient_name=(p.get("ingredient_name") or p.get("ingredient_name_resolved") or "").strip(),
@@ -12337,6 +10265,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             mode="upsert",
         ))
     if it == "edit_recipe_ingredient_qty":
+        from voice_crud_routes import SetRecipeIngredientRequest, set_recipe_ingredient
         return await set_recipe_ingredient(SetRecipeIngredientRequest(
             dish_id=p.get("dish_id"), dish_name=p.get("dish_name") or p.get("dish_name_resolved"),
             ingredient_name=(p.get("ingredient_name") or p.get("ingredient_name_resolved") or "").strip(),
@@ -12345,6 +10274,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             mode="edit_qty",
         ))
     if it == "edit_inventory_item":
+        from voice_crud_routes import SetInventoryThresholdsRequest, set_inventory_thresholds
         return await set_inventory_thresholds(SetInventoryThresholdsRequest(
             inventory_id=p.get("inventory_id"),
             item_name=p.get("item_name") or p.get("item_name_resolved"),
@@ -12353,6 +10283,7 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             safety_buffer_percent=(float(p["safety_buffer_percent"]) if p.get("safety_buffer_percent") is not None else None),
         ))
     if it == "supplier_flip_order":
+        from supplier_intent_routes import FlipOrderRequest, supplier_flip_order
         return await supplier_flip_order(FlipOrderRequest(
             from_supplier=p.get("from_supplier") or "",
             to_supplier=p.get("to_supplier") or "",
@@ -12360,18 +10291,22 @@ async def voice_dispatch(req: VoiceDispatchRequest):
             items=p.get("items"),
         ))
     if it == "budget_cap_order":
+        from supplier_intent_routes import BudgetCapOrderRequest, supplier_budget_cap_order
         return await supplier_budget_cap_order(BudgetCapOrderRequest(
             max_budget=float(p.get("max_budget") or 0),
             category=p.get("category"),
             supplier_id=p.get("supplier_id"),
         ))
     if it == "compare_catalogs_top_savings":
+        from supplier_intent_routes import supplier_top_savings
         return await supplier_top_savings(limit=5)
     if it == "predictive_weekend_restock":
+        from supplier_intent_routes import PredictiveRestockRequest, supplier_predictive_restock
         return await supplier_predictive_restock(PredictiveRestockRequest(
             weeks_back=4, day_of_week=None, supplier_id=p.get("supplier_id"),
         ))
     if it == "check_minimum_order_value":
+        from supplier_min_order_routes import CheckMinOrderRequest, supplier_check_min_order
         return await supplier_check_min_order(CheckMinOrderRequest(
             supplier_id=p.get("supplier_id"),
             supplier_name=p.get("supplier_name") or p.get("supplier_name_resolved"),
@@ -12489,315 +10424,10 @@ async def voice_dispatch(req: VoiceDispatchRequest):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Migracja info — informacja dla FE o brakujących kolumnach/tabelach Supabase.
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Admin migration-status: backend/admin_routes.py (include_router)
 
-@app.get("/api/admin/migration-status")
-async def admin_migration_status(request: Request):
-    """Sprawdza czy migracja `ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql` została uruchomiona.
-    Zwraca listę brakujących kolumn/tabel i pełny SQL do wklejenia w Supabase SQL Editor."""
-    require_cron_secret(request)
-    async with httpx.AsyncClient(timeout=15.0, verify=_httpx_verify()) as client:
-        checks = {}
-        try:
-            await sb_get(client, "menu_items", params={"select": "is_available", "limit": "1"})
-            checks["menu_items.is_available"] = True
-        except Exception:
-            checks["menu_items.is_available"] = False
-        try:
-            await sb_get(client, "inventory_items", params={"select": "synonyms", "limit": "1"})
-            checks["inventory_items.synonyms"] = True
-        except Exception:
-            checks["inventory_items.synonyms"] = False
-        try:
-            await sb_get(client, "token_usage", params={"select": "id", "limit": "1"})
-            checks["token_usage table"] = True
-        except Exception:
-            checks["token_usage table"] = False
-        try:
-            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
-            checks["suppliers.min_order_value"] = True
-        except Exception:
-            checks["suppliers.min_order_value"] = False
-
-    all_ok = all(checks.values())
-    sql_path = Path(__file__).resolve().parent.parent / "supabase_migrations" / "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"
-    sql_content = sql_path.read_text(encoding="utf-8") if sql_path.exists() else ""
-    return {
-        "ok": all_ok,
-        "checks": checks,
-        "instructions": "Otwórz Supabase Dashboard → SQL Editor → New query → wklej poniższy SQL → Run." if not all_ok else "Wszystkie migracje uruchomione.",
-        "sql": sql_content if not all_ok else "",
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# AUTOMATYCZNE RAPORTY DOBOWE (End-of-Day Reports)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class CloseDayRequest(BaseModel):
-    date: Optional[str] = None           # YYYY-MM-DD; domyślnie dziś (UTC)
-    total_revenue: Optional[float] = None
-    total_waste_cost: Optional[float] = None
-    total_invoice_cost: Optional[float] = None
-
-
-def _week_of_month(d) -> int:
-    return min(5, (int(d.day) - 1) // 7 + 1)
-
-
-async def _sum_amount_for_day(client, table: str, day: str, extra: dict | None = None) -> float:
-    """Best-effort suma amount_pln z tabeli dla danego dnia (po created_at)."""
-    from datetime import date as _d, timedelta as _td
-    try:
-        next_day = (_d.fromisoformat(day) + _td(days=1)).isoformat()
-        params = [("select", "amount_pln"),
-                  ("created_at", f"gte.{day}T00:00:00"),
-                  ("created_at", f"lt.{next_day}T00:00:00")]
-        if extra:
-            for k, v in extra.items():
-                params.append((k, v))
-        rows = await sb_get(client, table, params=params) or []
-        return round(sum(float(r.get("amount_pln") or 0) for r in rows), 2)
-    except Exception:
-        return 0.0
-
-
-async def _generate_day_summary(httpx_c: httpx.AsyncClient,
-                                revenue: float, waste: float, invoice: float,
-                                day: str) -> tuple[str, dict]:
-    profit = round(revenue - waste - invoice, 2)
-    try:
-        client = _openai()
-        prompt = (
-            f"Przeanalizuj dzień pracy restauracji ({day}). "
-            f"Utarg: {revenue} zł, Straty (waste): {waste} zł, Koszty faktur: {invoice} zł, "
-            f"Zysk netto: {profit} zł. "
-            "Wygeneruj profesjonalne, dokładnie 3-zdaniowe podsumowanie managerskie po polsku: "
-            "co poszło dobrze, gdzie uciekły pieniądze i jedna konkretna rekomendacja na jutro."
-        )
-        resp = await client.chat.completions.create(
-            model=CHAT_MODEL, temperature=0.5,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/pos/close-day", model=CHAT_MODEL,
-            extras={"date": day},
-        )
-        return (resp.choices[0].message.content or "").strip(), billing
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"_generate_day_summary failed: {e}")
-        return (f"Utarg {revenue} zł, straty {waste} zł, koszty faktur {invoice} zł, "
-                f"zysk netto {profit} zł.", {"credits_deducted": 0})
-
-
-# Safety net: zapomniane „Zamknij dzień” — auto-domknięcie po ≥25h od poprzedniego raportu.
-DAILY_REPORT_AUTO_CLOSE_HOURS = 25
-
-
-def _parse_iso_dt(value) -> "datetime | None":
-    from datetime import datetime as _dt, timezone as _tz
-    if not value:
-        return None
-    try:
-        s = str(value).strip().replace("Z", "+00:00")
-        dt = _dt.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=_tz.utc)
-        return dt
-    except Exception:
-        return None
-
-
-async def _persist_daily_report(
-    client,
-    day: str,
-    *,
-    revenue: float | None = None,
-    waste: float | None = None,
-    invoice: float | None = None,
-    use_ai: bool = True,
-    auto_closed: bool = False,
-    allow_overwrite: bool = True,
-) -> tuple[dict | None, dict, str | None]:
-    """Agregacja + zapis daily_reports (wspólne dla ręcznego i auto zamknięcia).
-
-    Zwraca (record_or_none, billing, skip_reason). skip_reason='exists' gdy dzień
-    już zamknięty i allow_overwrite=False (auto-close — bez podwójnego liczenia).
-    """
-    from datetime import date as _date
-
-    d_obj = _date.fromisoformat(day)
-    if revenue is None:
-        revenue = await _sum_amount_for_day(client, "revenue_entries", day)
-    if invoice is None:
-        invoice = await _sum_amount_for_day(
-            client, "variable_cost_entries", day, {"type": "eq.materials"}
-        )
-    if waste is None:
-        waste = await _sum_amount_for_day(
-            client, "variable_cost_entries", day, {"type": "eq.waste"}
-        )
-
-    existing = await sb_get(
-        client, "daily_reports",
-        params={"select": "id", "date": f"eq.{day}", "limit": "1"},
-    )
-    if existing and not allow_overwrite:
-        return None, {"credits_deducted": 0}, "exists"
-
-    if use_ai:
-        summary, billing = await _generate_day_summary(client, revenue, waste, invoice, day)
-    else:
-        profit = round(float(revenue) - float(waste) - float(invoice), 2)
-        # Auto-close: bez GPT (nie spalaj kredytów w tle); treść jak fallback ręcznego zamknięcia.
-        summary = (
-            f"[Auto] Zamknięto automatycznie po {DAILY_REPORT_AUTO_CLOSE_HOURS}h od poprzedniego raportu. "
-            f"Utarg {revenue} zł, straty {waste} zł, koszty faktur {invoice} zł, zysk netto {profit} zł."
-        )
-        billing = {"credits_deducted": 0}
-        if auto_closed:
-            pass  # flaga tylko dla czytelności wywołań
-
-    record = {
-        "date": day,
-        "total_revenue": revenue,
-        "total_waste_cost": waste,
-        "total_invoice_cost": invoice,
-        "ai_summary": summary,
-        "year": d_obj.year,
-        "month": d_obj.month,
-        "week_of_month": _week_of_month(d_obj),
-    }
-    if existing:
-        await sb_patch(client, "daily_reports", {"date": f"eq.{day}"}, record)
-        record["id"] = existing[0]["id"]
-    else:
-        row = await sb_post(client, "daily_reports", record)
-        record["id"] = (row[0] if isinstance(row, list) else row).get("id")
-    return record, billing, None
-
-
-async def _auto_close_stale_daily_reports(client) -> list[str]:
-    """Domyka brakujące raporty dobowe, gdy od last close minęło ≥25h.
-
-    Trigger: GET /api/reports/daily (ładowanie Raportów / foreground refresh).
-    Zakres: dni od (ostatni_raport.date + 1) do wczoraj (UTC), bez nadpisywania istniejących.
-
-    TODO(POS): gdy POS będzie podłączony i stabilny — synchronizuj zamknięcie dnia
-    z wydrukiem raportu dobowego z kasy (przy print/close POS wciągaj P&L do rubryk).
-    Na razie tylko safety-net w aplikacji, bez integracji POS.
-    """
-    from datetime import datetime as _dt, timezone as _tz, date as _date, timedelta as _td
-
-    try:
-        rows = await sb_get(
-            client, "daily_reports",
-            params={"select": "date,created_at", "order": "date.desc", "limit": "1"},
-        ) or []
-    except httpx.HTTPStatusError:
-        return []
-
-    if not rows:
-        return []
-
-    last = rows[0]
-    last_date_s = str(last.get("date") or "")[:10]
-    closed_at = _parse_iso_dt(last.get("created_at"))
-    if not last_date_s or closed_at is None:
-        return []
-
-    now = _dt.now(_tz.utc)
-    hours_since = (now - closed_at).total_seconds() / 3600.0
-    if hours_since < DAILY_REPORT_AUTO_CLOSE_HOURS:
-        return []
-
-    try:
-        last_d = _date.fromisoformat(last_date_s)
-    except ValueError:
-        return []
-
-    yesterday = now.date() - _td(days=1)
-    closed_days: list[str] = []
-    d = last_d + _td(days=1)
-    # Ogranicz kaskadę (np. po dłuższej przerwie) — max 14 dni na jedno wywołanie.
-    while d <= yesterday and len(closed_days) < 14:
-        day_s = d.isoformat()
-        try:
-            rec, _billing, skip = await _persist_daily_report(
-                client, day_s, use_ai=False, auto_closed=True, allow_overwrite=False,
-            )
-            if rec and not skip:
-                closed_days.append(day_s)
-                logger.info(f"daily_reports auto-close: {day_s}")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"daily_reports auto-close failed for {day_s}: {e}")
-            break
-        d += _td(days=1)
-    return closed_days
-
-
-@app.post("/api/pos/close-day")
-async def pos_close_day(req: CloseDayRequest):
-    """Zamknięcie dnia: agreguje utarg/straty/koszty, generuje podsumowanie AI (GPT-4o-mini)
-    i zapisuje rekord do daily_reports (z rokiem/miesiącem/tygodniem miesiąca)."""
-    from datetime import datetime as _dt, timezone as _tz, date as _date
-    day = (req.date or _dt.now(_tz.utc).strftime("%Y-%m-%d")).strip()
-    try:
-        _date.fromisoformat(day)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Nieprawidłowa data (YYYY-MM-DD).")
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        try:
-            record, billing, _skip = await _persist_daily_report(
-                client,
-                day,
-                revenue=req.total_revenue,
-                waste=req.total_waste_cost,
-                invoice=req.total_invoice_cost,
-                use_ai=True,
-                allow_overwrite=True,
-            )
-        except httpx.HTTPStatusError as e:
-            if _is_missing_column_error(e) or "daily_reports" in (e.response.text or "").lower() \
-                    or e.response.status_code == 404:
-                return {"ok": False, "needs_migration": True,
-                        "message": "Uruchom migrację ADD_DAILY_REPORTS.sql w Supabase (tabela daily_reports)."}
-            raise HTTPException(status_code=502, detail=f"daily_reports: {e.response.text}") from e
-
-    revenue = float((record or {}).get("total_revenue") or 0)
-    waste = float((record or {}).get("total_waste_cost") or 0)
-    invoice = float((record or {}).get("total_invoice_cost") or 0)
-    return _with_billing({
-        "ok": True,
-        "id": (record or {}).get("id"),
-        "report": record,
-        "message": (
-            f"Raport dobowy {day} zapisany. "
-            f"Zysk netto: {round(revenue - waste - invoice, 2)} zł."
-        ),
-    }, billing)
-
-
-@app.get("/api/reports/daily")
-async def reports_daily():
-    """Zwraca wszystkie raporty dobowe (sort malejąco po dacie) do archiwum w UI.
-
-    Przy okazji uruchamia safety-net auto-close (≥25h od poprzedniego zamknięcia).
-    """
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        try:
-            auto_closed = await _auto_close_stale_daily_reports(client)
-            rows = await sb_get(client, "daily_reports",
-                                params={"select": "*", "order": "date.desc", "limit": "2000"})
-            out = {"ok": True, "reports": rows or []}
-            if auto_closed:
-                out["auto_closed_dates"] = auto_closed
-            return out
-        except httpx.HTTPStatusError:
-            return {"ok": True, "reports": [], "needs_migration": True}
-
+# Daily reports: backend/daily_report_routes.py (include_router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AI TREND & ANALYTICS ORCHESTRATOR — podsumowania i porównania okresowe
@@ -14724,40 +12354,7 @@ async def _run_compare_periods(
     }, billing)
 
 
-@app.post("/api/reports/analyze-period")
-async def reports_analyze_period(req: AnalyzePeriodRequest):
-    """Analiza P&L (przychód − koszty stałe/zmienne − straty) dla okresu / zaznaczonych okien."""
-    return await _run_period_analysis(
-        req.period_type,
-        req.limit_days,
-        period_hint=req.period_hint,
-        selected_periods=req.selected_periods,
-    )
-
-
-@app.post("/api/reports/compare-periods")
-async def reports_compare_periods(req: ComparePeriodsRequest):
-    """Porównanie dwóch okresów finansowych (np. maj vs czerwiec)."""
-    return await _run_compare_periods(req.period_1, req.period_2)
-
-
-class ComprehensiveReportRequest(BaseModel):
-    """Raport zbiorczy za dokładny zakres dat (YYYY-MM-DD)."""
-    from_date: str
-    to_date: str
-    top_n: Optional[int] = 10
-
-
-def _parse_ymd_or_400(raw: str, field: str) -> str:
-    s = (raw or "").strip()[:10]
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", s):
-        raise HTTPException(status_code=400, detail=f"Nieprawidłowa data {field} (oczekiwano YYYY-MM-DD).")
-    try:
-        from datetime import date as _date
-        _date.fromisoformat(s)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Nieprawidłowa data {field}.") from e
-    return s
+# Reports API: backend/reports_routes.py (include_router)
 
 
 async def _daily_profit_series(
@@ -14995,75 +12592,12 @@ async def _waste_ranking_for_window(
     }
 
 
-@app.post("/api/reports/comprehensive")
-async def reports_comprehensive(req: ComprehensiveReportRequest):
-    """Raport zbiorczy: P&L, rankingi dań, zużycie magazynu, straty, dni zysku/straty."""
-    from_d = _parse_ymd_or_400(req.from_date, "from_date")
-    to_d = _parse_ymd_or_400(req.to_date, "to_date")
-    if from_d > to_d:
-        raise HTTPException(status_code=400, detail="from_date nie może być późniejsza niż to_date.")
-    try:
-        top_n = max(1, min(int(req.top_n or 10), 30))
-    except (TypeError, ValueError):
-        top_n = 10
-
-    since_iso = f"{from_d}T00:00:00Z"
-    until_iso = f"{to_d}T23:59:59Z"
-    from datetime import date as _date
-    days = max(1, (_date.fromisoformat(to_d) - _date.fromisoformat(from_d)).days + 1)
-
-    async with httpx.AsyncClient(timeout=120.0, verify=_httpx_verify()) as client:
-        pnl = await _compute_true_pnl(client, from_d, to_d)
-        menu = await _aggregate_menu_sales(
-            client, days, since_iso=since_iso, until_iso=until_iso,
-        )
-        menu_sorted_best = sorted(
-            menu, key=lambda r: (float(r.get("qty_sold") or 0), float(r.get("revenue_pln") or 0)), reverse=True,
-        )
-        menu_with_sales = [r for r in menu if float(r.get("qty_sold") or 0) > 0]
-        menu_sorted_worst = sorted(
-            menu_with_sales,
-            key=lambda r: (float(r.get("qty_sold") or 0), float(r.get("revenue_pln") or 0)),
-        )
-        inventory_top = await _inventory_usage_for_window(
-            client, since_iso, until_iso, top_n=top_n,
-        )
-        waste = await _waste_ranking_for_window(
-            client, since_iso, until_iso, top_n=top_n,
-        )
-        daily = await _daily_profit_series(client, from_d, to_d)
-
-    best_days = sorted(daily, key=lambda r: float(r.get("net_pln") or 0), reverse=True)[:top_n]
-    worst_days = sorted(daily, key=lambda r: float(r.get("net_pln") or 0))[:top_n]
-
-    return {
-        "ok": True,
-        "from_date": from_d,
-        "to_date": to_d,
-        "period_label": f"{from_d} – {to_d}",
-        "top_n": top_n,
-        "pnl": pnl,
-        "top_dishes": menu_sorted_best[:top_n],
-        "worst_dishes": menu_sorted_worst[:top_n],
-        "inventory_usage_top": inventory_top,
-        "waste": waste,
-        "daily_profits": daily,
-        "best_days": best_days,
-        "worst_days": worst_days,
-    }
+# Comprehensive report endpoint: backend/reports_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Subskrypcje i Portfel Kredytowy — API
+# Subskrypcje i Portfel Kredytowy — helpers (endpointy: subscription_routes.py)
 # ─────────────────────────────────────────────────────────────────────────────
-
-class TopupRequest(BaseModel):
-    package: Literal["small", "medium", "large"]
-
-
-class SubscribeRequest(BaseModel):
-    tier_level: int
-
 
 def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
     tier = int(sub.get("tier_level") or 0)
@@ -15175,120 +12709,12 @@ def _aggregate_credit_history(items: list[dict], *, window_sec: int = 150) -> li
     return merged
 
 
-@app.get("/api/subscription/usage-history")
-async def subscription_usage_history(limit: int = 500):
-    """Historia zużycia kredytów AI (token_usage), najnowsze wpisy pierwsze.
-    Wiele wywołań LLM z jednej akcji użytkownika jest scalanych w jeden wiersz."""
-    import math
-    # Pobierz więcej surowych wierszy, by po agregacji nadal mieć sensowny limit.
-    cap = max(1, min(int(limit), 1000))
-    raw_cap = min(3000, max(cap * 4, cap))
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            rows = await sb_get(client, "token_usage", params=[
-                ("select", "id,endpoint,model,prompt_tokens,completion_tokens,total_tokens,cost_usd,cost_pln,extras,created_at"),
-                ("order", "created_at.desc"),
-                ("limit", str(raw_cap)),
-            ])
-        except httpx.HTTPStatusError:
-            return {
-                "ok": False,
-                "needs_migration": True,
-                "items": [],
-                "count": 0,
-                "message": "Brak tabeli token_usage. Uruchom migrację ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql w Supabase.",
-            }
-        items = []
-        for r in rows or []:
-            ex = r.get("extras") or {}
-            if not isinstance(ex, dict):
-                ex = {}
-            credits = ex.get("credits_charged")
-            if credits is None:
-                credits = int(math.ceil(float(r.get("cost_pln") or 0) * 100))
-            else:
-                credits = int(credits)
-            items.append({
-                "id": r.get("id"),
-                "endpoint": r.get("endpoint") or "",
-                "model": r.get("model") or "",
-                "credits": credits,
-                "cost_pln": float(r.get("cost_pln") or 0),
-                "created_at": r.get("created_at"),
-                "extras": ex,
-            })
-        aggregated = _aggregate_credit_history(items)[:cap]
-        return {"ok": True, "items": aggregated, "count": len(aggregated)}
-
-
-@app.get("/api/subscription")
-async def get_subscription():
-    """Zwraca stan portfela, plan, listę funkcji (z blokadami) i pakiety doładowań."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        try:
-            sub = await _get_subscription(client)
-        except httpx.HTTPStatusError:
-            return {"ok": False, "needs_migration": True,
-                    "message": "Brak tabeli subscriptions. Uruchom migrację ADD_SUBSCRIPTIONS.sql w Supabase."}
-        view = _subscription_view(sub)
-        view["ok"] = True
-        return view
-
-
-@app.post("/api/subscription/topup")
-async def subscription_topup(req: TopupRequest):
-    """MOCK doładowanie — tylko gdy ALLOW_MOCK_BILLING=true. Produkcyjnie: Stripe Checkout."""
-    if os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
-        raise HTTPException(
-            status_code=400,
-            detail="Płatności MOCK wyłączone. Użyj POST /api/billing/create-checkout-session.",
-        )
-    pkg = TOPUP_PACKAGES[req.package]
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        sub = await _ensure_subscription(client)
-        new_bal = int(sub.get("credits_balance") or 0) + pkg["credits"]
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"},
-                       {"credits_balance": new_bal})
-        sub["credits_balance"] = new_bal
-        view = _subscription_view(sub, message=f"Doładowano {pkg['label']} za {pkg['price_pln']} zł (MOCK).")
-        view["ok"] = True
-        return view
-
-
-@app.post("/api/subscription/subscribe")
-async def subscription_subscribe(req: SubscribeRequest):
-    """MOCK subskrypcja — tylko gdy ALLOW_MOCK_BILLING=true. Produkcyjnie: Stripe Checkout."""
-    from datetime import datetime, timezone, timedelta
-    if os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
-        raise HTTPException(
-            status_code=400,
-            detail="Płatności MOCK wyłączone. Użyj POST /api/billing/create-checkout-session.",
-        )
-    if req.tier_level not in (1, 2):
-        raise HTTPException(status_code=400, detail="Nieprawidłowy tier (dozwolone: 1 lub 2).")
-    cfg = TIER_CONFIG[req.tier_level]
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        sub = await _ensure_subscription(client)
-        grant = cfg["monthly_grant"]
-        new_bal = int(sub.get("credits_balance") or 0) + grant
-        cpe = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-        upd = {"tier_level": req.tier_level, "credits_balance": new_bal,
-               "status": "active", "current_period_end": cpe}
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"}, upd)
-        view = _subscription_view({**sub, **upd},
-                                  message=f"Aktywowano plan {cfg['name']} (+{grant} kredytów). MOCK.")
-        view["ok"] = True
-        return view
+# Subscription API: backend/subscription_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stripe Connect Express — onboarding dystrybutorów (panel WWW)
+# Stripe Connect — helpers (endpointy: stripe_connect_routes.py)
 # ─────────────────────────────────────────────────────────────────────────────
-
-class StripeConnectRequest(BaseModel):
-    producer_id: str
-    email: Optional[str] = None
-
 
 async def _auth_user_id_from_request(request: Request) -> Optional[str]:
     """Supabase Auth user id z Bearer JWT (panel WWW / apka)."""
@@ -15312,167 +12738,7 @@ async def _auth_user_id_from_request(request: Request) -> Optional[str]:
     return None
 
 
-async def _run_stripe_connect_onboard(pid: str, *, require_owner_uid: Optional[str]) -> dict:
-    from billing_stripe import stripe_configured
-    from stripe_connect import start_connect_onboarding
-
-    if not stripe_configured():
-        raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
-    pid = (pid or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="Brak producer_id")
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "local_producers", params={
-            "select": "id,auth_user_id,email,company_name,stripe_connect_id,stripe_account_id",
-            "id": f"eq.{pid}",
-            "limit": "1",
-        })
-        if not rows:
-            raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
-        owner = (rows[0].get("auth_user_id") or "").strip()
-        if require_owner_uid is not None:
-            if not require_owner_uid:
-                raise HTTPException(status_code=401, detail="Zaloguj się (Bearer JWT)")
-            if owner and owner != require_owner_uid:
-                raise HTTPException(status_code=403, detail="To nie jest Twój profil dystrybutora")
-        try:
-            return await start_connect_onboarding(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                producer_id=pid,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            logger.exception("stripe connect onboard failed")
-            raise HTTPException(status_code=502, detail=str(e)[:300])
-
-
-@app.post("/api/stripe/connect")
-async def stripe_connect_onboard_post(request: Request, body: StripeConnectRequest):
-    """
-    Tworzy Stripe Express (PL) + Account Link onboarding.
-    Panel WWW: POST JSON { producer_id } z Bearer JWT właściciela.
-    """
-    uid = await _auth_user_id_from_request(request)
-    return await _run_stripe_connect_onboard(body.producer_id, require_owner_uid=uid)
-
-
-@app.get("/api/stripe/connect")
-async def stripe_connect_onboard_get(
-    producer_id: str,
-    refresh: Optional[int] = None,
-    token: Optional[str] = None,
-):
-    """Refresh URL z Stripe Account Link — tylko z HMAC z refresh_url."""
-    from fastapi.responses import RedirectResponse
-    from stripe_connect import verify_connect_refresh_token
-    if not verify_connect_refresh_token(producer_id, token):
-        raise HTTPException(status_code=401, detail="Brak tokenu odświeżenia Connect.")
-    result = await _run_stripe_connect_onboard(producer_id, require_owner_uid=None)
-    if result.get("url"):
-        return RedirectResponse(url=result["url"], status_code=303)
-    return result
-
-
-@app.get("/api/stripe/connect/callback")
-async def stripe_connect_callback(
-    producer_id: Optional[str] = None,
-    account_id: Optional[str] = None,
-):
-    """
-    Return URL po onboardingu Stripe — pobiera acct_... i zapisuje stripe_connect_id.
-    """
-    from fastapi.responses import RedirectResponse, HTMLResponse
-    from stripe_connect import sync_connect_account_to_producer, connect_www_success_url
-    import html as html_lib
-
-    pid = (producer_id or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="Brak producer_id")
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        try:
-            synced = await sync_connect_account_to_producer(
-                client=client,
-                sb_get=sb_get,
-                sb_patch=sb_patch,
-                producer_id=pid,
-                account_id=(account_id or "").strip() or None,
-            )
-        except Exception as e:
-            logger.exception("stripe connect callback failed")
-            return HTMLResponse(
-                content=(
-                    "<html><body style='font-family:sans-serif;padding:2rem'>"
-                    "<h1>Stripe Connect — błąd</h1>"
-                    f"<p>{html_lib.escape(str(e)[:300])}</p>"
-                    "</body></html>"
-                ),
-                status_code=502,
-            )
-
-    success = connect_www_success_url()
-    if success.startswith("http"):
-        success = assert_safe_redirect_url(success)
-        sep = "&" if "?" in success else "?"
-        return RedirectResponse(
-            url=f"{success}{sep}producer_id={pid}&stripe_connect_id={synced.get('stripe_connect_id','')}",
-            status_code=303,
-        )
-    return {
-        "ok": True,
-        "message": "Konto Stripe Connect zapisane. Możesz wrócić do panelu WWW.",
-        **synced,
-    }
-
-
-@app.get("/api/stripe/connect/done")
-async def stripe_connect_done(
-    producer_id: Optional[str] = None,
-    stripe_connect_id: Optional[str] = None,
-):
-    """Prosta strona sukcesu (gdy brak STRIPE_CONNECT_WWW_SUCCESS_URL)."""
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(
-        content=(
-            "<html><body style='font-family:sans-serif;padding:2rem'>"
-            "<h1>Stripe połączony</h1>"
-            f"<p>Dystrybutor: <code>{producer_id or '—'}</code></p>"
-            f"<p>Konto: <code>{stripe_connect_id or '—'}</code></p>"
-            "<p>Produkty będą widoczne dla restauratorów po zatwierdzeniu profilu.</p>"
-            "</body></html>"
-        )
-    )
-
-
-@app.get("/api/stripe/connect/status")
-async def stripe_connect_status(producer_id: str, request: Request):
-    """Status Connect dystrybutora (panel WWW)."""
-    pid = (producer_id or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="Brak producer_id")
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "local_producers", params={
-            "select": "id,stripe_connect_id,stripe_account_id,payouts_enabled,stripe_onboarding_complete",
-            "id": f"eq.{pid}",
-            "limit": "1",
-        })
-    if not rows:
-        raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
-    p = rows[0]
-    from stripe_connect import producer_connect_id
-    acct = producer_connect_id(p)
-    return {
-        "ok": True,
-        "producer_id": pid,
-        "stripe_connect_id": acct or None,
-        "connected": bool(acct),
-        "payouts_enabled": bool(p.get("payouts_enabled")),
-        "stripe_onboarding_complete": bool(p.get("stripe_onboarding_complete")),
-    }
+# Stripe Connect endpoints: backend/stripe_connect_routes.py (include_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16597,152 +13863,7 @@ async def producer_order_furgonetka_label(order_id: str, request: Request):
     )
 
 
-@app.post("/api/subscription/resign")
-async def subscription_resign():
-    """Rezygnacja z subskrypcji — natychmiast Tier 0 Free, bez ponownego pakietu 100 kredytów."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        sub = await _ensure_subscription(client)
-        upd = {"tier_level": 0, "status": "active", "current_period_end": None, "free_starter_claimed": True}
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"}, upd)
-        view = _subscription_view({**sub, **upd},
-                                  message=f"Przełączono na plan Free. Saldo: {sub.get('credits_balance')} kredytów "
-                                          f"(bez ponownego pakietu startowego).")
-        view["ok"] = True
-        return view
+# Subscription resign/cancel: backend/subscription_routes.py (include_router)
 
 
-@app.post("/api/subscription/cancel")
-async def subscription_cancel():
-    """Anulowanie — brak dalszych doładowań; kredyty i tier zostają do końca okresu."""
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as client:
-        sub = await _ensure_subscription(client)
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"},
-                       {"status": "canceled"})
-        view = _subscription_view({**sub, "status": "canceled"},
-                                  message="Subskrypcja anulowana. Kredyty i plan pozostają do końca "
-                                          "bieżącego okresu, bez kolejnych doładowań.")
-        view["ok"] = True
-        return view
-
-
-@app.get("/api/suppliers/{supplier_id}/catalog")
-async def get_supplier_catalog(supplier_id: str):
-    """Pełny katalog dostawcy dla Łowcy (W menu + poza menu).
-
-    in_menu = is_visible OR fuzzy match do składników z receptur menu użytkownika.
-    """
-    sid = (supplier_id or "").strip()
-    if not sid:
-        raise HTTPException(status_code=400, detail="Brak supplier_id.")
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        sup_rows = await sb_get(
-            client, "suppliers",
-            params={"select": "id,name,email,min_order_value", "id": f"eq.{sid}", "limit": "1"},
-        ) or []
-        if not sup_rows:
-            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
-        sup = sup_rows[0]
-        try:
-            rows = await sb_get(client, "supplier_catalog", params={
-                "select": "id,name,variant,unit,price_pln,is_visible,volume_label,sort_order",
-                "supplier_id": f"eq.{sid}",
-                "order": "name.asc",
-                "limit": "2000",
-            }) or []
-        except httpx.HTTPStatusError:
-            rows = await sb_get(client, "supplier_catalog", params={
-                "select": "id,name,variant,unit,price_pln,volume_label,sort_order",
-                "supplier_id": f"eq.{sid}",
-                "order": "name.asc",
-                "limit": "2000",
-            }) or []
-
-        menu_ings: list[str] = []
-        try:
-            # Składniki z receptur menu — do tagu „W menu”
-            menu_items = await sb_get(client, "menu_items", params={
-                "select": "id", "is_active": "eq.true", "limit": "500",
-            }) or []
-            menu_ids = [m["id"] for m in menu_items if m.get("id")]
-            if menu_ids:
-                # PostgREST: in.(id1,id2,…)
-                chunk = menu_ids[:80]
-                ing_rows = await sb_get(client, "recipe_ingredients", params={
-                    "select": "ingredient_name",
-                    "menu_item_id": f"in.({','.join(chunk)})",
-                    "limit": "3000",
-                }) or []
-                menu_ings = [
-                    str(r.get("ingredient_name") or "").strip()
-                    for r in ing_rows
-                    if str(r.get("ingredient_name") or "").strip()
-                ]
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"get_supplier_catalog menu ingredients: {e}")
-
-        products = []
-        for r in rows:
-            name = (r.get("name") or "").strip()
-            if not name:
-                continue
-            try:
-                price = float(r.get("price_pln") or 0)
-            except (TypeError, ValueError):
-                price = 0.0
-            visible = r.get("is_visible")
-            in_menu = visible is not False
-            if visible is False and menu_ings:
-                # Fuzzy jak na ekranie Dostawcy
-                try:
-                    from rapidfuzz import fuzz as _rf
-                    nn = _norm_pl(name)
-                    in_menu = any(
-                        _rf.token_set_ratio(nn, _norm_pl(ing)) >= 72
-                        for ing in menu_ings
-                    )
-                except Exception:
-                    in_menu = False
-            elif visible is None:
-                in_menu = True
-            products.append({
-                "id": r.get("id"),
-                "name": name,
-                "variant": r.get("variant"),
-                "unit": r.get("unit") or "szt",
-                "price_pln": price,
-                "volume_label": r.get("volume_label"),
-                "is_visible": visible if visible is not None else True,
-                "in_menu": bool(in_menu),
-            })
-        # W menu najpierw, potem poza menu; w grupie A-Z
-        products.sort(key=lambda p: (0 if p["in_menu"] else 1, _norm_pl(p["name"])))
-        return {
-            "ok": True,
-            "supplier_id": sid,
-            "supplier_name": (sup.get("name") or "").strip() or "Dostawca",
-            "supplier_email": (sup.get("email") or "").strip() or None,
-            "min_order_value": float(sup.get("min_order_value") or 0),
-            "products": products,
-            "count": len(products),
-            "in_menu_count": sum(1 for p in products if p["in_menu"]),
-            "extra_count": sum(1 for p in products if not p["in_menu"]),
-        }
-
-
-@app.post("/api/suppliers/{supplier_id}/refresh-catalog-visibility")
-async def refresh_catalog_visibility(supplier_id: str):
-    """Ponownie przelicza is_visible wg MENU/receptur (bez magazynu)."""
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
-        rows = await sb_get(client, "supplier_catalog", params={
-            "select": "id,name,price_pln,unit,volume_label,variant",
-            "supplier_id": f"eq.{supplier_id}",
-        })
-        if not rows:
-            return {"ok": True, "updated": 0, "message": "Pusty katalog."}
-        products = [
-            {"product_name": r["name"], "price_netto": float(r.get("price_pln") or 0),
-             "unit": r.get("unit") or "szt", "volume_label": r.get("volume_label") or ""}
-            for r in rows
-        ]
-        result = await _process_offer(client, supplier_id, {"products": products})
-        return {"ok": True, "updated": len(rows), **result}
+# Supplier catalog view: backend/supplier_catalog_view_routes.py (include_router)

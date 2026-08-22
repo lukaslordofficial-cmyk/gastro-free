@@ -15,7 +15,11 @@ import * as Linking from 'expo-linking';
 import { router } from 'expo-router';
 import { Check, Copy, Landmark, Pencil, X } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
-import { POLISH_BANK_LOGINS } from '@/lib/polishBankLogins';
+import {
+  POLISH_BANK_LOGINS,
+  bankNeedsAccountChoice,
+  type PolishBankLogin,
+} from '@/lib/polishBankLogins';
 import { buildManualPayCopyRows, type ManualPayCopyRow } from '@/lib/manualPayCopyRows';
 import { buildManualOrderTitle } from '@/lib/manualOrderTitle';
 import {
@@ -25,11 +29,11 @@ import {
 import { DS } from '@/constants/premiumTheme';
 import { manualPayStyles as styles } from '@/components/dealHunter/manualBankPaymentStyles';
 import { BankLogoBadge } from '@/components/dealHunter/BankLogoBadge';
+import { BankAccountTypeSheet } from '@/components/dealHunter/BankAccountTypeSheet';
 
 export type ManualPaymentOrder = {
   supplierId: string | null;
   supplierName: string;
-  /** Ignorowane — tytuł budowany z profilu restauracji. */
   orderTitle?: string;
   totalPln: number;
 };
@@ -64,6 +68,7 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
   const [restaurant, setRestaurant] = useState<RestaurantProfile | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [accountBank, setAccountBank] = useState<PolishBankLogin | null>(null);
 
   useEffect(() => {
     if (!visible || !order) {
@@ -71,6 +76,7 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
       setRestaurant(null);
       setCopiedKey(null);
       setToast(null);
+      setAccountBank(null);
       return;
     }
     let cancelled = false;
@@ -156,20 +162,28 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
     [showToast],
   );
 
-  const openBank = useCallback(
+  const openBankUrl = useCallback(
     async (url: string, bankName: string) => {
       try {
-        const ok = await Linking.canOpenURL(url);
-        if (!ok) {
-          showToast(`Nie udało się otworzyć ${bankName}`);
-          return;
-        }
-        await Linking.openURL(url);
+        const normalized = url.startsWith('http') ? url : `https://${url}`;
+        await Linking.openURL(normalized);
+        showToast(`Otwieram ${bankName}…`);
       } catch {
         showToast(`Nie udało się otworzyć ${bankName}`);
       }
     },
     [showToast],
+  );
+
+  const onBankPress = useCallback(
+    (bank: PolishBankLogin) => {
+      if (bankNeedsAccountChoice(bank)) {
+        setAccountBank(bank);
+        return;
+      }
+      void openBankUrl(bank.loginUrl, bank.name);
+    },
+    [openBankUrl],
   );
 
   const goEditProfile = useCallback(() => {
@@ -208,8 +222,8 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
           </TouchableOpacity>
 
           <Text style={[styles.hint, { color: C.textSecondary }]} allowFontScaling={false}>
-            Skopiuj dane do przelewu, potem otwórz bank i wklej je w formularzu. Płatność jest
-            całkowicie poza aplikacją — bez prowizji.
+            Skopiuj dane do przelewu, potem otwórz bank. Przy mBank / PKO / Santander i innych
+            z osobnym panelem firmowym wybierzesz konto osobiste lub firmowe.
           </Text>
 
           {toast ? (
@@ -299,7 +313,7 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
                     <TouchableOpacity
                       key={bank.id}
                       style={[styles.bankTile, { borderColor: C.border, backgroundColor: C.background }]}
-                      onPress={() => void openBank(bank.loginUrl, bank.name)}
+                      onPress={() => onBankPress(bank)}
                       activeOpacity={0.8}
                       testID={`manual-pay-bank-${bank.id}`}
                     >
@@ -316,14 +330,14 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
                           style={{ fontSize: 10, fontWeight: '600', color: C.textTertiary }}
                           allowFontScaling={false}
                         >
-                          Logowanie →
+                          {bankNeedsAccountChoice(bank) ? 'Osobiste / firmowe →' : 'Logowanie →'}
                         </Text>
                       </View>
                     </TouchableOpacity>
                   ))}
                 </View>
                 <Text style={[styles.footerNote, { color: C.textTertiary }]} allowFontScaling={false}>
-                  Otworzy się oficjalna strona logowania wybranego banku w przeglądarce.
+                  Oficjalna strona banku w przeglądarce. Płatność poza aplikacją — bez prowizji.
                 </Text>
               </>
             )}
@@ -331,6 +345,25 @@ export function ManualBankPaymentSheet({ visible, order, onClose, colors: C }: P
           </ScrollView>
         </View>
       </View>
+
+      <BankAccountTypeSheet
+        visible={!!accountBank}
+        bank={accountBank}
+        onClose={() => setAccountBank(null)}
+        onPick={(opt) => {
+          const name = accountBank?.name || 'bank';
+          setAccountBank(null);
+          void openBankUrl(opt.url, `${name} · ${opt.label}`);
+        }}
+        colors={{
+          card: C.card,
+          text: C.text,
+          textSecondary: C.textSecondary,
+          border: C.border,
+          accent: C.accent,
+          background: C.background,
+        }}
+      />
     </Modal>
   );
 }

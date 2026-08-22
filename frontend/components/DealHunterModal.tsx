@@ -13,7 +13,6 @@ import {
   Alert,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import * as Linking from 'expo-linking';
 import {
   X,
   Sparkles,
@@ -45,8 +44,14 @@ import { useAuth } from '@/contexts/AuthContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
 import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { formatPln } from '@/lib/format';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
 import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
+import { openMailInBrowser } from '@/lib/openMailCompose';
+import * as supplierOrdersService from '@/services/supplierOrdersService';
 import {
   type OptimizeResult,
   type OfferItem,
@@ -1749,14 +1754,24 @@ export function DealHunterModal({
           .select('id')
           .single();
         if (orderErr || !order) throw orderErr ?? new Error('Nie utworzono koszyka');
-        const rows = g.items.map((it) => ({
-          order_id: order.id,
-          raw_product_name: it.matched_name || it.product_name,
-          price_net: it.unit_price_base ?? null,
-          unit: it.unit || 'szt',
-          quantity_ordered: Number(it.quantity) || 0,
-          warehouse_product_id: null,
-        }));
+        const rows = await Promise.all(
+          g.items.map(async (it) => {
+            const whName = (it.product_name || '').trim();
+            let wid: string | null =
+              product && whName && product.product_name === whName ? product.id : null;
+            if (!wid && whName) {
+              wid = await supplierOrdersService.resolveWarehouseProductId(whName);
+            }
+            return {
+              order_id: order.id,
+              raw_product_name: it.matched_name || it.product_name,
+              price_net: it.unit_price_base ?? null,
+              unit: it.unit || 'szt',
+              quantity_ordered: Number(it.quantity) || 0,
+              warehouse_product_id: wid,
+            };
+          }),
+        );
         const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
         if (itemsErr) throw itemsErr;
         saved += 1;
@@ -1885,6 +1900,35 @@ export function DealHunterModal({
       setToEmails(toInit);
       setPendingGroups(null);
       setStep('preview');
+      // Panel Zamówienia → Przygotowywane
+      try {
+        for (const g of suppliers) {
+          if (g.is_local_producer || !g.supplier_id) continue;
+          await supplierOrdersService.ensureSentOrderForSupplier({
+            supplierId: g.supplier_id,
+            notes: 'Łowca Okazji',
+            items: await Promise.all(
+              (g.items || []).map(async (it) => {
+                const whName = (it.product_name || '').trim();
+                let wid: string | null =
+                  product && whName && product.product_name === whName ? product.id : null;
+                if (!wid && whName) {
+                  wid = await supplierOrdersService.resolveWarehouseProductId(whName);
+                }
+                return {
+                  raw_product_name: it.matched_name || it.product_name,
+                  price_net: it.unit_price_base ?? null,
+                  unit: it.unit || 'szt',
+                  quantity_ordered: Number(it.quantity) || 0,
+                  warehouse_product_id: wid,
+                };
+              }),
+            ),
+          });
+        }
+      } catch {
+        /* best-effort — mail i tak działa */
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się wygenerować wiadomości.';
       setError(msg);
@@ -2082,31 +2126,48 @@ export function DealHunterModal({
       Alert.alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy.');
       return;
     }
-    const clearDraftsForSupplier = async () => {
-      if (!m.supplier_id) return;
-      try {
-        const { data } = await supabase
-          .from('supplier_orders')
-          .select('id')
-          .eq('supplier_id', m.supplier_id)
-          .eq('status', 'draft');
-        const ids = (data || []).map((r: { id: string }) => r.id);
-        if (ids.length) {
-          await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
-        }
-      } catch {
-        /* best-effort */
+    if (m.supplier_id) {
+      const check = await checkSupplierMinOrder({
+        supplierId: m.supplier_id,
+        subtotalPln: Number(m.subtotal_pln) || 0,
+        supplierName: m.supplier_name,
+      });
+      if (!check.ok) {
+        const copy = minOrderAlertCopy(check);
+        premiumAlert(copy.title, copy.message);
+        return;
       }
-    };
+    }
     const usesAssistant = from.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
     const bodyToSend = usesAssistant ? body : stripAssistantOrderFooter(body);
     if (!usesAssistant) {
       try {
-        await Linking.openURL(
-          `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyToSend)}`,
-        );
+        await openMailInBrowser({
+          fromEmail: from,
+          to,
+          subject,
+          body: bodyToSend,
+        });
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-        await clearDraftsForSupplier();
+        if (m.supplier_id) {
+          try {
+            const { data } = await supabase
+              .from('supplier_orders')
+              .select('id')
+              .eq('supplier_id', m.supplier_id)
+              .eq('status', 'draft');
+            const ids = (data || []).map((r: { id: string }) => r.id);
+            if (ids.length) {
+              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
+        premiumAlert(
+          'Zamówienie',
+          'Twoje zamówienie trafiło do zakładki Dostawy - Przygotowywane',
+        );
       } catch {
         setSendStatus((s) => ({ ...s, [key]: 'error' }));
       }
@@ -2127,11 +2188,25 @@ export function DealHunterModal({
       });
       if (!res.ok) throw new Error();
       setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-      await clearDraftsForSupplier();
+      if (m.supplier_id) {
+        try {
+          const { data } = await supabase
+            .from('supplier_orders')
+            .select('id')
+            .eq('supplier_id', m.supplier_id)
+            .eq('status', 'draft');
+          const ids = (data || []).map((r: { id: string }) => r.id);
+          if (ids.length) {
+            await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+          }
+        } catch {
+          /* best-effort */
+        }
+      }
     } catch {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
     }
-  }, [toEmails, fromEmails, bodyText, subjectText]);
+  }, [toEmails, fromEmails, bodyText, subjectText, premiumAlert]);
 
   const sendAllEmails = useCallback(async () => {
     if (!messages.length) return;
@@ -2159,7 +2234,7 @@ export function DealHunterModal({
       // eslint-disable-next-line no-await-in-loop
       await sendEmail(m);
     }
-  }, [messages, sendStatus, fromEmails, sendEmail]);
+  }, [messages, sendStatus, fromEmails, sendEmail, premiumAlert]);
 
   const result = liveResult;
   const stepIndex = step === 'qty' ? 0 : step === 'compare' ? 1 : 2;

@@ -17,6 +17,42 @@ export type InvoiceCostPayload = {
   lines: InvoiceCostLine[];
 };
 
+/** Buduje notatkę kosztu zmiennego ze szczegółami pozycji (klik → podgląd).
+ * Prefiks `supplier:{uuid}` — sumy „Zamówiono” na kartach dostawców.
+ */
+export function buildInvoiceCostNote(input: {
+  supplier_id?: string;
+  supplier_name?: string;
+  total?: number;
+  lines: InvoiceCostLine[];
+  /** Domyślnie „Dostawa”; skan AI używa „Skan faktury”. */
+  sourceLabel?: string;
+}): string {
+  const payload: InvoiceCostPayload = {
+    v: 1,
+    kind: 'invoice_lines',
+    supplier_id: input.supplier_id,
+    supplier_name: input.supplier_name,
+    total: input.total,
+    lines: input.lines.filter((l) => l.name),
+  };
+  const sid = (input.supplier_id || '').trim();
+  const label = (input.sourceLabel || 'Dostawa').trim() || 'Dostawa';
+  const head = sid ? `${label} · supplier:${sid}\n` : `${label}\n`;
+  return `${head}GM_INVOICE_LINES:${JSON.stringify(payload)}`;
+}
+
+/** UUID dostawcy z notatki kosztu (`supplier:…` lub payload GM_INVOICE_LINES). */
+export function supplierIdFromCostNote(note: string | null | undefined): string | null {
+  const raw = (note || '').trim();
+  if (!raw) return null;
+  const m = /supplier:([0-9a-fA-F-]{36})/.exec(raw);
+  if (m?.[1]) return m[1].toLowerCase();
+  const inv = parseInvoiceCostNote(raw);
+  const sid = (inv?.supplier_id || '').trim();
+  return sid ? sid.toLowerCase() : null;
+}
+
 export function parseInvoiceCostNote(note: string | null | undefined): InvoiceCostPayload | null {
   const raw = (note || '').trim();
   if (!raw) return null;

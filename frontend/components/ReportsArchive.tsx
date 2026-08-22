@@ -1,43 +1,19 @@
 /**
  * ReportsArchive — cyfrowe archiwum raportów dobowych (End-of-Day Reports).
  * Wielopoziomowe drzewo: Rok → Miesiąc → Tydzień → Dzień, z podglądem dokumentu
- * (Przychód / Koszty / Zysk netto + Podsumowanie Managerskie AI „Jarvis").
+ * (Przychód / Koszty / Zysk netto).
  * Renderowane jako blok wewnątrz ScrollView Panelu Finansowego.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, Modal, ScrollView, AppState } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, AppState } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  ChevronRight, ChevronDown, FileText, Sparkles, CalendarClock, RefreshCw,
-  BarChart3, CalendarRange, TrendingUp, TrendingDown, X, LineChart,
+  ChevronRight, ChevronDown, FileText, CalendarClock, RefreshCw,
 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { DS } from '@/constants/premiumTheme';
-
-const BACKEND_URL_TREND = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
-
-type Aggregates = {
-  total_revenue: number;
-  total_waste_cost: number;
-  total_invoice_cost: number;
-  fixed_costs_allocated?: number;
-  variable_costs_allocated?: number;
-  variable_costs_net?: number;
-  net_profit: number;
-  days_count: number;
-};
-type TrendResult = {
-  ok: boolean;
-  period_label?: string;
-  reports_count?: number;
-  aggregates?: Aggregates;
-  best_day?: { date: string; net: number };
-  worst_day?: { date: string; net: number };
-  assistant_speech?: string;
-  message?: string;
-  needs_migration?: boolean;
-};
+import { apiJsonHeaders } from '@/lib/apiHeaders';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -77,33 +53,6 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
   const [closing, setClosing] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // ── Analiza Trendów AI ──────────────────────────────────────────────────
-  const [trendLoading, setTrendLoading] = useState<'week' | 'month' | 'year' | null>(null);
-  const [trendResult, setTrendResult] = useState<TrendResult | null>(null);
-  const [trendOpen, setTrendOpen] = useState(false);
-
-  const runTrend = useCallback(async (periodType: 'week' | 'month' | 'year') => {
-    setTrendLoading(periodType);
-    try {
-      const r = await fetch(`${BACKEND_URL_TREND}/api/reports/analyze-period`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ period_type: periodType }),
-      });
-      const d: TrendResult = await r.json();
-      setTrendResult(d);
-      setTrendOpen(true);
-    } catch {
-      setTrendResult({
-        ok: false,
-        assistant_speech: 'Nie udało się wygenerować analizy trendu. Spróbuj ponownie.',
-      });
-      setTrendOpen(true);
-    } finally {
-      setTrendLoading(null);
-    }
-  }, []);
-
   const [openYear, setOpenYear] = useState<number | null>(null);
   const [openMonth, setOpenMonth] = useState<string | null>(null); // `${year}-${month}`
   const [openWeek, setOpenWeek] = useState<string | null>(null);    // `${year}-${month}-${week}`
@@ -112,8 +61,16 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
   const fetchReports = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true);
     try {
-      const r = await fetch(`${BACKEND_URL}/api/reports/daily`);
-      const d = await r.json();
+      const headers = await apiJsonHeaders();
+      const r = await fetch(`${BACKEND_URL}/api/reports/daily`, { headers });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (!opts?.silent) {
+          setReports([]);
+          setMsg(typeof d.detail === 'string' ? d.detail : 'Nie udało się pobrać raportów (zaloguj się).');
+        }
+        return;
+      }
       const list: DailyReport[] = d.reports ?? [];
       setReports(list);
       setNeedsMigration(!!d.needs_migration);
@@ -143,15 +100,26 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
     setClosing(true);
     setMsg(null);
     try {
+      const headers = await apiJsonHeaders();
       const r = await fetch(`${BACKEND_URL}/api/pos/close-day`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({}),
       });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setMsg(
+          typeof d.detail === 'string'
+            ? d.detail
+            : d.message || `Nie udało się zamknąć dnia (${r.status}).`,
+        );
+        return;
+      }
       if (d.needs_migration) {
         setNeedsMigration(true);
         setMsg(d.message ?? 'Wymagana migracja bazy.');
+      } else if (d.ok === false) {
+        setMsg(d.message ?? 'Nie zapisano raportu.');
       } else {
         setMsg(d.message ?? 'Raport zapisany.');
         await fetchReports();
@@ -184,76 +152,6 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
 
   return (
     <View style={styles.wrap} testID="reports-archive">
-      {/* ── Analiza Trendów AI ── */}
-      <View style={styles.trendSection} testID="trend-analysis-section">
-        <View style={styles.trendHeader}>
-          <LineChart size={16} color={accent} strokeWidth={2.4} />
-          <Text style={styles.trendTitle}>Analiza Trendów AI</Text>
-        </View>
-        <Text style={styles.trendSub}>
-          Wybierz okres: tydzień / miesiąc / rok. (Zysk = utarg - koszty stałe - koszty zmienne)
-        </Text>
-        <View style={styles.trendBtnRow}>
-          <TouchableOpacity
-            style={[styles.trendBtnWrap, trendLoading === 'week' && { opacity: 0.6 }]}
-            onPress={() => runTrend('week')}
-            disabled={trendLoading !== null}
-            activeOpacity={0.85}
-            testID="trend-weekly-btn"
-          >
-            <LinearGradient
-              colors={theme.isPremium ? [...DS.gradient.green] : [Colors.accent, Colors.accentDark]}
-              start={{ x: 0, y: 0.2 }}
-              end={{ x: 1, y: 0.8 }}
-              style={styles.trendBtn}
-            >
-              {trendLoading === 'week'
-                ? <ActivityIndicator size="small" color="#0A0A0A" />
-                : <BarChart3 size={15} color="#0A0A0A" strokeWidth={2.4} />}
-              <Text style={styles.trendBtnText} allowFontScaling={false}>Tydzień</Text>
-            </LinearGradient>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.trendBtnWrap, trendLoading === 'month' && { opacity: 0.6 }]}
-            onPress={() => runTrend('month')}
-            disabled={trendLoading !== null}
-            activeOpacity={0.85}
-            testID="trend-monthly-btn"
-          >
-            <LinearGradient
-              colors={theme.isPremium ? [...DS.gradient.green] : [Colors.accentDark, Colors.accent]}
-              start={{ x: 0, y: 0.2 }}
-              end={{ x: 1, y: 0.8 }}
-              style={styles.trendBtn}
-            >
-              {trendLoading === 'month'
-                ? <ActivityIndicator size="small" color="#0A0A0A" />
-                : <CalendarRange size={15} color="#0A0A0A" strokeWidth={2.4} />}
-              <Text style={styles.trendBtnText} allowFontScaling={false}>Miesiąc</Text>
-            </LinearGradient>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.trendBtnWrap, trendLoading === 'year' && { opacity: 0.6 }]}
-            onPress={() => runTrend('year')}
-            disabled={trendLoading !== null}
-            activeOpacity={0.85}
-            testID="trend-yearly-btn"
-          >
-            <LinearGradient
-              colors={theme.isPremium ? [...DS.gradient.green] : [Colors.accent, Colors.accentDark]}
-              start={{ x: 0, y: 0.2 }}
-              end={{ x: 1, y: 0.8 }}
-              style={styles.trendBtn}
-            >
-              {trendLoading === 'year'
-                ? <ActivityIndicator size="small" color="#0A0A0A" />
-                : <LineChart size={15} color="#0A0A0A" strokeWidth={2.4} />}
-              <Text style={styles.trendBtnText} allowFontScaling={false}>Rok</Text>
-            </LinearGradient>
-          </TouchableOpacity>
-        </View>
-      </View>
-
       <View style={styles.topRow}>
         <Text style={styles.sectionLabel}>Archiwum raportów dobowych</Text>
         <TouchableOpacity style={styles.refreshBtn} onPress={fetchReports} testID="reports-refresh">
@@ -277,7 +175,7 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
           {closing
             ? <ActivityIndicator size="small" color="#0A0A0A" />
             : <CalendarClock size={16} color="#0A0A0A" strokeWidth={2.3} />}
-          <Text style={styles.closeDayText} allowFontScaling={false}>Zamknij dzień i wygeneruj raport AI</Text>
+          <Text style={styles.closeDayText} allowFontScaling={false}>Zamknij dzień i wygeneruj raport</Text>
         </LinearGradient>
       </TouchableOpacity>
 
@@ -413,155 +311,10 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
               {fmtPLN(selected.total_revenue - selected.total_waste_cost - selected.total_invoice_cost)}
             </Text>
           </View>
-
-          <View style={styles.aiBox}>
-            <View style={styles.aiHeader}>
-              <Sparkles size={15} color={Colors.accentDark} strokeWidth={2.2} />
-              <Text style={styles.aiTitle}>Podsumowanie Managerskie AI (Jarvis)</Text>
-            </View>
-            <Text style={styles.aiText}>{selected.ai_summary || 'Brak podsumowania.'}</Text>
-          </View>
         </View>
       )}
 
-      {/* ── Modal: wynik Analizy Trendów AI ── */}
-      <Modal
-        visible={trendOpen}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setTrendOpen(false)}
-      >
-        <View style={styles.trendModalOverlay}>
-          <View style={styles.trendModalSheet} testID="trend-result-modal">
-            <View style={styles.trendModalHeader}>
-              <View style={styles.trendModalTitleWrap}>
-                <View style={styles.trendModalIcon}>
-                  <LineChart size={18} color={Colors.white} strokeWidth={2.4} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.trendModalTitle}>Analiza Trendów AI</Text>
-                  {!!trendResult?.period_label && (
-                    <Text style={styles.trendModalPeriod}>
-                      {trendResult.period_label}
-                      {trendResult.reports_count ? ` · ${trendResult.reports_count} dni` : ''}
-                    </Text>
-                  )}
-                </View>
-              </View>
-              <TouchableOpacity onPress={() => setTrendOpen(false)} testID="trend-result-close" hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <X size={22} color={Colors.textSecondary} strokeWidth={2} />
-              </TouchableOpacity>
-            </View>
 
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 8 }}>
-              {trendResult?.aggregates && (
-                <>
-                  <View style={styles.trendGrid}>
-                    <View style={styles.trendCell}>
-                      <Text style={styles.trendCellLabel}>Utarg</Text>
-                      <Text style={[styles.trendCellVal, {
-                        color: (trendResult.aggregates.total_revenue ?? 0) >= 0
-                          ? (theme.isPremium ? DS.color.greenEnd : Colors.success)
-                          : Colors.danger,
-                      }]}>
-                        {fmtPLN(trendResult.aggregates.total_revenue)}
-                      </Text>
-                    </View>
-                    <View style={styles.trendCell}>
-                      <Text style={styles.trendCellLabel}>Zysk netto</Text>
-                      <Text style={[styles.trendCellVal, {
-                        color: (trendResult.aggregates.net_profit ?? 0) >= 0
-                          ? (theme.isPremium ? DS.color.greenEnd : Colors.success)
-                          : Colors.danger,
-                      }]}>
-                        {fmtPLN(trendResult.aggregates.net_profit)}
-                      </Text>
-                    </View>
-                  </View>
-                  <View style={styles.trendGrid}>
-                    <View style={[styles.trendCell, styles.trendCellLoss]}>
-                      <Text style={styles.trendCellLabel}>Koszty stałe</Text>
-                      <Text style={[styles.trendCellVal, styles.trendValSmall, { color: Colors.danger }]}>
-                        −{fmtPLN(trendResult.aggregates.fixed_costs_allocated ?? 0)}
-                      </Text>
-                    </View>
-                    <View style={[styles.trendCell, styles.trendCellLoss]}>
-                      <Text style={styles.trendCellLabel}>Koszty zmienne</Text>
-                      <Text style={[styles.trendCellVal, styles.trendValSmall, { color: Colors.danger }]}>
-                        −{fmtPLN(
-                          trendResult.aggregates.variable_costs_net
-                          ?? trendResult.aggregates.variable_costs_allocated
-                          ?? trendResult.aggregates.total_invoice_cost
-                          ?? 0,
-                        )}
-                      </Text>
-                    </View>
-                  </View>
-                  <View style={styles.trendGrid}>
-                    <View style={[styles.trendCell, styles.trendCellLoss]}>
-                      <Text style={styles.trendCellLabel}>Straty produktowe</Text>
-                      <Text style={[styles.trendCellVal, styles.trendValSmall, { color: Colors.danger }]}>
-                        −{fmtPLN(trendResult.aggregates.total_waste_cost)}
-                      </Text>
-                    </View>
-                    <View style={[styles.trendCell, styles.trendCellLoss]}>
-                      <Text style={styles.trendCellLabel}>Zakupy brutto</Text>
-                      <Text style={[styles.trendCellVal, styles.trendValSmall, { color: theme.textMuted }]}>
-                        {fmtPLN(
-                          trendResult.aggregates.variable_costs_allocated
-                          ?? trendResult.aggregates.total_invoice_cost
-                          ?? 0,
-                        )}
-                      </Text>
-                    </View>
-                  </View>
-
-                  {(trendResult.best_day || trendResult.worst_day) && (
-                    <View style={styles.trendDaysRow}>
-                      {trendResult.best_day && (
-                        <View style={[styles.trendDayCard, styles.trendDayGain]}>
-                          <TrendingUp size={14} color={Colors.success} strokeWidth={2.4} />
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.trendDayLabel}>Najlepszy dzień</Text>
-                            <Text style={styles.trendDayDate}>{trendResult.best_day.date}</Text>
-                          </View>
-                          <Text style={[styles.trendDayNet, { color: Colors.success }]}>
-                            {fmtPLN(trendResult.best_day.net)}
-                          </Text>
-                        </View>
-                      )}
-                      {trendResult.worst_day && (
-                        <View style={[styles.trendDayCard, styles.trendDayLoss]}>
-                          <TrendingDown size={14} color={Colors.danger} strokeWidth={2.4} />
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.trendDayLabel}>Największa strata</Text>
-                            <Text style={styles.trendDayDate}>{trendResult.worst_day.date}</Text>
-                          </View>
-                          <Text style={[styles.trendDayNet, { color: Colors.danger }]}>
-                            {fmtPLN(trendResult.worst_day.net)}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                  )}
-                </>
-              )}
-
-              <View style={styles.trendAiBox}>
-                <View style={styles.trendAiHeader}>
-                  <Sparkles size={15} color={Colors.accentDark} strokeWidth={2.2} />
-                  <Text style={styles.trendAiTitle}>Podsumowanie okresu</Text>
-                </View>
-                <Text style={styles.trendAiText} testID="trend-result-speech">
-                  {trendResult?.message
-                    || trendResult?.assistant_speech
-                    || 'Brak danych do analizy.'}
-                </Text>
-              </View>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -585,50 +338,7 @@ function makeArchiveStyles(theme: ReturnType<typeof useAppTheme>) {
 
   return StyleSheet.create({
     wrap: { marginTop: 4 },
-    trendSection: { backgroundColor: card, borderRadius: 16, borderWidth: 1, borderColor: border, padding: 16, marginBottom: 16 },
-    trendHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-    trendTitle: { fontSize: 15, fontWeight: '900', color: text, letterSpacing: 0.2 },
-    trendSub: { fontSize: 12, color: muted, marginTop: 4, marginBottom: 12, lineHeight: 17 },
-    trendBtnRow: { flexDirection: 'row', gap: 10 },
-    trendBtnWrap: {
-      flex: 1,
-      borderRadius: 12,
-      ...(theme.isPremium ? DS.shadow.greenGlow : {}),
-    },
-    trendBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 6,
-      borderRadius: 12,
-      paddingVertical: 11,
-      paddingHorizontal: 8,
-    },
-    trendBtnText: { color: '#0A0A0A', fontSize: 12, fontWeight: '800' },
-    trendModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
-    trendModalSheet: { backgroundColor: bg, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '88%' },
-    trendModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-    trendModalTitleWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-    trendModalIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: neonBtn, alignItems: 'center', justifyContent: 'center' },
-    trendModalTitle: { fontSize: 17, fontWeight: '900', color: text },
-    trendModalPeriod: { fontSize: 12, color: muted, marginTop: 1, textTransform: 'capitalize' },
-    trendGrid: { flexDirection: 'row', gap: 10, marginBottom: 10 },
-    trendCell: { flex: 1, backgroundColor: card, borderRadius: 12, borderWidth: 1, borderColor: border, padding: 13 },
-    trendCellLoss: { backgroundColor: theme.isPremium ? DS.color.dangerSoft : '#FEF2F2', borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : '#FECACA' },
-    trendCellLabel: { fontSize: 11, fontWeight: '700', color: muted, textTransform: 'uppercase', letterSpacing: 0.4 },
-    trendCellVal: { fontSize: 19, fontWeight: '900', marginTop: 5, color: text },
-    trendValSmall: { fontSize: 16 },
-    trendDaysRow: { gap: 8, marginTop: 2, marginBottom: 4 },
-    trendDayCard: { flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: 12, borderWidth: 1, padding: 12 },
-    trendDayGain: { backgroundColor: theme.isPremium ? 'rgba(0,255,120,0.08)' : '#F0FDF4', borderColor: theme.isPremium ? 'rgba(0,255,136,0.3)' : '#BBF7D0' },
-    trendDayLoss: { backgroundColor: theme.isPremium ? DS.color.dangerSoft : '#FEF2F2', borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : '#FECACA' },
-    trendDayLabel: { fontSize: 11, fontWeight: '700', color: muted, textTransform: 'uppercase', letterSpacing: 0.3 },
-    trendDayDate: { fontSize: 13, fontWeight: '700', color: text, marginTop: 1 },
-    trendDayNet: { fontSize: 15, fontWeight: '900' },
-    trendAiBox: { marginTop: 12, backgroundColor: accentSoft, borderRadius: 14, padding: 15 },
-    trendAiHeader: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
-    trendAiTitle: { fontSize: 12.5, fontWeight: '800', color: accent, flex: 1 },
-    trendAiText: { fontSize: 14, color: text, lineHeight: 22 },
+
     topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
     sectionLabel: { fontSize: 13, fontWeight: '800', color: body, letterSpacing: 0.3, textTransform: 'uppercase' },
     refreshBtn: { width: 34, height: 34, borderRadius: 10, backgroundColor: accentSoft, alignItems: 'center', justifyContent: 'center' },
@@ -666,9 +376,5 @@ function makeArchiveStyles(theme: ReturnType<typeof useAppTheme>) {
     docNetRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: border },
     docNetLabel: { fontSize: 14, fontWeight: '800', color: text },
     docNetVal: { fontSize: 22, fontWeight: '900' },
-    aiBox: { marginTop: 14, backgroundColor: accentSoft, borderRadius: 12, padding: 14 },
-    aiHeader: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 7 },
-    aiTitle: { fontSize: 12.5, fontWeight: '800', color: accent },
-    aiText: { fontSize: 13.5, color: text, lineHeight: 21 },
   });
 }

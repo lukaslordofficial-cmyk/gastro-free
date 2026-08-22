@@ -35,6 +35,7 @@ import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { supabase } from '@/lib/supabase';
+import { apiMultipartHeaders } from '@/lib/apiHeaders';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -165,6 +166,7 @@ export function ExpirationScanModal({ visible, onClose, onConfirmed, restaurantI
 
         const res = await fetch(`${BACKEND_URL}/api/inventory/scan-expiration`, {
           method: 'POST',
+          headers: await apiMultipartHeaders(),
           body: form,
         });
         if (!res.ok) {

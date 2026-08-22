@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
   Switch,
   Image,
+  DeviceEventEmitter,
 } from 'react-native';
 import * as Linking from 'expo-linking';
 import * as DocumentPicker from 'expo-document-picker';
@@ -42,12 +43,15 @@ import {
   PenLine,
   ScanLine,
   TrendingUp,
+  Package,
 } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as suppliersService from '@/services/suppliersService';
 import * as supplierOrdersService from '@/services/supplierOrdersService';
+import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { OrderModal } from '@/components/OrderModal';
+import { SupplierInvoicesModal } from '@/components/suppliers/SupplierInvoicesModal';
 import {
   OrderEmailComposer,
   type OrderEmailDraft,
@@ -72,8 +76,13 @@ import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
+import { SupplierOrdersModal } from '@/components/SupplierOrdersModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { formatPln, formatPlnNumber } from '@/lib/format';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
 import type { SupplierOffer, SupplierOfferItem } from '@/lib/types';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
@@ -85,6 +94,7 @@ interface CatalogProduct {
   name: string;
   variant: string;
   volume_label: string;
+  unit: string;
   unit_count: number;
   price_pln: number;
   liters_total: number;
@@ -169,6 +179,7 @@ function mapDbRow(row: any, menuIngredientNames: string[] = []): Supplier {
           name: c.name,
           variant: c.variant,
           volume_label: c.volume_label ?? '',
+          unit: (c.unit || 'szt').trim() || 'szt',
           unit_count: Number(c.unit_count),
           price_pln: Number(c.price_pln),
           liters_total: Number(c.liters_total),
@@ -255,22 +266,27 @@ function CatalogRow({
   product,
   last,
   onDelete,
+  onPress,
 }: {
   product: CatalogProduct;
   last: boolean;
   onDelete?: (id: string) => void;
+  onPress?: (product: CatalogProduct) => void;
 }) {
   const theme = useAppTheme();
   const perLiter = product.liters_total > 0
     ? ` · ${formatPlnNumber(product.price_pln / product.liters_total)} zł/L`
     : '';
   return (
-    <View
+    <TouchableOpacity
       style={[
         catStyles.row,
         last && catStyles.rowLast,
         theme.isPremium && { borderBottomColor: theme.border },
       ]}
+      onPress={onPress ? () => onPress(product) : undefined}
+      activeOpacity={onPress ? 0.7 : 1}
+      disabled={!onPress}
     >
       <View style={catStyles.info}>
         <Text style={[catStyles.name, { color: theme.text }]}>{product.name}</Text>
@@ -302,7 +318,7 @@ function CatalogRow({
           <Trash2 size={14} color={theme.danger} strokeWidth={2} />
         </TouchableOpacity>
       ) : null}
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -353,6 +369,14 @@ function SupplierCard({
   const [extraOffersOpen, setExtraOffersOpen] = useState(true);
   const [showManualModal, setShowManualModal] = useState(false);
   const [showOrderModal, setShowOrderModal] = useState(false);
+  const [seedCatalogProduct, setSeedCatalogProduct] = useState<{
+    id: string;
+    name: string;
+    variant: string;
+    unit: string;
+    price_pln: number | null;
+  } | null>(null);
+  const [showInvoices, setShowInvoices] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
   const [manualName, setManualName] = useState('');
   const [manualPrice, setManualPrice] = useState('');
@@ -630,6 +654,27 @@ function SupplierCard({
                   ]}
                 >
                   Edytuj
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  cardStyles.managePanelBtn,
+                  theme.isPremium
+                    ? { backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: DS.color.borderSubtle }
+                    : { backgroundColor: Colors.borderLight, borderWidth: 1, borderColor: Colors.border },
+                ]}
+                onPress={() => setShowInvoices(true)}
+                activeOpacity={0.7}
+                testID={`invoices-supplier-${supplier.id}`}
+              >
+                <FileText size={13} color={theme.isPremium ? DS.color.heading : Colors.textPrimary} strokeWidth={2.4} />
+                <Text
+                  style={[
+                    cardStyles.managePanelBtnText,
+                    { color: theme.isPremium ? DS.color.heading : Colors.textPrimary },
+                  ]}
+                >
+                  Faktury
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -1036,6 +1081,16 @@ function SupplierCard({
                   product={product}
                   last={idx === catalogInMenu.length - 1}
                   onDelete={deleteCatalogProduct}
+                  onPress={(p) => {
+                    setSeedCatalogProduct({
+                      id: p.id,
+                      name: p.name,
+                      variant: p.variant || p.volume_label || '',
+                      unit: p.unit || 'szt',
+                      price_pln: Number.isFinite(p.price_pln) ? p.price_pln : null,
+                    });
+                    setShowOrderModal(true);
+                  }}
                 />
               ))}
 
@@ -1068,6 +1123,16 @@ function SupplierCard({
                   product={product}
                   last={idx === catalogExtra.length - 1}
                   onDelete={deleteCatalogProduct}
+                  onPress={(p) => {
+                    setSeedCatalogProduct({
+                      id: p.id,
+                      name: p.name,
+                      variant: p.variant || p.volume_label || '',
+                      unit: p.unit || 'szt',
+                      price_pln: Number.isFinite(p.price_pln) ? p.price_pln : null,
+                    });
+                    setShowOrderModal(true);
+                  }}
                 />
               ))}
             </>
@@ -1338,7 +1403,19 @@ function SupplierCard({
         supplierName={supplier.name}
         supplierEmail={supplier.email}
         visible={showOrderModal}
-        onClose={() => setShowOrderModal(false)}
+        seedProduct={seedCatalogProduct}
+        onSeedConsumed={() => setSeedCatalogProduct(null)}
+        onClose={() => {
+          setShowOrderModal(false);
+          setSeedCatalogProduct(null);
+        }}
+      />
+
+      <SupplierInvoicesModal
+        visible={showInvoices}
+        supplierId={supplier.id}
+        supplierName={supplier.name}
+        onClose={() => setShowInvoices(false)}
       />
 
       {/* AI catalog scan modal (GPT-4o Vision) */}
@@ -1407,7 +1484,7 @@ const cardStyles = StyleSheet.create({
     paddingVertical: 12,
     marginTop: 2,
   },
-  managePanelBtnText: { fontSize: 12, fontWeight: '800' },
+  managePanelBtnText: { fontSize: 11, fontWeight: '800' },
   dataBlock: {
     borderRadius: 10,
     paddingVertical: 12,
@@ -1973,6 +2050,13 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
     })();
   }, [visible, reloadKey]);
 
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(SUPPLIER_BASKET_CHANGED, () => {
+      setReloadKey((k) => k + 1);
+    });
+    return () => sub.remove();
+  }, []);
+
   const totalItems = groups.reduce((acc, g) => acc + g.items.length, 0);
   const isEmpty = totalItems === 0 && draftOrders.length === 0;
 
@@ -2002,21 +2086,22 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
     };
   };
 
-  const markDraftSent = async (orderId: string) => {
-    try {
-      await supplierOrdersService.markDraftSent(orderId);
-      setDraftOrders((prev) => prev.filter((x) => x.id !== orderId));
-      setReloadKey((k) => k + 1);
-    } catch {
-      /* best-effort — koszyk i tak odświeżymy */
-      setReloadKey((k) => k + 1);
-    }
-  };
-
   const openDraftEmailTemplate = (d: DraftOrder) => {
     void (async () => {
       setEmailBusy(true);
       try {
+        if (d.supplier_id) {
+          const check = await checkSupplierMinOrder({
+            supplierId: d.supplier_id,
+            subtotalPln: draftTotal(d),
+            supplierName: d.supplier_name,
+          });
+          if (!check.ok) {
+            const copy = minOrderAlertCopy(check);
+            alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+            return;
+          }
+        }
         const { subject, body, email } = await buildOrderEmail(d);
         const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
         setEmailDraftOrderId(d.id);
@@ -2060,8 +2145,19 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
             void (async () => {
               setEmailBusy(true);
               try {
-                // Wysyłamy kolejno; po każdym sukcesie koszyk draft znika (status=sent)
                 for (const d of draftOrders) {
+                  if (d.supplier_id) {
+                    const check = await checkSupplierMinOrder({
+                      supplierId: d.supplier_id,
+                      subtotalPln: draftTotal(d),
+                      supplierName: d.supplier_name,
+                    });
+                    if (!check.ok) {
+                      const copy = minOrderAlertCopy(check);
+                      alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+                      continue;
+                    }
+                  }
                   const { subject, body, email } = await buildOrderEmail(d);
                   const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
                   setEmailDraftOrderId(d.id);
@@ -2306,13 +2402,15 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
           setShowEmail(false);
           setEmailDraft(null);
           setEmailDraftOrderId(null);
+          setReloadKey((k) => k + 1);
         }}
         onSent={() => {
           const id = emailDraftOrderId;
-          if (id) {
-            void markDraftSent(id);
-          }
-          setEmailDraftOrderId(null);
+          if (id) void supplierOrdersService.markDraftSent(id).then(() => setReloadKey((k) => k + 1));
+        }}
+        onMailClientOpened={() => {
+          const id = emailDraftOrderId;
+          if (id) void supplierOrdersService.markDraftSent(id).then(() => setReloadKey((k) => k + 1));
         }}
         onPayPress={
           emailDraft
@@ -2388,6 +2486,7 @@ export default function DostawcyScreen() {
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showGlobalBasket, setShowGlobalBasket] = useState(false);
+  const [showSupplierOrders, setShowSupplierOrders] = useState(false);
   const [showTopScan, setShowTopScan] = useState(false);
   const [totalAnalyses, setTotalAnalyses] = useState(0);
   const [orderTotals, setOrderTotals] = useState<Record<string, number>>({});
@@ -2652,11 +2751,16 @@ export default function DostawcyScreen() {
                 />
               }
             >
-              <View style={{ marginBottom: DS.space[16] }}>
+              <View style={{ marginBottom: DS.space[16], gap: 10 }}>
                 <PremiumGlowCta
                   label="Zgłoś informację"
                   onPress={() => openVoiceReport()}
                   icon={<Sparkles size={16} color="#0A0A0A" strokeWidth={2.5} />}
+                />
+                <PremiumGlowCta
+                  label="Zamówienia"
+                  onPress={() => setShowSupplierOrders(true)}
+                  icon={<Package size={16} color="#0A0A0A" strokeWidth={2.5} />}
                 />
               </View>
 
@@ -2715,7 +2819,7 @@ export default function DostawcyScreen() {
                     key={supplier.id}
                     supplier={supplier}
                     totalAnalysesUsed={totalAnalyses}
-                    orderTotal={orderTotals[supplier.id] ?? 0}
+                    orderTotal={orderTotals[(supplier.id || '').toLowerCase()] ?? 0}
                     onPhone={(phone) => Linking.openURL(`tel:${phone}`)}
                     onEmail={(email) => Linking.openURL(`mailto:${email}`)}
                     onUpload={handleUpload}
@@ -2759,8 +2863,19 @@ export default function DostawcyScreen() {
         </View>
       </View>
 
-      <View style={{ paddingHorizontal: 20, marginBottom: 12 }}>
+      <View style={{ paddingHorizontal: 20, marginBottom: 12, gap: 10 }}>
         <ReportInfoButton contextHint="Dostawcy" onApplied={fetchSuppliers} testID="dostawcy-report-info" />
+        <TouchableOpacity
+          style={mainStyles.ordersCta}
+          onPress={() => setShowSupplierOrders(true)}
+          activeOpacity={0.85}
+          testID="dostawcy-orders-btn"
+        >
+          <View style={mainStyles.ordersCtaIcon}>
+            <Package size={14} color={Colors.white} strokeWidth={2.5} />
+          </View>
+          <Text style={mainStyles.ordersCtaText}>Zamówienia</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={mainStyles.searchWrap}>
@@ -2826,7 +2941,7 @@ export default function DostawcyScreen() {
               key={supplier.id}
               supplier={supplier}
               totalAnalysesUsed={totalAnalyses}
-              orderTotal={orderTotals[supplier.id] ?? 0}
+              orderTotal={orderTotals[(supplier.id || '').toLowerCase()] ?? 0}
               onPhone={(phone) => Linking.openURL(`tel:${phone}`)}
               onEmail={(email) => Linking.openURL(`mailto:${email}`)}
               onUpload={handleUpload}
@@ -3053,6 +3168,11 @@ export default function DostawcyScreen() {
         onClose={() => setShowGlobalBasket(false)}
       />
 
+      <SupplierOrdersModal
+        visible={showSupplierOrders}
+        onClose={() => setShowSupplierOrders(false)}
+      />
+
       {/* Top-level document scan (no supplier — auto-detect/create) */}
       <CatalogScanModal
         supplierId={null}
@@ -3076,6 +3196,31 @@ const mainStyles = StyleSheet.create({
   addBtn: { width: 38, height: 38, borderRadius: 10, backgroundColor: Colors.accent, alignItems: 'center', justifyContent: 'center' },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   basketBtn: { width: 38, height: 38, borderRadius: 10, backgroundColor: Colors.accentLight, borderWidth: 1, borderColor: '#BFDBFE', alignItems: 'center', justifyContent: 'center' },
+  ordersCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    alignSelf: 'flex-start',
+    backgroundColor: '#8B5CF6',
+    paddingLeft: 6,
+    paddingRight: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    shadowColor: '#8B5CF6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    elevation: 4,
+  },
+  ordersCtaIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ordersCtaText: { color: Colors.white, fontSize: 12, fontWeight: '700', letterSpacing: 0.2 },
   searchWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 16, marginBottom: 12, backgroundColor: Colors.card, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 12, paddingVertical: 10 },
   topScanBtn: { flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginBottom: 12, backgroundColor: Colors.accent, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, shadowColor: Colors.accent, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.28, shadowRadius: 6, elevation: 4 },
   topScanIcon: { width: 36, height: 36, borderRadius: 9, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },

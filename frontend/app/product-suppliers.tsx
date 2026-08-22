@@ -28,6 +28,7 @@ import {
   RefreshCw,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { OrderModal } from '@/components/OrderModal';
 import { ProductExpiryEditor } from '@/components/ProductExpiryEditor';
@@ -134,7 +135,9 @@ export default function ProductSuppliersScreen() {
     if (!productId) return;
     setLoadingYield(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/inventory/${productId}/portions-yield`);
+      const res = await fetch(`${BACKEND_URL}/api/inventory/${productId}/portions-yield`, {
+        headers: await apiJsonHeaders(),
+      });
       if (res.ok) {
         setYieldData(await res.json());
       }
@@ -202,7 +205,7 @@ export default function ProductSuppliersScreen() {
         for (const r of unlinked ?? []) {
           if (!r?.raw_product_name || seen.has(r.id)) continue;
           if (!isTenantSupplier(r.supplier_id)) continue;
-          if (!namesMatch(productLabel, r.raw_product_name, 72)) continue;
+          if (!namesMatch(productLabel, r.raw_product_name, 58)) continue;
           seen.add(r.id);
           toLink.push(r.id);
           rows.push({
@@ -236,7 +239,7 @@ export default function ProductSuppliersScreen() {
         }
         const { data: catalog } = await catalogQuery;
         for (const c of catalog ?? []) {
-          if (!c?.name || !namesMatch(productLabel, c.name, 72)) continue;
+          if (!c?.name || !namesMatch(productLabel, c.name, 58)) continue;
           if (!isTenantSupplier(c.supplier_id)) continue;
           const synId = `cat-${c.id}`;
           if (seen.has(synId)) continue;

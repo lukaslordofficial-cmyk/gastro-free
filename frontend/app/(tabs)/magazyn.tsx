@@ -14,6 +14,7 @@ import {
   Switch,
   RefreshControl,
   ActivityIndicator,
+  DeviceEventEmitter,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -39,6 +40,7 @@ import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { getAccountKey } from '@/lib/accountKey';
 import * as inventoryService from '@/services/inventoryService';
+import { INVENTORY_CHANGED } from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
@@ -62,8 +64,6 @@ import {
   ensureDefaultWarehouseCategories,
   normCategoryName,
 } from '@/lib/warehouseCategories';
-import { ensureDefaultKitchenUtensils } from '@/lib/kitchenUtensils';
-import { KitchenUtensilsSection } from '@/components/KitchenUtensilsSection';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -855,6 +855,13 @@ export default function MagazynScreen() {
       void fetchData({ fast: true });
     }
   }, [documentScanRevision, fetchData]);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(INVENTORY_CHANGED, () => {
+      void fetchData({ fast: true });
+    });
+    return () => sub.remove();
+  }, [fetchData]);
 
   const onRefresh = () => { setRefreshing(true); void fetchData(); };
 
@@ -1653,9 +1660,6 @@ export default function MagazynScreen() {
         }
         ListFooterComponent={
           <>
-            {theme.isPremium && accountKey && accountKey !== 'default' ? (
-              <KitchenUtensilsSection accountKey={accountKey} />
-            ) : null}
             <View style={{ height: 120 }} />
             <AdBannerFooter />
           </>

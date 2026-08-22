@@ -15,6 +15,7 @@ import {
   Platform,
   ActivityIndicator,
   ScrollView,
+  DeviceEventEmitter,
 } from 'react-native';
 import { X, ShoppingCart, Plus, Package, Trash2, Truck, Search, Landmark } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -35,7 +36,12 @@ import {
 import { formatPlnNumber } from '@/lib/format';
 import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
 import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
+import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
 import { useAuth } from '@/contexts/AuthContext';
+import {
+  checkSupplierMinOrder,
+  minOrderAlertCopy,
+} from '@/lib/supplierMinOrder';
 
 interface Props {
   supplierId: string;
@@ -43,6 +49,15 @@ interface Props {
   supplierEmail?: string | null;
   visible: boolean;
   onClose: () => void;
+  /** Produkt z katalogu dostawcy — po otwarciu dodawany do koszyka (qty 1). */
+  seedProduct?: {
+    id: string;
+    name: string;
+    variant?: string;
+    unit?: string;
+    price_pln: number | null;
+  } | null;
+  onSeedConsumed?: () => void;
 }
 
 type CatalogRow = {
@@ -65,6 +80,8 @@ export function OrderModal({
   supplierEmail,
   visible,
   onClose,
+  seedProduct = null,
+  onSeedConsumed,
 }: Props) {
   const theme = useAppTheme();
   const { alert } = usePremiumAlert();
@@ -91,12 +108,39 @@ export function OrderModal({
   const [emailDraft, setEmailDraft] = useState<OrderEmailDraft | null>(null);
   const [showEmail, setShowEmail] = useState(false);
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
+  const [shippingCost, setShippingCost] = useState(0);
+  const [freeShipFrom, setFreeShipFrom] = useState(0);
+  const [minOrderValue, setMinOrderValue] = useState(0);
 
   const cartItems = useMemo(() => Array.from(cart.values()), [cart]);
   const cartCount = cartItems.length;
 
   const load = useCallback(async () => {
     setLoading(true);
+    try {
+      let { data: sup, error: supErr } = await supabase
+        .from('suppliers')
+        .select('shipping_cost, free_shipping_threshold, min_order_value')
+        .eq('id', supplierId)
+        .maybeSingle();
+      if (supErr && /min_order_value/.test(supErr.message ?? '')) {
+        const retry = await supabase
+          .from('suppliers')
+          .select('shipping_cost, free_shipping_threshold')
+          .eq('id', supplierId)
+          .maybeSingle();
+        sup = retry.data as typeof sup;
+      }
+      setShippingCost(Number((sup as { shipping_cost?: number } | null)?.shipping_cost) || 0);
+      setFreeShipFrom(
+        Number((sup as { free_shipping_threshold?: number } | null)?.free_shipping_threshold) || 0,
+      );
+      setMinOrderValue(Number((sup as { min_order_value?: number } | null)?.min_order_value) || 0);
+    } catch {
+      setShippingCost(0);
+      setFreeShipFrom(0);
+      setMinOrderValue(0);
+    }
     let rows: any[] | null = null;
     const full = await supabase
       .from('supplier_catalog')
@@ -132,13 +176,27 @@ export function OrderModal({
   }, [supplierId]);
 
   useEffect(() => {
-    if (visible) {
-      setCart(new Map());
-      setNotes('');
-      setQuery('');
-      setActiveTab('products');
-      void load();
-    }
+    if (!visible) return;
+    setCart(new Map());
+    setNotes('');
+    setQuery('');
+    setActiveTab(seedProduct?.id ? 'cart' : 'products');
+    const seed = seedProduct;
+    void load().then(() => {
+      if (!seed?.id) return;
+      const row: CatalogRow = {
+        id: seed.id,
+        name: seed.name,
+        variant: seed.variant || '',
+        unit: seed.unit || 'szt',
+        price_pln: seed.price_pln,
+        in_menu: true,
+      };
+      setCart(new Map([[row.id, { item: row, quantity: 1 }]]));
+      onSeedConsumed?.();
+    });
+    // seed tylko przy otwarciu — nie w deps (unikamy pętli)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, load]);
 
   const filtered = useMemo(() => {
@@ -156,6 +214,18 @@ export function OrderModal({
     const existing = cart.get(item.id);
     setQtyInput(existing ? existing.quantity.toString() : '1');
     setShowQtyModal(true);
+  };
+
+  const addOneToCart = (item: CatalogRow) => {
+    setCart((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(item.id);
+      next.set(item.id, {
+        item,
+        quantity: (existing?.quantity || 0) + 1,
+      });
+      return next;
+    });
   };
 
   const confirmQty = () => {
@@ -221,13 +291,32 @@ export function OrderModal({
     }
   };
 
+  const ensureMinOrderMet = async (): Promise<boolean> => {
+    const subtotal = productsTotal ?? cartItems.reduce(
+      (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+      0,
+    );
+    const check = await checkSupplierMinOrder({
+      supplierId,
+      subtotalPln: subtotal,
+      minOrderValue,
+      supplierName,
+    });
+    if (check.ok) return true;
+    const copy = minOrderAlertCopy(check);
+    alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
+    return false;
+  };
+
   const placeOrder = async () => {
     if (cart.size === 0) {
       alert('Puste zamówienie', 'Dodaj produkty do zamówienia.');
       return;
     }
+    if (!(await ensureMinOrderMet())) return;
     setSaving(true);
     try {
+      // status=sent → panel Zamówienia / Przygotowywane (po przejściu do maila)
       const { data: order, error: orderErr } = await supabase
         .from('supplier_orders')
         .insert({
@@ -250,18 +339,50 @@ export function OrderModal({
       const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
       if (itemsErr) throw itemsErr;
 
-      const tpl = await fetchOrderEmailTemplate({
-        supplierId,
-        supplierName,
-        supplierEmail,
-        notes,
-        items: cartItems.map((e) => ({
+      // Koszyk (drafty) → już w „Przygotowywane”
+      await supabase
+        .from('supplier_orders')
+        .update({ status: 'sent' })
+        .eq('supplier_id', supplierId)
+        .eq('status', 'draft');
+      try {
+        DeviceEventEmitter.emit(SUPPLIER_BASKET_CHANGED);
+      } catch {
+        /* ignore */
+      }
+
+      const productsSum = cartItems.reduce(
+        (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+        0,
+      );
+      const shipFee =
+        shippingCost > 0
+        && !(freeShipFrom > 0 && productsSum >= freeShipFrom)
+          ? shippingCost
+          : 0;
+      const emailItems = [
+        ...cartItems.map((e) => ({
           product_name: e.item.name,
           quantity: e.quantity,
           unit: e.item.unit,
           line_total:
             e.item.price_pln != null ? e.item.price_pln * e.quantity : 0,
         })),
+        ...(shipFee > 0
+          ? [{
+              product_name: 'Koszt dostawy',
+              quantity: 1,
+              unit: 'szt',
+              line_total: shipFee,
+            }]
+          : []),
+      ];
+      const tpl = await fetchOrderEmailTemplate({
+        supplierId,
+        supplierName,
+        supplierEmail,
+        notes,
+        items: emailItems,
       });
       let fromEmail = ASSISTANT_FROM_EMAIL;
       let body = tpl.body;
@@ -283,10 +404,7 @@ export function OrderModal({
         subject: tpl.subject,
         body,
         supplierId,
-        totalPln: productsTotal ?? cartItems.reduce(
-          (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
-          0,
-        ),
+        totalPln: Math.round((productsSum + shipFee) * 100) / 100,
       });
       setShowEmail(true);
     } catch (e: any) {
@@ -302,6 +420,17 @@ export function OrderModal({
     return cartItems.reduce((acc, e) => acc + e.item.price_pln! * e.quantity, 0);
   }, [cartItems]);
 
+  const deliveryFee = useMemo(() => {
+    if (productsTotal == null || shippingCost <= 0) return 0;
+    if (freeShipFrom > 0 && productsTotal >= freeShipFrom) return 0;
+    return shippingCost;
+  }, [productsTotal, shippingCost, freeShipFrom]);
+
+  const grandTotal = useMemo(() => {
+    if (productsTotal == null) return null;
+    return Math.round((productsTotal + deliveryFee) * 100) / 100;
+  }, [productsTotal, deliveryFee]);
+
   const renderProduct = ({ item, index }: { item: CatalogRow; index: number }) => {
     const inCart = cart.get(item.id);
     const prev = filtered[index - 1];
@@ -315,7 +444,11 @@ export function OrderModal({
             {item.in_menu ? 'Występujące w menu' : 'Dodatkowe'}
           </Text>
         ) : null}
-        <View style={[styles.productRow, { borderBottomColor: border }]}>
+        <TouchableOpacity
+          style={[styles.productRow, { borderBottomColor: border }]}
+          onPress={() => addOneToCart(item)}
+          activeOpacity={0.7}
+        >
           <View style={styles.productLeft}>
             <Text style={[styles.productName, { color: text }]} numberOfLines={2}>
               {item.name}
@@ -338,6 +471,7 @@ export function OrderModal({
               inCart && { backgroundColor: accent, borderColor: accent },
             ]}
             onPress={() => openQty(item)}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
             activeOpacity={0.75}
           >
             {inCart ? (
@@ -351,7 +485,7 @@ export function OrderModal({
               <Plus size={18} color={prem ? accent : Colors.accent} strokeWidth={2.5} />
             )}
           </TouchableOpacity>
-        </View>
+        </TouchableOpacity>
       </View>
     );
   };
@@ -501,10 +635,17 @@ export function OrderModal({
 
         {activeTab === 'cart' && cartItems.length > 0 && (
           <View style={[styles.footer, { backgroundColor: card, borderTopColor: border }]}>
-            {productsTotal != null && (
-              <Text style={[styles.grandTotal, { color: text }]}>
-                Razem: {formatPlnNumber(productsTotal)} zł
-              </Text>
+            {grandTotal != null && (
+              <View style={{ marginBottom: 8 }}>
+                {deliveryFee > 0 ? (
+                  <Text style={[styles.grandTotal, { color: muted, fontSize: 13, fontWeight: '600' }]}>
+                    Produkty: {formatPlnNumber(productsTotal!)} zł · Dostawa: {formatPlnNumber(deliveryFee)} zł
+                  </Text>
+                ) : null}
+                <Text style={[styles.grandTotal, { color: text }]}>
+                  Razem: {formatPlnNumber(grandTotal)} zł
+                </Text>
+              </View>
             )}
             <View style={styles.footerRow}>
               <TouchableOpacity
@@ -534,17 +675,20 @@ export function OrderModal({
             </View>
             <TouchableOpacity
               style={[styles.manualPayBtn, { borderColor: accent }]}
-              onPress={() =>
-                setManualPayOrder({
-                  supplierId,
-                  supplierName,
-                  orderTitle: `Zamówienie — ${supplierName}`,
-                  totalPln: productsTotal ?? cartItems.reduce(
-                    (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
-                    0,
-                  ),
-                })
-              }
+              onPress={() => {
+                void (async () => {
+                  if (!(await ensureMinOrderMet())) return;
+                  setManualPayOrder({
+                    supplierId,
+                    supplierName,
+                    orderTitle: `Zamówienie — ${supplierName}`,
+                    totalPln: grandTotal ?? cartItems.reduce(
+                      (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+                      0,
+                    ) + deliveryFee,
+                  });
+                })();
+              }}
               activeOpacity={0.85}
               testID="order-modal-manual-pay"
             >
@@ -595,12 +739,15 @@ export function OrderModal({
         visible={showEmail}
         draft={emailDraft}
         onClose={() => {
+          // Zostaw OrderModal otwarty — użytkownik wraca do złożonego zamówienia / koszyka
           setShowEmail(false);
-          onClose();
         }}
         onSent={() => {
+          // Asystent: zamówienie już jest status=sent (Przygotowywane)
           setShowEmail(false);
-          onClose();
+        }}
+        onMailClientOpened={() => {
+          // Zewnętrzna skrzynka — zostaje w Przygotowywanych (sent)
         }}
         onPayPress={
           emailDraft

@@ -3635,6 +3635,39 @@ function peelNamedFromCategories(cats: string[]): { categories: string[]; named:
   return { categories: matched, named };
 }
 
+/** Wyłuskaj nazwę dania z komendy głosowej gdy LLM nie wypełnił dish_name. */
+function cleanSpokenDishQuery(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/[.?!,;]+$/g, '')
+    .replace(/\s+z\s+menu\s*$/i, '')
+    .replace(/\s+z\s+karty\s*$/i, '')
+    .replace(/\s+z\s+kart[ye]\s+da[nń]\s*$/i, '')
+    .replace(/^(?:danie|pozycj[eę])\s+/i, '')
+    .trim();
+}
+
+function guessDishNameFromTranscript(transcript: string, intent: Intent): string {
+  const t = String(transcript || '').trim();
+  if (!t) return '';
+  const patterns: RegExp[] =
+    intent === 'delete_menu_item'
+      ? [
+          /(?:usuń|usun|skasuj|wyrzuć|wyrzuc)\s+(?:z\s+menu\s+)?(?:danie\s+)?(.+)$/i,
+          /(?:usuń|usun|skasuj)\s+(.+?)\s+z\s+menu/i,
+        ]
+      : [
+          /(?:zmień|zmien|ustaw)\s+cen[ęe]\s+(?:dania\s+)?(.+?)(?:\s+na\s+[\d.,]+)?$/i,
+          /(?:cena|cenę)\s+(?:dania\s+)?(.+?)(?:\s+na\s+[\d.,]+)?$/i,
+        ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    const raw = cleanSpokenDishQuery(m?.[1] || '');
+    if (raw.length >= 2) return raw;
+  }
+  return '';
+}
+
 function seedPayload(
   intent: Intent,
   payload: Record<string, any>,
@@ -3767,8 +3800,19 @@ function seedPayload(
       p.dish_name = '';
       p.dish_name_resolved = '';
       if (intent === 'edit_menu_item_price') p.new_price = null;
-    } else if (p.dish_accepted == null) {
-      p.dish_accepted = !!p.dish_id;
+    } else {
+      // Zawsze wymagaj kliknięcia podpowiedzi; w polu → najlepsza nazwa z menu (nie surowy transcript).
+      const resolved = cleanSpokenDishQuery(String(p.dish_name_resolved || ''));
+      const raw = cleanSpokenDishQuery(String(p.dish_name || ''));
+      const fromTranscript = guessDishNameFromTranscript(String(opts?.transcript || ''), intent);
+      const spoken = resolved || raw || fromTranscript;
+      if (spoken) {
+        p.dish_name = spoken;
+        p.dish_name_resolved = resolved || spoken;
+      }
+      p.dish_accepted = false;
+      p.dish_id = null;
+      if (intent === 'edit_menu_item_price' && p.new_price === 0) p.new_price = null;
     }
   }
   if (intent === 'navigate_screen' && opts?.fromLegend) {

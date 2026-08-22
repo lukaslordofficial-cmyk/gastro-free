@@ -20,6 +20,102 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Pęczek=szt, raport przypisań magazynu, admin extract (`chore/split-monoliths`)
+
+- **UX/fix:** jednostka „pęczek/wiązka” → szt; fuzzy bez szumu jednostek w nazwie;
+  po odbiorze dark premium lista przypisań (produkt → kategoria); niepewne → Inne;
+  raporty bez Jarvis/AI w UI; close-day bez generowania AI summary.
+- **Split:** `admin_routes.py` (`/api/admin/migration-status`, cron secret).
+
+### 2026-08-22 — Faktury/głos/dostawa/raporty + katalog extract (`chore/split-monoliths`)
+
+- **UX/fix:** pełne usuwanie faktury (cost+invoice); głos prefilluje najlepsze danie z menu;
+  koszt dostawy doliczany do zamówienia/odbioru; koper↔koperek zwiększa stan; close-day z auth;
+  usunięto Analizę Trendów AI i Naczynia kuchenne z Magazynu.
+- **Split + security:** `supplier_catalog_view_routes.py` (GET catalog + refresh) z tenant;
+  ReportsArchive → `apiJsonHeaders` + sprawdzenie `r.ok`.
+
+### 2026-08-22 — Logout/faktury/fuzzy + daily reports extract (`chore/split-monoliths`)
+
+- **UX:** wylogowanie → `premiumAlert` (dark); usuwanie faktury u dostawcy; głosowe
+  usuwanie dania prefilluje nazwę; koper↔koperek (synonim + `warehouse_product_id` w Łowcy).
+- **Split + security:** `daily_report_routes.py` — `POST /api/pos/close-day`,
+  `GET /api/reports/daily` (+ auto-close) z `require_tenant_account_key()`.
+- `server.py` ≈ 13.5k linii (było ~13.8k przed tym kęsem).
+
+### 2026-08-22 — Voice CRUD v2 extract + tenant on /api/voice/dispatch (`chore/split-monoliths`)
+
+- **Split:** `voice_crud_v2_routes.py` — bulk/delete/availability/scale + `voice_dispatch_v2`.
+- **Security:** `require_tenant_account_key()` na `POST /api/voice/dispatch` oraz w `voice_dispatch_v2`
+  (wcześniej bulk wipe menu/magazynu bez jawnego tenanta na tym pathu).
+- Helpery `_cat_matches` / `_is_missing_column_error` zostają w `server.py` (shared).
+
+### 2026-08-22 — Faktury drzewo + supplier intents extract (`chore/split-monoliths`)
+
+- **UX:** `SupplierInvoicesModal` → `ExpandableDateJournal` (rok/miesiąc/tydzień/dzień);
+  kafelek ze skrótem „Zamówiono N produktów”; pełne pozycje po kliknięciu (scroll).
+- **Split + security:** `supplier_intent_routes.py` — flip/budget/top-savings/predictive
+  z `require_tenant` (+ deal-hunter na top-savings).
+
+### 2026-08-22 — Faktury dostawcy + sumy wydatków + min-order extract (`chore/split-monoliths`)
+
+- **UX:** kafelek „Faktury” obok Edytuj/Usuń; lista chronologiczna + suma wydatków
+  (`SupplierInvoicesModal` + `supplierSpendService`).
+- **Fix:** notatka kosztu przy odbiorze zamówienia ma `supplier:{uuid}` — badge „Zamówiono”
+  liczy też ręczne dostawy (nie tylko skany AI).
+- **Split + security:** `supplier_min_order_routes.py` (`check-minimum-order` + `require_tenant`).
+
+### 2026-08-22 — Mail sheet UX + voice CRUD out of server.py (`chore/split-monoliths`)
+
+- **UX:** sheet wysyłki: Aplikacja pocztowa / Tylko logowanie / Asystent dostaw (potwierdzenie + Reply-To);
+  usunięty zdublowany „Gotowa wiadomość”; alert po app bez zbędnego opisu szkicu.
+- **Split + security:** `backend/voice_crud_routes.py` — `set-price` / `set-ingredient` /
+  `set-thresholds` / `recompute-availability` z `require_tenant_account_key()` na wszystkich.
+- Testy: `backend/tests/test_voice_crud_routes.py`.
+
+### 2026-08-22 — Prefill maila, plurals magazynu, szczegóły dostawy, banki A/B (`chore/split-monoliths`)
+
+- **Mail:** Onet/WP/… bez API compose → `mailto:` z adresatem/tematem/treścią (+ schowek);
+  opcjonalnie „Tylko logowanie” na stronę portalu.
+- **Magazyn:** mocniejsze stemowanie plurals (`bataty`↔`batat`); próg match 58; kategorie przez te same tokeny.
+- **Koszty zmienne:** odbiór dostawy zapisuje `GM_INVOICE_LINES` → klik pokazuje pozycje.
+- **Banki:** 18 kafelków; Wariant A (osobiste/firmowe) vs B (jedna URL); `BankAccountTypeSheet`.
+
+### 2026-08-22 — Fuzzy oferty + mail PL + koszyk + kategorie magazynu (`chore/split-monoliths`)
+
+- **Magazyn→dostawcy:** `namesMatch` / synonimy (`marchewka`↔`marchew`) + niższy próg w `product-suppliers`.
+- **Mail:** `mailProviders` — `op.pl`→Onet (`poczta.onet.pl`); WP/o2/Interia/Gazeta/Proton/Tuta/GMX;
+  domena firmowa → bez linku do obcego portalu.
+- **Koszyk:** przejście zamówienia do `sent` (Przygotowywane) czyści drafty dostawcy + event `SUPPLIER_BASKET_CHANGED`.
+- **Odbiór dostawy:** `applyOrderItemsToInventory` + `guessWarehouseCategory` (np. bób→Warzywa) + fuzzy nazwa + obrazki po aliasach.
+
+### 2026-08-21 — Kęs: mail compose wg domeny + draft w koszyku + voice STT (`chore/split-monoliths`)
+
+- **UX:** `openMailInBrowser` / `openMailInApp` + katalog `mailProviders` —
+  Gmail/Yahoo/Outlook/WP/O2/Onet/… według domeny nadawcy; wybór przeglądarka vs aplikacja;
+  otwarcie skrzynki **nie** oznacza zamówienia jako `sent` (zostaje `draft` do ręcznego usunięcia).
+- **Split:** `backend/voice_transcribe_routes.py` (`POST /api/voice/transcribe`).
+- `OrderModal.placeOrder` zapisuje koszyk jako `draft`.
+
+### 2026-08-21 — Kęs: order email out of server.py (`chore/split-monoliths`)
+
+- **Split:** `backend/order_email_format.py` (pure szablony) +
+  `backend/order_email_routes.py` (`generate-messages`, `send-email`).
+- **Security:** oba endpointy wymagają `require_tenant_account_key()`.
+- Testy: `backend/tests/test_order_email_routes.py`.
+
+### 2026-08-21 — Kęs: POS webhook out of server.py + fix bottleneck (`chore/split-monoliths`)
+
+- **Split:** `backend/pos_webhook_routes.py` + `backend/pos_webhook_consume.py`
+  (`POST /api/pos/webhook`); ContextVar tenanta z HMAC resetowany w `finally`.
+- **Bugfix:** usunięty drugi (martwy) `_recompute_menu_availability` w `server.py`,
+  który nadpisywał pełną implementację i cicho psuł POS Bottleneck (`TypeError`
+  na `changed_inventory_ids`). Helper `_availability_changed_count` dla call-site’ów
+  oczekujących int.
+- **Security:** `POST /api/menu/recompute-availability` wymaga
+  `require_tenant_account_key()`.
+- Testy: `backend/tests/test_pos_webhook_routes.py`.
+
 ### 2026-08-21 — Kęs: restaurant_profile out of server.py (`chore/split-monoliths`)
 
 - **Split:** `backend/restaurant_profile.py` (IO + sync profiles/disk) +
@@ -292,6 +388,9 @@ Przegląd całej aplikacji vs dekalog `.agentrules`. Ten branch **nie** tnie mon
   całe IO Dostawców: fetch z 4-poziomowym fallbackiem schematu, katalog, oferty AI,
   edge function `process-offer`, zamówienia/drafty. `app/(tabs)/dostawcy.tsx` = 0
   bezpośrednich zapytań `supabase` (było 36).
+- **Panel Zamówienia (2026-08):** `SupplierOrdersModal` + statusy `sent` (Przygotowywane)
+  / `received` (Zrealizowane); odbiór dostawy z opcją magazyn + koszty zmienne.
+  Wejście: przycisk pod „Zgłoś informację” na ekranie Dostawcy.
 - Weryfikacja: bundle Metro OK, tsc 166->154 (usunięte surowe inserty `never`).
 - Pozostałe ekrany z `supabase` w UI: `menu.tsx` (7), `ustawienia.tsx` (2) — kolejne kęsy.
 ### 2026-06 — Kęs #3: Serwis Magazynu + fix crashu (czeka na test urządzenia)

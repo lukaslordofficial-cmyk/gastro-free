@@ -3,14 +3,24 @@ const MENU_UNITS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
 export type MenuUnit = (typeof MENU_UNITS)[number];
 
 export function normalizeMenuUnit(raw: string | null | undefined): MenuUnit {
-  const x = (raw || '').trim().toLowerCase().replace(/\.$/, '');
+  const x = (raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/ł/g, 'l')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\.$/, '');
   if (!x) return 'g';
   if (['g', 'gr', 'gram', 'gramy', 'gramow', 'gramów'].includes(x)) return 'g';
   if (['kg', 'kilogram', 'kilogramy', 'kilogramow', 'kilogramów'].includes(x)) return 'kg';
   if (['ml', 'mililitr', 'mililitry', 'mililitrow', 'mililitrów'].includes(x)) return 'ml';
   if (['l', 'ltr', 'litr', 'litry', 'litrow', 'litrów'].includes(x)) return 'L';
-  if (['szt', 'sztuka', 'sztuki', 'sztuk', 'pcs', 'pc'].includes(x)) return 'szt';
-  if (x === 'opak' || x === 'op') return 'szt';
+  if (
+    ['szt', 'sztuka', 'sztuki', 'sztuk', 'pcs', 'pc', 'opak', 'op',
+      'peczek', 'peczki', 'peczka', 'wiazka', 'wiazki', 'bunch'].includes(x)
+  ) {
+    return 'szt';
+  }
   const hit = MENU_UNITS.find((u) => u.toLowerCase() === x);
   return hit ?? 'g';
 }

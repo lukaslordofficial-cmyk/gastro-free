@@ -7,7 +7,6 @@ import {
   dedupeWarehouseCategories,
   ensureDefaultWarehouseCategories,
 } from '@/lib/warehouseCategories';
-import { ensureDefaultKitchenUtensils } from '@/lib/kitchenUtensils';
 import { namesMatch } from '@/lib/fuzzyProductMatch';
 
 const ITEM_COLS_FULL =
@@ -24,15 +23,13 @@ export type WarehouseData = {
   wasteLogs: Row[];
 };
 
-/** Seed kategorii/utensyliów. fast=true -> w tle (po skanie faktury). */
+/** Seed kategorii magazynu. fast=true -> w tle (po skanie faktury). */
 export async function seedWarehouse(ak: string, fast: boolean): Promise<void> {
   if (!fast) {
     await ensureDefaultWarehouseCategories(supabase, ak);
     await dedupeWarehouseCategories(supabase, ak);
-    await ensureDefaultKitchenUtensils(supabase, ak);
   } else {
     void ensureDefaultWarehouseCategories(supabase, ak);
-    void ensureDefaultKitchenUtensils(supabase, ak);
   }
 }
 

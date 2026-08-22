@@ -1750,14 +1750,24 @@ export function DealHunterModal({
           .select('id')
           .single();
         if (orderErr || !order) throw orderErr ?? new Error('Nie utworzono koszyka');
-        const rows = g.items.map((it) => ({
-          order_id: order.id,
-          raw_product_name: it.matched_name || it.product_name,
-          price_net: it.unit_price_base ?? null,
-          unit: it.unit || 'szt',
-          quantity_ordered: Number(it.quantity) || 0,
-          warehouse_product_id: null,
-        }));
+        const rows = await Promise.all(
+          g.items.map(async (it) => {
+            const whName = (it.product_name || '').trim();
+            let wid: string | null =
+              product && whName && product.product_name === whName ? product.id : null;
+            if (!wid && whName) {
+              wid = await supplierOrdersService.resolveWarehouseProductId(whName);
+            }
+            return {
+              order_id: order.id,
+              raw_product_name: it.matched_name || it.product_name,
+              price_net: it.unit_price_base ?? null,
+              unit: it.unit || 'szt',
+              quantity_ordered: Number(it.quantity) || 0,
+              warehouse_product_id: wid,
+            };
+          }),
+        );
         const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
         if (itemsErr) throw itemsErr;
         saved += 1;
@@ -1893,12 +1903,23 @@ export function DealHunterModal({
           await supplierOrdersService.ensureSentOrderForSupplier({
             supplierId: g.supplier_id,
             notes: 'Łowca Okazji',
-            items: (g.items || []).map((it) => ({
-              raw_product_name: it.matched_name || it.product_name,
-              price_net: it.unit_price_base ?? null,
-              unit: it.unit || 'szt',
-              quantity_ordered: Number(it.quantity) || 0,
-            })),
+            items: await Promise.all(
+              (g.items || []).map(async (it) => {
+                const whName = (it.product_name || '').trim();
+                let wid: string | null =
+                  product && whName && product.product_name === whName ? product.id : null;
+                if (!wid && whName) {
+                  wid = await supplierOrdersService.resolveWarehouseProductId(whName);
+                }
+                return {
+                  raw_product_name: it.matched_name || it.product_name,
+                  price_net: it.unit_price_base ?? null,
+                  unit: it.unit || 'szt',
+                  quantity_ordered: Number(it.quantity) || 0,
+                  warehouse_product_id: wid,
+                };
+              }),
+            ),
           });
         }
       } catch {

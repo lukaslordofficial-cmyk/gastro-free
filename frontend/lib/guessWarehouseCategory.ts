@@ -12,7 +12,7 @@ const CAT_KEYWORDS: Array<{ category: string; words: string[] }> = [
       'pomidor', 'cebula', 'czosnek', 'salat', 'ogorek', 'baklazan', 'jabl', 'banan',
       'cytryn', 'marchew', 'ziemniak', 'papryk', 'brokul', 'kalafior', 'burak', 'kapust',
       'szpinak', 'awokado', 'grzyb', 'pieczark', 'owoc', 'warzyw', 'por', 'seler', 'pietruszk',
-      'koperek', 'bazyl', 'natk', 'rzodkiew', 'cukini', 'dyni', 'gruszk', 'truskawk', 'malin',
+      'koper', 'koperek', 'bazyl', 'natk', 'rzodkiew', 'cukini', 'dyni', 'gruszk', 'truskawk', 'malin',
       'borowk', 'jagod', 'winogron', 'arbuz', 'melon', 'ananas', 'mango', 'kiwi', 'batat',
       'bob', 'fasol', 'groch', 'soczewic', 'groszek', 'kalarep', 'bruksel', 'porzeczk',
     ],

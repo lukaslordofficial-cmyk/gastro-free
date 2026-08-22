@@ -359,10 +359,20 @@ export function DishPickEditor({
   priceField?: boolean;
   title: string;
 }) {
-  const [query, setQuery] = useState(String(edited.dish_name_resolved || edited.dish_name || ''));
+  const seedName = String(edited.dish_name_resolved || edited.dish_name || '');
+  const [query, setQuery] = useState(seedName);
   const [suggestions, setSuggestions] = useState<{ id: string; name: string; price_pln?: number }[]>([]);
   const [loading, setLoading] = useState(false);
   const accepted = edited.dish_accepted === true && !!edited.dish_id;
+
+  // Prefill z komendy głosowej (np. „usuń kaczkę po pekińsku”) — sync gdy payload dojdzie.
+  useEffect(() => {
+    if (accepted) return;
+    const next = String(edited.dish_name_resolved || edited.dish_name || '').trim();
+    if (next && next !== query) setQuery(next);
+    // tylko gdy zmienia się seed z AI / transcriptu
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edited.dish_name, edited.dish_name_resolved, accepted]);
 
   useEffect(() => {
     if (accepted) {

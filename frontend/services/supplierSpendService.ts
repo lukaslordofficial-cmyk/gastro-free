@@ -154,3 +154,26 @@ export async function fetchSupplierInvoices(supplierId: string): Promise<{
   const totalSpent = entries.reduce((s, e) => s + (Number(e.amount_pln) || 0), 0);
   return { entries, totalSpent: Math.round(totalSpent * 100) / 100 };
 }
+
+/** Usuń wgraną fakturę / dostawę (koszt zmienny i/lub wiersz invoices). */
+export async function deleteSupplierInvoiceEntry(
+  entry: SupplierInvoiceEntry,
+): Promise<void> {
+  const id = String(entry.id || '');
+  if (id.startsWith('cost:')) {
+    const rawId = id.slice('cost:'.length);
+    const ak = getAccountKey();
+    let q = supabase.from('variable_cost_entries').delete().eq('id', rawId);
+    if (isRealKey(ak)) q = q.eq('account_key', ak);
+    const { error } = await q;
+    if (error) throw error;
+    return;
+  }
+  if (id.startsWith('invoice:')) {
+    const rawId = id.slice('invoice:'.length);
+    const { error } = await supabase.from('invoices').delete().eq('id', rawId);
+    if (error) throw error;
+    return;
+  }
+  throw new Error('Nieznany typ wpisu faktury.');
+}

@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Logout/faktury/fuzzy + daily reports extract (`chore/split-monoliths`)
+
+- **UX:** wylogowanie → `premiumAlert` (dark); usuwanie faktury u dostawcy; głosowe
+  usuwanie dania prefilluje nazwę; koper↔koperek (synonim + `warehouse_product_id` w Łowcy).
+- **Split + security:** `daily_report_routes.py` — `POST /api/pos/close-day`,
+  `GET /api/reports/daily` (+ auto-close) z `require_tenant_account_key()`.
+- `server.py` ≈ 13.5k linii (było ~13.8k przed tym kęsem).
+
 ### 2026-08-22 — Voice CRUD v2 extract + tenant on /api/voice/dispatch (`chore/split-monoliths`)
 
 - **Split:** `voice_crud_v2_routes.py` — bulk/delete/availability/scale + `voice_dispatch_v2`.

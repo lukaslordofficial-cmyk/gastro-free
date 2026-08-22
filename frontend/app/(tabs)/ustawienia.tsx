@@ -5,7 +5,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Alert,
   Switch,
   RefreshControl,
   ActivityIndicator,
@@ -88,7 +87,7 @@ export default function UstawieniaScreen() {
   const [settingsPane, setSettingsPane] = useState<SettingsPaneId>('lokal');
 
   const handleSignOut = () => {
-    Alert.alert('Wylogowanie', 'Na pewno chcesz się wylogować?', [
+    premiumAlert('Wylogowanie', 'Na pewno chcesz się wylogować?', [
       { text: 'Anuluj', style: 'cancel' },
       {
         text: 'Wyloguj',

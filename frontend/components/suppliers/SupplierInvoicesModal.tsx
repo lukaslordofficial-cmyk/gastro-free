@@ -23,8 +23,10 @@ import {
 } from '@/components/ExpandableDateJournal';
 import {
   fetchSupplierInvoices,
+  deleteSupplierInvoiceEntry,
   type SupplierInvoiceEntry,
 } from '@/services/supplierSpendService';
+import { usePremiumAlert } from '@/components/PremiumAlert';
 
 type Props = {
   visible: boolean;
@@ -88,6 +90,7 @@ export function SupplierInvoicesModal({
   onClose,
 }: Props) {
   const theme = useAppTheme();
+  const { alert: premiumAlert } = usePremiumAlert();
   const prem = theme.isPremium;
   const bg = prem ? DS.color.bgPrimary : Colors.background;
   const card = prem ? DS.color.surfaceCard : Colors.card;
@@ -123,6 +126,42 @@ export function SupplierInvoicesModal({
   }, [visible, load]);
 
   const leaves = useMemo(() => toJournalLeaves(entries), [entries]);
+
+  const handleDeleteLeaf = useCallback(
+    (leaf: { id: string }) => {
+      const entry = entries.find((e) => e.id === leaf.id);
+      if (!entry) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        premiumAlert(
+          'Usunąć fakturę?',
+          'Wpis zniknie z listy i sumy wydatków u dostawcy. Magazyn nie cofnie automatycznie ilości.',
+          [
+            { text: 'Anuluj', style: 'cancel', onPress: () => resolve(false) },
+            {
+              text: 'Usuń',
+              style: 'destructive',
+              onPress: () => {
+                void (async () => {
+                  try {
+                    await deleteSupplierInvoiceEntry(entry);
+                    await load();
+                    resolve(true);
+                  } catch (e: unknown) {
+                    premiumAlert(
+                      'Błąd',
+                      e instanceof Error ? e.message : 'Nie udało się usunąć faktury.',
+                    );
+                    resolve(false);
+                  }
+                })();
+              },
+            },
+          ],
+        );
+      });
+    },
+    [entries, load, premiumAlert],
+  );
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
@@ -171,6 +210,7 @@ export function SupplierInvoicesModal({
               items={leaves}
               emptyText="Brak faktur i dostaw dla tego dostawcy."
               formatAmount={formatPln}
+              onDeleteLeaf={handleDeleteLeaf}
             />
           )}
           <View style={{ height: 40 }} />

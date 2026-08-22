@@ -3635,6 +3635,28 @@ function peelNamedFromCategories(cats: string[]): { categories: string[]; named:
   return { categories: matched, named };
 }
 
+/** Wyłuskaj nazwę dania z komendy głosowej gdy LLM nie wypełnił dish_name. */
+function guessDishNameFromTranscript(transcript: string, intent: Intent): string {
+  const t = String(transcript || '').trim();
+  if (!t) return '';
+  const patterns: RegExp[] =
+    intent === 'delete_menu_item'
+      ? [
+          /(?:usuń|usun|skasuj|wyrzuć|wyrzuc)\s+(?:z\s+menu\s+)?(?:danie\s+)?(.+)$/i,
+          /(?:usuń|usun|skasuj)\s+(.+?)\s+z\s+menu/i,
+        ]
+      : [
+          /(?:zmień|zmien|ustaw)\s+cen[ęe]\s+(?:dania\s+)?(.+?)(?:\s+na\s+[\d.,]+)?$/i,
+          /(?:cena|cenę)\s+(?:dania\s+)?(.+?)(?:\s+na\s+[\d.,]+)?$/i,
+        ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    const raw = (m?.[1] || '').trim().replace(/[.?!,;]+$/g, '').trim();
+    if (raw.length >= 2) return raw;
+  }
+  return '';
+}
+
 function seedPayload(
   intent: Intent,
   payload: Record<string, any>,
@@ -3767,8 +3789,18 @@ function seedPayload(
       p.dish_name = '';
       p.dish_name_resolved = '';
       if (intent === 'edit_menu_item_price') p.new_price = null;
-    } else if (p.dish_accepted == null) {
-      p.dish_accepted = !!p.dish_id;
+    } else {
+      // Zawsze wymagaj kliknięcia podpowiedzi; nazwę z głosu trzymaj w polu.
+      const spoken =
+        String(p.dish_name_resolved || p.dish_name || '').trim()
+        || guessDishNameFromTranscript(String(opts?.transcript || ''), intent);
+      if (spoken) {
+        p.dish_name = spoken;
+        if (!p.dish_name_resolved) p.dish_name_resolved = spoken;
+      }
+      p.dish_accepted = false;
+      p.dish_id = null;
+      if (intent === 'edit_menu_item_price' && p.new_price === 0) p.new_price = null;
     }
   }
   if (intent === 'navigate_screen' && opts?.fromLegend) {

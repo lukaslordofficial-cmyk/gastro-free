@@ -202,6 +202,25 @@ async function loadCategories(ak: string): Promise<Array<{ id: string; name: str
   return (data ?? []) as Array<{ id: string; name: string }>;
 }
 
+/** Znajdź id pozycji magazynu po nazwie (koper ↔ koperek). */
+export async function resolveWarehouseProductId(
+  productName: string,
+): Promise<string | null> {
+  const name = (productName || '').trim();
+  if (!name) return null;
+  const ak = getAccountKey();
+  let q = supabase.from('inventory_items').select('id, name').limit(5000);
+  if (ak && ak !== 'default') q = q.eq('account_key', ak);
+  const { data } = await q;
+  const rows = (data ?? []) as Array<{ id: string; name: string }>;
+  if (!rows.length) return null;
+  const key = productMatchKey(name);
+  const exact = key ? rows.find((r) => productMatchKey(r.name) === key) : undefined;
+  if (exact) return exact.id;
+  const fuzzy = bestProductMatch(name, rows, (r) => r.name, 58);
+  return fuzzy?.item.id ?? null;
+}
+
 /** Dopisz ilości do magazynu (fuzzy nazwa); nowe produkty → inteligentna kategoria. */
 export async function applyOrderItemsToInventory(
   items: SupplierOrderFull['supplier_order_items'],

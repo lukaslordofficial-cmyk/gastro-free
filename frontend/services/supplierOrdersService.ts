@@ -20,6 +20,9 @@ import {
 /** Odśwież koszyk globalny po przejściu draft → przygotowywane. */
 export const SUPPLIER_BASKET_CHANGED = 'gm/supplier-basket-changed';
 
+/** Magazyn: po przyjęciu dostawy odśwież listę (qty / nowe pozycje). */
+export const INVENTORY_CHANGED = 'gm/inventory-changed';
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = any;
 
@@ -269,7 +272,7 @@ export type ApplyInventoryResult = {
   assignments: InventoryAssignment[];
 };
 
-/** Dopisz ilości do magazynu (fuzzy nazwa); nieznane → Inne + raport przypisań. */
+/** Dopisz ilości do magazynu (fuzzy nazwa); tylko aktywne pozycje; nieznane → Inne. */
 export async function applyOrderItemsToInventory(
   items: SupplierOrderFull['supplier_order_items'],
 ): Promise<ApplyInventoryResult> {
@@ -282,23 +285,93 @@ export async function applyOrderItemsToInventory(
   const inneCat =
     categories.find((c) => (c.name || '').trim().toLowerCase() === 'inne') ?? null;
 
+  // Tylko aktywne — soft-delete (is_active=false) z DEDUP nie może „połykać” dostaw.
   let invQuery = supabase
     .from('inventory_items')
-    .select('id, name, quantity, category_id, unit')
+    .select('id, name, quantity, category_id, unit, is_active')
     .limit(5000);
   if (ak && ak !== 'default') invQuery = invQuery.eq('account_key', ak);
-  const { data: allInv } = await invQuery;
+  let { data: allInv, error: invErr } = await invQuery.eq('is_active', true);
+  if (invErr && /is_active/.test(invErr.message ?? '')) {
+    const retry = await (ak && ak !== 'default'
+      ? supabase
+          .from('inventory_items')
+          .select('id, name, quantity, category_id, unit')
+          .eq('account_key', ak)
+          .limit(5000)
+      : supabase
+          .from('inventory_items')
+          .select('id, name, quantity, category_id, unit')
+          .limit(5000));
+    allInv = retry.data;
+    invErr = retry.error;
+  }
+  if (invErr) {
+    throw new Error(`Nie udało się wczytać magazynu: ${invErr.message}`);
+  }
   const inventory = (allInv ?? []) as Array<{
     id: string;
     name: string;
     quantity: number;
     category_id: string | null;
     unit?: string | null;
+    is_active?: boolean | null;
   }>;
 
   const resolveCategoryLabel = (categoryId: string | null | undefined, fallback: string) => {
     if (categoryId && catNameById.has(categoryId)) return catNameById.get(categoryId)!;
     return fallback;
+  };
+
+  const bumpQuantity = async (
+    invId: string,
+    displayName: string,
+    before: number,
+    qty: number,
+  ): Promise<number> => {
+    const nextQty = before + qty;
+    const patch: Record<string, unknown> = {
+      quantity: nextQty,
+      is_active: true,
+    };
+    let upd = supabase.from('inventory_items').update(patch).eq('id', invId);
+    if (ak && ak !== 'default') upd = upd.eq('account_key', ak);
+    let { data: updatedRow, error } = await upd.select('id, quantity, is_active').maybeSingle();
+    if (error && /is_active/.test(error.message ?? '')) {
+      const soft = { quantity: nextQty };
+      let u2 = supabase.from('inventory_items').update(soft).eq('id', invId);
+      if (ak && ak !== 'default') u2 = u2.eq('account_key', ak);
+      const r2 = await u2.select('id, quantity').maybeSingle();
+      updatedRow = r2.data as { id: string; quantity: number; is_active?: boolean } | null;
+      error = r2.error;
+    }
+    if (error) {
+      throw new Error(`Nie udało się zwiększyć stanu „${displayName}”: ${error.message}`);
+    }
+    if (!updatedRow) {
+      const r3 = await supabase
+        .from('inventory_items')
+        .update(patch)
+        .eq('id', invId)
+        .select('id, quantity')
+        .maybeSingle();
+      if (r3.error) {
+        throw new Error(`Nie udało się zwiększyć stanu „${displayName}”: ${r3.error.message}`);
+      }
+      if (!r3.data) {
+        throw new Error(
+          `Nie zapisano stanu „${displayName}” (brak uprawnień lub pozycja nieaktywna).`,
+        );
+      }
+      return Number(r3.data.quantity) || nextQty;
+    }
+    const saved = Number(updatedRow.quantity);
+    if (!Number.isFinite(saved) || Math.abs(saved - nextQty) > 0.0001) {
+      throw new Error(
+        `Stan „${displayName}” nie został zapisany (oczekiwano ${nextQty}, jest ${saved}).`,
+      );
+    }
+    return saved;
   };
 
   for (const it of items) {
@@ -313,6 +386,7 @@ export async function applyOrderItemsToInventory(
 
     let invId = (it.warehouse_product_id || '').trim() || null;
     let matched = invId ? inventory.find((r) => r.id === invId) : undefined;
+    // martwy / nieaktywny ID z zamówienia → fuzzy po nazwie wśród aktywnych
     if (invId && !matched) invId = null;
 
     if (!matched) {
@@ -341,30 +415,9 @@ export async function applyOrderItemsToInventory(
 
     if (matched && invId) {
       const before = Number(matched.quantity) || 0;
-      let upd = supabase
-        .from('inventory_items')
-        .update({ quantity: before + qty })
-        .eq('id', invId);
-      if (ak && ak !== 'default') upd = upd.eq('account_key', ak);
-      const { data: updatedRow, error } = await upd.select('id, quantity').maybeSingle();
-      if (error) {
-        throw new Error(
-          `Nie udało się zwiększyć stanu „${matched.name}”: ${error.message}`,
-        );
-      }
-      if (!updatedRow) {
-        const { error: e2 } = await supabase
-          .from('inventory_items')
-          .update({ quantity: before + qty })
-          .eq('id', invId);
-        if (e2) {
-          throw new Error(
-            `Nie udało się zwiększyć stanu „${matched.name}”: ${e2.message}`,
-          );
-        }
-      }
+      const savedQty = await bumpQuantity(invId, matched.name, before, qty);
       updated += 1;
-      matched.quantity = before + qty;
+      matched.quantity = savedQty;
       assignments.push({
         sourceName: rawName,
         inventoryName: matched.name,
@@ -376,7 +429,6 @@ export async function applyOrderItemsToInventory(
       continue;
     }
 
-    // Brak dopasowania → nowa pozycja; niepewna jednostka / brak kategorii → Inne
     const guessed = unsureUnit ? 'Inne' : guessWarehouseCategoryName(matchName || rawName);
     let cat = mapGuessToUserCategory(guessed, categories);
     if (!cat || guessed === 'Inne' || unsureUnit) {
@@ -392,35 +444,48 @@ export async function applyOrderItemsToInventory(
       portion_size: null,
       is_combo_polprodukt: false,
       is_critical: false,
+      is_active: true,
       account_key: ak,
       category_id: cat?.id ?? null,
     };
-    const { data: inserted, error } = await supabase
+    let { data: inserted, error } = await supabase
       .from('inventory_items')
       .insert(payload as never)
       .select('id, name, quantity, category_id')
       .maybeSingle();
+    if (error && /is_active/.test(error.message ?? '')) {
+      const { is_active: _ia, ...withoutActive } = payload;
+      const r2 = await supabase
+        .from('inventory_items')
+        .insert(withoutActive as never)
+        .select('id, name, quantity, category_id')
+        .maybeSingle();
+      inserted = r2.data;
+      error = r2.error;
+    }
     if (error) {
       throw new Error(`Nie udało się dodać „${storeName}” do magazynu: ${error.message}`);
     }
-    if (inserted) {
-      created += 1;
-      inventory.push({
-        ...(inserted as { id: string; name: string; quantity: number; category_id: string | null }),
-        unit,
-      });
-      assignments.push({
-        sourceName: rawName,
-        inventoryName: (inserted as { name: string }).name,
-        categoryName: resolveCategoryLabel(
-          (inserted as { category_id?: string | null }).category_id,
-          cat?.name || 'Inne',
-        ),
-        action: 'created',
-        qty,
-        unit,
-      });
+    if (!inserted?.id) {
+      throw new Error(`Nie zapisano nowej pozycji „${storeName}” w magazynie.`);
     }
+    created += 1;
+    inventory.push({
+      ...(inserted as { id: string; name: string; quantity: number; category_id: string | null }),
+      unit,
+      is_active: true,
+    });
+    assignments.push({
+      sourceName: rawName,
+      inventoryName: (inserted as { name: string }).name,
+      categoryName: resolveCategoryLabel(
+        (inserted as { category_id?: string | null }).category_id,
+        cat?.name || 'Inne',
+      ),
+      action: 'created',
+      qty,
+      unit,
+    });
   }
   return { updated, created, assignments };
 }
@@ -492,5 +557,8 @@ export async function receiveSupplierOrder(
     .update({ status: 'received' })
     .eq('id', order.id);
   if (error) throw error;
+  if (opts.applyInventory) {
+    DeviceEventEmitter.emit(INVENTORY_CHANGED);
+  }
   return { assignments };
 }

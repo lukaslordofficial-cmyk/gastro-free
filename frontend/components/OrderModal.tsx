@@ -45,6 +45,15 @@ interface Props {
   supplierEmail?: string | null;
   visible: boolean;
   onClose: () => void;
+  /** Produkt z katalogu dostawcy — po otwarciu dodawany do koszyka (qty 1). */
+  seedProduct?: {
+    id: string;
+    name: string;
+    variant?: string;
+    unit?: string;
+    price_pln: number | null;
+  } | null;
+  onSeedConsumed?: () => void;
 }
 
 type CatalogRow = {
@@ -67,6 +76,8 @@ export function OrderModal({
   supplierEmail,
   visible,
   onClose,
+  seedProduct = null,
+  onSeedConsumed,
 }: Props) {
   const theme = useAppTheme();
   const { alert } = usePremiumAlert();
@@ -150,13 +161,27 @@ export function OrderModal({
   }, [supplierId]);
 
   useEffect(() => {
-    if (visible) {
-      setCart(new Map());
-      setNotes('');
-      setQuery('');
-      setActiveTab('products');
-      void load();
-    }
+    if (!visible) return;
+    setCart(new Map());
+    setNotes('');
+    setQuery('');
+    setActiveTab(seedProduct?.id ? 'cart' : 'products');
+    const seed = seedProduct;
+    void load().then(() => {
+      if (!seed?.id) return;
+      const row: CatalogRow = {
+        id: seed.id,
+        name: seed.name,
+        variant: seed.variant || '',
+        unit: seed.unit || 'szt',
+        price_pln: seed.price_pln,
+        in_menu: true,
+      };
+      setCart(new Map([[row.id, { item: row, quantity: 1 }]]));
+      onSeedConsumed?.();
+    });
+    // seed tylko przy otwarciu — nie w deps (unikamy pętli)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, load]);
 
   const filtered = useMemo(() => {
@@ -174,6 +199,18 @@ export function OrderModal({
     const existing = cart.get(item.id);
     setQtyInput(existing ? existing.quantity.toString() : '1');
     setShowQtyModal(true);
+  };
+
+  const addOneToCart = (item: CatalogRow) => {
+    setCart((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(item.id);
+      next.set(item.id, {
+        item,
+        quantity: (existing?.quantity || 0) + 1,
+      });
+      return next;
+    });
   };
 
   const confirmQty = () => {
@@ -374,7 +411,11 @@ export function OrderModal({
             {item.in_menu ? 'Występujące w menu' : 'Dodatkowe'}
           </Text>
         ) : null}
-        <View style={[styles.productRow, { borderBottomColor: border }]}>
+        <TouchableOpacity
+          style={[styles.productRow, { borderBottomColor: border }]}
+          onPress={() => addOneToCart(item)}
+          activeOpacity={0.7}
+        >
           <View style={styles.productLeft}>
             <Text style={[styles.productName, { color: text }]} numberOfLines={2}>
               {item.name}
@@ -397,6 +438,7 @@ export function OrderModal({
               inCart && { backgroundColor: accent, borderColor: accent },
             ]}
             onPress={() => openQty(item)}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
             activeOpacity={0.75}
           >
             {inCart ? (
@@ -410,7 +452,7 @@ export function OrderModal({
               <Plus size={18} color={prem ? accent : Colors.accent} strokeWidth={2.5} />
             )}
           </TouchableOpacity>
-        </View>
+        </TouchableOpacity>
       </View>
     );
   };

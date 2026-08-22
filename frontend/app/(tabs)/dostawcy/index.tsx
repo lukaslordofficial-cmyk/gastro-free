@@ -90,6 +90,7 @@ interface CatalogProduct {
   name: string;
   variant: string;
   volume_label: string;
+  unit: string;
   unit_count: number;
   price_pln: number;
   liters_total: number;
@@ -174,6 +175,7 @@ function mapDbRow(row: any, menuIngredientNames: string[] = []): Supplier {
           name: c.name,
           variant: c.variant,
           volume_label: c.volume_label ?? '',
+          unit: (c.unit || 'szt').trim() || 'szt',
           unit_count: Number(c.unit_count),
           price_pln: Number(c.price_pln),
           liters_total: Number(c.liters_total),
@@ -260,22 +262,27 @@ function CatalogRow({
   product,
   last,
   onDelete,
+  onPress,
 }: {
   product: CatalogProduct;
   last: boolean;
   onDelete?: (id: string) => void;
+  onPress?: (product: CatalogProduct) => void;
 }) {
   const theme = useAppTheme();
   const perLiter = product.liters_total > 0
     ? ` · ${formatPlnNumber(product.price_pln / product.liters_total)} zł/L`
     : '';
   return (
-    <View
+    <TouchableOpacity
       style={[
         catStyles.row,
         last && catStyles.rowLast,
         theme.isPremium && { borderBottomColor: theme.border },
       ]}
+      onPress={onPress ? () => onPress(product) : undefined}
+      activeOpacity={onPress ? 0.7 : 1}
+      disabled={!onPress}
     >
       <View style={catStyles.info}>
         <Text style={[catStyles.name, { color: theme.text }]}>{product.name}</Text>
@@ -307,7 +314,7 @@ function CatalogRow({
           <Trash2 size={14} color={theme.danger} strokeWidth={2} />
         </TouchableOpacity>
       ) : null}
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -358,6 +365,13 @@ function SupplierCard({
   const [extraOffersOpen, setExtraOffersOpen] = useState(true);
   const [showManualModal, setShowManualModal] = useState(false);
   const [showOrderModal, setShowOrderModal] = useState(false);
+  const [seedCatalogProduct, setSeedCatalogProduct] = useState<{
+    id: string;
+    name: string;
+    variant: string;
+    unit: string;
+    price_pln: number | null;
+  } | null>(null);
   const [showInvoices, setShowInvoices] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
   const [manualName, setManualName] = useState('');
@@ -1063,6 +1077,16 @@ function SupplierCard({
                   product={product}
                   last={idx === catalogInMenu.length - 1}
                   onDelete={deleteCatalogProduct}
+                  onPress={(p) => {
+                    setSeedCatalogProduct({
+                      id: p.id,
+                      name: p.name,
+                      variant: p.variant || p.volume_label || '',
+                      unit: p.unit || 'szt',
+                      price_pln: Number.isFinite(p.price_pln) ? p.price_pln : null,
+                    });
+                    setShowOrderModal(true);
+                  }}
                 />
               ))}
 
@@ -1095,6 +1119,16 @@ function SupplierCard({
                   product={product}
                   last={idx === catalogExtra.length - 1}
                   onDelete={deleteCatalogProduct}
+                  onPress={(p) => {
+                    setSeedCatalogProduct({
+                      id: p.id,
+                      name: p.name,
+                      variant: p.variant || p.volume_label || '',
+                      unit: p.unit || 'szt',
+                      price_pln: Number.isFinite(p.price_pln) ? p.price_pln : null,
+                    });
+                    setShowOrderModal(true);
+                  }}
                 />
               ))}
             </>
@@ -1365,7 +1399,12 @@ function SupplierCard({
         supplierName={supplier.name}
         supplierEmail={supplier.email}
         visible={showOrderModal}
-        onClose={() => setShowOrderModal(false)}
+        seedProduct={seedCatalogProduct}
+        onSeedConsumed={() => setSeedCatalogProduct(null)}
+        onClose={() => {
+          setShowOrderModal(false);
+          setSeedCatalogProduct(null);
+        }}
       />
 
       <SupplierInvoicesModal

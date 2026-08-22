@@ -1,11 +1,12 @@
 /**
  * Otwiera pocztę: przeglądarka (wg domeny From) albo aplikacja / mailto.
- * Nie miesza Gmaila z innymi domenami — bez „domyślnego” klienta przy trybie przeglądarki.
+ * Domeny firmowe: bez fałszywego linku do Orange/Gmail — tylko schowek + instrukcja.
  */
 import * as Linking from 'expo-linking';
 import * as Clipboard from 'expo-clipboard';
 import {
   findMailProvider,
+  hasKnownMailLogin,
   mailProviderLabel,
   type MailProvider,
 } from '@/lib/mailProviders';
@@ -19,13 +20,15 @@ export type MailComposeInput = {
 
 export type OpenMailResult = {
   opened: string;
-  mode: 'browser' | 'app';
+  mode: 'browser' | 'app' | 'clipboard';
   providerLabel: string;
   /** true gdy web nie wspiera prefill — treść skopiowana do schowka. */
   copiedForPaste: boolean;
+  /** Domena firmowa / nieznana — brak zewnętrznego logowania. */
+  corporateDomain?: boolean;
 };
 
-export { mailProviderLabel, findMailProvider } from '@/lib/mailProviders';
+export { mailProviderLabel, findMailProvider, hasKnownMailLogin } from '@/lib/mailProviders';
 
 function enc(s: string): string {
   return encodeURIComponent(s);
@@ -64,13 +67,12 @@ export async function openMailInBrowser(input: MailComposeInput): Promise<OpenMa
 
   if (!provider) {
     await copyComposePayload(to, subject, body);
-    const ok = await tryOpen('https://www.google.com/search?q=poczta+logowanie');
-    if (!ok) throw new Error('Nie udało się otworzyć przeglądarki.');
     return {
-      opened: 'https://www.google.com/search?q=poczta+logowanie',
-      mode: 'browser',
+      opened: '',
+      mode: 'clipboard',
       providerLabel: label,
       copiedForPaste: true,
+      corporateDomain: true,
     };
   }
 
@@ -122,7 +124,7 @@ export async function openMailInApp(input: MailComposeInput): Promise<OpenMailRe
   throw new Error('Nie udało się otworzyć aplikacji pocztowej.');
 }
 
-/** Kompatybilność: najpierw przeglądarka dostawcy, bez mailto-fallbacku do Gmaila. */
+/** Kompatybilność: przeglądarka dostawcy; domena firmowa → tylko schowek. */
 export async function openMailCompose(input: MailComposeInput): Promise<OpenMailResult> {
   return openMailInBrowser(input);
 }

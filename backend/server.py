@@ -4074,6 +4074,7 @@ _CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
         "szpinak", "awokado", "grzyb", "pieczark", "owoc", "warzyw", "por", "seler", "pietruszk",
         "koperek", "bazyl", "natk", "rzodkiew", "cukini", "dyni", "gruszk", "truskawk", "malin",
         "borowk", "jagod", "winogron", "arbuz", "melon", "ananas", "mango", "kiwi", "batat",
+        "bob", "fasol", "groch", "groszek", "kalarep", "bruksel",
     )),
     ("Nabiał", (
         "mleko", "ser", "smietan", "jogurt", "maslo", "twarog", "mozarella", "mozzarella",

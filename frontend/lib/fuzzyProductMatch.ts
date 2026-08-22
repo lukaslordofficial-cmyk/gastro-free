@@ -95,7 +95,17 @@ const SYNONYM: Record<string, string> = {
   yolk: 'jajko',
   marchewki: 'marchew',
   marchewek: 'marchew',
+  marchewka: 'marchew',
+  marchewke: 'marchew',
   marchew: 'marchew',
+  bob: 'bob',
+  bobu: 'bob',
+  bobem: 'bob',
+  bobow: 'bob',
+  fasolki: 'fasol',
+  fasolka: 'fasol',
+  fasoli: 'fasol',
+  fasola: 'fasol',
   ogorki: 'ogorek',
   ogorkow: 'ogorek',
   papryki: 'papryka',
@@ -234,6 +244,8 @@ const SINGULAR_DISPLAY: Record<string, string> = {
   jajko: 'jajko',
   ziemniak: 'ziemniak',
   marchew: 'marchew',
+  bob: 'bób',
+  fasol: 'fasola',
   ogorek: 'ogórek',
   papryka: 'papryka',
   cukinia: 'cukinia',
@@ -383,6 +395,14 @@ export function scoreProductNames(a: string, b: string): number {
   }
   if (shorter.length === 1 && longer.includes(shorter[0]) && longer.length <= 3) {
     score = Math.max(score, 82);
+  }
+  // Prefiks / odmiana: marchew ⊂ marchewka, bob ⊂ bobu (gdy synonim nie złapał)
+  if (shorter.length === 1 && longer.length === 1) {
+    const a = shorter[0];
+    const b = longer[0];
+    if (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) {
+      score = Math.max(score, 90);
+    }
   }
   // „ser kozi” ⊂ „ser kozi rolka” (po odfiltrowaniu form opakowania w STOP)
   if (shorter.length >= 2 && shorter.every((t) => longer.includes(t)) && longer.length - shorter.length <= 2) {

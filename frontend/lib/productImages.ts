@@ -581,7 +581,7 @@ export const VEGETABLE_CATALOG: ProductImageEntry[] = [
     slug: 'fasolka_szparagowa_zielona',
     category: 'warzywa',
     labelPl: 'Fasolka szparagowa',
-    aliases: ['fasolka', 'fasolka szparagowa', 'green beans'],
+    aliases: ['fasolka', 'fasolka szparagowa', 'green beans', 'bób', 'bob', 'fasola szparagowa'],
     storagePath: 'warzywa/fasolka_szparagowa_zielona.png',
     localAsset: require('@/assets/premium/vegetables/fasolka_szparagowa_zielona.webp'),
   },

@@ -123,11 +123,19 @@ export function OrderEmailComposer({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const afterExternalOpen = (opts?: { copiedForPaste?: boolean; providerLabel?: string }) => {
+  const afterExternalOpen = (opts?: {
+    copiedForPaste?: boolean;
+    providerLabel?: string;
+    corporateDomain?: boolean;
+  }) => {
     onMailClientOpened?.();
-    const extra = opts?.copiedForPaste
-      ? `\n\nTreść skopiowana do schowka — wklej w ${opts.providerLabel || 'poczcie'} po zalogowaniu.`
-      : '';
+    let extra = '';
+    if (opts?.corporateDomain) {
+      extra =
+        '\n\nTreść skopiowana. To domena firmowa — zaloguj się w panelu poczty swojej firmy i wklej wiadomość (Ctrl+V / wklej).';
+    } else if (opts?.copiedForPaste) {
+      extra = `\n\nTreść skopiowana do schowka — wklej w ${opts.providerLabel || 'poczcie'} po zalogowaniu.`;
+    }
     alert('Zamówienie', `${PREP_MSG}${extra}`, [{ text: 'OK', style: 'primary' }]);
   };
 

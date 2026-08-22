@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
   Switch,
   Image,
+  DeviceEventEmitter,
 } from 'react-native';
 import * as Linking from 'expo-linking';
 import * as DocumentPicker from 'expo-document-picker';
@@ -47,6 +48,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import * as suppliersService from '@/services/suppliersService';
 import * as supplierOrdersService from '@/services/supplierOrdersService';
+import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { OrderModal } from '@/components/OrderModal';
 import {
@@ -1974,6 +1976,13 @@ function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: ()
       setLoading(false);
     })();
   }, [visible, reloadKey]);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(SUPPLIER_BASKET_CHANGED, () => {
+      setReloadKey((k) => k + 1);
+    });
+    return () => sub.remove();
+  }, []);
 
   const totalItems = groups.reduce((acc, g) => acc + g.items.length, 0);
   const isEmpty = totalItems === 0 && draftOrders.length === 0;

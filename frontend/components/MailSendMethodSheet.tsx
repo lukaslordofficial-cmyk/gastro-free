@@ -49,9 +49,10 @@ export function MailSendMethodSheet({
             {'\n'}
             {provider
               ? `Wykryto: ${label}. Wybierz sposób wysyłki.`
-              : 'Nie rozpoznano dostawcy — wybierz przeglądarkę (skopiujemy treść) lub aplikację pocztową.'}
+              : 'Domena firmowa / nieznana — nie otwieramy obcego portalu. Skopiujemy treść; zaloguj się w panelu swojej firmy lub użyj aplikacji pocztowej.'}
           </Text>
 
+          {provider ? (
           <TouchableOpacity
             style={[styles.row, { borderColor: border, backgroundColor: prem ? DS.color.bgTertiary : Colors.borderLight }]}
             onPress={onPickBrowser}
@@ -62,12 +63,13 @@ export function MailSendMethodSheet({
               <Globe size={18} color={accent} strokeWidth={2.2} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.rowTitle, { color: text }]}>Przeglądarka / Internet</Text>
+              <Text style={[styles.rowTitle, { color: text }]}>Przeglądarka — {label}</Text>
               <Text style={[styles.rowSub, { color: muted }]}>
-                Otwórz {label} w przeglądarce (logowanie + nowa wiadomość)
+                Otwórz stronę logowania ({provider.webInboxUrl.replace(/^https?:\/\//, '')})
               </Text>
             </View>
           </TouchableOpacity>
+          ) : null}
 
           <TouchableOpacity
             style={[styles.row, { borderColor: border, backgroundColor: prem ? DS.color.bgTertiary : Colors.borderLight }]}

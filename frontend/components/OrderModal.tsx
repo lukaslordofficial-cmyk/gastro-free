@@ -15,6 +15,7 @@ import {
   Platform,
   ActivityIndicator,
   ScrollView,
+  DeviceEventEmitter,
 } from 'react-native';
 import { X, ShoppingCart, Plus, Package, Trash2, Truck, Search, Landmark } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -35,6 +36,7 @@ import {
 import { formatPlnNumber } from '@/lib/format';
 import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
 import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
+import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
 import { useAuth } from '@/contexts/AuthContext';
 
 interface Props {
@@ -250,6 +252,18 @@ export function OrderModal({
       }));
       const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
       if (itemsErr) throw itemsErr;
+
+      // Koszyk (drafty) → już w „Przygotowywane”
+      await supabase
+        .from('supplier_orders')
+        .update({ status: 'sent' })
+        .eq('supplier_id', supplierId)
+        .eq('status', 'draft');
+      try {
+        DeviceEventEmitter.emit(SUPPLIER_BASKET_CHANGED);
+      } catch {
+        /* ignore */
+      }
 
       const tpl = await fetchOrderEmailTemplate({
         supplierId,

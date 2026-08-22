@@ -1,9 +1,19 @@
 /**
  * supplierOrdersService — koszyki + panel Zamówienia (sent / received).
  */
+import { DeviceEventEmitter } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { insertVariableCost } from '@/services/financeService';
+import { namesMatch } from '@/lib/fuzzyProductMatch';
+import {
+  guessWarehouseCategoryName,
+  mapGuessToUserCategory,
+} from '@/lib/guessWarehouseCategory';
+import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
+
+/** Odśwież koszyk globalny po przejściu draft → przygotowywane. */
+export const SUPPLIER_BASKET_CHANGED = 'gm/supplier-basket-changed';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = any;
@@ -63,20 +73,45 @@ export async function fetchGlobalBasket(): Promise<{ offerItems: Row[]; drafts: 
   return { offerItems: offerData ?? [], drafts: drafts ?? [] };
 }
 
+function emitBasketChanged(): void {
+  try {
+    DeviceEventEmitter.emit(SUPPLIER_BASKET_CHANGED);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Draft → sent (Przygotowywane) + wyczyść pozostałe drafty tego dostawcy z koszyka. */
 export async function markDraftSent(orderId: string): Promise<void> {
+  const { data: row } = await supabase
+    .from('supplier_orders')
+    .select('id, supplier_id')
+    .eq('id', orderId)
+    .maybeSingle();
   const { error } = await supabase.from('supplier_orders').update({ status: 'sent' }).eq('id', orderId);
   if (error) throw error;
+  const sid = (row as { supplier_id?: string } | null)?.supplier_id;
+  if (sid) {
+    await supabase
+      .from('supplier_orders')
+      .update({ status: 'sent' })
+      .eq('supplier_id', sid)
+      .eq('status', 'draft');
+  }
+  emitBasketChanged();
 }
 
 export async function deleteDrafts(draftIds: string[]): Promise<void> {
   if (!draftIds.length) return;
   await supabase.from('supplier_order_items').delete().in('order_id', draftIds);
   await supabase.from('supplier_orders').delete().in('id', draftIds);
+  emitBasketChanged();
 }
 
 export async function deleteOneDraft(orderId: string): Promise<void> {
   await supabase.from('supplier_order_items').delete().eq('order_id', orderId);
   await supabase.from('supplier_orders').delete().eq('id', orderId);
+  emitBasketChanged();
 }
 
 /**
@@ -102,6 +137,7 @@ export async function ensureSentOrderForSupplier(params: {
   const draftIds = (drafts || []).map((r: { id: string }) => r.id);
   if (draftIds.length) {
     await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', draftIds);
+    emitBasketChanged();
     return draftIds[0];
   }
   const { data: order, error } = await supabase
@@ -126,6 +162,7 @@ export async function ensureSentOrderForSupplier(params: {
     const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
     if (itemsErr) throw itemsErr;
   }
+  emitBasketChanged();
   return order.id as string;
 }
 
@@ -154,13 +191,35 @@ export function orderLineTotal(items: SupplierOrderFull['supplier_order_items'])
   }, 0);
 }
 
-/** Dopisz ilości do magazynu (po warehouse_product_id lub nazwie); utwórz brakujące. */
+async function loadCategories(ak: string): Promise<Array<{ id: string; name: string }>> {
+  await ensureDefaultWarehouseCategories(supabase, ak);
+  const { data } = await supabase
+    .from('inventory_categories')
+    .select('id, name')
+    .eq('account_key', ak)
+    .limit(200);
+  return (data ?? []) as Array<{ id: string; name: string }>;
+}
+
+/** Dopisz ilości do magazynu (fuzzy nazwa); nowe produkty → inteligentna kategoria. */
 export async function applyOrderItemsToInventory(
   items: SupplierOrderFull['supplier_order_items'],
 ): Promise<{ updated: number; created: number }> {
   let updated = 0;
   let created = 0;
   const ak = getAccountKey();
+  const categories = ak && ak !== 'default' ? await loadCategories(ak) : [];
+
+  let invQuery = supabase.from('inventory_items').select('id, name, quantity, category_id').limit(5000);
+  if (ak && ak !== 'default') invQuery = invQuery.eq('account_key', ak);
+  const { data: allInv } = await invQuery;
+  const inventory = (allInv ?? []) as Array<{
+    id: string;
+    name: string;
+    quantity: number;
+    category_id: string | null;
+  }>;
+
   for (const it of items) {
     const qty = Number(it.quantity_ordered) || 0;
     if (qty <= 0) continue;
@@ -169,34 +228,28 @@ export async function applyOrderItemsToInventory(
     const unit = (it.unit || 'szt').trim() || 'szt';
 
     let invId = (it.warehouse_product_id || '').trim() || null;
-    if (!invId) {
-      let q = supabase
-        .from('inventory_items')
-        .select('id, quantity')
-        .ilike('name', name)
-        .limit(1);
-      if (ak && ak !== 'default') q = q.eq('account_key', ak);
-      const { data } = await q.maybeSingle();
-      if (data?.id) invId = data.id;
+    let matched = invId ? inventory.find((r) => r.id === invId) : undefined;
+
+    if (!matched) {
+      matched = inventory.find((r) => namesMatch(name, r.name, 72));
+      if (matched) invId = matched.id;
     }
 
-    if (invId) {
-      const { data: row } = await supabase
+    if (matched && invId) {
+      const before = Number(matched.quantity) || 0;
+      const { error } = await supabase
         .from('inventory_items')
-        .select('id, quantity')
-        .eq('id', invId)
-        .maybeSingle();
-      if (row?.id) {
-        const before = Number(row.quantity) || 0;
-        const { error } = await supabase
-          .from('inventory_items')
-          .update({ quantity: before + qty })
-          .eq('id', row.id);
-        if (!error) updated += 1;
-        continue;
+        .update({ quantity: before + qty })
+        .eq('id', invId);
+      if (!error) {
+        updated += 1;
+        matched.quantity = before + qty;
       }
+      continue;
     }
 
+    const guessed = guessWarehouseCategoryName(name);
+    const cat = mapGuessToUserCategory(guessed, categories);
     const payload: Record<string, unknown> = {
       name,
       quantity: qty,
@@ -207,9 +260,17 @@ export async function applyOrderItemsToInventory(
       is_combo_polprodukt: false,
       is_critical: false,
       account_key: ak,
+      category_id: cat?.id ?? null,
     };
-    const { error } = await supabase.from('inventory_items').insert(payload as never);
-    if (!error) created += 1;
+    const { data: inserted, error } = await supabase
+      .from('inventory_items')
+      .insert(payload as never)
+      .select('id, name, quantity, category_id')
+      .maybeSingle();
+    if (!error && inserted) {
+      created += 1;
+      inventory.push(inserted as { id: string; name: string; quantity: number; category_id: string | null });
+    }
   }
   return { updated, created };
 }

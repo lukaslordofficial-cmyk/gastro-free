@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Fuzzy oferty + mail PL + koszyk + kategorie magazynu (`chore/split-monoliths`)
+
+- **Magazyn→dostawcy:** `namesMatch` / synonimy (`marchewka`↔`marchew`) + niższy próg w `product-suppliers`.
+- **Mail:** `mailProviders` — `op.pl`→Onet (`poczta.onet.pl`); WP/o2/Interia/Gazeta/Proton/Tuta/GMX;
+  domena firmowa → bez linku do obcego portalu (tylko schowek / app).
+- **Koszyk:** przejście zamówienia do `sent` (Przygotowywane) czyści drafty dostawcy + event `SUPPLIER_BASKET_CHANGED`.
+- **Odbiór dostawy:** `applyOrderItemsToInventory` + `guessWarehouseCategory` (np. bób→Warzywa) + fuzzy nazwa + obrazki po aliasach.
+
 ### 2026-08-21 — Kęs: mail compose wg domeny + draft w koszyku + voice STT (`chore/split-monoliths`)
 
 - **UX:** `openMailInBrowser` / `openMailInApp` + katalog `mailProviders` —

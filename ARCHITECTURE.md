@@ -20,6 +20,13 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Voice CRUD v2 extract + tenant on /api/voice/dispatch (`chore/split-monoliths`)
+
+- **Split:** `voice_crud_v2_routes.py` — bulk/delete/availability/scale + `voice_dispatch_v2`.
+- **Security:** `require_tenant_account_key()` na `POST /api/voice/dispatch` oraz w `voice_dispatch_v2`
+  (wcześniej bulk wipe menu/magazynu bez jawnego tenanta na tym pathu).
+- Helpery `_cat_matches` / `_is_missing_column_error` zostają w `server.py` (shared).
+
 ### 2026-08-22 — Faktury drzewo + supplier intents extract (`chore/split-monoliths`)
 
 - **UX:** `SupplierInvoicesModal` → `ExpandableDateJournal` (rok/miesiąc/tydzień/dzień);

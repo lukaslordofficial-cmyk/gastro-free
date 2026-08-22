@@ -20,6 +20,13 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Pęczek=szt, raport przypisań magazynu, admin extract (`chore/split-monoliths`)
+
+- **UX/fix:** jednostka „pęczek/wiązka” → szt; fuzzy bez szumu jednostek w nazwie;
+  po odbiorze dark premium lista przypisań (produkt → kategoria); niepewne → Inne;
+  raporty bez Jarvis/AI w UI; close-day bez generowania AI summary.
+- **Split:** `admin_routes.py` (`/api/admin/migration-status`, cron secret).
+
 ### 2026-08-22 — Faktury/głos/dostawa/raporty + katalog extract (`chore/split-monoliths`)
 
 - **UX/fix:** pełne usuwanie faktury (cost+invoice); głos prefilluje najlepsze danie z menu;

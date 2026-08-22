@@ -22,6 +22,7 @@ import {
   fetchOrdersByStatuses,
   orderLineTotal,
   receiveSupplierOrder,
+  type InventoryAssignment,
   type SupplierOrderFull,
 } from '@/services/supplierOrdersService';
 
@@ -40,6 +41,17 @@ function formatPlDate(iso: string): string {
   } catch {
     return iso.slice(0, 10);
   }
+}
+
+function formatAssignmentsMessage(assignments: InventoryAssignment[]): string {
+  if (!assignments.length) {
+    return 'Zamówienie oznaczone jako zrealizowane (bez zmian w magazynie).';
+  }
+  const lines = assignments.map((a) => {
+    const verb = a.action === 'updated' ? 'dopisano do' : 'nowa pozycja w';
+    return `• ${a.sourceName} → ${a.inventoryName} (${verb} „${a.categoryName}”, +${a.qty} ${a.unit})`;
+  });
+  return `Przypisanie do magazynu:\n${lines.join('\n')}`;
 }
 
 export function SupplierOrdersModal({ visible, onClose }: Props) {
@@ -109,16 +121,25 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
   ) => {
     setBusyId(order.id);
     try {
-      await receiveSupplierOrder(order, { applyInventory, applyVariableCost });
+      const { assignments } = await receiveSupplierOrder(order, {
+        applyInventory,
+        applyVariableCost,
+      });
       await reload();
       setTab('done');
-      alert(
-        'Gotowe',
-        applyInventory || applyVariableCost
-          ? 'Zamówienie w „Zrealizowane”. Magazyn/koszty zaktualizowane zgodnie z wyborem.'
-          : 'Zamówienie przeniesione do „Zrealizowane”.',
-        [{ text: 'OK', style: 'primary' }],
-      );
+      if (applyInventory && assignments.length) {
+        alert('Magazyn zaktualizowany', formatAssignmentsMessage(assignments), [
+          { text: 'OK', style: 'primary' },
+        ]);
+      } else {
+        alert(
+          'Gotowe',
+          applyInventory || applyVariableCost
+            ? 'Zamówienie w „Zrealizowane”. Magazyn/koszty zaktualizowane zgodnie z wyborem.'
+            : 'Zamówienie przeniesione do „Zrealizowane”.',
+          [{ text: 'OK', style: 'primary' }],
+        );
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się oznaczyć odbioru.';
       alert('Błąd', msg);

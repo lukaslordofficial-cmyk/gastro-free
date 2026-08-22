@@ -12,6 +12,10 @@ import {
 } from '@/lib/guessWarehouseCategory';
 import { ensureDefaultWarehouseCategories } from '@/lib/warehouseCategories';
 import { buildInvoiceCostNote } from '@/lib/invoiceCostNote';
+import {
+  normalizeWarehouseUnit,
+  stripUnitNoiseFromProductName,
+} from '@/lib/warehouseUnits';
 
 /** Odśwież koszyk globalny po przejściu draft → przygotowywane. */
 export const SUPPLIER_BASKET_CHANGED = 'gm/supplier-basket-changed';
@@ -235,7 +239,7 @@ async function loadCategories(ak: string): Promise<Array<{ id: string; name: str
 export async function resolveWarehouseProductId(
   productName: string,
 ): Promise<string | null> {
-  const name = (productName || '').trim();
+  const name = stripUnitNoiseFromProductName(productName || '');
   if (!name) return null;
   const ak = getAccountKey();
   let q = supabase.from('inventory_items').select('id, name').limit(5000);
@@ -250,16 +254,38 @@ export async function resolveWarehouseProductId(
   return fuzzy?.item.id ?? null;
 }
 
-/** Dopisz ilości do magazynu (fuzzy nazwa); nowe produkty → inteligentna kategoria. */
+export type InventoryAssignment = {
+  sourceName: string;
+  inventoryName: string;
+  categoryName: string;
+  action: 'updated' | 'created';
+  qty: number;
+  unit: string;
+};
+
+export type ApplyInventoryResult = {
+  updated: number;
+  created: number;
+  assignments: InventoryAssignment[];
+};
+
+/** Dopisz ilości do magazynu (fuzzy nazwa); nieznane → Inne + raport przypisań. */
 export async function applyOrderItemsToInventory(
   items: SupplierOrderFull['supplier_order_items'],
-): Promise<{ updated: number; created: number }> {
+): Promise<ApplyInventoryResult> {
   let updated = 0;
   let created = 0;
+  const assignments: InventoryAssignment[] = [];
   const ak = getAccountKey();
   const categories = ak && ak !== 'default' ? await loadCategories(ak) : [];
+  const catNameById = new Map(categories.map((c) => [c.id, c.name]));
+  const inneCat =
+    categories.find((c) => (c.name || '').trim().toLowerCase() === 'inne') ?? null;
 
-  let invQuery = supabase.from('inventory_items').select('id, name, quantity, category_id').limit(5000);
+  let invQuery = supabase
+    .from('inventory_items')
+    .select('id, name, quantity, category_id, unit')
+    .limit(5000);
   if (ak && ak !== 'default') invQuery = invQuery.eq('account_key', ak);
   const { data: allInv } = await invQuery;
   const inventory = (allInv ?? []) as Array<{
@@ -267,29 +293,36 @@ export async function applyOrderItemsToInventory(
     name: string;
     quantity: number;
     category_id: string | null;
+    unit?: string | null;
   }>;
+
+  const resolveCategoryLabel = (categoryId: string | null | undefined, fallback: string) => {
+    if (categoryId && catNameById.has(categoryId)) return catNameById.get(categoryId)!;
+    return fallback;
+  };
 
   for (const it of items) {
     const qty = Number(it.quantity_ordered) || 0;
     if (qty <= 0) continue;
-    const name = (it.raw_product_name || '').trim();
-    if (!name) continue;
-    const unit = (it.unit || 'szt').trim() || 'szt';
+    const rawName = (it.raw_product_name || '').trim();
+    if (!rawName) continue;
+    const matchName = stripUnitNoiseFromProductName(rawName);
+    const unitNorm = normalizeWarehouseUnit(it.unit);
+    const unit = unitNorm || 'szt';
+    const unsureUnit = unitNorm == null && !!(it.unit || '').trim();
 
     let invId = (it.warehouse_product_id || '').trim() || null;
     let matched = invId ? inventory.find((r) => r.id === invId) : undefined;
-    // ID wskazujące nieistniejący produkt → fuzzy po nazwie
     if (invId && !matched) invId = null;
 
     if (!matched) {
-      const key = productMatchKey(name);
+      const key = productMatchKey(matchName);
       matched =
         (key
           ? inventory.find((r) => productMatchKey(r.name) === key)
           : undefined) ||
-        bestProductMatch(name, inventory, (r) => r.name, 55)?.item ||
-        inventory.find((r) => namesMatch(name, r.name, 55));
-      // Gdy w ofercie „koperek”, a w magazynie „koper” — wybierz najkrótszą nazwę przy tym samym kluczu
+        bestProductMatch(matchName, inventory, (r) => r.name, 55)?.item ||
+        inventory.find((r) => namesMatch(matchName, r.name, 55));
       if (!matched && key) {
         const sameKey = inventory.filter((r) => productMatchKey(r.name) === key);
         if (sameKey.length) {
@@ -297,6 +330,11 @@ export async function applyOrderItemsToInventory(
             (a.name || '').length <= (b.name || '').length ? a : b,
           );
         }
+      }
+      if (!matched && matchName !== rawName) {
+        matched =
+          bestProductMatch(rawName, inventory, (r) => r.name, 55)?.item ||
+          inventory.find((r) => namesMatch(rawName, r.name, 55));
       }
       if (matched) invId = matched.id;
     }
@@ -315,7 +353,6 @@ export async function applyOrderItemsToInventory(
         );
       }
       if (!updatedRow) {
-        // RLS / brak wiersza — nie twórz duplikatu pod tą samą nazwą; spróbuj bez filtra ak
         const { error: e2 } = await supabase
           .from('inventory_items')
           .update({ quantity: before + qty })
@@ -328,13 +365,26 @@ export async function applyOrderItemsToInventory(
       }
       updated += 1;
       matched.quantity = before + qty;
+      assignments.push({
+        sourceName: rawName,
+        inventoryName: matched.name,
+        categoryName: resolveCategoryLabel(matched.category_id, 'Magazyn'),
+        action: 'updated',
+        qty,
+        unit,
+      });
       continue;
     }
 
-    const guessed = guessWarehouseCategoryName(name);
-    const cat = mapGuessToUserCategory(guessed, categories);
+    // Brak dopasowania → nowa pozycja; niepewna jednostka / brak kategorii → Inne
+    const guessed = unsureUnit ? 'Inne' : guessWarehouseCategoryName(matchName || rawName);
+    let cat = mapGuessToUserCategory(guessed, categories);
+    if (!cat || guessed === 'Inne' || unsureUnit) {
+      cat = inneCat ?? cat;
+    }
+    const storeName = matchName || rawName;
     const payload: Record<string, unknown> = {
-      name,
+      name: storeName,
       quantity: qty,
       unit,
       min_quantity: 0,
@@ -350,20 +400,39 @@ export async function applyOrderItemsToInventory(
       .insert(payload as never)
       .select('id, name, quantity, category_id')
       .maybeSingle();
-    if (!error && inserted) {
+    if (error) {
+      throw new Error(`Nie udało się dodać „${storeName}” do magazynu: ${error.message}`);
+    }
+    if (inserted) {
       created += 1;
-      inventory.push(inserted as { id: string; name: string; quantity: number; category_id: string | null });
+      inventory.push({
+        ...(inserted as { id: string; name: string; quantity: number; category_id: string | null }),
+        unit,
+      });
+      assignments.push({
+        sourceName: rawName,
+        inventoryName: (inserted as { name: string }).name,
+        categoryName: resolveCategoryLabel(
+          (inserted as { category_id?: string | null }).category_id,
+          cat?.name || 'Inne',
+        ),
+        action: 'created',
+        qty,
+        unit,
+      });
     }
   }
-  return { updated, created };
+  return { updated, created, assignments };
 }
 
 export async function receiveSupplierOrder(
   order: SupplierOrderFull,
   opts: { applyInventory: boolean; applyVariableCost: boolean },
-): Promise<void> {
+): Promise<{ assignments: InventoryAssignment[] }> {
+  let assignments: InventoryAssignment[] = [];
   if (opts.applyInventory) {
-    await applyOrderItemsToInventory(order.supplier_order_items || []);
+    const res = await applyOrderItemsToInventory(order.supplier_order_items || []);
+    assignments = res.assignments;
   }
   if (opts.applyVariableCost) {
     const items = order.supplier_order_items || [];
@@ -423,4 +492,5 @@ export async function receiveSupplierOrder(
     .update({ status: 'received' })
     .eq('id', order.id);
   if (error) throw error;
+  return { assignments };
 }

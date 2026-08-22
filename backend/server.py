@@ -67,6 +67,7 @@ from supplier_min_order_routes import router as supplier_min_order_router
 from supplier_intent_routes import router as supplier_intent_router
 from daily_report_routes import router as daily_report_router
 from supplier_catalog_view_routes import router as supplier_catalog_view_router
+from admin_routes import router as admin_router
 from restaurant_profile_routes import router as restaurant_profile_router
 from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
@@ -209,6 +210,7 @@ app.include_router(supplier_min_order_router)
 app.include_router(supplier_intent_router)
 app.include_router(daily_report_router)
 app.include_router(supplier_catalog_view_router)
+app.include_router(admin_router)
 app.include_router(billing_router)
 app.include_router(restaurant_profile_router)
 
@@ -3467,7 +3469,10 @@ async def _load_matchable_terms(client: httpx.AsyncClient) -> dict:
     return {"inv_terms": inv_terms, "recipe_terms": recipe_terms}
 
 
-_PIECE_UNITS = {"szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie"}
+_PIECE_UNITS = {
+    "szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie",
+    "peczek", "peczki", "peczka", "wiazka", "wiazki", "bunch", "bunches",
+}
 
 
 def _is_piece_unit(u: str) -> bool:
@@ -10932,47 +10937,8 @@ async def voice_dispatch(req: VoiceDispatchRequest):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Migracja info — informacja dla FE o brakujących kolumnach/tabelach Supabase.
-# ─────────────────────────────────────────────────────────────────────────────
 
-
-@app.get("/api/admin/migration-status")
-async def admin_migration_status(request: Request):
-    """Sprawdza czy migracja `ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql` została uruchomiona.
-    Zwraca listę brakujących kolumn/tabel i pełny SQL do wklejenia w Supabase SQL Editor."""
-    require_cron_secret(request)
-    async with httpx.AsyncClient(timeout=15.0, verify=_httpx_verify()) as client:
-        checks = {}
-        try:
-            await sb_get(client, "menu_items", params={"select": "is_available", "limit": "1"})
-            checks["menu_items.is_available"] = True
-        except Exception:
-            checks["menu_items.is_available"] = False
-        try:
-            await sb_get(client, "inventory_items", params={"select": "synonyms", "limit": "1"})
-            checks["inventory_items.synonyms"] = True
-        except Exception:
-            checks["inventory_items.synonyms"] = False
-        try:
-            await sb_get(client, "token_usage", params={"select": "id", "limit": "1"})
-            checks["token_usage table"] = True
-        except Exception:
-            checks["token_usage table"] = False
-        try:
-            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
-            checks["suppliers.min_order_value"] = True
-        except Exception:
-            checks["suppliers.min_order_value"] = False
-
-    all_ok = all(checks.values())
-    sql_path = Path(__file__).resolve().parent.parent / "supabase_migrations" / "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"
-    sql_content = sql_path.read_text(encoding="utf-8") if sql_path.exists() else ""
-    return {
-        "ok": all_ok,
-        "checks": checks,
-        "instructions": "Otwórz Supabase Dashboard → SQL Editor → New query → wklej poniższy SQL → Run." if not all_ok else "Wszystkie migracje uruchomione.",
-        "sql": sql_content if not all_ok else "",
-    }
-
+# Admin migration-status: backend/admin_routes.py (include_router)
 
 # Daily reports: backend/daily_report_routes.py (include_router)
 

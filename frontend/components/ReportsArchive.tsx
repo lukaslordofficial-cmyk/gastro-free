@@ -1,14 +1,14 @@
 /**
  * ReportsArchive — cyfrowe archiwum raportów dobowych (End-of-Day Reports).
  * Wielopoziomowe drzewo: Rok → Miesiąc → Tydzień → Dzień, z podglądem dokumentu
- * (Przychód / Koszty / Zysk netto + Podsumowanie Managerskie AI „Jarvis").
+ * (Przychód / Koszty / Zysk netto).
  * Renderowane jako blok wewnątrz ScrollView Panelu Finansowego.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, AppState } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  ChevronRight, ChevronDown, FileText, Sparkles, CalendarClock, RefreshCw,
+  ChevronRight, ChevronDown, FileText, CalendarClock, RefreshCw,
 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
@@ -175,7 +175,7 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
           {closing
             ? <ActivityIndicator size="small" color="#0A0A0A" />
             : <CalendarClock size={16} color="#0A0A0A" strokeWidth={2.3} />}
-          <Text style={styles.closeDayText} allowFontScaling={false}>Zamknij dzień i wygeneruj raport AI</Text>
+          <Text style={styles.closeDayText} allowFontScaling={false}>Zamknij dzień i wygeneruj raport</Text>
         </LinearGradient>
       </TouchableOpacity>
 
@@ -311,14 +311,6 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
               {fmtPLN(selected.total_revenue - selected.total_waste_cost - selected.total_invoice_cost)}
             </Text>
           </View>
-
-          <View style={styles.aiBox}>
-            <View style={styles.aiHeader}>
-              <Sparkles size={15} color={Colors.accentDark} strokeWidth={2.2} />
-              <Text style={styles.aiTitle}>Podsumowanie Managerskie AI (Jarvis)</Text>
-            </View>
-            <Text style={styles.aiText}>{selected.ai_summary || 'Brak podsumowania.'}</Text>
-          </View>
         </View>
       )}
 
@@ -384,9 +376,5 @@ function makeArchiveStyles(theme: ReturnType<typeof useAppTheme>) {
     docNetRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: border },
     docNetLabel: { fontSize: 14, fontWeight: '800', color: text },
     docNetVal: { fontSize: 22, fontWeight: '900' },
-    aiBox: { marginTop: 14, backgroundColor: accentSoft, borderRadius: 12, padding: 14 },
-    aiHeader: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 7 },
-    aiTitle: { fontSize: 12.5, fontWeight: '800', color: accent },
-    aiText: { fontSize: 13.5, color: text, lineHeight: 21 },
   });
 }

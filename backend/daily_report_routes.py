@@ -248,7 +248,7 @@ async def pos_close_day(req: CloseDayRequest):
                 revenue=req.total_revenue,
                 waste=req.total_waste_cost,
                 invoice=req.total_invoice_cost,
-                use_ai=True,
+                use_ai=False,
                 allow_overwrite=True,
             )
         except httpx.HTTPStatusError as e:

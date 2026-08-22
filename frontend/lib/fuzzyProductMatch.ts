@@ -12,6 +12,8 @@ const STOP = new Set([
   'rolka', 'rolki', 'rolke', 'kostka', 'kostki', 'blok', 'bloki', 'plastry',
   'plaster', 'krazek', 'krazki', 'kreg', 'kregi', 'tacka', 'tacki', 'luz',
   'luzem', 'porcja', 'porcje', 'opakowanie', 'paczk', 'paczka', 'szt', 'sztuka',
+  // Formy sprzedaży / wiązki — „koperek pęczek” ↔ magazyn „koper”
+  'peczek', 'peczki', 'peczka', 'wiazka', 'wiazki', 'bunch', 'bunches',
 ]);
 
 /** Synonimy kulinarne → kanoniczny token (po normalizacji). */

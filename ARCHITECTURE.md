@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-22 — Faktury/głos/dostawa/raporty + katalog extract (`chore/split-monoliths`)
+
+- **UX/fix:** pełne usuwanie faktury (cost+invoice); głos prefilluje najlepsze danie z menu;
+  koszt dostawy doliczany do zamówienia/odbioru; koper↔koperek zwiększa stan; close-day z auth;
+  usunięto Analizę Trendów AI i Naczynia kuchenne z Magazynu.
+- **Split + security:** `supplier_catalog_view_routes.py` (GET catalog + refresh) z tenant;
+  ReportsArchive → `apiJsonHeaders` + sprawdzenie `r.ok`.
+
 ### 2026-08-22 — Logout/faktury/fuzzy + daily reports extract (`chore/split-monoliths`)
 
 - **UX:** wylogowanie → `premiumAlert` (dark); usuwanie faktury u dostawcy; głosowe

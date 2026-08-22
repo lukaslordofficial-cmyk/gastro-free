@@ -192,6 +192,35 @@ export function orderLineTotal(items: SupplierOrderFull['supplier_order_items'])
   }, 0);
 }
 
+/** Koszt dostawy: gdy shipping_cost > 0 i (brak progu gratis albo koszyk poniżej progu). */
+export function computeSupplierShipping(
+  productsTotal: number,
+  shippingCost: number,
+  freeShippingThreshold: number,
+): number {
+  const ship = Number(shippingCost) || 0;
+  if (ship <= 0) return 0;
+  const freeFrom = Number(freeShippingThreshold) || 0;
+  if (freeFrom > 0 && productsTotal >= freeFrom) return 0;
+  return Math.round(ship * 100) / 100;
+}
+
+async function fetchSupplierShippingMeta(supplierId: string): Promise<{
+  shipping_cost: number;
+  free_shipping_threshold: number;
+}> {
+  const { data } = await supabase
+    .from('suppliers')
+    .select('shipping_cost, free_shipping_threshold')
+    .eq('id', supplierId)
+    .maybeSingle();
+  return {
+    shipping_cost: Number((data as { shipping_cost?: number } | null)?.shipping_cost) || 0,
+    free_shipping_threshold:
+      Number((data as { free_shipping_threshold?: number } | null)?.free_shipping_threshold) || 0,
+  };
+}
+
 async function loadCategories(ak: string): Promise<Array<{ id: string; name: string }>> {
   await ensureDefaultWarehouseCategories(supabase, ak);
   const { data } = await supabase
@@ -258,21 +287,47 @@ export async function applyOrderItemsToInventory(
         (key
           ? inventory.find((r) => productMatchKey(r.name) === key)
           : undefined) ||
-        bestProductMatch(name, inventory, (r) => r.name, 58)?.item ||
-        inventory.find((r) => namesMatch(name, r.name, 58));
+        bestProductMatch(name, inventory, (r) => r.name, 55)?.item ||
+        inventory.find((r) => namesMatch(name, r.name, 55));
+      // Gdy w ofercie „koperek”, a w magazynie „koper” — wybierz najkrótszą nazwę przy tym samym kluczu
+      if (!matched && key) {
+        const sameKey = inventory.filter((r) => productMatchKey(r.name) === key);
+        if (sameKey.length) {
+          matched = sameKey.reduce((a, b) =>
+            (a.name || '').length <= (b.name || '').length ? a : b,
+          );
+        }
+      }
       if (matched) invId = matched.id;
     }
 
     if (matched && invId) {
       const before = Number(matched.quantity) || 0;
-      const { error } = await supabase
+      let upd = supabase
         .from('inventory_items')
         .update({ quantity: before + qty })
         .eq('id', invId);
-      if (!error) {
-        updated += 1;
-        matched.quantity = before + qty;
+      if (ak && ak !== 'default') upd = upd.eq('account_key', ak);
+      const { data: updatedRow, error } = await upd.select('id, quantity').maybeSingle();
+      if (error) {
+        throw new Error(
+          `Nie udało się zwiększyć stanu „${matched.name}”: ${error.message}`,
+        );
       }
+      if (!updatedRow) {
+        // RLS / brak wiersza — nie twórz duplikatu pod tą samą nazwą; spróbuj bez filtra ak
+        const { error: e2 } = await supabase
+          .from('inventory_items')
+          .update({ quantity: before + qty })
+          .eq('id', invId);
+        if (e2) {
+          throw new Error(
+            `Nie udało się zwiększyć stanu „${matched.name}”: ${e2.message}`,
+          );
+        }
+      }
+      updated += 1;
+      matched.quantity = before + qty;
       continue;
     }
 
@@ -312,34 +367,51 @@ export async function receiveSupplierOrder(
   }
   if (opts.applyVariableCost) {
     const items = order.supplier_order_items || [];
-    const total = orderLineTotal(items);
+    const productsTotal = orderLineTotal(items);
+    const shipMeta = await fetchSupplierShippingMeta(order.supplier_id);
+    const shipping = computeSupplierShipping(
+      productsTotal,
+      shipMeta.shipping_cost,
+      shipMeta.free_shipping_threshold,
+    );
+    const total = Math.round((productsTotal + shipping) * 100) / 100;
     if (total > 0) {
       const supplierName = order.suppliers?.name || 'Dostawca';
+      const lines = items.map((it) => ({
+        name: (it.raw_product_name || '').trim(),
+        qty: Number(it.quantity_ordered) || 0,
+        unit: (it.unit || 'szt').trim() || 'szt',
+        price_netto: it.price_net != null ? Number(it.price_net) : 0,
+      }));
+      if (shipping > 0) {
+        lines.push({
+          name: 'Koszt dostawy',
+          qty: 1,
+          unit: 'szt',
+          price_netto: shipping,
+        });
+      }
       const note = buildInvoiceCostNote({
         supplier_id: order.supplier_id,
         supplier_name: supplierName,
-        total: Math.round(total * 100) / 100,
-        lines: items.map((it) => ({
-          name: (it.raw_product_name || '').trim(),
-          qty: Number(it.quantity_ordered) || 0,
-          unit: (it.unit || 'szt').trim() || 'szt',
-          price_netto: it.price_net != null ? Number(it.price_net) : 0,
-        })),
+        total,
+        lines,
       });
       await insertVariableCost({
         year_month: yearMonthNow(),
         type: 'materials',
         name: `Dostawa — ${supplierName}`,
-        amount_pln: Math.round(total * 100) / 100,
+        amount_pln: total,
         note,
       });
-      // Best-effort: nagłówek w tabeli invoices (jak skan AI)
       try {
         await supabase.from('invoices').insert({
           supplier_id: order.supplier_id,
           supplier_name: supplierName,
-          total_cost: Math.round(total * 100) / 100,
-          note: 'Zamówienie ręczne — zrealizowane',
+          total_cost: total,
+          note: shipping > 0
+            ? `Zamówienie ręczne — zrealizowane (+ dostawa ${shipping} zł)`
+            : 'Zamówienie ręczne — zrealizowane',
         } as never);
       } catch {
         /* tabela/migracja opcjonalna */

@@ -143,7 +143,7 @@ export function SupplierInvoicesModal({
               onPress: () => {
                 void (async () => {
                   try {
-                    await deleteSupplierInvoiceEntry(entry);
+                    await deleteSupplierInvoiceEntry(entry, { supplierId });
                     await load();
                     resolve(true);
                   } catch (e: unknown) {
@@ -160,7 +160,7 @@ export function SupplierInvoicesModal({
         );
       });
     },
-    [entries, load, premiumAlert],
+    [entries, load, premiumAlert, supplierId],
   );
 
   return (

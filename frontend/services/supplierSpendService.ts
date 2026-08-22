@@ -155,11 +155,22 @@ export async function fetchSupplierInvoices(supplierId: string): Promise<{
   return { entries, totalSpent: Math.round(totalSpent * 100) / 100 };
 }
 
-/** Usuń wgraną fakturę / dostawę (koszt zmienny i/lub wiersz invoices). */
+/** Usuń wgraną fakturę / dostawę (koszt zmienny + powiązany wiersz invoices). */
 export async function deleteSupplierInvoiceEntry(
   entry: SupplierInvoiceEntry,
+  opts?: { supplierId?: string },
 ): Promise<void> {
   const id = String(entry.id || '');
+  const amt = Number(entry.amount_pln) || 0;
+  const createdMs = Date.parse(entry.created_at);
+  const supplierId = (opts?.supplierId || '').trim().toLowerCase();
+
+  const sameBallpark = (iso?: string | null) => {
+    const b = Date.parse(iso || '');
+    if (!Number.isFinite(createdMs) || !Number.isFinite(b)) return true;
+    return Math.abs(createdMs - b) < 86_400_000;
+  };
+
   if (id.startsWith('cost:')) {
     const rawId = id.slice('cost:'.length);
     const ak = getAccountKey();
@@ -167,13 +178,63 @@ export async function deleteSupplierInvoiceEntry(
     if (isRealKey(ak)) q = q.eq('account_key', ak);
     const { error } = await q;
     if (error) throw error;
+    // Usuń też „cień” w invoices (wcześniej ukryty jako duplikat) — inaczej liść zostaje w drzewku bez pozycji.
+    try {
+      let iq = supabase.from('invoices').select('id, total_cost, created_at, supplier_id').limit(300);
+      if (supplierId) iq = iq.eq('supplier_id', supplierId);
+      const { data: invs } = await iq;
+      for (const inv of invs ?? []) {
+        const row = inv as {
+          id: string;
+          total_cost?: number;
+          created_at?: string;
+          supplier_id?: string;
+        };
+        if (Math.abs(Number(row.total_cost) - amt) > 0.02) continue;
+        if (!sameBallpark(row.created_at)) continue;
+        await supabase.from('invoices').delete().eq('id', row.id);
+      }
+    } catch {
+      /* invoices optional */
+    }
     return;
   }
+
   if (id.startsWith('invoice:')) {
     const rawId = id.slice('invoice:'.length);
     const { error } = await supabase.from('invoices').delete().eq('id', rawId);
     if (error) throw error;
+    const ak = getAccountKey();
+    if (isRealKey(ak)) {
+      const { data: costs } = await supabase
+        .from('variable_cost_entries')
+        .select('id, amount_pln, note, created_at')
+        .eq('account_key', ak)
+        .eq('type', 'materials')
+        .order('created_at', { ascending: false })
+        .limit(300);
+      for (const c of costs ?? []) {
+        const row = c as {
+          id: string;
+          amount_pln?: number;
+          note?: string | null;
+          created_at?: string;
+        };
+        if (Math.abs(Number(row.amount_pln) - amt) > 0.02) continue;
+        if (!sameBallpark(row.created_at)) continue;
+        if (supplierId) {
+          const sid = supplierIdFromCostNote(row.note);
+          if (sid && sid !== supplierId) continue;
+        }
+        await supabase
+          .from('variable_cost_entries')
+          .delete()
+          .eq('id', row.id)
+          .eq('account_key', ak);
+      }
+    }
     return;
   }
+
   throw new Error('Nieznany typ wpisu faktury.');
 }

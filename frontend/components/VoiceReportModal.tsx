@@ -3636,6 +3636,17 @@ function peelNamedFromCategories(cats: string[]): { categories: string[]; named:
 }
 
 /** Wyłuskaj nazwę dania z komendy głosowej gdy LLM nie wypełnił dish_name. */
+function cleanSpokenDishQuery(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/[.?!,;]+$/g, '')
+    .replace(/\s+z\s+menu\s*$/i, '')
+    .replace(/\s+z\s+karty\s*$/i, '')
+    .replace(/\s+z\s+kart[ye]\s+da[nń]\s*$/i, '')
+    .replace(/^(?:danie|pozycj[eę])\s+/i, '')
+    .trim();
+}
+
 function guessDishNameFromTranscript(transcript: string, intent: Intent): string {
   const t = String(transcript || '').trim();
   if (!t) return '';
@@ -3651,7 +3662,7 @@ function guessDishNameFromTranscript(transcript: string, intent: Intent): string
         ];
   for (const re of patterns) {
     const m = t.match(re);
-    const raw = (m?.[1] || '').trim().replace(/[.?!,;]+$/g, '').trim();
+    const raw = cleanSpokenDishQuery(m?.[1] || '');
     if (raw.length >= 2) return raw;
   }
   return '';
@@ -3790,13 +3801,14 @@ function seedPayload(
       p.dish_name_resolved = '';
       if (intent === 'edit_menu_item_price') p.new_price = null;
     } else {
-      // Zawsze wymagaj kliknięcia podpowiedzi; nazwę z głosu trzymaj w polu.
-      const spoken =
-        String(p.dish_name_resolved || p.dish_name || '').trim()
-        || guessDishNameFromTranscript(String(opts?.transcript || ''), intent);
+      // Zawsze wymagaj kliknięcia podpowiedzi; w polu → najlepsza nazwa z menu (nie surowy transcript).
+      const resolved = cleanSpokenDishQuery(String(p.dish_name_resolved || ''));
+      const raw = cleanSpokenDishQuery(String(p.dish_name || ''));
+      const fromTranscript = guessDishNameFromTranscript(String(opts?.transcript || ''), intent);
+      const spoken = resolved || raw || fromTranscript;
       if (spoken) {
         p.dish_name = spoken;
-        if (!p.dish_name_resolved) p.dish_name_resolved = spoken;
+        p.dish_name_resolved = resolved || spoken;
       }
       p.dish_accepted = false;
       p.dish_id = null;

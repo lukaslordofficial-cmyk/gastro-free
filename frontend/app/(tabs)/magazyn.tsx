@@ -62,8 +62,6 @@ import {
   ensureDefaultWarehouseCategories,
   normCategoryName,
 } from '@/lib/warehouseCategories';
-import { ensureDefaultKitchenUtensils } from '@/lib/kitchenUtensils';
-import { KitchenUtensilsSection } from '@/components/KitchenUtensilsSection';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -1653,9 +1651,6 @@ export default function MagazynScreen() {
         }
         ListFooterComponent={
           <>
-            {theme.isPremium && accountKey && accountKey !== 'default' ? (
-              <KitchenUtensilsSection accountKey={accountKey} />
-            ) : null}
             <View style={{ height: 120 }} />
             <AdBannerFooter />
           </>

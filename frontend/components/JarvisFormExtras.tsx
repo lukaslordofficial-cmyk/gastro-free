@@ -9,6 +9,7 @@ import { Check, Plus, X, Upload } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { DS } from '@/constants/premiumTheme';
+import { bestProductMatch, rankProductMatches } from '@/lib/fuzzyProductMatch';
 import {
   type DealHunterSearchScope,
   DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
@@ -364,13 +365,53 @@ export function DishPickEditor({
   const [suggestions, setSuggestions] = useState<{ id: string; name: string; price_pln?: number }[]>([]);
   const [loading, setLoading] = useState(false);
   const accepted = edited.dish_accepted === true && !!edited.dish_id;
+  const didFuzzyPrefill = React.useRef(false);
 
-  // Prefill z komendy głosowej (np. „usuń kaczkę po pekińsku”) — sync gdy payload dojdzie.
+  // Prefill: wyszukaj w menu najbardziej podobną nazwę do tego, co użytkownik wymienił.
   useEffect(() => {
-    if (accepted) return;
-    const next = String(edited.dish_name_resolved || edited.dish_name || '').trim();
-    if (next && next !== query) setQuery(next);
-    // tylko gdy zmienia się seed z AI / transcriptu
+    if (accepted || didFuzzyPrefill.current) return;
+    const seed = String(edited.dish_name_resolved || edited.dish_name || '').trim();
+    if (seed.length < 2) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        let { data, error } = await supabase
+          .from('menu_items')
+          .select('id, name, price_pln')
+          .eq('is_active', true)
+          .limit(2000);
+        if (error) {
+          const retry = await supabase
+            .from('menu_items')
+            .select('id, name, price_pln')
+            .limit(2000);
+          data = retry.data;
+        }
+        const rows = (data as { id: string; name: string; price_pln?: number }[]) ?? [];
+        if (!rows.length || cancelled) return;
+        const best = bestProductMatch(seed, rows, (r) => r.name, 58);
+        if (!best) {
+          setQuery(seed);
+          return;
+        }
+        didFuzzyPrefill.current = true;
+        setQuery(best.item.name);
+        patch({
+          dish_name: best.item.name,
+          dish_name_resolved: best.item.name,
+          dish_id: null,
+          dish_accepted: false,
+        });
+        const ranked = rankProductMatches(seed, rows, (r) => r.name, { threshold: 50, limit: 8 });
+        setSuggestions(ranked.map((r) => r.item));
+      } catch {
+        if (!cancelled) setQuery(seed);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // tylko przy nowym seedzie z głosu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edited.dish_name, edited.dish_name_resolved, accepted]);
 
@@ -391,20 +432,28 @@ export function DishPickEditor({
         let { data, error } = await supabase
           .from('menu_items')
           .select('id, name, price_pln')
-          .ilike('name', `%${q}%`)
           .eq('is_active', true)
-          .order('name')
-          .limit(8);
+          .limit(2000);
         if (error) {
           const retry = await supabase
             .from('menu_items')
             .select('id, name, price_pln')
-            .ilike('name', `%${q}%`)
-            .order('name')
-            .limit(8);
+            .limit(2000);
           data = retry.data;
         }
-        if (!cancelled) setSuggestions((data as any[]) ?? []);
+        const rows = (data as { id: string; name: string; price_pln?: number }[]) ?? [];
+        const ranked = rankProductMatches(q, rows, (r) => r.name, { threshold: 45, limit: 8 });
+        if (!cancelled) {
+          if (ranked.length) setSuggestions(ranked.map((r) => r.item));
+          else {
+            const { data: ilike } = await supabase
+              .from('menu_items')
+              .select('id, name, price_pln')
+              .ilike('name', `%${q}%`)
+              .limit(8);
+            setSuggestions((ilike as any[]) ?? []);
+          }
+        }
       } catch {
         if (!cancelled) setSuggestions([]);
       } finally {
@@ -432,6 +481,7 @@ export function DishPickEditor({
           hint: s.price_pln != null ? `${s.price_pln} zł` : undefined,
         }))}
         onChangeQuery={(v) => {
+          didFuzzyPrefill.current = true;
           setQuery(v);
           patch({
             dish_name: v,

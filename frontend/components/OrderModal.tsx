@@ -93,12 +93,28 @@ export function OrderModal({
   const [emailDraft, setEmailDraft] = useState<OrderEmailDraft | null>(null);
   const [showEmail, setShowEmail] = useState(false);
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
+  const [shippingCost, setShippingCost] = useState(0);
+  const [freeShipFrom, setFreeShipFrom] = useState(0);
 
   const cartItems = useMemo(() => Array.from(cart.values()), [cart]);
   const cartCount = cartItems.length;
 
   const load = useCallback(async () => {
     setLoading(true);
+    try {
+      const { data: sup } = await supabase
+        .from('suppliers')
+        .select('shipping_cost, free_shipping_threshold')
+        .eq('id', supplierId)
+        .maybeSingle();
+      setShippingCost(Number((sup as { shipping_cost?: number } | null)?.shipping_cost) || 0);
+      setFreeShipFrom(
+        Number((sup as { free_shipping_threshold?: number } | null)?.free_shipping_threshold) || 0,
+      );
+    } catch {
+      setShippingCost(0);
+      setFreeShipFrom(0);
+    }
     let rows: any[] | null = null;
     const full = await supabase
       .from('supplier_catalog')
@@ -265,18 +281,38 @@ export function OrderModal({
         /* ignore */
       }
 
-      const tpl = await fetchOrderEmailTemplate({
-        supplierId,
-        supplierName,
-        supplierEmail,
-        notes,
-        items: cartItems.map((e) => ({
+      const productsSum = cartItems.reduce(
+        (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
+        0,
+      );
+      const shipFee =
+        shippingCost > 0
+        && !(freeShipFrom > 0 && productsSum >= freeShipFrom)
+          ? shippingCost
+          : 0;
+      const emailItems = [
+        ...cartItems.map((e) => ({
           product_name: e.item.name,
           quantity: e.quantity,
           unit: e.item.unit,
           line_total:
             e.item.price_pln != null ? e.item.price_pln * e.quantity : 0,
         })),
+        ...(shipFee > 0
+          ? [{
+              product_name: 'Koszt dostawy',
+              quantity: 1,
+              unit: 'szt',
+              line_total: shipFee,
+            }]
+          : []),
+      ];
+      const tpl = await fetchOrderEmailTemplate({
+        supplierId,
+        supplierName,
+        supplierEmail,
+        notes,
+        items: emailItems,
       });
       let fromEmail = ASSISTANT_FROM_EMAIL;
       let body = tpl.body;
@@ -298,10 +334,7 @@ export function OrderModal({
         subject: tpl.subject,
         body,
         supplierId,
-        totalPln: productsTotal ?? cartItems.reduce(
-          (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
-          0,
-        ),
+        totalPln: Math.round((productsSum + shipFee) * 100) / 100,
       });
       setShowEmail(true);
     } catch (e: any) {
@@ -316,6 +349,17 @@ export function OrderModal({
     if (!cartItems.every((e) => e.item.price_pln != null)) return null;
     return cartItems.reduce((acc, e) => acc + e.item.price_pln! * e.quantity, 0);
   }, [cartItems]);
+
+  const deliveryFee = useMemo(() => {
+    if (productsTotal == null || shippingCost <= 0) return 0;
+    if (freeShipFrom > 0 && productsTotal >= freeShipFrom) return 0;
+    return shippingCost;
+  }, [productsTotal, shippingCost, freeShipFrom]);
+
+  const grandTotal = useMemo(() => {
+    if (productsTotal == null) return null;
+    return Math.round((productsTotal + deliveryFee) * 100) / 100;
+  }, [productsTotal, deliveryFee]);
 
   const renderProduct = ({ item, index }: { item: CatalogRow; index: number }) => {
     const inCart = cart.get(item.id);
@@ -516,10 +560,17 @@ export function OrderModal({
 
         {activeTab === 'cart' && cartItems.length > 0 && (
           <View style={[styles.footer, { backgroundColor: card, borderTopColor: border }]}>
-            {productsTotal != null && (
-              <Text style={[styles.grandTotal, { color: text }]}>
-                Razem: {formatPlnNumber(productsTotal)} zł
-              </Text>
+            {grandTotal != null && (
+              <View style={{ marginBottom: 8 }}>
+                {deliveryFee > 0 ? (
+                  <Text style={[styles.grandTotal, { color: muted, fontSize: 13, fontWeight: '600' }]}>
+                    Produkty: {formatPlnNumber(productsTotal!)} zł · Dostawa: {formatPlnNumber(deliveryFee)} zł
+                  </Text>
+                ) : null}
+                <Text style={[styles.grandTotal, { color: text }]}>
+                  Razem: {formatPlnNumber(grandTotal)} zł
+                </Text>
+              </View>
             )}
             <View style={styles.footerRow}>
               <TouchableOpacity
@@ -554,10 +605,10 @@ export function OrderModal({
                   supplierId,
                   supplierName,
                   orderTitle: `Zamówienie — ${supplierName}`,
-                  totalPln: productsTotal ?? cartItems.reduce(
+                  totalPln: grandTotal ?? cartItems.reduce(
                     (acc, e) => acc + (e.item.price_pln != null ? e.item.price_pln * e.quantity : 0),
                     0,
-                  ),
+                  ) + deliveryFee,
                 })
               }
               activeOpacity={0.85}

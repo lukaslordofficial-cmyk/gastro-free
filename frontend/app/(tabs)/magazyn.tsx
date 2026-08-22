@@ -123,8 +123,17 @@ type MagListRow =
   | { type: 'search_item'; item: MockInventoryItem }
   | { type: 'cat_toolbar' }
   | { type: 'mag_empty' }
-  | { type: 'cat_section'; cat: CategoryRow; items: MockInventoryItem[] }
-  | { type: 'uncat_section'; items: MockInventoryItem[] };
+  | {
+      type: 'cat_header';
+      cat: CategoryRow;
+      itemCount: number;
+      criticalCount: number;
+      warningCount: number;
+    }
+  | { type: 'cat_item'; item: MockInventoryItem; catColor: string }
+  | { type: 'cat_empty'; catId: string }
+  | { type: 'uncat_header'; itemCount: number }
+  | { type: 'uncat_item'; item: MockInventoryItem };
 
 interface WasteLogRow {
   id: string;
@@ -481,20 +490,24 @@ const itemStyles = StyleSheet.create({
 
 interface CategorySectionProps {
   category: CategoryRow;
-  items: MockInventoryItem[];
+  itemCount: number;
+  criticalCount: number;
+  warningCount: number;
   isExpanded: boolean;
   onToggle: () => void;
   onDelete: () => void;
-  onDeleteItem: (item: MockInventoryItem) => void;
-  onPressItem: (item: MockInventoryItem) => void;
-  onOrderItem: (item: MockInventoryItem) => void;
-  onEditItem: (item: MockInventoryItem) => void;
 }
 
-function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDeleteItem, onPressItem, onOrderItem, onEditItem }: CategorySectionProps) {
+function CategorySection({
+  category,
+  itemCount,
+  criticalCount,
+  warningCount,
+  isExpanded,
+  onToggle,
+  onDelete,
+}: CategorySectionProps) {
   const theme = useAppTheme();
-  const criticalCount = items.filter((i) => getStatus(i) === 'critical').length;
-  const warningCount = items.filter((i) => getStatus(i) === 'warning').length;
 
   if (theme.isPremium) {
     return (
@@ -512,7 +525,7 @@ function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDe
               </Text>
               <View style={catStyles.countRow}>
                 <Text style={catStyles.premCount} allowFontScaling={false}>
-                  {items.length} prod.
+                  {itemCount} prod.
                 </Text>
                 {criticalCount > 0 && (
                   <View style={[catStyles.alertBadge, catStyles.premAlertBadge]}>
@@ -543,34 +556,6 @@ function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDe
               : <ChevronRight size={16} color={DS.color.muted} strokeWidth={2} />}
           </TouchableOpacity>
         </View>
-
-        {isExpanded && (
-          <View style={catStyles.premBody}>
-            {items.length === 0 ? (
-              <View style={catStyles.emptyBody}>
-                <Text style={[catStyles.emptyBodyText, { color: DS.color.muted }]}>Brak produktów w tej kategorii</Text>
-              </View>
-            ) : (
-              items
-                .slice()
-                .sort((a, b) => {
-                  const ORDER = { critical: 0, warning: 1, ok: 2 } as const;
-                  return ORDER[getStatus(a)] - ORDER[getStatus(b)];
-                })
-                .map((item) => (
-                  <ItemCard
-                    key={item.id}
-                    item={item}
-                    catColor={category.color}
-                    onDelete={() => onDeleteItem(item)}
-                    onPress={() => onPressItem(item)}
-                    onOrder={() => onOrderItem(item)}
-                    onEdit={() => onEditItem(item)}
-                  />
-                ))
-            )}
-          </View>
-        )}
       </View>
     );
   }
@@ -588,7 +573,7 @@ function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDe
             <View style={catStyles.headerLeft}>
               <Text style={catStyles.catName}>{category.name}</Text>
               <View style={catStyles.countRow}>
-                <Text style={catStyles.totalCount}>{items.length} produktów</Text>
+                <Text style={catStyles.totalCount}>{itemCount} produktów</Text>
                 {criticalCount > 0 && (
                   <View style={catStyles.alertBadge}>
                     <Text style={catStyles.alertBadgeText}>{criticalCount} kryty.</Text>
@@ -619,34 +604,6 @@ function CategorySection({ category, items, isExpanded, onToggle, onDelete, onDe
           </TouchableOpacity>
         </View>
       </View>
-
-      {isExpanded && (
-        <View style={catStyles.body}>
-          {items.length === 0 ? (
-            <View style={catStyles.emptyBody}>
-              <Text style={catStyles.emptyBodyText}>Brak produktów w tej kategorii</Text>
-            </View>
-          ) : (
-            items
-              .slice()
-              .sort((a, b) => {
-                const ORDER = { critical: 0, warning: 1, ok: 2 } as const;
-                return ORDER[getStatus(a)] - ORDER[getStatus(b)];
-              })
-              .map((item) => (
-                <ItemCard
-                  key={item.id}
-                  item={item}
-                  catColor={category.color}
-                  onDelete={() => onDeleteItem(item)}
-                  onPress={() => onPressItem(item)}
-                  onOrder={() => onOrderItem(item)}
-                  onEdit={() => onEditItem(item)}
-                />
-              ))
-          )}
-        </View>
-      )}
     </View>
   );
 }
@@ -970,14 +927,44 @@ export default function MagazynScreen() {
       rows.push({ type: 'mag_empty' });
     } else {
       for (const section of categorySections) {
-        rows.push({ type: 'cat_section', cat: section.cat, items: section.items });
+        const criticalCount = section.items.filter((i) => getStatus(i) === 'critical').length;
+        const warningCount = section.items.filter((i) => getStatus(i) === 'warning').length;
+        rows.push({
+          type: 'cat_header',
+          cat: section.cat,
+          itemCount: section.items.length,
+          criticalCount,
+          warningCount,
+        });
+        if (expandedCategories.has(section.cat.name)) {
+          if (section.items.length === 0) {
+            rows.push({ type: 'cat_empty', catId: section.cat.id });
+          } else {
+            const sorted = section.items.slice().sort((a, b) => {
+              const ORDER = { critical: 0, warning: 1, ok: 2 } as const;
+              return ORDER[getStatus(a)] - ORDER[getStatus(b)];
+            });
+            for (const inv of sorted) {
+              rows.push({
+                type: 'cat_item',
+                item: inv,
+                catColor: section.cat.color || FALLBACK_COLOR,
+              });
+            }
+          }
+        }
       }
     }
     if (uncategorizedItems.length > 0) {
-      rows.push({ type: 'uncat_section', items: uncategorizedItems });
+      rows.push({ type: 'uncat_header', itemCount: uncategorizedItems.length });
+      if (expandedCategories.has('__uncategorized__')) {
+        for (const inv of uncategorizedItems) {
+          rows.push({ type: 'uncat_item', item: inv });
+        }
+      }
     }
     return rows;
-  }, [search, searchResults, dbCategories.length, categorySections, uncategorizedItems]);
+  }, [search, searchResults, dbCategories.length, categorySections, uncategorizedItems, expandedCategories]);
 
   const totalCritical = useMemo(() => inventory.filter((i) => getStatus(i) === 'critical').length, [inventory]);
 
@@ -1219,21 +1206,38 @@ export default function MagazynScreen() {
               <Text style={styles.emptyText}>Dodaj pierwszą kategorię, a następnie produkty.</Text>
             </View>
           );
-        case 'cat_section':
+        case 'cat_header':
           return (
             <CategorySection
               category={item.cat}
-              items={item.items}
+              itemCount={item.itemCount}
+              criticalCount={item.criticalCount}
+              warningCount={item.warningCount}
               isExpanded={expandedCategories.has(item.cat.name)}
               onToggle={() => toggleCategory(item.cat.name)}
               onDelete={() => handleDeleteCategory(item.cat)}
-              onDeleteItem={handleDeleteItem}
-              onPressItem={handlePressItem}
-              onOrderItem={handleOrderItem}
-              onEditItem={openEditItem}
             />
           );
-        case 'uncat_section':
+        case 'cat_item':
+          return (
+            <ItemCard
+              item={item.item}
+              catColor={item.catColor}
+              onDelete={() => handleDeleteItem(item.item)}
+              onPress={() => handlePressItem(item.item)}
+              onOrder={() => handleOrderItem(item.item)}
+              onEdit={() => openEditItem(item.item)}
+            />
+          );
+        case 'cat_empty':
+          return (
+            <View style={catStyles.emptyBody}>
+              <Text style={[catStyles.emptyBodyText, theme.isPremium && { color: DS.color.muted }]}>
+                Brak produktów w tej kategorii
+              </Text>
+            </View>
+          );
+        case 'uncat_header':
           return (
             <View style={catStyles.section}>
               <TouchableOpacity
@@ -1245,7 +1249,7 @@ export default function MagazynScreen() {
                 <View style={catStyles.headerContent}>
                   <View style={catStyles.headerLeft}>
                     <Text style={catStyles.catName}>Bez kategorii</Text>
-                    <Text style={catStyles.totalCount}>{item.items.length} produktów</Text>
+                    <Text style={catStyles.totalCount}>{item.itemCount} produktów</Text>
                   </View>
                   <View style={catStyles.headerRight}>
                     {expandedCategories.has('__uncategorized__')
@@ -1254,22 +1258,18 @@ export default function MagazynScreen() {
                   </View>
                 </View>
               </TouchableOpacity>
-              {expandedCategories.has('__uncategorized__') && (
-                <View style={catStyles.body}>
-                  {item.items.map((inv) => (
-                    <ItemCard
-                      key={inv.id}
-                      item={inv}
-                      catColor={FALLBACK_COLOR}
-                      onDelete={() => handleDeleteItem(inv)}
-                      onPress={() => handlePressItem(inv)}
-                      onOrder={() => handleOrderItem(inv)}
-                      onEdit={() => openEditItem(inv)}
-                    />
-                  ))}
-                </View>
-              )}
             </View>
+          );
+        case 'uncat_item':
+          return (
+            <ItemCard
+              item={item.item}
+              catColor={FALLBACK_COLOR}
+              onDelete={() => handleDeleteItem(item.item)}
+              onPress={() => handlePressItem(item.item)}
+              onOrder={() => handleOrderItem(item.item)}
+              onEdit={() => openEditItem(item.item)}
+            />
           );
         default:
           return null;
@@ -1628,13 +1628,16 @@ export default function MagazynScreen() {
       {/* Main content — FlashList recycles rows + images stay on disk cache */}
       <FlashList
         data={magRows}
-        estimatedItemSize={88}
+        estimatedItemSize={96}
         extraData={expandedCategories}
         keyExtractor={(row, index) => {
           switch (row.type) {
             case 'search_item': return `si-${row.item.id}`;
-            case 'cat_section': return `cs-${row.cat.id}`;
-            case 'uncat_section': return 'uncat';
+            case 'cat_header': return `ch-${row.cat.id}`;
+            case 'cat_item': return `ci-${row.item.id}`;
+            case 'cat_empty': return `ce-${row.catId}`;
+            case 'uncat_header': return 'uncat-h';
+            case 'uncat_item': return `ui-${row.item.id}`;
             case 'search_meta': return 'search-meta';
             case 'search_empty': return 'search-empty';
             case 'cat_toolbar': return 'cat-toolbar';
@@ -1644,7 +1647,7 @@ export default function MagazynScreen() {
         }}
         renderItem={renderMagRow}
         getItemType={(row) => row.type}
-        drawDistance={280}
+        drawDistance={480}
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}

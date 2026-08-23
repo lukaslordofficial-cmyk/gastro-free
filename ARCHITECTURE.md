@@ -20,6 +20,15 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-23 — Supplier scan meta extract + LP tenant hardening (`chore/split-monoliths`)
+
+- **Split:** `backend/supplier_scan_meta.py` — normalizacja/merge pól dostawcy ze skanu
+  (wycięte z `server.py`); `documents_routes` + testy importują nowy moduł.
+- **Security:** LP — `require_tenant` na courier-quotes, confirm-payment, create-shipment,
+  retry-shipment; `create_shipment` używa `require_tenant` zamiast luźnego `get_account_key`.
+- Testy: `tests/test_supplier_scan_meta.py` (bez importu server), `test_local_producers_routes.py`.
+- `server.py` ≈ **12.0k** linii (było ~12.2k przed tym kęsem).
+
 ### 2026-08-23 — Culinary units extract + menu tenant + canonicalize fix (`chore/split-monoliths`)
 
 - **Bugfix:** `_canonicalize_ingredient_units` kończyło się wczesnym `return` po

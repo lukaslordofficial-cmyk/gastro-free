@@ -6,11 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server import (  # noqa: E402
-    _compose_supplier_notes_from_scan,
-    _merge_supplier_notes,
-    _normalize_supplier_scan_meta,
+from supplier_scan_meta import (  # noqa: E402
     build_supplier_patch_from_scan,
+    compose_supplier_notes_from_scan as _compose_supplier_notes_from_scan,
+    merge_supplier_notes as _merge_supplier_notes,
+    normalize_supplier_scan_meta as _normalize_supplier_scan_meta,
     supplier_meta_preview,
 )
 

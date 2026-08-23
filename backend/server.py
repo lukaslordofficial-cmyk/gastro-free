@@ -2128,60 +2128,23 @@ async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[
 
 
 async def _apply_revenue(client, p, transcript, source):
-    desc = (p.get("description") or "").strip() or "Wpływ (dyktowane)"
-    amt = float(p.get("amount_pln") or 0)
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="Revenue: amount_pln musi być > 0.")
-    row = await sb_post(client, "revenue_entries", {
-        "year_month": _current_year_month(),
-        "description": desc, "amount_pln": amt,
-        "note": p.get("note") or transcript,
-    })
-    return row[0]["id"], {"description": desc, "amount_pln": amt}, []
+    from voice_actions_finance import apply_revenue
+    return await apply_revenue(client, p, transcript, source)
 
 
 async def _apply_fixed_cost(client, p, transcript, source):
-    name = (p.get("cost_name") or p.get("description") or "").strip() or "Koszt stały"
-    amt = float(p.get("amount_pln") or 0)
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="Fixed cost: amount_pln musi być > 0.")
-    typ = p.get("cost_type") or "other"
-    if typ not in ("rent", "media", "payroll", "other"):
-        typ = "other"
-    row = await sb_post(client, "fixed_costs", {
-        "year_month": _current_year_month(),
-        "type": typ, "name": name, "amount_pln": amt,
-        "note": p.get("note") or transcript,
-    })
-    return row[0]["id"], {"type": typ, "name": name, "amount_pln": amt}, []
+    from voice_actions_finance import apply_fixed_cost
+    return await apply_fixed_cost(client, p, transcript, source)
 
 
 async def _apply_variable_cost(client, p, transcript, source):
-    name = (p.get("cost_name") or p.get("description") or "").strip() or "Koszt zmienny"
-    amt = float(p.get("amount_pln") or 0)
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="Variable cost: amount_pln musi być > 0.")
-    typ = p.get("cost_type") or "other"
-    if typ not in ("materials", "waste", "other"):
-        typ = "other"
-    row = await sb_post(client, "variable_cost_entries", {
-        "year_month": _current_year_month(),
-        "type": typ, "name": name, "amount_pln": amt,
-        "note": p.get("note") or transcript,
-    })
-    return row[0]["id"], {"type": typ, "name": name, "amount_pln": amt}, []
+    from voice_actions_finance import apply_variable_cost
+    return await apply_variable_cost(client, p, transcript, source)
 
 
 async def _resolve_category_id(client, name: Optional[str]) -> Optional[str]:
-    if not name:
-        return None
-    rows = await sb_get(client, "inventory_categories",
-                        params={"select": "id,name", "name": f"ilike.{name}", "limit": "1"})
-    if rows:
-        return rows[0]["id"]
-    # create new
-    new = await sb_post(client, "inventory_categories", {"name": name, "color": "#6B7280", "icon_name": "package"})
-    return new[0]["id"]
+    from voice_actions_finance import resolve_category_id
+    return await resolve_category_id(client, name)
 
 
 async def _apply_expiration_batch(client, p, transcript, source):
@@ -4389,13 +4352,8 @@ _EXPIRY_SCAN_JSON_SCHEMA = {
 
 
 async def _list_tenant_account_keys(client: httpx.AsyncClient) -> list[str]:
-    """Wszystkie account_key z profiles — cron musi obejść każdego tenanta osobno."""
-    rows = await sb_get(
-        client,
-        "profiles",
-        params={"select": "account_key", "limit": "5000"},
-    ) or []
-    return collect_tenant_account_keys(rows)
+    from tenant_expiry_alerts import list_tenant_account_keys
+    return await list_tenant_account_keys(client)
 
 
 async def _run_expiry_alerts_for_tenant(
@@ -4405,144 +4363,35 @@ async def _run_expiry_alerts_for_tenant(
     warn_until,
 ) -> tuple[list[dict], Optional[str]]:
     """Jeden tenant: partie kończące ważność + opcjonalne danie dnia + Expo Push."""
-    from datetime import date as _date
+    from tenant_expiry_alerts import run_expiry_alerts_for_tenant
 
-    alerts: list[dict] = []
-    dish: Optional[str] = None
-
-    rows = await sb_get(
-        httpx_c,
-        "warehouse_inventory",
-        params={
-            "select": "id,restaurant_id,product_name,quantity,unit,expiration_date,status,alert_triggers",
-            "expiration_date": f"lte.{warn_until.isoformat()}",
-            "quantity": "gt.0",
-            "limit": "500",
-        },
-    ) or []
-
-    batches = []
-    for r in rows:
-        try:
-            exp = _date.fromisoformat(str(r.get("expiration_date"))[:10])
-        except Exception:
-            continue
-        if exp < today:
-            continue
-        if float(r.get("quantity") or 0) <= 0:
-            continue
-        batches.append(r)
-
-    names = [str(b.get("product_name") or "") for b in batches if b.get("product_name")]
-    if names:
-        try:
-            await _guard_ai(needs_credits=False)
-            client = _openai()
-            resp = await client.chat.completions.create(
-                model=CHAT_MODEL,
-                temperature=0.4,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
-                            "zaproponuj jedno konkretne „Danie dnia” po polsku "
-                            "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
-                        ),
-                    },
-                    {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
-                ],
-            )
-            dish = (resp.choices[0].message.content or "").strip() or None
-        except Exception:
-            logging.exception("expiry job: dish suggestion failed")
-
-    for i, b in enumerate(batches):
-        exp = _date.fromisoformat(str(b["expiration_date"])[:10])
-        days_left = (exp - today).days
-        triggers = b.get("alert_triggers") or [7, 3, 1]
-        if not isinstance(triggers, list):
-            triggers = [7, 3, 1]
-        triggers_i = {int(x) for x in triggers if str(x).lstrip('-').isdigit() or isinstance(x, (int, float))}
-        if days_left not in triggers_i and days_left != 0:
-            continue
-        message = (
-            f"Produkt {b['product_name']} kończy ważność DZIŚ! Użyj go!"
-            if days_left == 0
-            else f"Produkt {b['product_name']} kończy ważność za {days_left} dni! Użyj go!"
-        )
-        logging.info("EXPIRY_ALERT %s", message)
-        alerts.append({
-            "restaurant_id": b.get("restaurant_id"),
-            "batch_id": b.get("id"),
-            "product_name": b.get("product_name"),
-            "days_left": days_left,
-            "alert_day": days_left,
-            "message": message,
-            "dish_of_the_day": dish if i == 0 else None,
-        })
-    if not alerts:
-        return alerts, dish
-
-    try:
-        await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
-    except Exception:
-        for a in alerts:
-            a.pop("alert_day", None)
-        try:
-            await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
-        except Exception:
-            logging.exception("expiry job: alert insert failed")
-
-    try:
-        profiles = await sb_get(
-            httpx_c,
-            "profiles",
-            params={
-                "select": "id",
-                "account_key": f"eq.{get_account_key()}",
-                "limit": "200",
-            },
-        ) or []
-        uids = [str(p.get("id")) for p in profiles if p.get("id")]
-        tokens: list[dict] = []
-        if uids:
-            tokens = await sb_get(
-                httpx_c,
-                "device_push_tokens",
-                params={
-                    "select": "token",
-                    "user_id": f"in.({','.join(uids)})",
-                    "limit": "500",
+    async def _suggest(names: list[str]) -> Optional[str]:
+        await _guard_ai(needs_credits=False)
+        client = _openai()
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.4,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
+                        "zaproponuj jedno konkretne „Danie dnia” po polsku "
+                        "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
+                    ),
                 },
-            ) or []
-        push_msgs = []
-        for t in tokens:
-            tok = str(t.get("token") or "").strip()
-            if not tok:
-                continue
-            for a in alerts[:20]:
-                push_msgs.append({
-                    "to": tok,
-                    "title": "Termin przydatności",
-                    "body": a["message"],
-                    "sound": "default",
-                    "data": {"type": "expiry", "product_name": a.get("product_name")},
-                })
-        for i in range(0, len(push_msgs), 80):
-            chunk = push_msgs[i:i + 80]
-            if not chunk:
-                continue
-            await httpx_c.post(
-                "https://exp.host/--/api/v2/push/send",
-                json=chunk,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=30.0,
-            )
-    except Exception:
-        logging.exception("expiry job: Expo Push failed")
+                {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
+            ],
+        )
+        return (resp.choices[0].message.content or "").strip() or None
 
-    return alerts, dish
+    return await run_expiry_alerts_for_tenant(
+        httpx_c,
+        today=today,
+        warn_until=warn_until,
+        account_key=get_account_key(),
+        suggest_dish_fn=_suggest,
+    )
 
 
 async def menu_scan(file: UploadFile = File(...)):
@@ -4985,9 +4834,11 @@ _INSPIRATION_JSON_SCHEMA = {
 }
 
 
-def _inspiration_cache_key(slug: str, dish_name: str) -> str:
+def _inspiration_cache_key(slug: str, dish_name: str, account_key: Optional[str] = None) -> str:
     raw = (slug or "").strip().lower() or (dish_name or "").strip().lower()
-    return re.sub(r"\s+", "_", raw)
+    base = re.sub(r"\s+", "_", raw)
+    ak = (account_key or get_account_key() or "default").strip() or "default"
+    return f"{ak}::{base}"
 
 
 def _read_inspiration_cache() -> dict:
@@ -5048,7 +4899,7 @@ async def inspiration_recipe(req: InspirationRecipeRequest):
     if not dish_name:
         raise HTTPException(status_code=400, detail="Podaj nazwę potrawy.")
     slug = (req.slug or "").strip() or None
-    key = _inspiration_cache_key(slug or "", dish_name)
+    key = _inspiration_cache_key(slug or "", dish_name, get_account_key())
 
     if not req.force_refresh:
         cache = _read_inspiration_cache()

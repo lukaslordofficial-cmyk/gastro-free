@@ -19,7 +19,14 @@ logger = logging.getLogger("billing.routes")
 router = APIRouter(tags=["billing"])
 
 
-def _get_account_key() -> str:
+def _require_tenant() -> str:
+    from server import require_tenant_account_key
+
+    return require_tenant_account_key()
+
+
+def _account_key_soft() -> str:
+    """Fallback dla webhooka Stripe (bez nagłówka tenanta)."""
     from server import get_account_key
 
     return get_account_key()
@@ -68,9 +75,18 @@ class PortalSessionRequest(BaseModel):
 
 @router.post("/api/billing/create-checkout-session")
 async def billing_create_checkout(req: CheckoutSessionRequest):
-    """Tworzy Stripe Checkout Session. Kredyty dolicza TYLKO webhook / confirm-session po płatności."""
-    from billing_stripe import create_checkout_session, stripe_configured
+    """
+    Subskrypcja: jeśli jest już stripe_subscription_id — zmienia plan w Stripe (upgrade/downgrade)
+    bez ręcznej rezygnacji. W przeciwnym razie tworzy Checkout Session.
+    Top-up: zawsze Checkout. Kredyty z Checkout dolicza webhook / confirm-session.
+    """
+    from billing_stripe import (
+        create_checkout_session,
+        stripe_configured,
+        upgrade_existing_subscription,
+    )
 
+    account_key = _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
     success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
@@ -83,16 +99,58 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
         cancel = f"{public}/billing-cancel"
     success = assert_safe_redirect_url(success)
     cancel = assert_safe_redirect_url(cancel)
+
+    customer_id: Optional[str] = None
     try:
-        session = await create_checkout_session(
-            account_key=_get_account_key(),
-            kind=req.kind,
-            tier_level=req.tier_level,
-            package=req.package,
-            success_url=success,
-            cancel_url=cancel,
-            idempotency_key=req.idempotency_key or str(uuid.uuid4()),
-        )
+        async with httpx.AsyncClient(timeout=45.0, verify=httpx_verify()) as client:
+            sub = await _ensure_sub(client)
+            customer_id = sub.get("stripe_customer_id")
+
+            # Upgrade/downgrade istniejącej subskrypcji — bez drugiego Checkout
+            if (
+                req.kind == "subscription"
+                and req.tier_level in (1, 2)
+                and (sub.get("stripe_subscription_id") or "").startswith("sub_")
+            ):
+                cur_tier = int(sub.get("tier_level") or 0)
+                if cur_tier == int(req.tier_level):
+                    return {
+                        "ok": True,
+                        "upgraded": True,
+                        "tier_level": cur_tier,
+                        "message": "Ten plan jest już aktywny.",
+                    }
+                try:
+                    result = await upgrade_existing_subscription(
+                        account_key=account_key,
+                        tier_level=int(req.tier_level),
+                        stripe_subscription_id=sub["stripe_subscription_id"],
+                        current_tier=cur_tier,
+                        credits_balance=int(sub.get("credits_balance") or 0),
+                        tier_config=_tier_config(),
+                        client=client,
+                        sb_get=sb_get,
+                        sb_patch=sb_patch,
+                        sb_post=sb_post,
+                        idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+                    )
+                    return {"ok": True, **result}
+                except Exception as up_err:
+                    logger.warning(
+                        "upgrade_existing_subscription failed, fallback to Checkout: %s",
+                        up_err,
+                    )
+
+            session = await create_checkout_session(
+                account_key=account_key,
+                kind=req.kind,
+                tier_level=req.tier_level,
+                package=req.package,
+                success_url=success,
+                cancel_url=cancel,
+                customer_id=customer_id,
+                idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+            )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -107,6 +165,7 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
     Potwierdzenie płatności bez Stripe CLI / webhooka.
     Backend odpytuje Stripe API — jeśli session jest opłacona, dolicza kredyty/tier.
     Frontend NIE może podać kwoty kredytów — tylko session_id.
+    Sesja musi należeć do tenanta (metadata.account_key / client_reference_id).
     """
     from billing_stripe import (
         apply_paid_checkout_session,
@@ -114,6 +173,7 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
         stripe_configured,
     )
 
+    account_key = _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
     sid = (req.session_id or "").strip()
@@ -123,6 +183,18 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
         session = await retrieve_checkout_session(sid)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+
+    meta = dict(session.get("metadata") or {})
+    session_owner = (
+        (meta.get("account_key") or "").strip()
+        or (session.get("client_reference_id") or "").strip()
+    )
+    if not session_owner or session_owner != account_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Ta sesja płatności nie należy do Twojego konta.",
+        )
+
     async with httpx.AsyncClient(timeout=60.0, verify=httpx_verify()) as client:
         result = await apply_paid_checkout_session(
             session,
@@ -130,7 +202,7 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
             sb_get=sb_get,
             sb_post=sb_post,
             sb_patch=sb_patch,
-            account_key_default=_get_account_key(),
+            account_key_default=account_key,
             tier_config=_tier_config(),
         )
         if result.get("paid"):
@@ -147,6 +219,7 @@ async def billing_portal(req: PortalSessionRequest):
     """Stripe Customer Portal — zarządzanie kartą / anulowanie / faktury."""
     from billing_stripe import create_billing_portal_session, stripe_configured
 
+    _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
     async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
@@ -186,7 +259,7 @@ async def billing_webhook(request: Request):
             sb_get=sb_get,
             sb_post=sb_post,
             sb_patch=sb_patch,
-            account_key_default=_get_account_key(),
+            account_key_default=_account_key_soft(),
             tier_config=_tier_config(),
         )
     return result

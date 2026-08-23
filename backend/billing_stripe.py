@@ -116,6 +116,126 @@ async def _stripe_post(path: str, data: dict, *, idempotency_key: Optional[str] 
         return payload
 
 
+async def _stripe_get(path: str) -> dict:
+    headers = {"Authorization": f"Bearer {_secret()}"}
+    async with httpx.AsyncClient(timeout=45.0, verify=_ssl_verify()) as client:
+        r = await client.get(f"{STRIPE_API}{path}", headers=headers)
+        payload = r.json()
+        if r.status_code >= 400:
+            msg = payload.get("error", {}).get("message") or r.text[:300]
+            raise RuntimeError(f"Stripe API {r.status_code}: {msg}")
+        return payload
+
+
+async def _stripe_delete(path: str) -> dict:
+    headers = {"Authorization": f"Bearer {_secret()}"}
+    async with httpx.AsyncClient(timeout=45.0, verify=_ssl_verify()) as client:
+        r = await client.delete(f"{STRIPE_API}{path}", headers=headers)
+        payload = r.json() if r.content else {}
+        if r.status_code >= 400:
+            msg = (payload.get("error") or {}).get("message") if isinstance(payload, dict) else None
+            raise RuntimeError(f"Stripe API {r.status_code}: {msg or r.text[:300]}")
+        return payload if isinstance(payload, dict) else {}
+
+
+async def cancel_stripe_subscription(subscription_id: str, *, at_period_end: bool = False) -> dict:
+    """Anuluje subskrypcję Stripe. Domyślnie natychmiast (DELETE); opcjonalnie na koniec okresu."""
+    sid = (subscription_id or "").strip()
+    if not sid.startswith("sub_"):
+        raise ValueError("Nieprawidłowy stripe_subscription_id")
+    if at_period_end:
+        return await _stripe_post(f"/subscriptions/{sid}", {"cancel_at_period_end": True})
+    return await _stripe_delete(f"/subscriptions/{sid}")
+
+
+async def upgrade_existing_subscription(
+    *,
+    account_key: str,
+    tier_level: int,
+    stripe_subscription_id: str,
+    current_tier: int,
+    credits_balance: int,
+    tier_config: dict,
+    client: httpx.AsyncClient,
+    sb_get,
+    sb_patch,
+    sb_post,
+    idempotency_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Zmiana ceny istniejącej subskrypcji Stripe (upgrade/downgrade) bez nowego Checkout.
+    Przy upgrade dolicza różnicę monthly_grant; przy downgrade tylko zmienia tier.
+    """
+    if tier_level not in (1, 2):
+        raise ValueError("tier_level musi być 1 lub 2")
+    sid = (stripe_subscription_id or "").strip()
+    if not sid.startswith("sub_"):
+        raise ValueError("Brak aktywnej subskrypcji Stripe do zmiany planu")
+
+    price_id = resolve_price_id(tier_level=tier_level)
+    stripe_sub = await _stripe_get(f"/subscriptions/{sid}")
+    items = (stripe_sub.get("items") or {}).get("data") or []
+    if not items:
+        raise RuntimeError("Subskrypcja Stripe nie ma pozycji do zmiany")
+    item_id = items[0].get("id")
+    if not item_id:
+        raise RuntimeError("Brak item_id w subskrypcji Stripe")
+
+    metadata = {
+        "account_key": account_key,
+        "kind": "subscription",
+        "tier_level": str(tier_level),
+    }
+    updated = await _stripe_post(
+        f"/subscriptions/{sid}",
+        {
+            "items": [{"id": item_id, "price": price_id}],
+            "proration_behavior": "create_prorations",
+            "cancel_at_period_end": False,
+            "metadata": metadata,
+        },
+        idempotency_key=idempotency_key,
+    )
+
+    old_grant = int((tier_config.get(int(current_tier or 0)) or {}).get("monthly_grant") or 0)
+    new_grant = int((tier_config.get(tier_level) or {}).get("monthly_grant") or 0)
+    credit_delta = max(0, new_grant - old_grant) if tier_level > int(current_tier or 0) else 0
+
+    period_end = None
+    try:
+        ts = updated.get("current_period_end")
+        if ts:
+            period_end = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    except Exception:
+        period_end = None
+
+    tier_name = (tier_config.get(tier_level) or {}).get("name") or f"tier {tier_level}"
+    changes: dict[str, Any] = {
+        "tier_level": tier_level,
+        "status": "active",
+        "credits_balance": int(credits_balance or 0) + credit_delta,
+        "stripe_subscription_id": sid,
+    }
+    if period_end:
+        changes["current_period_end"] = period_end
+    cust = updated.get("customer") or stripe_sub.get("customer")
+    if cust:
+        changes["stripe_customer_id"] = cust
+
+    await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, changes)
+    msg = f"Plan zmieniony na {tier_name}."
+    if credit_delta:
+        msg += f" Dodano +{credit_delta} kredytów (różnica grantu)."
+    return {
+        "upgraded": True,
+        "tier_level": tier_level,
+        "credit_delta": credit_delta,
+        "price_id": price_id,
+        "stripe_subscription_id": sid,
+        "message": msg,
+    }
+
+
 async def create_checkout_session(
     *,
     account_key: str,
@@ -125,6 +245,7 @@ async def create_checkout_session(
     success_url: str,
     cancel_url: str,
     customer_email: Optional[str] = None,
+    customer_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
 ) -> dict[str, Any]:
     if kind == "subscription":
@@ -172,7 +293,11 @@ async def create_checkout_session(
     else:
         raise ValueError("kind musi być subscription|topup")
 
-    if customer_email:
+    # Istniejący customer Stripe — unikamy duplikatów i ułatwia upgrade później
+    cid = (customer_id or "").strip()
+    if cid.startswith("cus_"):
+        payload["customer"] = cid
+    elif customer_email:
         payload["customer_email"] = customer_email
 
     session = await _stripe_post("/checkout/sessions", payload, idempotency_key=idempotency_key)

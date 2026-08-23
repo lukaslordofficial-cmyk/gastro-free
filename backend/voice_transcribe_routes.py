@@ -24,8 +24,9 @@ class TranscribeResponse(BaseModel):
 
 @router.post("/api/voice/transcribe", response_model=TranscribeResponse)
 async def transcribe(audio: UploadFile = File(...), language: str = Form("pl")):
-    from server import STT_MODEL, _bill_openai_response, _guard_ai, _openai
+    from server import STT_MODEL, _bill_openai_response, _guard_ai, _openai, require_tenant_account_key
 
+    require_tenant_account_key()
     client = _openai()
     await _guard_ai()
     contents = await audio.read()

@@ -63,11 +63,10 @@ async def confirm_invoice(req: ConfirmInvoiceRequest):
     from server import (
         _apply_supplier_scan_meta,
         _find_or_create_supplier,
-        _normalize_supplier_scan_meta,
         _save_invoice,
         require_tenant_account_key,
-        supplier_meta_preview,
     )
+    from supplier_scan_meta import normalize_supplier_scan_meta, supplier_meta_preview
 
     require_tenant_account_key()
     if not req.products:
@@ -90,7 +89,7 @@ async def confirm_invoice(req: ConfirmInvoiceRequest):
         merged_src = {**flat_meta, **{k: v for k, v in req.supplier.items() if v is not None}}
     else:
         merged_src = flat_meta
-    supplier_meta = _normalize_supplier_scan_meta(merged_src)
+    supplier_meta = normalize_supplier_scan_meta(merged_src)
 
     async with httpx.AsyncClient(timeout=90.0, verify=httpx_verify()) as client:
         if req.supplier_id:
@@ -144,14 +143,13 @@ async def process_document(
         _load_user_inventory_categories,
         _merge_document_vision_batches,
         _normalize_invoice_line_name,
-        _normalize_supplier_scan_meta,
         _openai,
         _openai_vision_json_batches,
         _process_offer,
         _with_billing,
         require_tenant_account_key,
-        supplier_meta_preview,
     )
+    from supplier_scan_meta import normalize_supplier_scan_meta, supplier_meta_preview
 
     require_tenant_account_key()
     client = _openai()
@@ -192,7 +190,7 @@ async def process_document(
 
     doc_type = data.get("document_type") or "OFERTA_HANDLOWA"
     supplier_name = data.get("supplier_name")
-    supplier_meta = _normalize_supplier_scan_meta(data.get("supplier"))
+    supplier_meta = normalize_supplier_scan_meta(data.get("supplier"))
     pages_info = {
         "pages_total": pages_meta.get("pages_total"),
         "pages_processed": pages_meta.get("pages_rendered"),

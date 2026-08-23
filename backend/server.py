@@ -1823,298 +1823,35 @@ async def interpret_waste_legacy(payload: InterpretRequest):
 # 3) Actions.apply — persist to Supabase according to intent
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _to_base(qty: float, unit: str) -> tuple[float, str]:
-    """Sprowadza do wspólnej bazy. Gęstość gastronomiczna 1 g == 1 ml, więc
-    waga (g/kg) i objętość (ml/l) mają WSPÓLNĄ bazę 'g' — dzięki temu składnik
-    receptury podany w ml odejmuje się/liczy z magazynu w g (i odwrotnie)."""
-    u = (unit or "").lower().strip().rstrip(".")
-    if u in ("kg", "kilogram"):
-        return qty * 1000.0, "g"
-    if u in ("g", "gram", "gramy"):
-        return qty, "g"
-    if u in ("l", "litr", "litry"):
-        return qty * 1000.0, "g"   # 1 l = 1000 ml = 1000 g (płyny gastro)
-    if u in ("ml", "mililitr"):
-        return qty, "g"
-    return qty, u
+from culinary_units import (
+    PIECE_DEFAULT_SIZE as _PIECE_DEFAULT_SIZE,
+    PIECE_UNITS as _PIECE_UNITS,
+    canon_dim as _canon_dim,
+    convert as _convert,
+    convert_culinary as _convert_culinary,
+    from_gml as _from_gml,
+    is_piece_unit as _is_piece_unit,
+    to_base as _to_base,
+    to_gml as _to_gml,
+    yield_available as _yield_available,
+)
 
 
-def _convert(qty: float, from_unit: str, to_unit: str) -> Optional[float]:
-    a, ua = _to_base(qty, from_unit)
-    b, ub = _to_base(1.0, to_unit)
-    if ua != ub:
-        return None
-    return a / b
-
-
-_PIECE_DEFAULT_SIZE = 200.0  # domyślnie 1 szt/opak ≈ 200 g/ml (produkty płynne/gastro)
-
-
-def _norm_name(s: str) -> str:
-    return " ".join((s or "").lower().split())
-
-
-# Części produktu → cały produkt (magazyn/receptura kupuje całość, nie części).
-_PART_TO_WHOLE: dict[str, str] = {
-    # jajko
-    "zoltko": "jajko", "zoltka": "jajko", "zoltek": "jajko",
-    "zoltkajaja": "jajko", "zoltkojaja": "jajko", "zoltkojajka": "jajko",
-    "zoltkajajka": "jajko", "zoltkojaj": "jajko", "zoltkajaj": "jajko",
-    "bialko": "jajko", "bialka": "jajko",
-    "bialkojaja": "jajko", "bialkojajka": "jajko", "bialkojaj": "jajko",
-    "eggyolk": "jajko", "eggwhite": "jajko", "yolk": "jajko",
-    "melanz": "jajko", "melanz jajeczny": "jajko",
-    # cytrusy / owoce
-    "skorka cytryny": "cytryna", "skorkacytryny": "cytryna",
-    "sok z cytryny": "cytryna", "sokzcytryny": "cytryna", "sok cytrynowy": "cytryna",
-    "skorka pomaranczy": "pomarańcza", "skorkapomaranczy": "pomarańcza",
-    "sok z pomaranczy": "pomarańcza", "skorka limonki": "limonka",
-    "sok z limonki": "limonka", "skorka limetki": "limonka",
-    # warzywa / zioła
-    "lisc pietruszki": "pietruszka", "natka pietruszki": "pietruszka",
-    "korzen pietruszki": "pietruszka", "lisc selera": "seler",
-    "zabek czosnku": "czosnek", "zabki czosnku": "czosnek",
-    # mięso / inne
-    "skorka kurczaka": "kurczak", "kosci kurczaka": "kurczak",
-    "skorka indyka": "indyk", "miazsz awokado": "awokado",
-}
-
-
-def _strip_diacritics_pl(s: str) -> str:
-    table = str.maketrans({
-        "ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n",
-        "ó": "o", "ś": "s", "ź": "z", "ż": "z",
-    })
-    return (s or "").lower().translate(table)
-
-
-def _whole_product_name(name: str) -> str:
-    """Mapuje część produktu (np. żółtko) na cały produkt magazynowy (jajko)."""
-    raw = (name or "").strip()
-    if not raw:
-        return raw
-    key = _strip_diacritics_pl(_norm_name(raw))
-    key_compact = key.replace(" ", "")
-    mapped = _PART_TO_WHOLE.get(key) or _PART_TO_WHOLE.get(key_compact)
-    if mapped:
-        return mapped
-    # „żółtko jaja / żółtko z jajka / białko jajka” itp.
-    if "zoltko" in key_compact or key_compact.startswith("bialkojaj") or (
-        "bialko" in key_compact and "jaj" in key_compact
-    ):
-        return "jajko"
-    if key_compact.startswith("skorkacytr") or key_compact.startswith("sokzcytr"):
-        return "cytryna"
-    if key_compact.startswith("skorkapomar") or key_compact.startswith("sokzpomar"):
-        return "pomarańcza"
-    return raw
-
-
-# Plural / stem-ish → singular display (pomidory→pomidor). Used at recipe + inventory write.
-_PLURAL_TO_SINGULAR: dict[str, str] = {
-    "pomidory": "pomidor", "pomidorow": "pomidor", "pomidora": "pomidor",
-    "jajka": "jajko", "jajek": "jajko", "jaja": "jajko",
-    "ziemniaki": "ziemniak", "ziemniakow": "ziemniak",
-    "marchewki": "marchew", "marchewek": "marchew",
-    "ogorki": "ogórek", "ogorkow": "ogórek",
-    "papryki": "papryka", "cukinie": "cukinia", "baklazany": "bakłażan",
-    "pieczarki": "pieczarka", "pieczarek": "pieczarka",
-    "grzyby": "grzyb", "grzybow": "grzyb",
-    "borowiki": "borowik", "borowikow": "borowik",
-    "boczniaki": "boczniak", "boczniakow": "boczniak",
-    "cebule": "cebula", "cytryny": "cytryna", "limonki": "limonka",
-    "jablka": "jabłko", "jablek": "jabłko", "banany": "banan", "bananow": "banan",
-    "truskawki": "truskawka", "truskawek": "truskawka",
-    "maliny": "malina", "orzechy": "orzech", "orzechow": "orzech",
-    "migdaly": "migdał", "oliwki": "oliwka", "oliwek": "oliwka",
-    "bulki": "bułka", "bulek": "bułka", "chleby": "chleb",
-    "kielbasy": "kiełbasa", "kielbas": "kiełbasa",
-    "boczki": "boczek", "filety": "filet", "piersi": "pierś",
-    "steki": "stek", "kotlety": "kotlet", "kotletow": "kotlet",
-    "krewetki": "krewetka", "krewetek": "krewetka",
-}
-
-
-# Dish-like names that must NOT become warehouse SKUs — rewrite to buyable ingredient.
-_DISH_LIKE_TO_INGREDIENT: dict[str, str] = {
-    "risotto": "ryż arborio",
-    "risotto grzybowe": "ryż arborio",
-    "risotto z grzybami": "ryż arborio",
-    "paella": "ryż bomba",
-    "couscous": "kuskus",
-    "kuskus": "kuskus",
-    "polenta": "kasza kukurydziana",
-    "gnocchi": "gnocchi (półprodukt)",
-    "nalesniki": "mąka pszenna",
-    "naleśniki": "mąka pszenna",
-}
-
-
-def _normalize_ingredient_name(name: str) -> str:
-    """Kanoniczna nazwa składnika: całe produkty + singular PL (pomidory→pomidor)."""
-    raw = _whole_product_name((name or "").strip())
-    if not raw:
-        return raw
-    key = _strip_diacritics_pl(_norm_name(raw))
-    if key in _PLURAL_TO_SINGULAR:
-        return _PLURAL_TO_SINGULAR[key]
-    # Ostatni token liczby mnogiej (np. „pomidory cherry” → „pomidor cherry”)
-    parts = key.split()
-    if len(parts) >= 2 and parts[-1] in _PLURAL_TO_SINGULAR:
-        last = _PLURAL_TO_SINGULAR[parts[-1]]
-        orig_parts = raw.split()
-        if orig_parts:
-            orig_parts[-1] = last
-            return " ".join(orig_parts)
-    # Dish-like → buyable ingredient
-    if key in _DISH_LIKE_TO_INGREDIENT:
-        return _DISH_LIKE_TO_INGREDIENT[key]
-    for dish_key, ing in _DISH_LIKE_TO_INGREDIENT.items():
-        if key == dish_key or key.startswith(dish_key + " "):
-            return ing
-    return raw
-
-
-def _apply_normalize_ingredient_names_to_dishes(dishes: list) -> None:
-    """In-place: normalize ingredient names (singular + dish→SKU rewrite)."""
-    for d in dishes or []:
-        ings = getattr(d, "suggested_ingredients", None)
-        if ings is None and isinstance(d, dict):
-            ings = d.get("suggested_ingredients") or d.get("ingredients")
-        if not ings:
-            ings = getattr(d, "ingredients", None)
-        if not ings:
-            continue
-        for ing in ings:
-            if hasattr(ing, "name"):
-                ing.name = _normalize_ingredient_name(getattr(ing, "name", "") or "")
-            elif isinstance(ing, dict) and "name" in ing:
-                ing["name"] = _normalize_ingredient_name(ing.get("name") or "")
-
-
-def _is_combo_polprodukt_name(name: str) -> bool:
-    """Wykrywa półprodukt combo (nie kupowany jako jeden SKU).
-
-    Reguły (menu scan → magazyn):
-    1. Mix / mieszanka / zestaw warzyw lub sałat bez jednego buyable SKU.
-    2. Przetworzone/grillowane/pieczone/smażone mieszanki (np. „warzywa grillowane”).
-    3. Domowe frytki / pieczone dodatki złożone z wielu składników.
-    4. Nazwy z „mix”, „mixem”, „assorted”, „selection” + warzywa/mięsa.
-    NIE oznacza: pojedynczego surowca (pomidor, boczek, ryż).
-    """
-    n = _strip_diacritics_pl(_norm_name(name or ""))
-    if not n or len(n) < 4:
-        return False
-    # Jawne combo / półprodukt
-    if any(k in n for k in (
-        "polprodukt", "pol-produkt", "combo", "mise en place", "prep ",
-    )):
-        return True
-    # Mix / mieszanka
-    if any(k in n for k in ("mieszanka", "mix warzyw", "mix salat", "mix salat", "vegetable mix", "assorted")):
-        return True
-    if n.startswith("mix ") or " mix" in n:
-        if any(k in n for k in ("warzyw", "salat", "mies", "grzyb", "owoc")):
-            return True
-    # Przetworzone mieszanki (grill / piecz / smaż) — typowo nie jeden SKU
-    processed = any(k in n for k in (
-        "grillowan", "pieczon", "smazo", "smazon", "duszone", "gotowane",
-        "blanszowan", "marynowan", "glazurowan",
-    ))
-    multi = any(k in n for k in (
-        "warzyw", "salat", "grzyb", "owoc", "mies", "dodatk", "zestaw",
-    ))
-    if processed and multi:
-        return True
-    # Klasyczne przykłady
-    if n in (
-        "warzywa grillowane", "warzywa pieczone", "warzywa duszone",
-        "warzywa smażone", "warzywa smazone", "grilled vegetables",
-        "pieczone warzywa", "grillowane warzywa", "smażone warzywa",
-        "smazone warzywa", "mix sałat", "mix salat", "sałatka mieszana",
-        "salatka mieszana",
-    ):
-        return True
-    return False
-
-
-# Propozycje składników combo (gdy wykryto półprodukt bez receptury).
-_COMBO_DEFAULT_INGREDIENTS: dict[str, list[str]] = {
-    "warzywa grillowane": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
-    "warzywa pieczone": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
-    "pieczone warzywa": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
-    "grillowane warzywa": ["cukinia", "papryka", "bakłażan", "olej rzepakowy"],
-    "mix sałat": ["sałata rzymska", "rukola", "roszponka"],
-    "mix salat": ["sałata rzymska", "rukola", "roszponka"],
-}
-
-
-def _combo_default_ingredients(name: str) -> list[str]:
-    key = _strip_diacritics_pl(_norm_name(name or ""))
-    if key in _COMBO_DEFAULT_INGREDIENTS:
-        return list(_COMBO_DEFAULT_INGREDIENTS[key])
-    for k, ings in _COMBO_DEFAULT_INGREDIENTS.items():
-        if k in key or key in k:
-            return list(ings)
-    if "warzyw" in key and any(p in key for p in ("grill", "piecz", "smaz", "smaż")):
-        return ["cukinia", "papryka", "bakłażan", "olej rzepakowy"]
-    return []
-
-
-def _apply_whole_product_names_to_dishes(dishes: list) -> None:
-    """In-place: części → całe produkty + singular PL (pomidory→pomidor)."""
-    _apply_normalize_ingredient_names_to_dishes(dishes)
+from ingredient_name_norm import (
+    apply_normalize_ingredient_names_to_dishes as _apply_normalize_ingredient_names_to_dishes,
+    apply_whole_product_names_to_dishes as _apply_whole_product_names_to_dishes,
+    combo_default_ingredients as _combo_default_ingredients,
+    is_combo_polprodukt_name as _is_combo_polprodukt_name,
+    norm_name as _norm_name,
+    normalize_ingredient_name as _normalize_ingredient_name,
+    strip_diacritics_pl as _strip_diacritics_pl,
+    whole_product_name as _whole_product_name,
+)
 
 
 def _is_porcja_row(name: str) -> bool:
     return _norm_name(name) in ("porcja", "porcje", "wielkosc porcji", "wielkość porcji",
                                 "wielkosc porc) i", "gramatura", "gramatura porcji")
-
-def _to_gml(qty: float, unit: str, unit_size: float) -> Optional[float]:
-    """Zamiana na wspólną bazę g/ml (gęstość kulinarna 1:1). None dla nieznanej jednostki."""
-    u = _norm_name(unit)
-    if u == "kg":
-        return qty * 1000.0
-    if u in ("g", "gram", "gramy"):
-        return qty
-    if u in ("l", "litr", "litry"):
-        return qty * 1000.0
-    if u == "ml":
-        return qty
-    if _is_piece_unit(u):
-        return qty * unit_size
-    return None
-
-
-def _from_gml(val: float, unit: str, unit_size: float) -> Optional[float]:
-    u = _norm_name(unit)
-    if u == "kg":
-        return val / 1000.0
-    if u in ("g", "gram", "gramy"):
-        return val
-    if u in ("l", "litr", "litry"):
-        return val / 1000.0
-    if u == "ml":
-        return val
-    if _is_piece_unit(u):
-        return (val / unit_size) if unit_size else None
-    return None
-
-
-def _convert_culinary(qty: float, from_unit: str, to_unit: str,
-                      unit_size: Optional[float] = None) -> Optional[float]:
-    """Konwersja odporna dla g/kg/ml/l/szt/opak.
-    - g↔ml: gęstość gastronomiczna 1:1 (śmietana, mleko, oleje, sosy).
-    - szt/opak ↔ waga/objętość: przez `unit_size` (g/ml na 1 szt), domyślnie 200.
-    Zwraca None tylko dla całkiem nieznanej jednostki (np. 'porcja')."""
-    try:
-        size = float(unit_size) if (unit_size and float(unit_size) > 0) else _PIECE_DEFAULT_SIZE
-    except (TypeError, ValueError):
-        size = _PIECE_DEFAULT_SIZE
-    gml = _to_gml(qty, from_unit, size)
-    if gml is None:
-        return None
-    return _from_gml(gml, to_unit, size)
 
 
 # ── Spójność jednostek składników zwracanych przez AI ────────────────────────
@@ -2126,17 +1863,6 @@ _LIQUID_NAME_HINTS = (
     "sok", "krem", "ocet", "syrop", "wino", "piwo", "śmieta", "majonez",
     "musztard", "ketchup", "passata", "przecier", "esencj", "napój", "napoj",
 )
-
-
-def _canon_dim(u: str) -> Optional[str]:
-    """Wymiar jednostki: 'gml' dla g/kg/ml/l (przeliczalne 1:1), 'szt' dla sztuk."""
-    x = (u or "").strip().lower().rstrip(".")
-    if x in ("g", "gram", "gramy", "kg", "kilogram", "ml", "mililitr", "l", "litr", "litry"):
-        return "gml"
-    if x in ("szt", "sztuka", "sztuki", "opak", "op", "opakowanie",
-             "plaster", "plasterek", "listek", "list", "zabek", "ząbek"):
-        return "szt"
-    return None
 
 
 def _iter_ingredients(dish):
@@ -2245,10 +1971,6 @@ def _canonicalize_ingredient_units(dishes: list) -> None:
                     except Exception:  # noqa: BLE001
                         pass
             ing.unit = target
-
-
-        return None
-    return _from_gml(gml, to_unit, size)
 
 
 async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[str], source: str):
@@ -2981,125 +2703,15 @@ def _images_from_upload(
     )
 
 
-def _page_surcharge_credits(pages_rendered: int) -> int:
-    """Deprecated: billing jest wyłącznie z OpenAI usage (tokeny). Zawsze 0."""
-    return 0
-
-
-def _norm_product_key(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
-
-
-def _merge_supplier_meta_dicts(*parts: Any) -> dict:
-    out: dict = {}
-    for p in parts:
-        if not isinstance(p, dict):
-            continue
-        for k, v in p.items():
-            if v is None or v == "" or v == []:
-                continue
-            if out.get(k) in (None, "", []):
-                out[k] = v
-    return out
-
-
-def _merge_document_vision_batches(parts: list[dict]) -> dict:
-    """Scala wyniki Vision z kolejnych partii stron PDF."""
-    if not parts:
-        return {
-            "document_type": "OFERTA_HANDLOWA",
-            "supplier_name": None,
-            "total_amount": 0,
-            "supplier": {},
-            "products": [],
-        }
-    types = [str(p.get("document_type") or "") for p in parts]
-    if "FAKTURA_ZAKUPOWA" in types:
-        doc_type = "FAKTURA_ZAKUPOWA"
-    elif "MENU_RESTAURACYJNE" in types:
-        doc_type = "MENU_RESTAURACYJNE"
-    else:
-        doc_type = types[0] or "OFERTA_HANDLOWA"
-
-    supplier_name = None
-    for p in parts:
-        sn = (p.get("supplier_name") or "").strip() if isinstance(p.get("supplier_name"), str) else None
-        if sn:
-            supplier_name = sn
-            break
-
-    total_amount = 0.0
-    for p in parts:
-        try:
-            total_amount = max(total_amount, float(p.get("total_amount") or 0))
-        except (TypeError, ValueError):
-            pass
-
-    supplier = _merge_supplier_meta_dicts(*[p.get("supplier") for p in parts])
-
-    products: list[dict] = []
-    seen: set[str] = set()
-    for p in parts:
-        for row in p.get("products") or []:
-            if not isinstance(row, dict):
-                continue
-            key = _norm_product_key(str(row.get("product_name") or ""))
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            products.append(row)
-
-    return {
-        "document_type": doc_type,
-        "supplier_name": supplier_name,
-        "total_amount": total_amount,
-        "supplier": supplier,
-        "products": products,
-    }
-
-
-def _merge_catalog_vision_batches(parts: list[dict]) -> dict:
-    products: list[dict] = []
-    seen: set[str] = set()
-    supplier_name = None
-    for p in parts:
-        if not supplier_name:
-            sn = p.get("supplier_name")
-            if isinstance(sn, str) and sn.strip():
-                supplier_name = sn.strip()
-        for row in p.get("products") or []:
-            if not isinstance(row, dict):
-                continue
-            key = _norm_product_key(str(row.get("product_name") or ""))
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            products.append(row)
-    return {"supplier_name": supplier_name, "products": products}
-
-
-def _merge_menu_vision_batches(parts: list[dict]) -> dict:
-    dishes: list[dict] = []
-    seen: set[str] = set()
-    for p in parts:
-        for row in p.get("dishes") or []:
-            if not isinstance(row, dict):
-                continue
-            key = _norm_product_key(str(row.get("name") or row.get("product_name") or ""))
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            dishes.append(row)
-    return {"dishes": dishes}
-
-
-def _merge_recipe_ocr_batches(parts: list[dict]) -> dict:
-    chunks = []
-    for p in parts:
-        t = (p.get("text") or "").strip()
-        if t:
-            chunks.append(t)
-    return {"text": "\n\n".join(chunks)}
+from vision_batch_merge import (
+    merge_catalog_vision_batches as _merge_catalog_vision_batches,
+    merge_document_vision_batches as _merge_document_vision_batches,
+    merge_menu_vision_batches as _merge_menu_vision_batches,
+    merge_recipe_ocr_batches as _merge_recipe_ocr_batches,
+    merge_supplier_meta_dicts as _merge_supplier_meta_dicts,
+    norm_product_key as _norm_product_key,
+    page_surcharge_credits as _page_surcharge_credits,
+)
 
 
 async def _openai_vision_json_batches(
@@ -3237,109 +2849,12 @@ def _norm(s: str) -> str:
 # Fuzzy matching (produkty z gazetek ↔ magazyn + składniki receptur)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Próg podobieństwa dla rapidfuzz (0-100). 80 = permisywny, jak wybrał użytkownik.
-FUZZY_MATCH_THRESHOLD = 68
-
-# Regex do wycinania jednostek/liczb: "1kg", "500 g", "200ml", "2 szt", "1,5l", "1.5 l"
-_UNIT_RE = re.compile(
-    r"\b\d+[.,]?\d*\s*"
-    r"(?:kg|g|mg|dag|l|ml|cl|dl|szt\.?|opak\.?|op\.?|kartonow?y?|karton|"
-    r"sztuk[a-zi]*|opakowa[a-z]*)\b",
-    re.IGNORECASE,
+from pl_fuzzy_norm import (
+    FUZZY_MATCH_THRESHOLD,
+    food_match_key as _food_match_key,
+    norm_pl as _norm_pl,
+    strip_accents as _strip_accents,
 )
-# Pojedyncze cyfry/liczby, myślniki, przecinki, kropki, znaki specjalne.
-_NOISE_RE = re.compile(r"[^a-z0-9\s]")
-
-
-def _strip_accents(text: str) -> str:
-    """Usuwa polskie znaki diakrytyczne: ą→a, ć→c, ł→l, ó→o itd."""
-    if not text:
-        return ""
-    # Uwaga: 'ł' nie rozkłada się przez NFKD → obsłużyć osobno.
-    text = text.replace("ł", "l").replace("Ł", "L")
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
-
-
-_TOKEN_SYNONYMS = {
-    "filet": "piers", "filety": "piers", "filetem": "piers", "filetu": "piers",
-    "piersi": "piers", "piersiami": "piers", "piers": "piers",
-    "kurczaka": "kurczak", "kurczakiem": "kurczak", "kurczaki": "kurczak",
-    "kurczakowi": "kurczak", "drobiowy": "kurczak", "drobiowa": "kurczak", "drobiowe": "kurczak",
-    "indyka": "indyk", "indykiem": "indyk",
-    "wolowego": "wolow", "wolowa": "wolow", "wolowy": "wolow", "wolowe": "wolow",
-    "wolowina": "wolow", "wolowiny": "wolow",
-    "wieprzowego": "wieprz", "wieprzowa": "wieprz", "wieprzowy": "wieprz", "wieprzowina": "wieprz",
-    "oliwek": "oliw", "oliwa": "oliw", "oliwy": "oliw", "oliwie": "oliw", "olive": "oliw",
-    "cukru": "cukier", "cukrem": "cukier",
-    "soli": "sol", "sola": "sol",
-    "pieprzu": "pieprz",
-    "czosnku": "czosnek", "czosnkiem": "czosnek",
-    "cebuli": "cebula",
-    "pomidorow": "pomidor", "pomidory": "pomidor", "pomidora": "pomidor",
-    "ziemniakow": "ziemniak", "ziemniaki": "ziemniak",
-    "majonezu": "majonez", "musztardy": "musztarda",
-    "smietany": "smietana", "mleka": "mleko",
-    "masla": "maslo", "maslem": "maslo",
-    "sera": "ser", "serem": "ser",
-    "mozarella": "mozzarella", "mozzarelli": "mozzarella", "mozarell": "mozzarella",
-    "mozzarella": "mozzarella", "mozz": "mozzarella", "buffalo": "buffalo",
-    "jajka": "jajko", "jajek": "jajko", "jaja": "jajko",
-    "koper": "koper", "koperek": "koper", "koperki": "koper", "kopru": "koper", "koprem": "koper",
-    "marchewka": "marchew", "marchewki": "marchew", "marchewek": "marchew", "marchew": "marchew",
-}
-
-
-def _canon_token(t: str) -> str:
-    """Lekki stem + synonimy kulinarne (filet↔pierś, kurczaka→kurczak)."""
-    if t in _TOKEN_SYNONYMS:
-        return _TOKEN_SYNONYMS[t]
-    for suf in ("ami", "ach", "owi", "iem", "ow", "om", "em", "ie"):
-        if len(t) > len(suf) + 3 and t.endswith(suf):
-            stem = t[: -len(suf)]
-            return _TOKEN_SYNONYMS.get(stem, stem)
-    if len(t) >= 6 and t[-1] in "ayiue":
-        stem = t[:-1]
-        return _TOKEN_SYNONYMS.get(stem, stem)
-    return t
-
-
-def _norm_pl(text: str) -> str:
-    """Pełna normalizacja PL dla fuzzy matchingu:
-    - lower + usunięcie diakrytyków
-    - usunięcie jednostek/miar (1kg, 500g, 200ml, 2 szt...)
-    - usunięcie znaków niealfanum.
-    - synonimy/stem (filet↔pierś, kurczaka→kurczak)
-    - tokenizacja + posortowany join (kolejność słów nie ma znaczenia).
-    - usunięcie marek/dostawców (Sokołów, …) by nie blokować matchingu.
-    """
-    if not text:
-        return ""
-    s = _strip_accents(str(text)).lower()
-    s = _UNIT_RE.sub(" ", s)
-    s = _NOISE_RE.sub(" ", s)
-    tokens = [t for t in s.split() if len(t) >= 2]
-    # Usuwamy typowe słowa-śmieci (przyimki), które nie niosą znaczenia
-    stop = {"do", "od", "na", "za", "ze", "we", "po", "pod", "nad", "przy",
-            "bez", "dla", "oraz", "lub", "albo", "a", "i", "z", "w"}
-    # Marki / szum e-commerce — „Sokołów Schab” ↔ magazyn „Schab”
-    brands = {
-        "sokolow", "sokolów", "animex", "morliny", "berlinki", "henkel",
-        "premium", "bio", "eko", "organic", "light", "classic", "extra",
-        "select", "selection", "gourmet", "fresh", "swieze", "swiezy",
-        "opak", "opakowanie", "promocja", "virgin", "extra",
-        # Formy opakowania / porcji — „ser kozi” ↔ „ser kozi rolka”
-        "rolka", "rolki", "rolke", "kostka", "kostki", "blok", "bloki",
-        "plastry", "plaster", "krazek", "krazki", "kreg", "kregi",
-        "tacka", "tacki", "luz", "luzem", "porcja", "porcje", "paczka",
-        "paczk", "szt", "sztuka", "sztuki",
-    }
-    tokens = [
-        _canon_token(t) for t in tokens
-        if t not in stop and t not in brands
-    ]
-    tokens = [t for t in tokens if len(t) >= 2 and t not in stop]
-    return " ".join(sorted(set(tokens)))
 
 
 def _fuzzy_match(query: str, choices: list[str], threshold: int = FUZZY_MATCH_THRESHOLD
@@ -3453,37 +2968,6 @@ async def _load_matchable_terms(client: httpx.AsyncClient) -> dict:
             recipe_terms.setdefault(k, name)
 
     return {"inv_terms": inv_terms, "recipe_terms": recipe_terms}
-
-
-_PIECE_UNITS = {
-    "szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie",
-    "peczek", "peczki", "peczka", "wiazka", "wiazki", "bunch", "bunches",
-}
-
-
-def _is_piece_unit(u: str) -> bool:
-    x = (u or "").strip().lower()
-    return x in _PIECE_UNITS or x.startswith("szt") or x.startswith("op")
-
-
-def _yield_available(stock_qty: float, stock_unit: str,
-                     uwv: Optional[float], wvu: Optional[str],
-                     recipe_unit: str) -> tuple[Optional[float], bool]:
-    """Ile surowca (w jednostce receptury) mamy w magazynie.
-
-    - Jeśli jednostki są przeliczalne wprost (g↔kg, ml↔l) → standardowa konwersja.
-    - Jeśli magazyn jest w 'szt.'/'op.', a receptura w g/ml → najpierw
-      stan * unit_weight_volume (waga/objętość 1 szt.), potem konwersja do jednostki receptury.
-    Zwraca (dostępna_ilość_w_jednostce_receptury | None, convertible)."""
-    direct = _convert(stock_qty, stock_unit, recipe_unit)
-    if direct is not None:
-        return direct, True
-    if _is_piece_unit(stock_unit) and uwv and wvu:
-        total_wv = float(stock_qty) * float(uwv)  # w g lub ml
-        conv = _convert(total_wv, wvu, recipe_unit)
-        if conv is not None:
-            return conv, True
-    return None, False
 
 
 # confirm-catalog: backend/supplier_catalog_scan_routes.py (include_router)
@@ -3619,229 +3103,16 @@ async def _has_catalog_visible(client: httpx.AsyncClient) -> bool:
     return bool(_catalog_visible_col)
 
 
-def _nip_digits(value: Optional[str]) -> str:
-    return "".join(ch for ch in str(value or "") if ch.isdigit())
-
-
-def _normalize_supplier_scan_meta(raw: Optional[dict]) -> dict:
-    """Normalizuje blok `supplier` z Vision JSON do pól panelu Dostawcy."""
-    src = raw if isinstance(raw, dict) else {}
-
-    def _str(key: str) -> Optional[str]:
-        v = src.get(key)
-        if v is None:
-            return None
-        s = str(v).strip()
-        return s or None
-
-    def _num(key: str) -> Optional[float]:
-        v = src.get(key)
-        if v is None or v == "":
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def _int(key: str) -> Optional[int]:
-        n = _num(key)
-        if n is None:
-            return None
-        try:
-            return int(round(n))
-        except (TypeError, ValueError):
-            return None
-
-    return {
-        "nip": _str("nip"),
-        "phone": _str("phone"),
-        "email": _str("email"),
-        "contact_person": _str("contact_person"),
-        "address": _str("address"),
-        "bank_account": _str("bank_account"),
-        "payment_terms": _str("payment_terms"),
-        "shipping_cost": _num("shipping_cost"),
-        "min_order_value": _num("min_order_value"),
-        "free_shipping_threshold": _num("free_shipping_threshold"),
-        "lead_time_days": _int("lead_time_days"),
-    }
-
-
-def _compose_supplier_notes_from_scan(meta: dict) -> Optional[str]:
-    parts: list[str] = []
-    addr = (meta.get("address") or "").strip()
-    pay = (meta.get("payment_terms") or "").strip()
-    if addr:
-        parts.append(f"Adres: {addr}")
-    if pay:
-        parts.append(f"Termin płatności: {pay}")
-    return "\n".join(parts) if parts else None
-
-
-def _merge_supplier_notes(existing: Optional[str], incoming: Optional[str]) -> Optional[str]:
-    """Dokłada linie z dokumentu bez kasowania istniejących notatek."""
-    ex = (existing or "").strip()
-    inc = (incoming or "").strip()
-    if not inc:
-        return None  # brak aktualizacji
-    if not ex:
-        return inc
-    to_add = []
-    for line in inc.split("\n"):
-        line = line.strip()
-        if line and line not in ex:
-            to_add.append(line)
-    if not to_add:
-        return None  # już jest
-    return f"{ex}\n" + "\n".join(to_add)
-
-
-def _prefer_supplier_str(existing: Optional[str], new: Optional[str], *, kind: str = "text") -> Optional[str]:
-    """Zwraca nową wartość do zapisu albo None (= nie zmieniaj).
-
-    - puste z dokumentu → nie nadpisuj
-    - puste w DB → uzupełnij
-    - obie niepuste → aktualizuj gdy dokument wygląda jaśniej / kompletniej
-    """
-    n = (new or "").strip()
-    e = (existing or "").strip()
-    if not n:
-        return None
-    if not e:
-        return n
-    if kind == "nip":
-        nd, ed = _nip_digits(n), _nip_digits(e)
-        if not nd:
-            return None
-        if len(nd) > len(ed) or (len(nd) == 10 and len(ed) != 10):
-            return n
-        if nd == ed:
-            return None  # ten sam NIP, bez kosmetyki
-        return n  # inny NIP z dokumentu — aktualny dokument wygrywa
-    if kind == "phone":
-        nd = sum(ch.isdigit() for ch in n)
-        ed = sum(ch.isdigit() for ch in e)
-        if nd > ed:
-            return n
-        if nd == ed and n != e:
-            return n
-        return None
-    if kind == "email":
-        if "@" in n and "@" not in e:
-            return n
-        if n.lower() != e.lower():
-            return n
-        return None
-    # text / contact: dłuższy lub wyraźnie inny
-    if len(n) > len(e) + 2 or n.lower() != e.lower():
-        return n
-    return None
-
-
-def _prefer_supplier_num(
-    existing,
-    new: Optional[float],
-    *,
-    allow_zero: bool = False,
-) -> Optional[float]:
-    """Zwraca liczbę do zapisu albo None (= nie zmieniaj)."""
-    if new is None:
-        return None
-    try:
-        v = float(new)
-    except (TypeError, ValueError):
-        return None
-    if allow_zero:
-        if v < 0:
-            return None
-    elif v <= 0:
-        return None
-    try:
-        ex = float(existing) if existing is not None and existing != "" else 0.0
-    except (TypeError, ValueError):
-        ex = 0.0
-    # Uzupełnij brak / zaktualizuj gdy dokument podaje wartość (w tym 0 = darmowa dostawa)
-    if allow_zero:
-        if ex == v:
-            return None
-        return v
-    if ex <= 0 or abs(ex - v) > 0.009:
-        return v
-    return None
-
-
-def build_supplier_patch_from_scan(existing: dict, meta: dict) -> dict:
-    """Czysta logika merge — używana przy zapisie i w testach jednostkowych."""
-    patch: dict = {}
-    for key, kind in (
-        ("nip", "nip"),
-        ("phone", "phone"),
-        ("email", "email"),
-        ("contact_person", "text"),
-        ("address", "text"),
-        ("bank_account", "text"),
-    ):
-        chosen = _prefer_supplier_str(existing.get(key), meta.get(key), kind=kind)
-        if chosen is not None:
-            patch[key] = chosen
-
-    notes_in = _compose_supplier_notes_from_scan(meta)
-    notes_merged = _merge_supplier_notes(existing.get("notes"), notes_in)
-    if notes_merged is not None:
-        patch["notes"] = notes_merged
-
-    ship = _prefer_supplier_num(
-        existing.get("shipping_cost"), meta.get("shipping_cost"), allow_zero=True,
-    )
-    if ship is not None:
-        patch["shipping_cost"] = ship
-
-    min_o = _prefer_supplier_num(
-        existing.get("min_order_value"), meta.get("min_order_value"), allow_zero=False,
-    )
-    if min_o is not None:
-        patch["min_order_value"] = min_o
-
-    free_th = _prefer_supplier_num(
-        existing.get("free_shipping_threshold"),
-        meta.get("free_shipping_threshold"),
-        allow_zero=False,
-    )
-    if free_th is not None:
-        patch["free_shipping_threshold"] = free_th
-
-    lead = meta.get("lead_time_days")
-    if lead is not None:
-        try:
-            lead_i = int(lead)
-        except (TypeError, ValueError):
-            lead_i = None
-        if lead_i is not None and lead_i > 0:
-            ex_lead = existing.get("lead_time_days")
-            try:
-                ex_i = int(ex_lead) if ex_lead is not None and ex_lead != "" else None
-            except (TypeError, ValueError):
-                ex_i = None
-            if ex_i is None or ex_i <= 0 or ex_i != lead_i:
-                patch["lead_time_days"] = lead_i
-
-    return patch
-
-
-def supplier_meta_preview(meta: dict) -> dict:
-    """Kompaktowy podgląd pól dostawcy dla FE (pomija puste)."""
-    out: dict = {}
-    for k in (
-        "nip", "phone", "email", "contact_person", "address", "bank_account", "payment_terms",
-        "shipping_cost", "min_order_value", "free_shipping_threshold", "lead_time_days",
-    ):
-        v = meta.get(k)
-        if v is None:
-            continue
-        if isinstance(v, str) and not v.strip():
-            continue
-        out[k] = v
-    return out
+from supplier_scan_meta import (
+    build_supplier_patch_from_scan,
+    compose_supplier_notes_from_scan as _compose_supplier_notes_from_scan,
+    merge_supplier_notes as _merge_supplier_notes,
+    nip_digits as _nip_digits,
+    normalize_supplier_scan_meta as _normalize_supplier_scan_meta,
+    prefer_supplier_num as _prefer_supplier_num,
+    prefer_supplier_str as _prefer_supplier_str,
+    supplier_meta_preview,
+)
 
 
 async def _find_or_create_supplier(
@@ -4000,113 +3271,29 @@ async def _resolve_category_id_cached(client: httpx.AsyncClient, cat_name: str, 
         return None
 
 
-# Słowa kluczowe → kategoria magazynowa (bezpłatna heurystyka, bez LLM).
-# UWAGA: dopasowanie tokenowe (nie substring) — „gin” NIE łapie się w „virgin”.
-_CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("Oleje i tłuszcze", (
-        "oliwa", "oliw", "olive", "olej", "oleju", "olejem", "rzepak", "slonecznik",
-        "smalec", "tluszcz", "frytur", "ghee", "klarowan", "oil",
-    )),
-    ("Warzywa i owoce", (
-        "pomidor", "cebula", "czosnek", "salat", "ogorek", "baklazan", "jabl", "banan",
-        "cytryn", "marchew", "ziemniak", "papryk", "brokul", "kalafior", "burak", "kapust",
-        "szpinak", "awokado", "grzyb", "pieczark", "owoc", "warzyw", "por", "seler", "pietruszk",
-        "koper", "koperek", "bazyl", "natk", "rzodkiew", "cukini", "dyni", "gruszk", "truskawk", "malin",
-        "borowk", "jagod", "winogron", "arbuz", "melon", "ananas", "mango", "kiwi", "batat",
-        "bob", "fasol", "groch", "groszek", "kalarep", "bruksel",
-    )),
-    ("Nabiał", (
-        "mleko", "ser", "smietan", "jogurt", "maslo", "twarog", "mozarella", "mozzarella",
-        "parmezan", "jajk", "jajec", "kefir", "maslank", "ricotta", "feta",
-        "goud", "cheddar", "camembert",
-    )),
-    ("Mięso i wędliny", (
-        "kurczak", "wolow", "wieprz", "indyk", "schab", "karkow", "wedlin", "boczek", "kielbas",
-        "szynk", "filet", "udziec", "mieso", "wolovina", "kaczka", "ges", "baranin",
-        "cielecin", "mielon", "parowk", "kabanos", "salami", "prosciutto",
-    )),
-    ("Ryby i owoce morza", (
-        "ryba", "ryby", "losos", "dorsz", "krewet", "tuna", "tunczyk", "sledz", "makrel",
-        "kalmar", "osmiornic", "malz", "krewetki", "owoc morza", "mintaj", "pstrag",
-    )),
-    ("Pieczywo", (
-        "chleb", "bulka", "bagiet", "ciabatta", "tortilla", "wrap", "pieczyw", "croissant",
-        "rogal", "focacci", "pita",
-    )),
-    ("Przyprawy", (
-        "przypraw", "pieprz", "papryka mielona", "curry", "oregano", "tymianek", "kminek",
-        "cynamon", "kurkum", "chili", "przyprawa", "ziola", "lisc laurowy",
-    )),
-    ("Wywary i sosy", (
-        "bulion", "wywar", "fond", "sos ", "sosy", "demi-glace", "demi glace", "passata",
-        "koncentrat pomidor", "musztard", "ketchup", "majonez",
-    )),
-    ("Alkohole", (
-        "wino", "piwo", "wodka", "whisky", "whiskey", "rum", "gin", "likier", "prosecco",
-        "szampan", "cydr", "aperol", "campari", "alkohol", "tequila", "brandy", "koniak",
-        "cognac", "wermut", "porto", "martini",
-    )),
-    ("Napoje", (
-        "sok", "woda", "cola", "napoj", "kawa", "herbata", "syrop", "tonik", "lemoniad",
-        "nektar", "energy", "izoton",
-    )),
-    ("Mrożonki", (
-        "mrozon", "frozen", "lody", "mrozonka", "mrozone", "mrozony",
-    )),
-    ("Chemia i czystość", (
-        "detergent", "plyn do naczy", "plyn do podlog", "mydlo", "papier toalet", "recznik papier",
-        "folia spozyw", "worki na smieci", "dezynfek", "chlor", "wybielacz", "chem",
-    )),
-    ("Opakowania", (
-        "pojemnik", "tacka", "pudelek", "pudelko", "opakowan", "kubek", "pokrywk", "slomk",
-        "serwetk", "talerz jednoraz", "sztucce",
-    )),
-    ("Suchy magazyn", (
-        "maka", "ryz", "makaron", "cukier", "sol", "ocet", "konserw", "fasola such",
-        "soczewic", "kasza", "platki", "drozdze", "proszek do pieczenia", "skrobia",
-        "pasztet", "cukier puder", "maka pszen",
-    )),
-]
+# Słowa kluczowe → kategoria magazynowa — warehouse_category_guess.py
+from warehouse_category_guess import (
+    CAT_KEYWORDS as _CAT_KEYWORDS,
+    expiry_status as _expiry_status,
+    guess_category_free as _guess_category_free_impl,
+    keyword_token_hit as _keyword_token_hit,
+)
 
 
-def _food_match_key(text: str) -> str:
-    """Klucz do deduplikacji: pomidor / pomidory / Pomidor świeży → ten sam stem.
-
-    Zachowuje liczby (np. śmietana 18% ≠ 30%).
-    UWAGA: krótkich słów nie obcinamy o pojedyncze „a/e/i/y”
-    (batat ≠ bata — inaczej batat ↛ bataty).
-    """
-    s = _norm_pl(text)
-    # dołóż gołe liczby z oryginału (procenty tłuszczu itd.), bo _norm_pl bywa je gubi
-    raw = _strip_accents(str(text or "")).lower()
-    for m in re.findall(r"\d+[.,]?\d*", raw):
-        num = m.replace(",", ".")
-        if num and num not in s:
-            s = f"{s} {num}".strip()
-    # Stopwords jednostek / łączników — nie wchodzą do klucza
-    stop = {"z", "ze", "do", "w", "we", "na", "i", "oraz", "bez", "typ", "luz"}
-    out: list[str] = []
-    for t in s.split():
-        if t in stop:
-            continue
-        if t.isdigit() or re.match(r"^\d+[.]?\d*$", t):
-            out.append(t)
-            continue
-        base = t
-        # Dłuższe końcówki fleksyjne (bezpieczne)
-        for suf in ("ami", "ach", "owie", "owi", "ow", "om"):
-            if len(t) >= 5 and t.endswith(suf):
-                base = t[: -len(suf)]
-                break
-        else:
-            # Pojedyncze a/e/i/y tylko gdy słowo ≥6 znaków (bataty→batat, nie batat→bata)
-            for suf in ("y", "i", "e", "a"):
-                if len(t) >= 6 and t.endswith(suf):
-                    base = t[: -len(suf)]
-                    break
-        if len(base) >= 3:
-            out.append(base)
-    return " ".join(sorted(set(out)))
+def _guess_category_free(
+    product_name: str,
+    *,
+    ai_category: Optional[str] = None,
+    user_categories: Optional[list[dict]] = None,
+    neighbor_category: Optional[str] = None,
+) -> str:
+    return _guess_category_free_impl(
+        product_name,
+        ai_category=ai_category,
+        user_categories=user_categories,
+        neighbor_category=neighbor_category,
+        resolve_by_fuzzy=_resolve_by_fuzzy,
+    )
 
 
 from inventory_invoice_match import (
@@ -4125,90 +3312,6 @@ def _inventory_names_same_product(invoice_name: str, stock_name: str) -> bool:
         food_match_key=_food_match_key,
         norm_fn=_norm,
     )
-
-
-def _keyword_token_hit(word: str, key: str) -> bool:
-    """Tokenowe dopasowanie słowa kluczowego.
-
-    - exact token: „gin” ↔ „gin”
-    - stem (len≥4): „oliw” ↔ „oliwa” / „oliwek” (token zaczyna się od stemu)
-    - NIE substring w środku tokenu: „gin” ↛ „virgin”
-    - NIE odwrotny stem: „winogron” ↛ „wino”
-    """
-    w = (word or "").strip().lower()
-    if not w or not key:
-        return False
-    if " " in w:
-        return f" {w} " in f" {key} " or key.startswith(w) or key.endswith(w)
-    for t in key.split():
-        if t == w:
-            return True
-        if len(w) >= 4 and t.startswith(w):
-            return True
-    return False
-
-
-def _guess_category_free(
-    product_name: str,
-    *,
-    ai_category: Optional[str] = None,
-    user_categories: Optional[list[dict]] = None,
-    neighbor_category: Optional[str] = None,
-) -> str:
-    """Bezpłatne przypisanie kategorii: słowa kluczowe + kategorie użytkownika + AI hint."""
-    user_cats = user_categories or []
-    user_names = [(c.get("name") or "").strip() for c in user_cats if (c.get("name") or "").strip()]
-
-    def _map_to_user(wanted: str) -> str:
-        if not wanted:
-            return "Inne"
-        if not user_names:
-            return wanted
-        # exact / fuzzy do kategorii użytkownika
-        for un in user_names:
-            if _norm(un) == _norm(wanted) or _norm_pl(un) == _norm_pl(wanted):
-                return un
-        hit, score = _resolve_by_fuzzy(wanted, [{"name": n} for n in user_names], key="name", threshold=70)
-        if hit:
-            return hit["name"]
-        # częściowe: „Warzywa” w „Warzywa i owoce”
-        wn = _norm_pl(wanted)
-        for un in user_names:
-            unp = _norm_pl(un)
-            if wn and unp and (wn in unp or unp in wn):
-                return un
-        return wanted if wanted != "Inne" else "Inne"
-
-    # 1) kategoria z podobnego produktu już w magazynie
-    if neighbor_category and neighbor_category.strip() and _norm(neighbor_category) != "inne":
-        return _map_to_user(neighbor_category.strip())
-
-    # 2) słowa kluczowe — najdłuższy stem wygrywa remisy (oliwa > gin-w-virgin)
-    key = _food_match_key(product_name) + " " + _norm_pl(product_name)
-    best_cat = None
-    best_score = 0
-    for cat_label, words in _CAT_KEYWORDS:
-        hits = [(w, len(w)) for w in words if _keyword_token_hit(w, key)]
-        if not hits:
-            continue
-        score = len(hits) * 10 + max(L for _, L in hits)
-        if score > best_score:
-            best_score = score
-            best_cat = cat_label
-    if best_cat and best_score > 0:
-        return _map_to_user(best_cat)
-
-    # 3) hint z AI — korekta oczywistych pomyłek olej ↔ alkohol
-    ai = (ai_category or "").strip()
-    if ai and _norm(ai) != "inne":
-        oilish = any(_keyword_token_hit(w, key) for w in (
-            "oliwa", "oliw", "olive", "olej", "oil", "smalec", "frytur", "ghee",
-        ))
-        if oilish and _norm_pl(ai) == "alkohole":
-            return _map_to_user("Oleje i tłuszcze")
-        return _map_to_user(ai)
-
-    return _map_to_user("Inne")
 
 
 def _find_inventory_duplicate(
@@ -5282,37 +4385,6 @@ _EXPIRY_SCAN_JSON_SCHEMA = {
 }
 
 
-def _expiry_status(iso_date: str) -> str:
-    from datetime import date as _date
-    try:
-        exp = _date.fromisoformat(iso_date[:10])
-    except ValueError:
-        return "warning"
-    today = _date.today()
-    delta = (exp - today).days
-    if delta < 0:
-        return "expired"
-    if delta <= 7:
-        return "warning"
-    return "fresh"
-
-
-class ExpiryScanResponse(BaseModel):
-    ok: bool = True
-    product_name: str
-    expiration_date: str
-    confidence_score: float
-    status: str
-    quantity: float
-    unit: str = "szt"
-    inventory_item_id: Optional[str] = None
-    inventory_matched_name: Optional[str] = None
-    batch_id: Optional[str] = None
-    message: str = ""
-    credits_deducted: int = 0
-    credits_remaining: Optional[int] = None
-
-
 # scan-expiration: backend/inventory_expiry_scan_routes.py (include_router)
 
 
@@ -5471,144 +4543,6 @@ async def _run_expiry_alerts_for_tenant(
         logging.exception("expiry job: Expo Push failed")
 
     return alerts, dish
-
-
-async def expiry_daily_job(request: Request):
-    """Scheduler: odśwież statusy; alert gdy days_left ∈ alert_triggers (domyślnie 7/3/1)."""
-    require_cron_secret(request)
-    from datetime import date as _date, timedelta
-
-    today = _date.today()
-    warn_until = today + timedelta(days=14)
-    all_alerts: list[dict] = []
-    dish: Optional[str] = None
-    tenants_done = 0
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
-        try:
-            await sb_post(httpx_c, "rpc/warehouse_inventory_refresh_status", {})
-        except Exception:
-            logging.exception("expiry job: refresh_status RPC failed")
-
-        tenant_keys = await _list_tenant_account_keys(httpx_c)
-        if not tenant_keys:
-            # Fallback: bieżący kontekst (ACCOUNT_KEY env) — lokalny single-tenant.
-            fallback = (get_account_key() or "").strip()
-            if fallback and fallback != "default":
-                tenant_keys = [fallback]
-
-        for ak in tenant_keys:
-            tok = _push_account_key(ak)
-            try:
-                tenant_alerts, tenant_dish = await _run_expiry_alerts_for_tenant(
-                    httpx_c, today=today, warn_until=warn_until,
-                )
-                all_alerts.extend(tenant_alerts)
-                if tenant_dish and not dish:
-                    dish = tenant_dish
-                tenants_done += 1
-            finally:
-                _reset_account_key(tok)
-
-    return {
-        "ok": True,
-        "tenants": tenants_done,
-        "alert_count": len(all_alerts),
-        "dish_of_the_day": dish,
-        "reminders": [a["message"] for a in all_alerts],
-    }
-
-
-async def manager_core_alerts_job(request: Request, push: bool = True):
-    """Cron: alerty CORE dla każdego tenanta osobno (+ opcjonalny Expo Push)."""
-    require_cron_secret(request)
-    all_alerts: list[dict] = []
-    speech: Optional[str] = None
-    pushed = 0
-    tenants_done = 0
-
-    async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as httpx_c:
-        tenant_keys = await _list_tenant_account_keys(httpx_c)
-        if not tenant_keys:
-            fallback = (get_account_key() or "").strip()
-            if fallback and fallback != "default":
-                tenant_keys = [fallback]
-
-        for ak in tenant_keys:
-            tok = _push_account_key(ak)
-            try:
-                res = await _run_manager_core_alerts(period_type="week", limit_days=7)
-                alerts = [
-                    a for a in (res.get("alerts") or [])
-                    if a.get("severity") in ("critical", "warn")
-                ]
-                all_alerts.extend(alerts)
-                if res.get("assistant_speech") and not speech:
-                    speech = res.get("assistant_speech")
-                tenants_done += 1
-
-                if not (push and alerts):
-                    continue
-                try:
-                    profiles = await sb_get(
-                        httpx_c,
-                        "profiles",
-                        params={
-                            "select": "id",
-                            "account_key": f"eq.{ak}",
-                            "limit": "200",
-                        },
-                    ) or []
-                    uids = [str(p.get("id")) for p in profiles if p.get("id")]
-                    tokens: list[dict] = []
-                    if uids:
-                        tokens = await sb_get(
-                            httpx_c,
-                            "device_push_tokens",
-                            params={
-                                "select": "token",
-                                "user_id": f"in.({','.join(uids)})",
-                                "limit": "500",
-                            },
-                        ) or []
-                    push_msgs = []
-                    for a in alerts[:8]:
-                        body = f"[{a.get('pair')}] {a.get('name')}: {a.get('detail', '')}"[:180]
-                        for t in tokens:
-                            tok_s = t.get("token")
-                            if not tok_s:
-                                continue
-                            push_msgs.append({
-                                "to": tok_s,
-                                "title": "Manager AI — alert",
-                                "body": body,
-                                "sound": "default",
-                                "data": {"type": "manager_core", "pair": a.get("pair")},
-                            })
-                    for i in range(0, len(push_msgs), 80):
-                        chunk = push_msgs[i:i + 80]
-                        if not chunk:
-                            continue
-                        await httpx_c.post(
-                            "https://exp.host/--/api/v2/push/send",
-                            json=chunk,
-                            headers={"Accept": "application/json", "Content-Type": "application/json"},
-                            timeout=30.0,
-                        )
-                        pushed += len(chunk)
-                except Exception:
-                    logging.exception("manager core alerts: Expo Push failed for %s", ak)
-            finally:
-                _reset_account_key(tok)
-
-    return {
-        "ok": True,
-        "tenants": tenants_done,
-        "alert_count": len(all_alerts),
-        "pushed_messages": pushed,
-        "speech": speech,
-        "alerts": all_alerts,
-    }
 
 
 async def menu_scan(file: UploadFile = File(...)):
@@ -13204,7 +12138,7 @@ async def local_producers_create_shipment(req: LpShipmentRequest):
     order_id = (req.order_id or "").strip()
     if not order_id:
         raise HTTPException(status_code=400, detail="Brak order_id")
-    account_key = get_account_key()
+    account_key = require_tenant_account_key()
 
     async with httpx.AsyncClient(timeout=90.0, verify=_httpx_verify()) as client:
         orders = await sb_get(client, "producer_orders", params={

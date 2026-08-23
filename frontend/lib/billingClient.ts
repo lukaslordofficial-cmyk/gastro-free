@@ -39,7 +39,7 @@ export async function createCheckoutAndOpen(opts: {
   kind: CheckoutKind;
   tier_level?: 1 | 2;
   package?: TopupKey;
-}): Promise<{ ok: boolean; url?: string; session_id?: string; message: string }> {
+}): Promise<{ ok: boolean; url?: string; session_id?: string; upgraded?: boolean; message: string }> {
   if (!BACKEND_URL) {
     return { ok: false, message: 'Brak EXPO_PUBLIC_BACKEND_URL — ustaw adres backendu (port 8001).' };
   }
@@ -60,6 +60,16 @@ export async function createCheckoutAndOpen(opts: {
       message: data.detail || data.message || `Błąd Stripe (${res.status})`,
     };
   }
+
+  // Istniejąca subskrypcja → backend zmienił plan w Stripe bez nowego Checkout
+  if (data.upgraded) {
+    return {
+      ok: true,
+      upgraded: true,
+      message: data.message || 'Plan zaktualizowany bez nowej płatności Checkout.',
+    };
+  }
+
   const url = data.url as string | undefined;
   const sessionId = data.id as string | undefined;
   if (!url) return { ok: false, message: 'Stripe nie zwrócił URL Checkout.' };

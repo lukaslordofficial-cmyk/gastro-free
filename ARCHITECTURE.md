@@ -20,6 +20,46 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-23 — Warehouse category guess extract + voice STT tenant (`chore/split-monoliths`)
+
+- **Split:** `backend/warehouse_category_guess.py` — `CAT_KEYWORDS` / `guess_category_free` /
+  `expiry_status` (wycięte z `server.py`).
+- **Security:** `POST /api/voice/transcribe` wymaga `require_tenant_account_key()`.
+- Testy: `tests/test_warehouse_category_guess.py`.
+- `server.py` ≈ **11.6k** linii (było ~11.8k).
+
+### 2026-08-23 — PL fuzzy extract + dead cron removal + billing tenant (`chore/split-monoliths`)
+
+- **Split:** `backend/pl_fuzzy_norm.py` — `norm_pl` / `food_match_key` / diakrytyki
+  (wycięte z `server.py`).
+- **Tech debt:** usunięte zdublowane `expiry_daily_job` + `manager_core_alerts_job`
+  z `server.py` (żyją w `cron_jobs_routes.py`).
+- **Security:** billing checkout / confirm-session / portal → `require_tenant`;
+  webhook Stripe zostaje na miękkim `get_account_key` (bez nagłówka tenanta).
+- Testy: `tests/test_pl_fuzzy_norm.py`.
+- `server.py` ≈ **11.8k** linii (było ~12.0k).
+
+### 2026-08-23 — Supplier scan meta extract + LP tenant hardening (`chore/split-monoliths`)
+
+- **Split:** `backend/supplier_scan_meta.py` — normalizacja/merge pól dostawcy ze skanu
+  (wycięte z `server.py`); `documents_routes` + testy importują nowy moduł.
+- **Security:** LP — `require_tenant` na courier-quotes, confirm-payment, create-shipment,
+  retry-shipment; `create_shipment` używa `require_tenant` zamiast luźnego `get_account_key`.
+- Testy: `tests/test_supplier_scan_meta.py` (bez importu server), `test_local_producers_routes.py`.
+- `server.py` ≈ **12.0k** linii (było ~12.2k przed tym kęsem).
+
+### 2026-08-23 — Culinary units extract + menu tenant + canonicalize fix (`chore/split-monoliths`)
+
+- **Bugfix:** `_canonicalize_ingredient_units` kończyło się wczesnym `return` po
+  **pierwszym** daniu — skan menu z wieloma potrawami nie ujednolicał jednostek
+  w pozostałych (martwy kod po złym merge).
+- **Split:** `backend/culinary_units.py` — konwersje g/kg/ml/l/szt + `yield_available`
+  (wycięte z `server.py`).
+- **Security:** `menu_vision_routes` — `require_tenant` na scan/OCR/suggest/inspiracje/confirm;
+  `local_producers` checkout + mark-received — tenant na routerze.
+- Testy: `tests/test_culinary_units.py`, `tests/test_menu_vision_routes.py`.
+- `server.py` ≈ **12.2k** linii (było ~12.3k przed tym kęsem).
+
 ### 2026-08-22 — Pęczek=szt, raport przypisań magazynu, admin extract (`chore/split-monoliths`)
 
 - **UX/fix:** jednostka „pęczek/wiązka” → szt; fuzzy bez szumu jednostek w nazwie;

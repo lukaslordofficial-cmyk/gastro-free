@@ -26,7 +26,8 @@ async def local_producers_courier_quotes(request: Request):
 
 @router.post("/api/local-producers/checkout")
 async def local_producers_checkout(request: Request):
-    from server import LpCheckoutRequest, local_producers_checkout as _impl
+    from server import LpCheckoutRequest, local_producers_checkout as _impl, require_tenant_account_key
+    require_tenant_account_key()
     body = await request.json()
     return await _impl(LpCheckoutRequest.model_validate(body))
 
@@ -65,7 +66,8 @@ async def local_producers_mark_handed_to_courier(order_id: str, request: Request
 
 @router.post("/api/local-producers/orders/{order_id}/mark-received")
 async def local_producers_mark_received(order_id: str):
-    from server import local_producers_mark_received as _impl
+    from server import local_producers_mark_received as _impl, require_tenant_account_key
+    require_tenant_account_key()
     return await _impl(order_id)
 
 

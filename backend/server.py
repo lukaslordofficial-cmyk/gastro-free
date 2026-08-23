@@ -1823,31 +1823,18 @@ async def interpret_waste_legacy(payload: InterpretRequest):
 # 3) Actions.apply — persist to Supabase according to intent
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _to_base(qty: float, unit: str) -> tuple[float, str]:
-    """Sprowadza do wspólnej bazy. Gęstość gastronomiczna 1 g == 1 ml, więc
-    waga (g/kg) i objętość (ml/l) mają WSPÓLNĄ bazę 'g' — dzięki temu składnik
-    receptury podany w ml odejmuje się/liczy z magazynu w g (i odwrotnie)."""
-    u = (unit or "").lower().strip().rstrip(".")
-    if u in ("kg", "kilogram"):
-        return qty * 1000.0, "g"
-    if u in ("g", "gram", "gramy"):
-        return qty, "g"
-    if u in ("l", "litr", "litry"):
-        return qty * 1000.0, "g"   # 1 l = 1000 ml = 1000 g (płyny gastro)
-    if u in ("ml", "mililitr"):
-        return qty, "g"
-    return qty, u
-
-
-def _convert(qty: float, from_unit: str, to_unit: str) -> Optional[float]:
-    a, ua = _to_base(qty, from_unit)
-    b, ub = _to_base(1.0, to_unit)
-    if ua != ub:
-        return None
-    return a / b
-
-
-_PIECE_DEFAULT_SIZE = 200.0  # domyślnie 1 szt/opak ≈ 200 g/ml (produkty płynne/gastro)
+from culinary_units import (
+    PIECE_DEFAULT_SIZE as _PIECE_DEFAULT_SIZE,
+    PIECE_UNITS as _PIECE_UNITS,
+    canon_dim as _canon_dim,
+    convert as _convert,
+    convert_culinary as _convert_culinary,
+    from_gml as _from_gml,
+    is_piece_unit as _is_piece_unit,
+    to_base as _to_base,
+    to_gml as _to_gml,
+    yield_available as _yield_available,
+)
 
 
 def _norm_name(s: str) -> str:
@@ -2070,52 +2057,6 @@ def _is_porcja_row(name: str) -> bool:
     return _norm_name(name) in ("porcja", "porcje", "wielkosc porcji", "wielkość porcji",
                                 "wielkosc porc) i", "gramatura", "gramatura porcji")
 
-def _to_gml(qty: float, unit: str, unit_size: float) -> Optional[float]:
-    """Zamiana na wspólną bazę g/ml (gęstość kulinarna 1:1). None dla nieznanej jednostki."""
-    u = _norm_name(unit)
-    if u == "kg":
-        return qty * 1000.0
-    if u in ("g", "gram", "gramy"):
-        return qty
-    if u in ("l", "litr", "litry"):
-        return qty * 1000.0
-    if u == "ml":
-        return qty
-    if _is_piece_unit(u):
-        return qty * unit_size
-    return None
-
-
-def _from_gml(val: float, unit: str, unit_size: float) -> Optional[float]:
-    u = _norm_name(unit)
-    if u == "kg":
-        return val / 1000.0
-    if u in ("g", "gram", "gramy"):
-        return val
-    if u in ("l", "litr", "litry"):
-        return val / 1000.0
-    if u == "ml":
-        return val
-    if _is_piece_unit(u):
-        return (val / unit_size) if unit_size else None
-    return None
-
-
-def _convert_culinary(qty: float, from_unit: str, to_unit: str,
-                      unit_size: Optional[float] = None) -> Optional[float]:
-    """Konwersja odporna dla g/kg/ml/l/szt/opak.
-    - g↔ml: gęstość gastronomiczna 1:1 (śmietana, mleko, oleje, sosy).
-    - szt/opak ↔ waga/objętość: przez `unit_size` (g/ml na 1 szt), domyślnie 200.
-    Zwraca None tylko dla całkiem nieznanej jednostki (np. 'porcja')."""
-    try:
-        size = float(unit_size) if (unit_size and float(unit_size) > 0) else _PIECE_DEFAULT_SIZE
-    except (TypeError, ValueError):
-        size = _PIECE_DEFAULT_SIZE
-    gml = _to_gml(qty, from_unit, size)
-    if gml is None:
-        return None
-    return _from_gml(gml, to_unit, size)
-
 
 # ── Spójność jednostek składników zwracanych przez AI ────────────────────────
 # Bug: dla tego samego składnika (np. śmietana) AI raz zwracało g, raz ml,
@@ -2126,17 +2067,6 @@ _LIQUID_NAME_HINTS = (
     "sok", "krem", "ocet", "syrop", "wino", "piwo", "śmieta", "majonez",
     "musztard", "ketchup", "passata", "przecier", "esencj", "napój", "napoj",
 )
-
-
-def _canon_dim(u: str) -> Optional[str]:
-    """Wymiar jednostki: 'gml' dla g/kg/ml/l (przeliczalne 1:1), 'szt' dla sztuk."""
-    x = (u or "").strip().lower().rstrip(".")
-    if x in ("g", "gram", "gramy", "kg", "kilogram", "ml", "mililitr", "l", "litr", "litry"):
-        return "gml"
-    if x in ("szt", "sztuka", "sztuki", "opak", "op", "opakowanie",
-             "plaster", "plasterek", "listek", "list", "zabek", "ząbek"):
-        return "szt"
-    return None
 
 
 def _iter_ingredients(dish):
@@ -2245,10 +2175,6 @@ def _canonicalize_ingredient_units(dishes: list) -> None:
                     except Exception:  # noqa: BLE001
                         pass
             ing.unit = target
-
-
-        return None
-    return _from_gml(gml, to_unit, size)
 
 
 async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[str], source: str):
@@ -3453,37 +3379,6 @@ async def _load_matchable_terms(client: httpx.AsyncClient) -> dict:
             recipe_terms.setdefault(k, name)
 
     return {"inv_terms": inv_terms, "recipe_terms": recipe_terms}
-
-
-_PIECE_UNITS = {
-    "szt", "szt.", "sztuka", "sztuki", "op", "op.", "opak", "opakowanie",
-    "peczek", "peczki", "peczka", "wiazka", "wiazki", "bunch", "bunches",
-}
-
-
-def _is_piece_unit(u: str) -> bool:
-    x = (u or "").strip().lower()
-    return x in _PIECE_UNITS or x.startswith("szt") or x.startswith("op")
-
-
-def _yield_available(stock_qty: float, stock_unit: str,
-                     uwv: Optional[float], wvu: Optional[str],
-                     recipe_unit: str) -> tuple[Optional[float], bool]:
-    """Ile surowca (w jednostce receptury) mamy w magazynie.
-
-    - Jeśli jednostki są przeliczalne wprost (g↔kg, ml↔l) → standardowa konwersja.
-    - Jeśli magazyn jest w 'szt.'/'op.', a receptura w g/ml → najpierw
-      stan * unit_weight_volume (waga/objętość 1 szt.), potem konwersja do jednostki receptury.
-    Zwraca (dostępna_ilość_w_jednostce_receptury | None, convertible)."""
-    direct = _convert(stock_qty, stock_unit, recipe_unit)
-    if direct is not None:
-        return direct, True
-    if _is_piece_unit(stock_unit) and uwv and wvu:
-        total_wv = float(stock_qty) * float(uwv)  # w g lub ml
-        conv = _convert(total_wv, wvu, recipe_unit)
-        if conv is not None:
-            return conv, True
-    return None, False
 
 
 # confirm-catalog: backend/supplier_catalog_scan_routes.py (include_router)

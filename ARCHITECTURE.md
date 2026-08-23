@@ -20,6 +20,18 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-23 — Culinary units extract + menu tenant + canonicalize fix (`chore/split-monoliths`)
+
+- **Bugfix:** `_canonicalize_ingredient_units` kończyło się wczesnym `return` po
+  **pierwszym** daniu — skan menu z wieloma potrawami nie ujednolicał jednostek
+  w pozostałych (martwy kod po złym merge).
+- **Split:** `backend/culinary_units.py` — konwersje g/kg/ml/l/szt + `yield_available`
+  (wycięte z `server.py`).
+- **Security:** `menu_vision_routes` — `require_tenant` na scan/OCR/suggest/inspiracje/confirm;
+  `local_producers` checkout + mark-received — tenant na routerze.
+- Testy: `tests/test_culinary_units.py`, `tests/test_menu_vision_routes.py`.
+- `server.py` ≈ **12.2k** linii (było ~12.3k przed tym kęsem).
+
 ### 2026-08-22 — Pęczek=szt, raport przypisań magazynu, admin extract (`chore/split-monoliths`)
 
 - **UX/fix:** jednostka „pęczek/wiązka” → szt; fuzzy bez szumu jednostek w nazwie;

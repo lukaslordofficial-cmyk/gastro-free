@@ -19,7 +19,14 @@ logger = logging.getLogger("billing.routes")
 router = APIRouter(tags=["billing"])
 
 
-def _get_account_key() -> str:
+def _require_tenant() -> str:
+    from server import require_tenant_account_key
+
+    return require_tenant_account_key()
+
+
+def _account_key_soft() -> str:
+    """Fallback dla webhooka Stripe (bez nagłówka tenanta)."""
     from server import get_account_key
 
     return get_account_key()
@@ -71,6 +78,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
     """Tworzy Stripe Checkout Session. Kredyty dolicza TYLKO webhook / confirm-session po płatności."""
     from billing_stripe import create_checkout_session, stripe_configured
 
+    account_key = _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
     success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
@@ -85,7 +93,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
     cancel = assert_safe_redirect_url(cancel)
     try:
         session = await create_checkout_session(
-            account_key=_get_account_key(),
+            account_key=account_key,
             kind=req.kind,
             tier_level=req.tier_level,
             package=req.package,
@@ -114,6 +122,7 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
         stripe_configured,
     )
 
+    account_key = _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
     sid = (req.session_id or "").strip()
@@ -130,7 +139,7 @@ async def billing_confirm_session(req: ConfirmSessionRequest):
             sb_get=sb_get,
             sb_post=sb_post,
             sb_patch=sb_patch,
-            account_key_default=_get_account_key(),
+            account_key_default=account_key,
             tier_config=_tier_config(),
         )
         if result.get("paid"):
@@ -147,6 +156,7 @@ async def billing_portal(req: PortalSessionRequest):
     """Stripe Customer Portal — zarządzanie kartą / anulowanie / faktury."""
     from billing_stripe import create_billing_portal_session, stripe_configured
 
+    _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY")
     async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
@@ -186,7 +196,7 @@ async def billing_webhook(request: Request):
             sb_get=sb_get,
             sb_post=sb_post,
             sb_patch=sb_patch,
-            account_key_default=_get_account_key(),
+            account_key_default=_account_key_soft(),
             tier_config=_tier_config(),
         )
     return result

@@ -20,6 +20,17 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-23 — PL fuzzy extract + dead cron removal + billing tenant (`chore/split-monoliths`)
+
+- **Split:** `backend/pl_fuzzy_norm.py` — `norm_pl` / `food_match_key` / diakrytyki
+  (wycięte z `server.py`).
+- **Tech debt:** usunięte zdublowane `expiry_daily_job` + `manager_core_alerts_job`
+  z `server.py` (żyją w `cron_jobs_routes.py`).
+- **Security:** billing checkout / confirm-session / portal → `require_tenant`;
+  webhook Stripe zostaje na miękkim `get_account_key` (bez nagłówka tenanta).
+- Testy: `tests/test_pl_fuzzy_norm.py`.
+- `server.py` ≈ **11.8k** linii (było ~12.0k).
+
 ### 2026-08-23 — Supplier scan meta extract + LP tenant hardening (`chore/split-monoliths`)
 
 - **Split:** `backend/supplier_scan_meta.py` — normalizacja/merge pól dostawcy ze skanu

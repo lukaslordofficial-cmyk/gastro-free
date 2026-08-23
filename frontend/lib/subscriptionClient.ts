@@ -290,9 +290,35 @@ export async function cancelSubscription(): Promise<SubscriptionState> {
   );
 }
 
-/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu startowego. */
+/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu startowego.
+ * Preferuje backend (anuluje też Stripe), lokalny patch tylko jako fallback. */
 export async function resignToFreeTier(): Promise<SubscriptionState> {
-  const row = await ensureRow();
+  if (BACKEND_URL) {
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Account-Key': accountKey(),
+      };
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess.session?.access_token;
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${BACKEND_URL}/api/subscription/resign`, {
+        method: 'POST',
+        headers,
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const row = await ensureRow();
+        return buildView(
+          row,
+          payload.message
+            || `Zrezygnowano z planu. Saldo kredytów: ${row.credits_balance}.`,
+        );
+      }
+    } catch {
+      /* fall through to local */
+    }
+  }
   const updated = await patchRow({
     tier_level: 0,
     status: 'active',

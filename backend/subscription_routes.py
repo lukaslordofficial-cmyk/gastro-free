@@ -167,23 +167,39 @@ async def subscription_subscribe(req: SubscribeRequest):
 
 @router.post("/api/subscription/resign")
 async def subscription_resign():
-    """Rezygnacja z subskrypcji — natychmiast Tier 0 Free, bez ponownego pakietu 100 kredytów."""
+    """Rezygnacja z subskrypcji — natychmiast Tier 0 Free, bez ponownego pakietu 100 kredytów.
+    Jeśli jest stripe_subscription_id — anuluje subskrypcję w Stripe (żeby nie było dalszych obciążeń)."""
+    import logging
+
+    from billing_stripe import cancel_stripe_subscription, stripe_configured
     from server import _ensure_subscription, _subscription_view
 
+    log = logging.getLogger("subscription.resign")
     ak = _ak()
-    async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
+    async with httpx.AsyncClient(timeout=45.0, verify=httpx_verify()) as client:
         sub = await _ensure_subscription(client)
+        sid = (sub.get("stripe_subscription_id") or "").strip()
+        if sid.startswith("sub_") and stripe_configured():
+            try:
+                await cancel_stripe_subscription(sid, at_period_end=False)
+            except Exception as e:
+                log.exception("Stripe cancel on resign failed")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Nie udało się anulować subskrypcji w Stripe: {str(e)[:200]}",
+                ) from e
         upd = {
             "tier_level": 0,
             "status": "active",
             "current_period_end": None,
             "free_starter_claimed": True,
+            "stripe_subscription_id": None,
         }
         await sb_patch(client, "subscriptions", {"account_key": f"eq.{ak}"}, upd)
         view = _subscription_view(
             {**sub, **upd},
             message=(
-                f"Przełączono na plan Free. Saldo: {sub.get('credits_balance')} kredytów "
+                f"Zrezygnowano z planu. Przełączono na Free. Saldo: {sub.get('credits_balance')} kredytów "
                 f"(bez ponownego pakietu startowego)."
             ),
         )

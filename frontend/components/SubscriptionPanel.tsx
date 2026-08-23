@@ -137,9 +137,28 @@ export function SubscriptionPanel() {
         data={data}
         busy={busy}
         onSubscribe={(t) => run(`sub-${t}`, () => subscribe(t))}
+        onResign={() => run('resign', resign)}
         styles={styles}
         theme={theme}
       />
+
+      {activePaid && (
+        <View style={styles.resignBanner} testID="resign-plan-banner">
+          <Text style={styles.resignBannerTitle}>Twój plan: {data.tier_name}</Text>
+          <TouchableOpacity
+            style={styles.resignBannerBtn}
+            onPress={() => run('resign', resign)}
+            disabled={busy !== null}
+            testID="resign-subscription-primary"
+          >
+            {busy === 'resign'
+              ? <ActivityIndicator size="small" color={Colors.white} />
+              : <Text style={styles.resignBannerBtnText}>
+                  Zrezygnuj z planu
+                </Text>}
+          </TouchableOpacity>
+        </View>
+      )}
 
       {(activePaid || (data.status === 'canceled' && data.tier_level >= 1)) && (
         <TouchableOpacity
@@ -154,7 +173,7 @@ export function SubscriptionPanel() {
         </TouchableOpacity>
       )}
 
-      {(activePaid || onFreeTier || data.tier_level >= 1) && (
+      {!activePaid && (onFreeTier || data.tier_level >= 1) && (
         <TouchableOpacity
           style={styles.resignBtn}
           onPress={() => run('resign', resign)}
@@ -242,12 +261,14 @@ function PlanList({
   data,
   busy,
   onSubscribe,
+  onResign,
   styles,
   theme,
 }: {
   data: { tier_level: number; status: string; plans: typeof import('@/lib/subscriptionCatalog').TIER_PLANS };
   busy: string | null;
   onSubscribe: (tier: 1 | 2) => void;
+  onResign?: () => void;
   styles: ReturnType<typeof makeSubStyles>;
   theme: ReturnType<typeof useAppTheme>;
 }) {
@@ -257,6 +278,11 @@ function PlanList({
       {plans.slice().sort((a, b) => a.tier_level - b.tier_level).map((p) => {
         const isFree = p.tier_level === 0;
         const current = data.tier_level === p.tier_level && (isFree ? true : data.status === 'active');
+        const upgradeLabel = data.tier_level > 0 && p.tier_level > data.tier_level
+          ? 'Ulepsz plan'
+          : data.tier_level > p.tier_level
+            ? 'Zmień plan'
+            : 'Wybierz plan';
         return (
           <View
             key={p.tier_level}
@@ -285,10 +311,24 @@ function PlanList({
               ))}
             </View>
             {current ? (
-              <View style={styles.planActiveTag}>
-                <Check size={13} color={theme.success} strokeWidth={2.6} />
-                <Text style={styles.planActiveText}>Aktywny</Text>
-              </View>
+              <>
+                <View style={styles.planActiveTag}>
+                  <Check size={13} color={theme.success} strokeWidth={2.6} />
+                  <Text style={styles.planActiveText}>Aktywny</Text>
+                </View>
+                {!isFree && onResign ? (
+                  <TouchableOpacity
+                    style={styles.planResignBtn}
+                    onPress={onResign}
+                    disabled={busy !== null}
+                    testID={`resign-tier-${p.tier_level}`}
+                  >
+                    {busy === 'resign'
+                      ? <ActivityIndicator size="small" color={theme.danger} />
+                      : <Text style={styles.planResignText}>Zrezygnuj z planu</Text>}
+                  </TouchableOpacity>
+                ) : null}
+              </>
             ) : isFree ? null : (
               <TouchableOpacity
                 style={styles.planBtn}
@@ -298,7 +338,7 @@ function PlanList({
               >
                 {busy === `sub-${p.tier_level}`
                   ? <ActivityIndicator size="small" color={theme.isPremium ? '#0A0A0A' : Colors.white} />
-                  : <Text style={[styles.planBtnText, theme.isPremium && { color: '#0A0A0A' }]}>{data.tier_level > p.tier_level ? 'Zmień plan' : 'Wybierz plan'}</Text>}
+                  : <Text style={[styles.planBtnText, theme.isPremium && { color: '#0A0A0A' }]}>{upgradeLabel}</Text>}
               </TouchableOpacity>
             )}
           </View>
@@ -372,6 +412,33 @@ function makeSubStyles(theme: ReturnType<typeof useAppTheme>) {
     planBtnText: { color: Colors.white, fontWeight: '800', fontSize: 13 },
     planActiveTag: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: successSoft, borderRadius: 10, paddingVertical: 10, marginTop: 10 },
     planActiveText: { color: theme.success, fontWeight: '800', fontSize: 13 },
+    planResignBtn: {
+      borderRadius: 10,
+      paddingVertical: 10,
+      alignItems: 'center',
+      marginTop: 8,
+      borderWidth: 1,
+      borderColor: theme.isPremium ? 'rgba(255,80,80,0.45)' : '#FECACA',
+      backgroundColor: theme.isPremium ? 'rgba(255,80,80,0.08)' : '#FEF2F2',
+    },
+    planResignText: { color: theme.danger, fontWeight: '800', fontSize: 13 },
+    resignBanner: {
+      marginTop: 14,
+      backgroundColor: theme.isPremium ? 'rgba(255,80,80,0.08)' : '#FEF2F2',
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: theme.isPremium ? 'rgba(255,80,80,0.35)' : '#FECACA',
+      padding: 14,
+      gap: 10,
+    },
+    resignBannerTitle: { fontSize: 13, fontWeight: '700', color: text, textAlign: 'center' },
+    resignBannerBtn: {
+      backgroundColor: theme.danger,
+      borderRadius: 10,
+      paddingVertical: 12,
+      alignItems: 'center',
+    },
+    resignBannerBtnText: { color: Colors.white, fontWeight: '800', fontSize: 14 },
     cancelBtn: { alignItems: 'center', paddingVertical: 12, marginTop: 12 },
     cancelText: { color: theme.danger, fontWeight: '700', fontSize: 13 },
     resignBtn: { alignItems: 'center', paddingVertical: 10, marginTop: 4, paddingHorizontal: 12 },

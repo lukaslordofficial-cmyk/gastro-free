@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
 
 export type CascadeProductItem = {
   id: string;
@@ -98,6 +99,7 @@ const UiOverlayContext = createContext<UiOverlayContextValue>({
 });
 
 export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
+  const { accountKey, isAuthenticated } = useAuth();
   /** Lokalne modale (ReportInfoButton) — tylko flaga reklam. */
   const [localVoiceOpen, setLocalVoiceOpen] = useState(false);
   /** Globalny host wake word. */
@@ -111,6 +113,18 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
   const [documentScanRevision, setDocumentScanRevision] = useState(0);
   const [lastDocumentScanKind, setLastDocumentScanKind] = useState<DocumentScanKind | null>(null);
   const [menuScanVisible, setMenuScanVisible] = useState(false);
+
+  // Hard reset overlayów przy zmianie konta / wylogowaniu — zero wycieku UI między tenantami.
+  useEffect(() => {
+    setLocalVoiceOpen(false);
+    setVoiceOpen(false);
+    setVoiceOpts({});
+    setCameraOpen(false);
+    setCascade({ visible: false, title: 'Produkty', subtitle: undefined, items: [], mode: 'custom' });
+    setWakeListenEnabledState(false);
+    setDocumentScanVisible(false);
+    setMenuScanVisible(false);
+  }, [accountKey, isAuthenticated]);
 
   const openProductCascade = useCallback(
     (opts: {

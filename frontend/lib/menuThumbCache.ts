@@ -1,12 +1,14 @@
 /**
  * Cache mapowań slug/relativePath dla Menu.
  * Źródło obrazka = lokalny require (lazy folder) — nie Supabase dania/.
+ * Klucz AsyncStorage jest scoped per account_key — zero wycieku między kontami.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { resolveDishLocalAsset } from '@/lib/dishAssets';
 import type { MenuDishThumb } from '@/lib/menuDishThumbs';
+import { getAccountKey } from '@/lib/accountKey';
 
-const MAP_KEY = '@gm/menu_thumbs_v5';
+const MAP_KEY_PREFIX = '@gm/menu_thumbs_v5:';
 
 export type StoredThumb = {
   slug: string;
@@ -20,9 +22,15 @@ type StoredMap = Record<string, StoredThumb>;
 
 let store: StoredMap = {};
 let storeLoaded = false;
+let storeAccountKey = '';
 const thumbsByName = new Map<string, MenuDishThumb>();
 const listeners = new Set<() => void>();
 let notifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function storageKeyFor(accountKey?: string): string {
+  const ak = (accountKey || getAccountKey() || 'default').trim() || 'default';
+  return `${MAP_KEY_PREFIX}${ak}`;
+}
 
 function notifySoon(delay = 60) {
   if (notifyTimer) return;
@@ -45,6 +53,15 @@ export function subscribeMenuThumbs(fn: () => void): () => void {
 
 export function getMenuThumbSync(name: string): MenuDishThumb | undefined {
   return thumbsByName.get(name);
+}
+
+/** Czyści pamięć + przeładowuje store dla innego konta (po login / switch). */
+export function resetMenuThumbCacheMemory(): void {
+  thumbsByName.clear();
+  store = {};
+  storeLoaded = false;
+  storeAccountKey = '';
+  notifySoon(20);
 }
 
 function dishKey(name: string, category?: string): string {
@@ -75,21 +92,23 @@ export function applyThumbsToMemory(thumbs: Map<string, MenuDishThumb>): void {
   notifySoon(40);
 }
 
-export async function loadMenuThumbStore(): Promise<StoredMap> {
-  if (storeLoaded) return store;
+export async function loadMenuThumbStore(accountKey?: string): Promise<StoredMap> {
+  const ak = (accountKey || getAccountKey() || 'default').trim() || 'default';
+  if (storeLoaded && storeAccountKey === ak) return store;
   try {
-    const raw = await AsyncStorage.getItem(MAP_KEY);
+    const raw = await AsyncStorage.getItem(storageKeyFor(ak));
     store = raw ? (JSON.parse(raw) as StoredMap) : {};
   } catch {
     store = {};
   }
   storeLoaded = true;
+  storeAccountKey = ak;
   return store;
 }
 
 async function persistStore(): Promise<void> {
   try {
-    await AsyncStorage.setItem(MAP_KEY, JSON.stringify(store));
+    await AsyncStorage.setItem(storageKeyFor(storeAccountKey || getAccountKey()), JSON.stringify(store));
   } catch {
     /* ignore */
   }
@@ -101,8 +120,9 @@ function rowForItem(name: string, category?: string): StoredThumb | undefined {
 
 export async function hydrateMenuThumbsFromDisk(
   items: ReadonlyArray<{ name: string; category?: string }>,
+  accountKey?: string,
 ): Promise<Map<string, MenuDishThumb>> {
-  await loadMenuThumbStore();
+  await loadMenuThumbStore(accountKey);
   const out = new Map<string, MenuDishThumb>();
 
   for (const item of items) {
@@ -139,7 +159,6 @@ function mergeThumbIntoStore(name: string, category: string | undefined, thumb: 
     store[dishKey(name, category)]?.relativePath ||
     '';
   if (!thumb.slug || !rel) {
-    // Jeśli source jest local number, relativePath powinno być ustawione przez matcher
     if (!thumb.relativePath) return;
   }
   const relativePath = thumb.relativePath || rel;
@@ -192,7 +211,6 @@ export async function persistOneMenuThumb(
 export async function downloadMenuThumbsLocally(
   _items: ReadonlyArray<{ name: string; category?: string }>,
   thumbs: Map<string, MenuDishThumb>,
-  _onProgress?: (next: Map<string, MenuDishThumb>) => void,
 ): Promise<Map<string, MenuDishThumb>> {
   return thumbs;
 }

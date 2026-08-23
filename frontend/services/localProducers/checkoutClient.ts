@@ -41,6 +41,10 @@ export async function openProducerOrderCheckout(
   session_id?: string;
   message: string;
 }> {
+  const oid = String(orderId || '').trim();
+  if (!oid) {
+    return { ok: false, message: 'Brak ID zamówienia — nie można otworzyć płatności.' };
+  }
   if (!BACKEND_URL) {
     return { ok: false, message: 'Brak EXPO_PUBLIC_BACKEND_URL — ustaw adres backendu.' };
   }
@@ -48,8 +52,8 @@ export async function openProducerOrderCheckout(
     method: 'POST',
     headers: await authHeaders(),
     body: JSON.stringify({
-      order_id: orderId,
-      idempotency_key: `lp_${orderId}_${Date.now()}`,
+      order_id: oid,
+      idempotency_key: `lp_${oid}_${Date.now()}`,
       app_return_url: Linking.createURL('/lp/success'),
     }),
   });
@@ -68,7 +72,7 @@ export async function openProducerOrderCheckout(
 
   try {
     if (sessionId) await AsyncStorage.setItem(PENDING_LP_SESSION_KEY, sessionId);
-    await AsyncStorage.setItem(PENDING_LP_ORDER_KEY, orderId);
+    await AsyncStorage.setItem(PENDING_LP_ORDER_KEY, oid);
   } catch {
     /* ignore */
   }

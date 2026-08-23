@@ -1517,7 +1517,7 @@ export default function MagazynScreen() {
       </View>
       <View style={{ flex: 1 }}>
         <PremiumOutlineBtn
-          label="Zgłoś stratę"
+          label="Zgłoś stratę/licznik"
           onPress={() => setShowWasteLogs(true)}
           tone="red"
           size="lg"

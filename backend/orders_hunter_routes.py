@@ -51,6 +51,7 @@ async def interpret_order_command(request: Request):
 
 @router.post("/api/voice/dispatch")
 async def voice_dispatch(request: Request):
-    from server import VoiceDispatchRequest, voice_dispatch as _impl
+    from server import VoiceDispatchRequest, voice_dispatch as _impl, require_tenant_account_key
+    require_tenant_account_key()
     body = await request.json()
     return await _impl(VoiceDispatchRequest.model_validate(body))

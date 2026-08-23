@@ -128,19 +128,55 @@ def reliability_tco_multiplier(meta: dict) -> float:
     return round(1.0 + uplift, 4)
 
 
-def shipping_cost_for(subtotal: float, meta: dict) -> float:
-    """Koszt dostawy po uwzględnieniu free_shipping_threshold."""
+def shipping_cost_for(subtotal: float, meta: dict, items: Optional[list] = None) -> float:
+    """Koszt dostawy po uwzględnieniu free_shipping_threshold.
+
+    Lokalni przetwórcy: kurier wg wagi koszyka (InPost bands), nie flat 0 zł.
+    """
+    is_lp = bool(meta.get("is_local_producer"))
+    try:
+        free_at = float(meta.get("free_shipping_threshold") or 0)
+    except (TypeError, ValueError):
+        free_at = 0.0
+    if free_at > 0 and float(subtotal or 0) >= free_at:
+        return 0.0
+
+    if is_lp:
+        quote_items = []
+        for it in (items or []):
+            if not isinstance(it, dict):
+                continue
+            quote_items.append({
+                "quantity": it.get("quantity") if it.get("quantity") is not None else it.get("order_base_qty"),
+                "unit": it.get("unit") or it.get("base_dim") or "szt",
+                "weight_g": it.get("weight_g"),
+                "product_id": it.get("catalog_product_id") or it.get("product_id"),
+            })
+        if quote_items:
+            try:
+                from lp_courier_price import quote_courier_for_items
+                q = quote_courier_for_items(quote_items)
+                return round(float(q.get("price_pln") or 0), 2)
+            except Exception:
+                pass
+        # Szacunek flat gdy brak pozycji (TCO przed zbudowaniem koszyka)
+        try:
+            est = float(meta.get("shipping_cost") or 0)
+        except (TypeError, ValueError):
+            est = 0.0
+        if est > 0:
+            return round(est, 2)
+        try:
+            from lp_courier_price import courier_price_for_weight_kg
+            return round(float(courier_price_for_weight_kg(1.0)), 2)
+        except Exception:
+            return 15.99
+
     try:
         cost = float(meta.get("shipping_cost") or 0)
     except (TypeError, ValueError):
         cost = 0.0
     if cost <= 0:
-        return 0.0
-    try:
-        free_at = float(meta.get("free_shipping_threshold") or 0)
-    except (TypeError, ValueError):
-        free_at = 0.0
-    if free_at > 0 and subtotal >= free_at:
         return 0.0
     return round(cost, 2)
 
@@ -150,7 +186,7 @@ def _enrich_group(g: dict, suppliers_meta: dict[str, dict]) -> dict:
     sid = g["supplier_id"]
     meta = _supplier_meta(suppliers_meta, sid)
     sub = round(float(g.get("subtotal_pln") or 0), 2)
-    ship = shipping_cost_for(sub, meta)
+    ship = shipping_cost_for(sub, meta, items=g.get("items") or [])
     min_val = float(g.get("min_order_value") if g.get("min_order_value") is not None
                     else _min_order_value(suppliers_meta, sid))
     meets = min_val <= 0 or sub >= min_val
@@ -197,18 +233,31 @@ def _virtual_min_penalty(subtotal: float, min_val: float) -> float:
     return _gap_to_min(subtotal, min_val)
 
 
-def _basket_tco(subtotal: float, sid: str, suppliers_meta: dict[str, dict]) -> float:
+def _basket_tco(
+    subtotal: float,
+    sid: str,
+    suppliers_meta: dict[str, dict],
+    items: Optional[list] = None,
+) -> float:
     """TCO koszyka: produkty + shipping (po free threshold) + kara za min (+ reliability)."""
     meta = _supplier_meta(suppliers_meta, sid)
     min_v = _min_order_value(suppliers_meta, sid)
-    ship = shipping_cost_for(subtotal, meta)
+    ship = shipping_cost_for(subtotal, meta, items=items)
     base = float(subtotal) + ship + _virtual_min_penalty(float(subtotal), min_v)
     return round(base * reliability_tco_multiplier(meta), 2)
 
 
 def _groups_tco(groups: dict[str, dict], suppliers_meta: dict[str, dict]) -> float:
     return round(
-        sum(_basket_tco(float(g.get("subtotal_pln") or 0), sid, suppliers_meta) for sid, g in groups.items()),
+        sum(
+            _basket_tco(
+                float(g.get("subtotal_pln") or 0),
+                sid,
+                suppliers_meta,
+                items=g.get("items") or [],
+            )
+            for sid, g in groups.items()
+        ),
         2,
     )
 
@@ -1282,7 +1331,12 @@ def _scenario_from_groups(
     all_meet = all(g["meets_minimum_order"] for g in enriched) if enriched else False
     tco_total = round(
         sum(
-            _basket_tco(float(g["subtotal_pln"]), g["supplier_id"], suppliers_meta)
+            _basket_tco(
+                float(g["subtotal_pln"]),
+                g["supplier_id"],
+                suppliers_meta,
+                items=g.get("items") or [],
+            )
             for g in enriched
         ),
         2,

@@ -107,7 +107,7 @@ import {
   subscribeDishCustomImages,
   getDishCustomImageSync,
 } from '@/lib/dishCustomImages';
-import { getMenuThumbSync, subscribeMenuThumbs } from '@/lib/menuThumbCache';
+import { getMenuThumbSync, subscribeMenuThumbs, resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
@@ -333,6 +333,12 @@ export default function MenuScreen() {
 
   useEffect(() => subscribeMenuThumbs(() => setThumbTick((t) => t + 1)), []);
 
+  // Inna restauracja = czysta pamięć miniaturek (AsyncStorage i tak jest per account_key).
+  useEffect(() => {
+    resetMenuThumbCacheMemory();
+    setThumbTick((t) => t + 1);
+  }, [accountKey]);
+
   // 1) Odczyt zapisanych przypisań (natychmiast).
   // 2) Matcher TYLKO dla nowych dań bez cache — nigdy ponownie dla całego menu.
   useEffect(() => {
@@ -358,7 +364,7 @@ export default function MenuScreen() {
           } = await import('@/lib/menuThumbCache');
           if (cancelled) return;
 
-          const seed = await hydrateMenuThumbsFromDisk(items);
+          const seed = await hydrateMenuThumbsFromDisk(items, accountKey || undefined);
           if (cancelled) return;
           applyThumbsToMemory(seed);
 
@@ -396,8 +402,7 @@ export default function MenuScreen() {
       cancelled = true;
       task.cancel?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- dishNamesKey only
-  }, [dishNamesKey]);
+  }, [dishNamesKey, accountKey, activeCat, fewestCategory]);
 
   useEffect(() => {
     void loadDishCustomImages().then(() => setCustomImageTick((t) => t + 1));

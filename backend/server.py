@@ -82,6 +82,12 @@ from voice_interpret_routes import router as voice_interpret_router
 from actions_routes import router as actions_router
 from orders_hunter_routes import router as orders_hunter_router
 from local_producers_routes import router as local_producers_router
+from deal_hunter_catalog import (
+    fetch_catalog_and_suppliers as _fetch_catalog_and_suppliers,
+    fetch_local_producer_catalog as _fetch_local_producer_catalog,
+    load_catalog_for_search_scope as _load_catalog_for_search_scope,
+    normalize_deal_hunter_search_scope as _normalize_deal_hunter_search_scope,
+)
 from order_email_format import fmt_pln as _fmt_pln, fmt_qty as _fmt_qty
 from url_safety import (
     assert_safe_redirect_url,
@@ -7268,281 +7274,14 @@ class InterpretOrderRequest(BaseModel):
 
 
 # --- Algorytm porównywania ---------------------------------------------------
+# Katalogi hurt + LP: backend/deal_hunter_catalog.py
 
-async def _fetch_catalog_and_suppliers(client: httpx.AsyncClient):
-    """Katalog + dostawcy TYLKO bieżącego tenanta.
-
-    `supplier_catalog` często nie ma kolumny account_key (tenant przez supplier_id).
-    Service role omija RLS — bez filtra `in.(supplier_ids)` matchowałoby obce
-    katalogi → puste nazwy dostawców i pusty picker w FE.
-    """
-    supplier_select = (
-        "id,name,email,contact_person,phone,min_order_value,"
-        "shipping_cost,free_shipping_threshold,lead_time_days"
-    )
-    try:
-        await sb_get(client, "suppliers", params={
-            "select": "min_order_value,shipping_cost,free_shipping_threshold,lead_time_days",
-            "limit": "1",
-        })
-    except Exception:
-        try:
-            await sb_get(client, "suppliers", params={
-                "select": "min_order_value,shipping_cost,free_shipping_threshold",
-                "limit": "1",
-            })
-            supplier_select = (
-                "id,name,email,contact_person,phone,min_order_value,"
-                "shipping_cost,free_shipping_threshold"
-            )
-        except Exception:
-            try:
-                await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
-                supplier_select = "id,name,email,contact_person,phone,min_order_value"
-            except Exception:
-                supplier_select = "id,name,email,contact_person,phone"
-    suppliers = await sb_get(client, "suppliers", params={
-        "select": supplier_select, "limit": "500",
-    }) or []
-    allowed_ids = [str(s["id"]) for s in suppliers if s.get("id")]
-    if not allowed_ids:
-        return [], suppliers
-
-    select_full = (
-        "id,supplier_id,name,variant,unit,price_pln,liters_total,kg_total,unit_count,is_visible"
-    )
-    select_no_kg = (
-        "id,supplier_id,name,variant,unit,price_pln,liters_total,unit_count,is_visible"
-    )
-    catalog: list = []
-    # Chunk — limity długości URL PostgREST
-    for i in range(0, len(allowed_ids), 40):
-        chunk = allowed_ids[i : i + 40]
-        id_filter = f"in.({','.join(chunk)})"
-        try:
-            rows = await sb_get(client, "supplier_catalog", params={
-                "select": select_full,
-                "supplier_id": id_filter,
-                "limit": "2000",
-            }) or []
-        except httpx.HTTPStatusError as e:
-            if "kg_total" in (e.response.text or ""):
-                rows = await sb_get(client, "supplier_catalog", params={
-                    "select": select_no_kg,
-                    "supplier_id": id_filter,
-                    "limit": "2000",
-                }) or []
-            else:
-                raise
-        catalog.extend(rows)
-
-    allowed_set = set(allowed_ids)
-    catalog = [r for r in catalog if str(r.get("supplier_id") or "") in allowed_set]
-    return catalog, suppliers
-
-
-def _normalize_deal_hunter_search_scope(raw: Optional[str]) -> str:
-    v = (raw or "suppliers_only").strip().lower().replace("-", "_").replace(" ", "_")
-    if v in (
-        "local_producers_only", "local", "producers", "lokalni", "lp",
-        "local_suppliers", "local_producers", "dystrybutorzy", "lokalni_dostawcy",
-        "tylko_lokalni", "tylko_lokalne",
-    ):
-        return "local_producers_only"
-    if v in (
-        "both", "all", "wszystkie", "oba", "compare", "porownaj",
-        "hurtownicy_i_lokalni", "suppliers_and_local",
-    ):
-        return "both"
-    # Explicit hurtownicy / default
-    return "suppliers_only"
-
-
-async def _fetch_local_producer_catalog(client: httpx.AsyncClient):
-    """Mapuje marketplace Lokalni Przetworcy -> format supplier_catalog dla Lowcy.
-
-    HARD RULE: active + verified + approved + nie zarchiwizowany (+ Connect gdy kolumna jest).
-    Fail-soft: brak tabel / migracji → puste listy.
-    """
-    producers = []
-    select_full = (
-        "id,company_name,email,phone,owner_name,min_order_value,city,voivodeship,"
-        "pickup_available,courier_available,active,verified,verification_status,"
-        "archived_at,stripe_connect_id"
-    )
-    select_no_connect = (
-        "id,company_name,email,phone,owner_name,min_order_value,city,voivodeship,"
-        "pickup_available,courier_available,active,verified,verification_status,"
-        "archived_at"
-    )
-    try:
-        producers = await sb_get(client, "local_producers", params={
-            "select": select_full,
-            "active": "eq.true",
-            "verified": "eq.true",
-            "limit": "500",
-        }) or []
-    except Exception as e:
-        logger.warning("local_producers fetch (connect) failed: %s — retry", e)
-        try:
-            producers = await sb_get(client, "local_producers", params={
-                "select": select_no_connect,
-                "active": "eq.true",
-                "verified": "eq.true",
-                "limit": "500",
-            }) or []
-        except Exception as e2:
-            logger.warning("local_producers fetch for Deal Hunter failed: %s", e2)
-            return [], []
-
-    visible = []
-    for p in producers:
-        if p.get("archived_at"):
-            continue
-        status = str(p.get("verification_status") or "").lower()
-        if status and status != "approved":
-            continue
-        if "stripe_connect_id" in p:
-            connect = (p.get("stripe_connect_id") or "").strip()
-            if not connect.startswith("acct_"):
-                continue
-        visible.append(p)
-
-    if not visible:
-        return [], []
-
-    producer_ids = [str(p["id"]) for p in visible if p.get("id")]
-    products: list = []
-    for i in range(0, len(producer_ids), 40):
-        chunk = producer_ids[i : i + 40]
-        id_filter = f"in.({','.join(chunk)})"
-        try:
-            rows = await sb_get(client, "producer_products", params={
-                "select": "id,producer_id,title,description,price,unit,available,stock,weight_g",
-                "producer_id": id_filter,
-                "available": "eq.true",
-                "limit": "2000",
-            }) or []
-        except Exception as e:
-            logger.warning("producer_products fetch failed: %s", e)
-            rows = []
-        products.extend(rows)
-
-    suppliers = []
-    for p in visible:
-        name = (p.get("company_name") or "Lokalny producent").strip()
-        city = (p.get("city") or "").strip()
-        if p.get("pickup_available"):
-            lead = 0.0
-        elif p.get("courier_available"):
-            lead = 1.0
-        else:
-            lead = 1.0
-        if city and city.lower() not in name.lower():
-            display = f"{name} · Lokalny · {city}"
-        else:
-            display = f"{name} · Lokalny"
-        suppliers.append({
-            "id": str(p["id"]),
-            "name": display,
-            "email": p.get("email"),
-            "contact_person": p.get("owner_name") or p.get("phone"),
-            "phone": p.get("phone"),
-            "min_order_value": float(p.get("min_order_value") or 0),
-            "shipping_cost": 0.0,
-            "free_shipping_threshold": 0.0,
-            "lead_time_days": lead,
-            "is_local_producer": True,
-            "city": city or None,
-            "voivodeship": (p.get("voivodeship") or None),
-            "source": "local_producer",
-        })
-
-    by_producer = {str(p["id"]) for p in visible if p.get("id")}
-    catalog = []
-    for row in products:
-        pid = str(row.get("producer_id") or "")
-        if pid not in by_producer:
-            continue
-        try:
-            stock = float(row.get("stock") or 0)
-        except (TypeError, ValueError):
-            stock = 0.0
-        if stock <= 0:
-            continue
-        try:
-            price = float(row.get("price") or 0)
-        except (TypeError, ValueError):
-            price = 0.0
-        if price <= 0:
-            continue
-        title = (row.get("title") or "").strip()
-        if not title:
-            continue
-        unit_raw = (row.get("unit") or "szt").strip() or "szt"
-        unit_dim, _ = _norm_unit(unit_raw)
-        # weight_g → kg_total tylko dla produktów sztukowych (opakowanie),
-        # nie dla towaru sprzedawanego luzem w kg/l (tam stock = dostępne kg/l).
-        kg_total = None
-        if unit_dim == "szt":
-            try:
-                wg = float(row.get("weight_g") or 0)
-                if wg > 0:
-                    kg_total = round(wg / 1000.0, 6)
-            except (TypeError, ValueError):
-                kg_total = None
-        entry = {
-            "id": str(row.get("id")),
-            "supplier_id": pid,
-            "name": title,
-            "variant": (row.get("description") or "")[:80] or None,
-            "unit": unit_raw,
-            "price_pln": price,
-            "liters_total": None,
-            "unit_count": 1,
-            "is_visible": True,
-            "is_local_producer": True,
-            "producer_product_id": str(row.get("id")),
-            "source": "local_producer",
-            # Dostępny stan w jednostce produktu — Łowca ucina zamówienie do stocku
-            "available_stock": stock,
-            "stock": stock,
-        }
-        if kg_total:
-            entry["kg_total"] = kg_total
-        catalog.append(entry)
-
-    logger.info(
-        "Deal Hunter: loaded %s local producers, %s products (search scope)",
-        len(suppliers),
-        len(catalog),
-    )
-    return catalog, suppliers
-
-
-async def _load_catalog_for_search_scope(client: httpx.AsyncClient, search_scope: Optional[str]):
-    """Łączy katalogi hurtowników i/lub lokalnych producentów wg search_scope."""
-    scope = _normalize_deal_hunter_search_scope(search_scope)
-    catalog: list = []
-    suppliers: list = []
-
-    if scope in ("suppliers_only", "both"):
-        c, s = await _fetch_catalog_and_suppliers(client)
-        for row in c:
-            row = dict(row)
-            row.setdefault("source", "supplier")
-            catalog.append(row)
-        for srow in s:
-            srow = dict(srow)
-            srow.setdefault("source", "supplier")
-            suppliers.append(srow)
-
-    if scope in ("local_producers_only", "both"):
-        c, s = await _fetch_local_producer_catalog(client)
-        catalog.extend(c)
-        suppliers.extend(s)
-
-    return catalog, suppliers, scope
+from deal_hunter_catalog import (  # noqa: E402
+    fetch_catalog_and_suppliers as _fetch_catalog_and_suppliers,
+    fetch_local_producer_catalog as _fetch_local_producer_catalog,
+    load_catalog_for_search_scope as _load_catalog_for_search_scope,
+    normalize_deal_hunter_search_scope as _normalize_deal_hunter_search_scope,
+)
 
 
 async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[str, float]:
@@ -8574,6 +8313,12 @@ async def compare_offers(req: CompareOffersRequest):
                         entry["catalog_product_id"] = str(
                             row.get("producer_product_id") or row.get("id")
                         )
+                    try:
+                        wg = float(row.get("weight_g") or 0)
+                        if wg > 0:
+                            entry["weight_g"] = wg
+                    except (TypeError, ValueError):
+                        pass
                 bbs[sid] = entry
 
         for it in req.items:

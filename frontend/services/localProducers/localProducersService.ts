@@ -598,7 +598,12 @@ export async function createProducerOrder(
     throw new Error(orderErr?.message || 'Nie udało się utworzyć zamówienia.');
   }
 
-  const orderId = (order as ProducerOrder).id;
+  const orderId = String((order as ProducerOrder).id || '').trim();
+  if (!orderId) {
+    throw new Error(
+      'Zamówienie utworzone, ale serwer nie zwrócił ID. Odśwież Dostawy i spróbuj zapłacić ponownie.',
+    );
+  }
   const itemsPayload = input.items.map((i) => ({
     order_id: orderId,
     product_id: i.productId,
@@ -616,7 +621,7 @@ export async function createProducerOrder(
     throw new Error(itemsErr.message);
   }
 
-  return order as ProducerOrder;
+  return { ...(order as ProducerOrder), id: orderId };
 }
 
 /**

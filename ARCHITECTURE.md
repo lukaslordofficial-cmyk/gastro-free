@@ -20,6 +20,14 @@ Warstwa UI **nigdy** nie importuje `supabase` bezpośrednio — tylko przez `ser
 
 ## Dziennik zmian strukturalnych
 
+### 2026-08-23 — Warehouse category guess extract + voice STT tenant (`chore/split-monoliths`)
+
+- **Split:** `backend/warehouse_category_guess.py` — `CAT_KEYWORDS` / `guess_category_free` /
+  `expiry_status` (wycięte z `server.py`).
+- **Security:** `POST /api/voice/transcribe` wymaga `require_tenant_account_key()`.
+- Testy: `tests/test_warehouse_category_guess.py`.
+- `server.py` ≈ **11.6k** linii (było ~11.8k).
+
 ### 2026-08-23 — PL fuzzy extract + dead cron removal + billing tenant (`chore/split-monoliths`)
 
 - **Split:** `backend/pl_fuzzy_norm.py` — `norm_pl` / `food_match_key` / diakrytyki

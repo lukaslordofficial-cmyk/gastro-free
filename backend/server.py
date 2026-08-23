@@ -3585,73 +3585,29 @@ async def _resolve_category_id_cached(client: httpx.AsyncClient, cat_name: str, 
         return None
 
 
-# Słowa kluczowe → kategoria magazynowa (bezpłatna heurystyka, bez LLM).
-# UWAGA: dopasowanie tokenowe (nie substring) — „gin” NIE łapie się w „virgin”.
-_CAT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("Oleje i tłuszcze", (
-        "oliwa", "oliw", "olive", "olej", "oleju", "olejem", "rzepak", "slonecznik",
-        "smalec", "tluszcz", "frytur", "ghee", "klarowan", "oil",
-    )),
-    ("Warzywa i owoce", (
-        "pomidor", "cebula", "czosnek", "salat", "ogorek", "baklazan", "jabl", "banan",
-        "cytryn", "marchew", "ziemniak", "papryk", "brokul", "kalafior", "burak", "kapust",
-        "szpinak", "awokado", "grzyb", "pieczark", "owoc", "warzyw", "por", "seler", "pietruszk",
-        "koper", "koperek", "bazyl", "natk", "rzodkiew", "cukini", "dyni", "gruszk", "truskawk", "malin",
-        "borowk", "jagod", "winogron", "arbuz", "melon", "ananas", "mango", "kiwi", "batat",
-        "bob", "fasol", "groch", "groszek", "kalarep", "bruksel",
-    )),
-    ("Nabiał", (
-        "mleko", "ser", "smietan", "jogurt", "maslo", "twarog", "mozarella", "mozzarella",
-        "parmezan", "jajk", "jajec", "kefir", "maslank", "ricotta", "feta",
-        "goud", "cheddar", "camembert",
-    )),
-    ("Mięso i wędliny", (
-        "kurczak", "wolow", "wieprz", "indyk", "schab", "karkow", "wedlin", "boczek", "kielbas",
-        "szynk", "filet", "udziec", "mieso", "wolovina", "kaczka", "ges", "baranin",
-        "cielecin", "mielon", "parowk", "kabanos", "salami", "prosciutto",
-    )),
-    ("Ryby i owoce morza", (
-        "ryba", "ryby", "losos", "dorsz", "krewet", "tuna", "tunczyk", "sledz", "makrel",
-        "kalmar", "osmiornic", "malz", "krewetki", "owoc morza", "mintaj", "pstrag",
-    )),
-    ("Pieczywo", (
-        "chleb", "bulka", "bagiet", "ciabatta", "tortilla", "wrap", "pieczyw", "croissant",
-        "rogal", "focacci", "pita",
-    )),
-    ("Przyprawy", (
-        "przypraw", "pieprz", "papryka mielona", "curry", "oregano", "tymianek", "kminek",
-        "cynamon", "kurkum", "chili", "przyprawa", "ziola", "lisc laurowy",
-    )),
-    ("Wywary i sosy", (
-        "bulion", "wywar", "fond", "sos ", "sosy", "demi-glace", "demi glace", "passata",
-        "koncentrat pomidor", "musztard", "ketchup", "majonez",
-    )),
-    ("Alkohole", (
-        "wino", "piwo", "wodka", "whisky", "whiskey", "rum", "gin", "likier", "prosecco",
-        "szampan", "cydr", "aperol", "campari", "alkohol", "tequila", "brandy", "koniak",
-        "cognac", "wermut", "porto", "martini",
-    )),
-    ("Napoje", (
-        "sok", "woda", "cola", "napoj", "kawa", "herbata", "syrop", "tonik", "lemoniad",
-        "nektar", "energy", "izoton",
-    )),
-    ("Mrożonki", (
-        "mrozon", "frozen", "lody", "mrozonka", "mrozone", "mrozony",
-    )),
-    ("Chemia i czystość", (
-        "detergent", "plyn do naczy", "plyn do podlog", "mydlo", "papier toalet", "recznik papier",
-        "folia spozyw", "worki na smieci", "dezynfek", "chlor", "wybielacz", "chem",
-    )),
-    ("Opakowania", (
-        "pojemnik", "tacka", "pudelek", "pudelko", "opakowan", "kubek", "pokrywk", "slomk",
-        "serwetk", "talerz jednoraz", "sztucce",
-    )),
-    ("Suchy magazyn", (
-        "maka", "ryz", "makaron", "cukier", "sol", "ocet", "konserw", "fasola such",
-        "soczewic", "kasza", "platki", "drozdze", "proszek do pieczenia", "skrobia",
-        "pasztet", "cukier puder", "maka pszen",
-    )),
-]
+# Słowa kluczowe → kategoria magazynowa — warehouse_category_guess.py
+from warehouse_category_guess import (
+    CAT_KEYWORDS as _CAT_KEYWORDS,
+    expiry_status as _expiry_status,
+    guess_category_free as _guess_category_free_impl,
+    keyword_token_hit as _keyword_token_hit,
+)
+
+
+def _guess_category_free(
+    product_name: str,
+    *,
+    ai_category: Optional[str] = None,
+    user_categories: Optional[list[dict]] = None,
+    neighbor_category: Optional[str] = None,
+) -> str:
+    return _guess_category_free_impl(
+        product_name,
+        ai_category=ai_category,
+        user_categories=user_categories,
+        neighbor_category=neighbor_category,
+        resolve_by_fuzzy=_resolve_by_fuzzy,
+    )
 
 
 from inventory_invoice_match import (
@@ -3670,90 +3626,6 @@ def _inventory_names_same_product(invoice_name: str, stock_name: str) -> bool:
         food_match_key=_food_match_key,
         norm_fn=_norm,
     )
-
-
-def _keyword_token_hit(word: str, key: str) -> bool:
-    """Tokenowe dopasowanie słowa kluczowego.
-
-    - exact token: „gin” ↔ „gin”
-    - stem (len≥4): „oliw” ↔ „oliwa” / „oliwek” (token zaczyna się od stemu)
-    - NIE substring w środku tokenu: „gin” ↛ „virgin”
-    - NIE odwrotny stem: „winogron” ↛ „wino”
-    """
-    w = (word or "").strip().lower()
-    if not w or not key:
-        return False
-    if " " in w:
-        return f" {w} " in f" {key} " or key.startswith(w) or key.endswith(w)
-    for t in key.split():
-        if t == w:
-            return True
-        if len(w) >= 4 and t.startswith(w):
-            return True
-    return False
-
-
-def _guess_category_free(
-    product_name: str,
-    *,
-    ai_category: Optional[str] = None,
-    user_categories: Optional[list[dict]] = None,
-    neighbor_category: Optional[str] = None,
-) -> str:
-    """Bezpłatne przypisanie kategorii: słowa kluczowe + kategorie użytkownika + AI hint."""
-    user_cats = user_categories or []
-    user_names = [(c.get("name") or "").strip() for c in user_cats if (c.get("name") or "").strip()]
-
-    def _map_to_user(wanted: str) -> str:
-        if not wanted:
-            return "Inne"
-        if not user_names:
-            return wanted
-        # exact / fuzzy do kategorii użytkownika
-        for un in user_names:
-            if _norm(un) == _norm(wanted) or _norm_pl(un) == _norm_pl(wanted):
-                return un
-        hit, score = _resolve_by_fuzzy(wanted, [{"name": n} for n in user_names], key="name", threshold=70)
-        if hit:
-            return hit["name"]
-        # częściowe: „Warzywa” w „Warzywa i owoce”
-        wn = _norm_pl(wanted)
-        for un in user_names:
-            unp = _norm_pl(un)
-            if wn and unp and (wn in unp or unp in wn):
-                return un
-        return wanted if wanted != "Inne" else "Inne"
-
-    # 1) kategoria z podobnego produktu już w magazynie
-    if neighbor_category and neighbor_category.strip() and _norm(neighbor_category) != "inne":
-        return _map_to_user(neighbor_category.strip())
-
-    # 2) słowa kluczowe — najdłuższy stem wygrywa remisy (oliwa > gin-w-virgin)
-    key = _food_match_key(product_name) + " " + _norm_pl(product_name)
-    best_cat = None
-    best_score = 0
-    for cat_label, words in _CAT_KEYWORDS:
-        hits = [(w, len(w)) for w in words if _keyword_token_hit(w, key)]
-        if not hits:
-            continue
-        score = len(hits) * 10 + max(L for _, L in hits)
-        if score > best_score:
-            best_score = score
-            best_cat = cat_label
-    if best_cat and best_score > 0:
-        return _map_to_user(best_cat)
-
-    # 3) hint z AI — korekta oczywistych pomyłek olej ↔ alkohol
-    ai = (ai_category or "").strip()
-    if ai and _norm(ai) != "inne":
-        oilish = any(_keyword_token_hit(w, key) for w in (
-            "oliwa", "oliw", "olive", "olej", "oil", "smalec", "frytur", "ghee",
-        ))
-        if oilish and _norm_pl(ai) == "alkohole":
-            return _map_to_user("Oleje i tłuszcze")
-        return _map_to_user(ai)
-
-    return _map_to_user("Inne")
 
 
 def _find_inventory_duplicate(
@@ -4825,37 +4697,6 @@ _EXPIRY_SCAN_JSON_SCHEMA = {
         },
     },
 }
-
-
-def _expiry_status(iso_date: str) -> str:
-    from datetime import date as _date
-    try:
-        exp = _date.fromisoformat(iso_date[:10])
-    except ValueError:
-        return "warning"
-    today = _date.today()
-    delta = (exp - today).days
-    if delta < 0:
-        return "expired"
-    if delta <= 7:
-        return "warning"
-    return "fresh"
-
-
-class ExpiryScanResponse(BaseModel):
-    ok: bool = True
-    product_name: str
-    expiration_date: str
-    confidence_score: float
-    status: str
-    quantity: float
-    unit: str = "szt"
-    inventory_item_id: Optional[str] = None
-    inventory_matched_name: Optional[str] = None
-    batch_id: Optional[str] = None
-    message: str = ""
-    credits_deducted: int = 0
-    credits_remaining: Optional[int] = None
 
 
 # scan-expiration: backend/inventory_expiry_scan_routes.py (include_router)

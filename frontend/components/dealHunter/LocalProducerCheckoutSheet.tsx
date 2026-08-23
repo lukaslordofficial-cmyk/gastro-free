@@ -149,15 +149,21 @@ export function LocalProducerCheckoutSheet({ visible, group, colors, onClose }: 
             weightKg: courierPick.weightKg,
           } : null,
         });
+        const orderId = String(order?.id || '').trim();
+        if (!orderId) {
+          throw new Error(
+            'Zamówienie bez ID — nie otwieram Stripe. Sprawdź zakładkę Dostawy.',
+          );
+        }
         setBusyMsg('Otwieranie Stripe…');
-        const payRes = await openProducerOrderCheckout(order.id, {
+        const payRes = await openProducerOrderCheckout(orderId, {
           onOpening: () => setBusyMsg('Otwieranie Stripe…'),
         });
         onClose();
         if (!payRes.ok) {
           premiumAlert(
             'Zamówienie zapisane',
-            `${payRes.message}\n\nID: ${order.id.slice(0, 8)}…`,
+            `${payRes.message}\n\nID: ${orderId.slice(0, 8)}…`,
             [{ text: 'OK', style: 'primary' }],
           );
         }

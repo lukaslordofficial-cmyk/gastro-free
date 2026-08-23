@@ -42,6 +42,23 @@ def test_shipping_free_threshold():
     assert shipping_cost_for(50, {"shipping_cost": 0}) == 0
 
 
+def test_lp_shipping_includes_courier_weight():
+    """Lokalny producent: TCO dolicza kuriera wg wagi, nie 0 zł."""
+    meta = {
+        "is_local_producer": True,
+        "shipping_cost": 15.99,
+        "free_shipping_threshold": 0,
+    }
+    items = [{"quantity": 2, "unit": "kg", "weight_g": None}]
+    ship = shipping_cost_for(40, meta, items=items)
+    assert ship > 0
+    # 2 kg → band ~15.99
+    assert ship == shipping_cost_for(40, meta, items=[{"quantity": 2, "unit": "kg"}])
+    # Darmowa dostawa powyżej progu
+    meta_free = {**meta, "free_shipping_threshold": 100}
+    assert shipping_cost_for(120, meta_free, items=items) == 0
+
+
 def test_split_max_respects_min_order():
     """Mała pozycja u drogiego Selgros poniżej min → przeniesiona do Makro."""
     items = [

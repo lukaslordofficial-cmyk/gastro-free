@@ -754,6 +754,27 @@ export function CriticalOrderEditor({
     { key: 'lowest_price', label: 'najniższa cena' },
   ];
 
+  const toggle = (name: string) => {
+    if (name === 'all') {
+      patch({ categories: allOn ? [] : ['all'] });
+      return;
+    }
+    const lower = name.toLowerCase();
+    let next = selected.filter((x) => x !== 'all');
+    if (next.some((x) => x.toLowerCase() === lower)) {
+      next = next.filter((x) => x.toLowerCase() !== lower);
+    } else {
+      next = [...next, name];
+    }
+    patch({ categories: next });
+  };
+
+  const updateItem = (idx: number, changes: Record<string, unknown>) => {
+    patch({
+      items: items.map((it, i) => (i === idx ? { ...it, ...changes } : it)),
+    });
+  };
+
   return (
     <View style={styles.card}>
       <Text style={styles.hint}>

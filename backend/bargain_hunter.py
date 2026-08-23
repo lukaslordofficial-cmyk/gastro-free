@@ -41,6 +41,11 @@ def _item_line_entry(pi: dict, b: dict) -> dict:
         out["is_local_producer"] = True
     if b.get("catalog_product_id"):
         out["catalog_product_id"] = b["catalog_product_id"]
+    if b.get("weight_g") is not None:
+        try:
+            out["weight_g"] = float(b["weight_g"])
+        except (TypeError, ValueError):
+            pass
     return out
 
 

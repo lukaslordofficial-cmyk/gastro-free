@@ -66,19 +66,12 @@ import {
   isDealHunterIntent,
 } from '@/lib/dealHunterGate';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
-import { WeightRealityCheckModal } from '@/components/WeightRealityCheckModal';
-import { offerWeightRealityCheck } from '@/lib/offerWeightRealityCheck';
-import { VolumeRealityCheckModal } from '@/components/VolumeRealityCheckModal';
-import { offerVolumeRealityCheck } from '@/lib/offerVolumeRealityCheck';
-import {
-  shouldPreferVolumeRealityCheck,
-  suggestedMlFromQty,
-} from '@/lib/volumeRealityCheck';
 import {
   findProduceConverter,
   piecesToKg,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
+import { useAuth } from '@/contexts/AuthContext';
 
 type Stage =
   | 'idle' | 'recording' | 'transcribing' | 'interpreting'
@@ -315,19 +308,20 @@ export function VoiceReportModal({
   const [showCommands, setShowCommands] = useState(false);
   const [commandHint, setCommandHint] = useState<string | null>(null);
   const [clarifyQuery, setClarifyQuery] = useState('');
-  const [showWeightCheck, setShowWeightCheck] = useState(false);
-  const [weightCheckItem, setWeightCheckItem] = useState<string | null>(null);
-  const [weightCheckSuggestedG, setWeightCheckSuggestedG] = useState<number | null>(null);
-  const [showVolumeCheck, setShowVolumeCheck] = useState(false);
-  const [volumeCheckItem, setVolumeCheckItem] = useState<string | null>(null);
-  const [volumeCheckSuggestedMl, setVolumeCheckSuggestedMl] = useState<number | null>(null);
   const { alert: premiumAlert } = usePremiumAlert();
+  const { accountKey } = useAuth();
   const wakeListeningRef = useRef(false);
   const autoStartedRef = useRef(false);
   const followUpModeRef = useRef(false);
   const followUpReturnStageRef = useRef<Stage>('review');
   const stageRef = useRef<Stage>('idle');
   stageRef.current = stage;
+  /** Monotonic — odrzuca odpowiedzi AI / apply po zamknięciu lub zmianie konta. */
+  const requestGenRef = useRef(0);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const accountKeyRef = useRef(accountKey);
+  accountKeyRef.current = accountKey;
   // Aktualne wartości do apply (drzewko dat / legenda) — bez stale closure
   const editedRef = useRef<Record<string, any>>({});
   const interpRef = useRef<Interpretation | null>(null);
@@ -352,6 +346,7 @@ export function VoiceReportModal({
 
   useEffect(() => {
     if (!visible) {
+      requestGenRef.current += 1;
       cleanup();
       autoStartedRef.current = false;
       setStage('idle');
@@ -379,6 +374,26 @@ export function VoiceReportModal({
       return () => clearTimeout(t);
     }
   }, [visible, autoStartRecording, autoStartWakeListen]);
+
+  // Zmiana tenanta: natychmiast unieważnij in-flight interpret/apply i wyczyść stan.
+  useEffect(() => {
+    requestGenRef.current += 1;
+    cleanup();
+    autoStartedRef.current = false;
+    setStage('idle');
+    setTranscript('');
+    setInterp(null);
+    setEdited({});
+    setConfirmText('');
+    setApplyResult(null);
+    setErrorMsg(null);
+    setElapsed(0);
+    setBulkCompare(null);
+    setBulkContextLabel('');
+    setCreditsNotice(null);
+    setCommandHint(null);
+    setClarifyQuery('');
+  }, [accountKey]);
 
   // Load inventory + menu categories when modal opens
   useEffect(() => {
@@ -713,6 +728,8 @@ export function VoiceReportModal({
     }
 
     // Uzupełnij pola — ponowna interpretacja i merge
+    const gen = ++requestGenRef.current;
+    const startedAccount = accountKeyRef.current;
     setStage('interpreting');
     try {
       const result = await fetchJson<Interpretation>(`${BACKEND_URL}/api/voice/interpret`, {
@@ -720,6 +737,9 @@ export function VoiceReportModal({
         headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
               body: JSON.stringify({ text }),
       });
+      if (gen !== requestGenRef.current || !visibleRef.current || accountKeyRef.current !== startedAccount) {
+        return;
+      }
       if (!result.ok) throw new Error(result.error);
       const data = result.data;
       if (data.intent === interp?.intent || data.intent !== 'unknown') {
@@ -731,6 +751,9 @@ export function VoiceReportModal({
       }
       setStage('review');
     } catch (e: any) {
+      if (gen !== requestGenRef.current || !visibleRef.current || accountKeyRef.current !== startedAccount) {
+        return;
+      }
       setErrorMsg(e?.message ?? 'Nie zrozumiano uzupełnienia głosowego.');
       setStage('review');
     }
@@ -743,6 +766,8 @@ export function VoiceReportModal({
   }
 
   async function handleInterpret(text: string) {
+    const gen = ++requestGenRef.current;
+    const startedAccount = accountKeyRef.current;
     setStage('interpreting');
     try {
       const result = await fetchJson<Interpretation>(`${BACKEND_URL}/api/voice/interpret`, {
@@ -750,6 +775,9 @@ export function VoiceReportModal({
         headers: await (await import('@/lib/apiHeaders')).apiJsonHeaders(),
               body: JSON.stringify({ text }),
       });
+      if (gen !== requestGenRef.current || !visibleRef.current || accountKeyRef.current !== startedAccount) {
+        return;
+      }
       if (!result.ok) throw new Error(result.error);
       const data = correctPeriodIntentFromTranscript(text, result.data);
       if (data.credits_deducted && data.credits_deducted > 0) {
@@ -769,6 +797,9 @@ export function VoiceReportModal({
       setEdited(seedPayload(data.intent, data.payload || {}, { transcript: text }));
       setStage('review');
     } catch (e: any) {
+      if (gen !== requestGenRef.current || !visibleRef.current || accountKeyRef.current !== startedAccount) {
+        return;
+      }
       setErrorMsg(e?.message ?? 'Błąd interpretacji AI.');
       setStage('error');
     }
@@ -885,6 +916,8 @@ export function VoiceReportModal({
     const curEdited = opts?.edited ?? editedRef.current ?? edited;
     const curTranscript = opts?.transcript ?? transcriptRef.current ?? transcript;
     if (!curInterp || curInterp.intent === 'unknown') return;
+    const gen = ++requestGenRef.current;
+    const startedAccount = accountKeyRef.current;
 
     // Free / tier 1 bez trialu → PremiumAlert, bez compare-offers / Łowcy
     if (isDealHunterIntent(curInterp.intent) && !dealHunterUnlocked) {
@@ -1050,26 +1083,17 @@ export function VoiceReportModal({
       };
 
       // Waste: visual size → kg for produce counted as pieces
-      let weightHintG: number | null = null;
       if (applyIntent === 'waste' && payload.produce_size) {
         const conv = findProduceConverter(String(payload.item_name || ''));
         const pcs = Number(payload.quantity);
         const sizeKey = String(payload.produce_size) as ProduceSizeKey;
         const tier = conv?.sizes.find((s) => s.key === sizeKey);
         if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
-          const { kg, grams } = piecesToKg(pcs, tier);
+          const { kg } = piecesToKg(pcs, tier);
           payload.produce_pieces = pcs;
           payload.produce_converter_id = conv.id;
           payload.quantity = kg;
           payload.unit = 'kg';
-          weightHintG = grams;
-        }
-      } else if (applyIntent === 'waste') {
-        const q = Number(payload.quantity);
-        const u = String(payload.unit || '').toLowerCase();
-        if (Number.isFinite(q) && q > 0) {
-          if (u === 'g') weightHintG = q;
-          else if (u === 'kg') weightHintG = q * 1000;
         }
       }
 
@@ -1088,6 +1112,9 @@ export function VoiceReportModal({
           source: 'voice',
         }),
       });
+      if (gen !== requestGenRef.current || !visibleRef.current || accountKeyRef.current !== startedAccount) {
+        return;
+      }
       if (!result.ok) throw new Error(result.error);
       const data = result.data;
       const extras = data.extras ?? {};
@@ -1165,34 +1192,10 @@ export function VoiceReportModal({
         }
       }
       setStage('done');
-      if (applyIntent === 'waste') {
-        const itemLabel = String(payload.item_name || curEdited.item_name || '');
-        const unitStr = String(payload.unit || '');
-        const qtyNum = Number(payload.quantity);
-        const preferVolume = shouldPreferVolumeRealityCheck({
-          unit: unitStr,
-          itemName: itemLabel,
-          reason: String(payload.reason_text || curEdited.reason_text || ''),
-        });
-        setWeightCheckItem(itemLabel);
-        setWeightCheckSuggestedG(weightHintG);
-        setVolumeCheckItem(itemLabel);
-        setVolumeCheckSuggestedMl(
-          Number.isFinite(qtyNum) ? suggestedMlFromQty(qtyNum, unitStr) : null,
-        );
-        setTimeout(() => {
-          if (preferVolume) {
-            offerVolumeRealityCheck(premiumAlert, {
-              onAccept: () => setShowVolumeCheck(true),
-            });
-          } else {
-            offerWeightRealityCheck(premiumAlert, {
-              onAccept: () => setShowWeightCheck(true),
-            });
-          }
-        }, 400);
-      }
     } catch (e: any) {
+      if (gen !== requestGenRef.current || !visibleRef.current || accountKeyRef.current !== startedAccount) {
+        return;
+      }
       setErrorMsg(e?.message ?? 'Błąd zapisu.');
       setStage('error');
     }
@@ -1785,18 +1788,6 @@ export function VoiceReportModal({
           onClose={() => { setBulkCompare(null); setBulkContextLabel(''); }}
         />
       ) : null}
-      <WeightRealityCheckModal
-        visible={showWeightCheck}
-        onClose={() => setShowWeightCheck(false)}
-        itemName={weightCheckItem}
-        suggestedGrams={weightCheckSuggestedG}
-      />
-      <VolumeRealityCheckModal
-        visible={showVolumeCheck}
-        onClose={() => setShowVolumeCheck(false)}
-        itemName={volumeCheckItem}
-        suggestedMl={volumeCheckSuggestedMl}
-      />
     </Modal>
   );
 }

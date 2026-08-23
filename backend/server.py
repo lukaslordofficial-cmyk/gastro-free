@@ -1271,39 +1271,34 @@ DOSTĘPNI DOSTAWCY (suppliers):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Voice CRUD Fuzzy Matching — próg 65 (permisywny dla błędów Whisper).
+# Przy strict_food=True: bataty ≠ bakłażan (food stem + bez agresywnego partial).
 # ─────────────────────────────────────────────────────────────────────────────
 
-VOICE_FUZZY_THRESHOLD = 65
+from voice_fuzzy_resolve import (  # noqa: E402
+    VOICE_FUZZY_THRESHOLD,
+    resolve_by_fuzzy as _resolve_by_fuzzy_impl,
+    verify_related_name as _verify_related_name_impl,
+)
 
 
-def _resolve_by_fuzzy(query: Optional[str], rows: list[dict],
-                      key: str = "name", threshold: int = VOICE_FUZZY_THRESHOLD
-                      ) -> tuple[Optional[dict], float]:
-    """Dopasowuje `query` (nazwa dyktowana głosem) do rekordów `rows` po polu `key`.
-    Używa token_set_ratio + partial_ratio (fallback), by tolerować krótsze zapytania
-    Whisper (np. "pana kota" ↔ "Panna cotta z owocami").
-    Zwraca (rekord, score) lub (None, 0.0)."""
-    if not query or not rows:
-        return None, 0.0
-    q = _norm_pl(query)
-    if not q:
-        return None, 0.0
-    best_row: Optional[dict] = None
-    best_score = 0.0
-    for row in rows:
-        cand = _norm_pl(row.get(key, "") or "")
-        if not cand:
-            continue
-        # dwa scorery: bierzemy większy
-        s1 = float(fuzz.token_set_ratio(q, cand))
-        s2 = float(fuzz.partial_ratio(q, cand))
-        s = max(s1, s2)
-        if s > best_score:
-            best_score = s
-            best_row = row
-    if best_score >= threshold:
-        return best_row, best_score
-    return None, best_score
+def _resolve_by_fuzzy(
+    query: Optional[str],
+    rows: list[dict],
+    key: str = "name",
+    threshold: int = VOICE_FUZZY_THRESHOLD,
+    *,
+    strict_food: bool = False,
+) -> tuple[Optional[dict], float]:
+    """Dopasowuje `query` do rekordów `rows`. Zob. voice_fuzzy_resolve.resolve_by_fuzzy."""
+    return _resolve_by_fuzzy_impl(
+        query,
+        rows,
+        key=key,
+        threshold=threshold,
+        norm_pl=_norm_pl,
+        food_names_compatible=_food_names_compatible,
+        strict_food=strict_food,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1735,19 +1730,60 @@ async def interpret(payload: InterpretRequest):
                 pl["dish_name_resolved"] = row["name"]
                 _remember_match("dish_name", row["name"], score, row["id"])
 
-        # item_name → inventory_items
+        # item_name → inventory_items (strict: bataty nie mogą wylądować na bakłażanie)
         if intent_val in ("edit_inventory_item", "delete_inventory_item", "add_expiration_batch"):
             q = pl.get("item_name")
-            row, score = _resolve_by_fuzzy(q, ingredients)
+            row, score = _resolve_by_fuzzy(q, ingredients, strict_food=True)
             if row:
                 pl["inventory_id"] = row["id"]
                 pl["item_name_resolved"] = row["name"]
                 _remember_match("item_name", row["name"], score, row["id"])
 
+        # waste: related_id z LLM bywa błędne — zawsze re-resolve po nazwie (strict)
+        if intent_val == "waste":
+            item_type_w = (pl.get("item_type") or "ingredient").strip().lower()
+            claimed_id = pl.get("related_id")
+            if item_type_w == "ingredient":
+                q = pl.get("item_name")
+                row, score = _resolve_by_fuzzy(q, ingredients, strict_food=True)
+                if row:
+                    pl["related_id"] = row["id"]
+                    pl["item_name"] = row["name"]
+                    pl["item_name_resolved"] = row["name"]
+                    _remember_match("item_name", row["name"], score, row["id"])
+                else:
+                    claimed = next((r for r in ingredients if str(r.get("id")) == str(claimed_id)), None) if claimed_id else None
+                    if claimed and q and _verify_related_name_impl(
+                        str(q), claimed, food_names_compatible=_food_names_compatible,
+                    ):
+                        pl["item_name"] = claimed.get("name") or pl.get("item_name")
+                        pl["item_name_resolved"] = claimed.get("name")
+                    else:
+                        pl["related_id"] = None
+            elif item_type_w == "dish":
+                q = pl.get("item_name")
+                row, score = _resolve_by_fuzzy(q, dishes)
+                if row:
+                    pl["related_id"] = row["id"]
+                    pl["item_name"] = row["name"]
+                    pl["item_name_resolved"] = row["name"]
+                    _remember_match("item_name", row["name"], score, row["id"])
+                else:
+                    claimed = next((r for r in dishes if str(r.get("id")) == str(claimed_id)), None) if claimed_id else None
+                    if claimed and q:
+                        sc = float(fuzz.token_set_ratio(_norm_pl(str(q)), _norm_pl(str(claimed.get("name") or ""))))
+                        if sc >= 80:
+                            pl["item_name"] = claimed.get("name") or pl.get("item_name")
+                            pl["item_name_resolved"] = claimed.get("name")
+                        else:
+                            pl["related_id"] = None
+                    else:
+                        pl["related_id"] = None
+
         # ingredient_name → inventory_items (bez resolvowania id, ale zwracamy resolved name)
         if intent_val in ("add_recipe_ingredient", "edit_recipe_ingredient_qty"):
             q = pl.get("ingredient_name")
-            row, score = _resolve_by_fuzzy(q, ingredients)
+            row, score = _resolve_by_fuzzy(q, ingredients, strict_food=True)
             if row:
                 pl["ingredient_inventory_id"] = row["id"]
                 pl["ingredient_name_resolved"] = row["name"]
@@ -1981,14 +2017,81 @@ async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[
     if item_type not in ("dish", "ingredient"):
         raise HTTPException(status_code=400, detail="Waste: item_type musi być 'dish' lub 'ingredient'.")
 
+    # Twarda weryfikacja related_id ↔ nazwa (ochrona przed złym UUID z LLM / ręcznego błędu).
+    related_id = p.get("related_id")
+    item_name = (p.get("item_name") or "").strip()
+    if item_type == "ingredient":
+        from voice_actions_waste import resolve_ingredient_target
+
+        inv_all: list = []
+        try:
+            inv_all = await sb_get(
+                client, "inventory_items",
+                params={"select": "id,name,quantity,unit,unit_weight_volume", "limit": "2000"},
+            ) or []
+        except httpx.HTTPStatusError:
+            try:
+                inv_all = await sb_get(
+                    client, "inventory_items",
+                    params={"select": "id,name,quantity,unit", "limit": "2000"},
+                ) or []
+            except httpx.HTTPStatusError:
+                inv_all = []
+        related_id, item_name, resolve_warnings = resolve_ingredient_target(
+            item_name,
+            related_id,
+            inv_all,
+            resolve_by_fuzzy=_resolve_by_fuzzy,
+            food_names_compatible=_food_names_compatible,
+        )
+        warnings.extend(resolve_warnings)
+        p["related_id"] = related_id
+        p["item_name"] = item_name
+        if not related_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Nie znaleziono w magazynie produktu pasującego do „{item_name or '—'}”. "
+                    "Wybierz pozycję z podpowiedzi — bez tego nie odejmiemy stanu."
+                ),
+            )
+    elif item_type == "dish" and related_id and item_name:
+        try:
+            mi = await sb_get(
+                client, "menu_items",
+                params={"select": "id,name", "id": f"eq.{related_id}", "limit": "1"},
+            )
+        except httpx.HTTPStatusError:
+            mi = []
+        if mi:
+            sc = float(fuzz.token_set_ratio(_norm_pl(item_name), _norm_pl(str(mi[0].get("name") or ""))))
+            if sc < 80:
+                warnings.append(f"Odrzucono niespójne ID dania ({mi[0].get('name')}) dla „{item_name}”.")
+                related_id = None
+                p["related_id"] = None
+                dishes = []
+                try:
+                    dishes = await sb_get(
+                        client, "menu_items",
+                        params={"select": "id,name", "is_active": "eq.true", "limit": "1000"},
+                    ) or []
+                except httpx.HTTPStatusError:
+                    dishes = []
+                row, _score = _resolve_by_fuzzy(item_name, dishes)
+                if row:
+                    related_id = row["id"]
+                    item_name = row["name"]
+                    p["related_id"] = related_id
+                    p["item_name"] = item_name
+
     log_payload = {
-        "item_id": p.get("related_id") if item_type == "ingredient" else None,
-        "item_name": p.get("item_name") or "",
+        "item_id": related_id if item_type == "ingredient" else None,
+        "item_name": item_name or p.get("item_name") or "",
         "quantity": p.get("quantity") or 0,
         "unit": p.get("unit") or "",
         "reason": p.get("reason_text") or "",
         "item_type": item_type,
-        "related_id": p.get("related_id"),
+        "related_id": related_id,
         "source": source,
         "transcript": transcript,
     }
@@ -2007,7 +2110,6 @@ async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[
             raise HTTPException(status_code=502, detail=f"waste_logs insert: {body}") from e
     log_id = (log_rows[0] if isinstance(log_rows, list) else log_rows)["id"]
 
-    related_id = p.get("related_id")
     qty = float(p.get("quantity") or 0)
     unit_in = p.get("unit") or ""
     if item_type == "ingredient" and related_id:
@@ -2026,16 +2128,24 @@ async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[
                 rows = []
         if rows:
             inv = rows[0]
-            conv = _convert_culinary(qty, unit_in, inv["unit"], inv.get("unit_weight_volume"))
-            delta = conv if conv is not None else qty
-            new_qty = max(0.0, float(inv.get("quantity") or 0) - float(delta))
-            try:
-                await sb_patch(client, "inventory_items", {"id": f"eq.{related_id}"}, {"quantity": new_qty})
-                deductions.append({"inventory_id": inv["id"], "name": inv["name"],
-                                   "deducted": round(float(delta), 4), "unit": inv["unit"],
-                                   "new_quantity": round(new_qty, 4)})
-            except Exception as e:  # noqa: BLE001
-                warnings.append(f"Nie udało się zaktualizować stanu {inv['name']} ({str(e)[:60]}).")
+            # Ponowna bariera: nazwa wiersza musi pasować do payloadu
+            if item_name and not _verify_related_name_impl(
+                item_name, inv, food_names_compatible=_food_names_compatible,
+            ):
+                warnings.append(
+                    f"Zablokowano odjęcie: magazyn „{inv.get('name')}” ≠ „{item_name}”."
+                )
+            else:
+                conv = _convert_culinary(qty, unit_in, inv["unit"], inv.get("unit_weight_volume"))
+                delta = conv if conv is not None else qty
+                new_qty = max(0.0, float(inv.get("quantity") or 0) - float(delta))
+                try:
+                    await sb_patch(client, "inventory_items", {"id": f"eq.{related_id}"}, {"quantity": new_qty})
+                    deductions.append({"inventory_id": inv["id"], "name": inv["name"],
+                                       "deducted": round(float(delta), 4), "unit": inv["unit"],
+                                       "new_quantity": round(new_qty, 4)})
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(f"Nie udało się zaktualizować stanu {inv['name']} ({str(e)[:60]}).")
         else:
             warnings.append(f"Zgłoszono stratę. Uwaga: Składnik [{p.get('item_name') or 'surowiec'}] "
                             "nie był wcześniej wprowadzony na magazyn – stan ustawiono na 0.")
@@ -2094,8 +2204,11 @@ async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[
                 continue  # "Porcja" to parametr potrawy, nie składnik do odjęcia
             try:
                 key = _norm_name(iname)
-                inv = inv_map.get(key) or next(
-                    (v for k, v in inv_map.items() if key and (key in k or k in key)), None)
+                inv = inv_map.get(key)
+                if not inv:
+                    # Bez substring „bataty”⊂losowego — tylko strict food fuzzy
+                    hit, _sc = _resolve_by_fuzzy(iname, inv_all, strict_food=True)
+                    inv = hit
                 if not inv:
                     warnings.append(f"Zgłoszono stratę. Uwaga: Składnik [{iname}] nie był wcześniej "
                                     "wprowadzony na magazyn – stan ustawiono na 0.")

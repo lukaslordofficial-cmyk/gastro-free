@@ -28,6 +28,7 @@ import {
   piecesToKg,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
+import { rankProductMatches } from '@/lib/fuzzyProductMatch';
 
 const BACKEND_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ??
@@ -41,7 +42,10 @@ type SuggestItem = {
   name: string;
   kind: 'dish' | 'ingredient';
   unit?: string;
+  score?: number;
 };
+
+type CatalogRow = { id: string; name: string; unit?: string };
 
 type WasteLogRow = {
   id: string;
@@ -128,11 +132,45 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const [okMsg, setOkMsg] = useState<string | null>(null);
   const [produceSize, setProduceSize] = useState<ProduceSizeKey | null>(null);
   const [convertedKg, setConvertedKg] = useState<number | null>(null);
+  const [catalog, setCatalog] = useState<CatalogRow[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
 
   const produceConverter = useMemo(() => {
     if (itemType !== 'ingredient') return null;
     return findProduceConverter(selected?.name || query);
   }, [itemType, selected?.name, query]);
+
+  /** Podświetlenie fragmentu nazwy pasującego do zapytania (lub całość przy fuzzy). */
+  function renderHighlightedName(name: string, q: string, baseColor: string, hiColor: string) {
+    const trimmed = q.trim();
+    if (!trimmed) {
+      return <Text style={[styles.suggestName, { color: baseColor }]}>{name}</Text>;
+    }
+    const lower = name.toLowerCase();
+    const ql = trimmed.toLowerCase();
+    let idx = lower.indexOf(ql);
+    let len = trimmed.length;
+    if (idx < 0) {
+      // odmiana: bataty → batat
+      const stem = ql.length >= 4 ? ql.slice(0, Math.max(4, ql.length - 1)) : ql;
+      idx = lower.indexOf(stem);
+      len = stem.length;
+    }
+    if (idx < 0) {
+      return (
+        <Text style={[styles.suggestName, { color: hiColor, fontWeight: '800' }]}>{name}</Text>
+      );
+    }
+    return (
+      <Text style={[styles.suggestName, { color: baseColor }]}>
+        {name.slice(0, idx)}
+        <Text style={{ color: hiColor, fontWeight: '800', backgroundColor: 'rgba(0,200,120,0.18)' }}>
+          {name.slice(idx, idx + len)}
+        </Text>
+        {name.slice(idx + len)}
+      </Text>
+    );
+  }
 
   const fetchLogs = useCallback(async () => {
     setLoadingLogs(true);
@@ -159,6 +197,67 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     void fetchLogs();
   }, [visible, fetchLogs]);
 
+  // Katalog raz przy wejściu w formularz — fuzzy PL (bataty→Batat) lokalnie.
+  useEffect(() => {
+    if (mode !== 'add') {
+      setCatalog([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setCatalogLoading(true);
+      try {
+        if (itemType === 'ingredient') {
+          const { data } = await supabase
+            .from('inventory_items')
+            .select('id, name, unit')
+            .order('name')
+            .limit(2000);
+          if (!cancelled) {
+            setCatalog(
+              ((data as any[]) ?? []).map((r) => ({
+                id: String(r.id),
+                name: String(r.name || ''),
+                unit: r.unit || 'szt',
+              })),
+            );
+          }
+        } else {
+          let { data, error: err } = await supabase
+            .from('menu_items')
+            .select('id, name')
+            .eq('is_active', true)
+            .order('name')
+            .limit(1000);
+          if (err) {
+            const retry = await supabase
+              .from('menu_items')
+              .select('id, name')
+              .order('name')
+              .limit(1000);
+            data = retry.data;
+          }
+          if (!cancelled) {
+            setCatalog(
+              ((data as any[]) ?? []).map((r) => ({
+                id: String(r.id),
+                name: String(r.name || ''),
+                unit: 'porcja',
+              })),
+            );
+          }
+        }
+      } catch {
+        if (!cancelled) setCatalog([]);
+      } finally {
+        if (!cancelled) setCatalogLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, itemType]);
+
   useEffect(() => {
     if (mode !== 'add' || selected) {
       setSuggestions([]);
@@ -169,66 +268,22 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       setSuggestions([]);
       return;
     }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      setSuggestLoading(true);
-      try {
-        if (itemType === 'ingredient') {
-          const { data } = await supabase
-            .from('inventory_items')
-            .select('id, name, unit')
-            .ilike('name', `%${q}%`)
-            .order('name')
-            .limit(8);
-          if (!cancelled) {
-            setSuggestions(
-              (data ?? []).map((r: any) => ({
-                id: String(r.id),
-                name: String(r.name),
-                kind: 'ingredient' as const,
-                unit: r.unit || 'szt',
-              })),
-            );
-          }
-        } else {
-          let { data, error: err } = await supabase
-            .from('menu_items')
-            .select('id, name')
-            .ilike('name', `%${q}%`)
-            .eq('is_active', true)
-            .order('name')
-            .limit(8);
-          if (err) {
-            const retry = await supabase
-              .from('menu_items')
-              .select('id, name')
-              .ilike('name', `%${q}%`)
-              .order('name')
-              .limit(8);
-            data = retry.data;
-          }
-          if (!cancelled) {
-            setSuggestions(
-              (data ?? []).map((r: any) => ({
-                id: String(r.id),
-                name: String(r.name),
-                kind: 'dish' as const,
-                unit: 'porcja',
-              })),
-            );
-          }
-        }
-      } catch {
-        if (!cancelled) setSuggestions([]);
-      } finally {
-        if (!cancelled) setSuggestLoading(false);
-      }
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [query, itemType, mode, selected]);
+    setSuggestLoading(catalogLoading);
+    const ranked = rankProductMatches(q, catalog, (c) => c.name, {
+      threshold: 52,
+      limit: 8,
+    });
+    setSuggestions(
+      ranked.map(({ item, score }) => ({
+        id: item.id,
+        name: item.name,
+        kind: itemType,
+        unit: item.unit || (itemType === 'dish' ? 'porcja' : 'szt'),
+        score,
+      })),
+    );
+    setSuggestLoading(false);
+  }, [query, itemType, mode, selected, catalog, catalogLoading]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, WasteLogRow[]>();
@@ -486,17 +541,37 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   testID="waste-name-input"
                 />
               </View>
-              {suggestLoading ? <ActivityIndicator size="small" color={accent} style={{ marginVertical: 8 }} /> : null}
+              {suggestLoading || catalogLoading ? (
+                <ActivityIndicator size="small" color={accent} style={{ marginVertical: 8 }} />
+              ) : null}
+              {!selected && query.trim().length >= 1 && suggestions.length === 0 && !suggestLoading && !catalogLoading ? (
+                <Text style={{ color: muted, fontSize: 12, marginTop: 8, fontWeight: '600' }}>
+                  Brak pasujących pozycji — dopisz literę lub sprawdź, czy produkt jest w magazynie.
+                </Text>
+              ) : null}
               {!selected && suggestions.length > 0 && (
-                <View style={[styles.suggestBox, { backgroundColor: card, borderColor: border }]}>
+                <View
+                  style={[
+                    styles.suggestBox,
+                    {
+                      backgroundColor: card,
+                      borderColor: accent,
+                      borderWidth: 2,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.suggestHint, { color: muted }]}>
+                    Wybierz pozycję (podświetlone dopasowanie):
+                  </Text>
                   {suggestions.map((s) => (
                     <TouchableOpacity
                       key={s.id}
-                      style={styles.suggestRow}
+                      style={[styles.suggestRow, { borderBottomColor: border }]}
                       onPress={() => pickSuggestion(s)}
                       activeOpacity={0.75}
+                      testID={`waste-suggest-${s.id}`}
                     >
-                      <Text style={[styles.suggestName, { color: text }]}>{s.name}</Text>
+                      {renderHighlightedName(s.name, query, text, accent)}
                       <Text style={[styles.suggestMeta, { color: muted }]}>
                         {s.kind === 'dish' ? 'menu' : 'magazyn'}
                       </Text>
@@ -510,6 +585,15 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   <Text style={[styles.selectedText, { color: accent }]}>
                     Wybrano: {selected.name}
                   </Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSelected(null);
+                    }}
+                    hitSlop={8}
+                    style={{ marginLeft: 'auto' }}
+                  >
+                    <Text style={{ color: muted, fontSize: 12, fontWeight: '700' }}>Zmień</Text>
+                  </TouchableOpacity>
                 </View>
               ) : null}
 
@@ -781,6 +865,14 @@ const styles = StyleSheet.create({
     marginTop: 8,
     overflow: 'hidden',
   },
+  suggestHint: {
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 4,
+    letterSpacing: 0.2,
+  },
   suggestRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -801,7 +893,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 14,
   },
-  selectedText: { fontSize: 13, fontWeight: '700' },
+  selectedText: { fontSize: 13, fontWeight: '700', flexShrink: 1 },
   qtyRow: { flexDirection: 'row', gap: 12, marginTop: 4 },
   unitRow: { gap: 6, paddingVertical: 4 },
   unitPill: {

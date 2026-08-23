@@ -280,13 +280,56 @@ export function IngredientNameSuggest({
   value,
   onChange,
   onPickUnit,
+  onPickItem,
 }: {
   value: string;
   onChange: (v: string) => void;
   onPickUnit?: (unit: string) => void;
+  /** Gdy użytkownik wybierze podpowiedź — pełny rekord (id + nazwa). */
+  onPickItem?: (item: { id: string; name: string; unit?: string }) => void;
 }) {
+  const [catalog, setCatalog] = useState<{ id: string; name: string; unit?: string }[]>([]);
   const [suggestions, setSuggestions] = useState<{ id: string; name: string; unit?: string }[]>([]);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('inventory_items')
+          .select('id, name, unit')
+          .eq('is_active', true)
+          .order('name')
+          .limit(2000);
+        if (!cancelled) {
+          const seen = new Set<string>();
+          const rows = ((data as any[]) ?? [])
+            .map((r) => ({
+              id: String(r.id),
+              name: String(r.name || ''),
+              unit: r.unit ? String(r.unit) : undefined,
+            }))
+            .filter((row) => {
+              const k = row.name
+                .trim()
+                .toLowerCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '');
+              if (!k || seen.has(k)) return false;
+              seen.add(k);
+              return true;
+            });
+          setCatalog(rows);
+        }
+      } catch {
+        if (!cancelled) setCatalog([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const q = value.trim();
@@ -294,40 +337,17 @@ export function IngredientNameSuggest({
       setSuggestions([]);
       return;
     }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const { data } = await supabase
-          .from('inventory_items')
-          .select('id, name, unit')
-          .eq('is_active', true)
-          .ilike('name', `%${q}%`)
-          .order('name')
-          .limit(20);
-        const seen = new Set<string>();
-        const deduped = ((data as any[]) ?? []).filter((row) => {
-          const k = String(row.name || '')
-            .trim()
-            .toLowerCase()
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '');
-          if (!k || seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        }).slice(0, 8);
-        if (!cancelled) setSuggestions(deduped);
-      } catch {
-        if (!cancelled) setSuggestions([]);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [value]);
+    setLoading(true);
+    const t = setTimeout(() => {
+      const ranked = rankProductMatches(q, catalog, (c) => c.name, {
+        threshold: 52,
+        limit: 8,
+      });
+      setSuggestions(ranked.map((r) => r.item));
+      setLoading(false);
+    }, 120);
+    return () => clearTimeout(t);
+  }, [value, catalog]);
 
   return (
     <JarvisSuggestBox
@@ -342,8 +362,9 @@ export function IngredientNameSuggest({
       placeholder="Nazwa składnika z magazynu"
       onPick={(s) => {
         onChange(s.name);
-        const hit = suggestions.find((x) => x.name === s.name);
+        const hit = suggestions.find((x) => x.id === s.id || x.name === s.name);
         if (hit?.unit && onPickUnit) onPickUnit(hit.unit);
+        if (hit && onPickItem) onPickItem(hit);
       }}
     />
   );

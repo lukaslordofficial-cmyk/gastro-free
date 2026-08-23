@@ -7274,14 +7274,7 @@ class InterpretOrderRequest(BaseModel):
 
 
 # --- Algorytm porównywania ---------------------------------------------------
-# Katalogi hurt + LP: backend/deal_hunter_catalog.py
-
-from deal_hunter_catalog import (  # noqa: E402
-    fetch_catalog_and_suppliers as _fetch_catalog_and_suppliers,
-    fetch_local_producer_catalog as _fetch_local_producer_catalog,
-    load_catalog_for_search_scope as _load_catalog_for_search_scope,
-    normalize_deal_hunter_search_scope as _normalize_deal_hunter_search_scope,
-)
+# Katalogi hurt + LP: backend/deal_hunter_catalog.py (import u góry pliku)
 
 
 async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[str, float]:

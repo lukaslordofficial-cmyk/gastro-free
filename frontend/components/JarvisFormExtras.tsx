@@ -9,7 +9,7 @@ import { Check, Plus, X, Upload } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { DS } from '@/constants/premiumTheme';
-import { bestProductMatch, rankProductMatches } from '@/lib/fuzzyProductMatch';
+import { bestProductMatch, rankCatalogForTyping, rankProductMatches } from '@/lib/fuzzyProductMatch';
 import {
   type DealHunterSearchScope,
   DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
@@ -339,13 +339,12 @@ export function IngredientNameSuggest({
     }
     setLoading(true);
     const t = setTimeout(() => {
-      const ranked = rankProductMatches(q, catalog, (c) => c.name, {
-        threshold: 52,
+      const ranked = rankCatalogForTyping(q, catalog, (c) => c.name, {
         limit: 8,
       });
       setSuggestions(ranked.map((r) => r.item));
       setLoading(false);
-    }, 120);
+    }, 80);
     return () => clearTimeout(t);
   }, [value, catalog]);
 

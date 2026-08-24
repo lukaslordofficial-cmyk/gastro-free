@@ -1,51 +1,31 @@
-# PRD — Gastro Manager (Wielkie Sprzątanie / refaktoryzacja)
+# Gastro-18 — Podział monolitu server.py (chore/split-monoliths)
 
-## Problem statement
-Działająca aplikacja gastronomiczna (React Native Expo + Supabase). Cel: audyt,
-refaktoryzacja i uporządkowanie architektury pod duży ruch, wg zasad `.agentrules`
-(Dekalog BHP). Absolutny priorytet: 100% zachowanej funkcjonalności, zero regresji.
-Praca „kęs po kęsie" — jeden moduł na raz, test na telefonie po każdej zmianie.
-Backup = repo Gastro-Manager-15; zmiany → nowe repo Gastro-Manager-16 (Save to Github).
+## Zadanie
+Repo: https://github.com/lukaslordofficial-cmyk/gastro-18 (branch `chore/split-monoliths`),
+sklonowane do `/app/gastro-18`. Stack: FastAPI + Supabase REST (PostgREST) + OpenAI.
+Cel: rozbić `backend/server.py` (11 472 linii) na moduły ~250 linii/plik, BEZ zmiany działania.
 
-## Stack
-- Frontend: React Native Expo + TypeScript (expo-router), Supabase JS, AsyncStorage
-- Backend: FastAPI (Python) — auto-confirm, skany, Łowca
-- DB: Supabase (Postgres + RLS)
+## Co zrobiono (2026-06)
+- `server.py`: 11 472 → **348 linii**. Zostały tylko: FastAPI app, CORS, include_router,
+  middleware multi-tenant, startup/shutdown, oraz re-eksporty (`from server import X` działa jak dawniej).
+- Wydzielono **46 modułów** (byte-preserving — kod przeniesiony 1:1):
+  - `app_core.py` — konfiguracja, klienci (OpenAI/HTTP), helpery bazowe.
+  - `constants.py`, `models.py`/`models_scan.py`/`models_lp.py` — dane/schematy/Pydantic.
+  - warstwy domenowe: matching, catalog_units, billing/subscription, interpret, actions,
+    vision/catalog/invoice/menu, compare/orders/dispatch, analytics (periods/sales/waste/pnl/runners),
+    local producers (lp_*).
+- Architektura warstwowa (czysty DAG, brak cykli importów). Moduły domenowe importują z `app_core`.
+- Test relokacji: `tests/test_pos_webhook_routes.py::test_single_recompute_definition` zaktualizowany,
+  by sprawdzać źródło modułu, w którym funkcja teraz mieszka (intencja guardu zachowana).
 
-## Zasady pracy (z .agentrules)
-Pliki ≤250 linii, separacja warstw (UI ↔ services ↔ lib), sekrety tylko w .env,
-RLS na tabelach, kod defensywny (try-catch), TS strict bez `any`, indeksy DB,
-refaktor przed nową funkcją, testy jednostkowe, dokumentacja (ARCHITECTURE.md).
+## Weryfikacja
+- Import OK, 106 tras (jak przed zmianą). Uvicorn startuje, `/api/health` = ok, 95 ścieżek OpenAPI.
+- Suite testów repo: **299 passed / 46 failed / 1 skipped** — IDENTYCZNIE jak przed refaktorem.
+  46 failów jest PRZED-ISTNIEJĄCYCH (testy integracyjne wymagające żywego serwera + kilka zależnych od danych).
+  **Zero regresji** względem baseline.
 
-## Zrobione
-### 2026-06 — Kęs #1: Moduł autoryzacji (separacja IO od stanu) ✅ (czeka na test urządzenia)
-- Utworzono `.agentrules` i `ARCHITECTURE.md`.
-- Nowa warstwa `frontend/services/` + `authService.ts` (całe IO Supabase/backend auth).
-- `contexts/AuthContext.tsx` odchudzony (już nie importuje `supabase`; tylko stan+orkiestracja).
-- Publiczny kontrakt `useAuth()` bez zmian → login/register bez modyfikacji.
-- `.env` frontendu ustawiony (klucze Supabase); plik w `.gitignore`.
-- tsc: parytet z oryginałem (2 istniejące błędy TS2769, brak nowych).
-
-## Backlog (kolejne kęsy — jeden na raz, po akceptacji + teście urządzenia)
-### 2026-06 — Kęs #2: Dashboard/Finanse + 2 bugfixy (czeka na test urządzenia)
-- Nowy `services/financeService.ts` (całe IO Finanse); `index.tsx` bez `supabase`.
-- FIX split-bundle ("failed to load split bundle") — usunięte wszystkie dynamiczne
-  importy `@/lib/accountKey` (5 plików) -> statyczne. Panel finansów powinien się ładować.
-- FIX multi-tenant — dashboard odświeża dane po zmianie konta (reaktywny accountKey).
-- Weryfikacja: bundle Metro OK, tsc 173->166, 0 błędów w index.tsx.
-
-- P0 Kęs #3: `magazyn.tsx` (2653) -> `services/inventoryService` + rozbicie UI.
-### 2026-06 — Kęs #3: Serwis Magazynu + fix crashu (czeka na test urządzenia)
-- FIX crashu "Rendered more hooks" w ExpandableDateJournal (hook po early-return) —
-  wywalał ekran finansów przy dodaniu 1. kosztu zmiennego. Naprawione.
-- Nowy `services/inventoryService.ts`; `magazyn.tsx` = 0 zapytań `supabase`.
-- Weryfikacja: bundle Metro OK, tsc 173->166.
-- P0 Kęs #4: `menu.tsx` (2866) -> `services/menuService` + rozbicie UI.
-- P1 Kęs #5: `dostawcy.tsx` (3185) -> `services/suppliersService` + rozbicie UI.
-### 2026-06 — Kęs #4: Serwis Dostawców ✅ (czeka na test urządzenia)
-- `services/suppliersService.ts` + `services/supplierOrdersService.ts`; dostawcy = 0 zapytań supabase (było 36).
-- Bundle Metro OK, tsc 166->154.
-- Pozostało w UI: menu.tsx (7 zapytań), ustawienia.tsx (2).
-- BACKLOG SKALOWALNOŚĆ (P0 przed skalą 10k+): audyt RLS + indeksy B-Tree na account_key/created_at (§VII),
-  paginacja/limity zamiast limit(1500-5000), filtr account_key na recipe_ingredients (obecnie bez filtra).
-- BACKLOG: rozbicie monolitów UI (<250 linii) — index/magazyn/menu/dostawcy/VoiceReportModal — kęs po kęsie z testem urządzenia.
+## Pliki wciąż >250 linii (świadomie — pojedyncze duże funkcje / spójne dane)
+constants.py(863, dane), orders_impl.py(687: `orders_critical_by_category` 586),
+compare_offers_impl.py(626: `compare_offers` 594), invoice_impl.py(457: `_save_invoice` 379),
+analytics_pnl.py(383: `_compute_true_pnl` 241), dispatch_impl.py(352), menu_confirm_impl.py(340).
+Dalszy podział wymaga refaktoru wnętrza pojedynczych funkcji (ryzyko zmiany logiki) — celowo pominięty.

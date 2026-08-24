@@ -247,6 +247,7 @@ async def create_checkout_session(
     customer_email: Optional[str] = None,
     customer_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    replace_subscription_id: Optional[str] = None,
 ) -> dict[str, Any]:
     if kind == "subscription":
         if tier_level not in (1, 2):
@@ -258,6 +259,9 @@ async def create_checkout_session(
             "kind": "subscription",
             "tier_level": str(tier_level),
         }
+        old_sub = (replace_subscription_id or "").strip()
+        if old_sub.startswith("sub_"):
+            metadata["replace_subscription_id"] = old_sub
         payload: dict[str, Any] = {
             "mode": mode,
             "success_url": success_url,
@@ -516,7 +520,9 @@ async def handle_stripe_event(
             grant = int(cfg.get("monthly_grant") or 0)
             cpe = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
             rows = await sb_get(client, "subscriptions", params={
-                "select": "credits_balance", "account_key": f"eq.{account_key}", "limit": "1",
+                "select": "credits_balance,stripe_subscription_id",
+                "account_key": f"eq.{account_key}",
+                "limit": "1",
             })
             bal = int((rows[0].get("credits_balance") if rows else 0) or 0)
             changes: dict[str, Any] = {
@@ -531,6 +537,25 @@ async def handle_stripe_event(
                 changes["stripe_subscription_id"] = subscription_id
             await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, changes)
             result["action"] = f"subscribe_tier_{tier}_+{grant}"
+
+            # Po opłaceniu wyższego planu — anuluj poprzednią subskrypcję Stripe (bez ręcznej rezygnacji).
+            old_sid = (meta.get("replace_subscription_id") or "").strip()
+            if not old_sid and rows:
+                old_sid = str(rows[0].get("stripe_subscription_id") or "").strip()
+            if (
+                old_sid.startswith("sub_")
+                and subscription_id
+                and old_sid != str(subscription_id)
+            ):
+                try:
+                    await cancel_stripe_subscription(old_sid, at_period_end=False)
+                    result["replaced_subscription_id"] = old_sid
+                except Exception as cancel_err:
+                    logger.warning(
+                        "Nie udało się anulować starej subskrypcji %s po upgrade: %s",
+                        old_sid,
+                        cancel_err,
+                    )
 
     elif event_type in ("customer.subscription.updated", "customer.subscription.created"):
         meta = dict(data_obj.get("metadata") or {})
@@ -564,20 +589,52 @@ async def handle_stripe_event(
             changes["current_period_end"] = period_end
         if tier in (1, 2) and our_status in ("active", "past_due"):
             changes["tier_level"] = tier
-        await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, changes)
-        result["action"] = f"subscription_{our_status}"
+
+        incoming_id = str(data_obj.get("id") or "").strip()
+        existing_rows = await sb_get(client, "subscriptions", params={
+            "select": "stripe_subscription_id,status,tier_level",
+            "account_key": f"eq.{account_key}",
+            "limit": "1",
+        })
+        current_sid = str((existing_rows[0].get("stripe_subscription_id") if existing_rows else "") or "").strip()
+        # Anulowanie STAREJ sub_ po upgrade nie może nadpisać nowej (id + status canceled).
+        if (
+            incoming_id.startswith("sub_")
+            and current_sid.startswith("sub_")
+            and incoming_id != current_sid
+            and our_status in ("canceled", "expired", "incomplete_expired")
+        ):
+            result["action"] = "ignored_replaced_subscription_updated"
+        else:
+            await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, changes)
+            result["action"] = f"subscription_{our_status}"
 
     elif event_type == "customer.subscription.deleted":
         meta = dict(data_obj.get("metadata") or {})
         account_key = meta.get("account_key") or account_key_default
-        await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, {
-            "tier_level": 0,
-            "status": "expired",
-            "current_period_end": None,
-            "stripe_subscription_id": None,
-            "free_starter_claimed": True,
+        deleted_id = str(data_obj.get("id") or "").strip()
+        rows = await sb_get(client, "subscriptions", params={
+            "select": "stripe_subscription_id",
+            "account_key": f"eq.{account_key}",
+            "limit": "1",
         })
-        result["action"] = "subscription_deleted_to_free"
+        current_sid = str((rows[0].get("stripe_subscription_id") if rows else "") or "").strip()
+        # Po upgrade anulujemy starą sub_ — nie wolno wtedy zerować nowego planu.
+        if (
+            deleted_id.startswith("sub_")
+            and current_sid.startswith("sub_")
+            and deleted_id != current_sid
+        ):
+            result["action"] = "ignored_replaced_subscription_deleted"
+        else:
+            await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, {
+                "tier_level": 0,
+                "status": "expired",
+                "current_period_end": None,
+                "stripe_subscription_id": None,
+                "free_starter_claimed": True,
+            })
+            result["action"] = "subscription_deleted_to_free"
 
     elif event_type == "invoice.paid":
         billing_reason = data_obj.get("billing_reason")

@@ -129,7 +129,7 @@ def normalize_ingredient_name(name: str) -> str:
     return raw
 
 
-def _applynormalize_ingredient_names_to_dishes(dishes: list) -> None:
+def apply_normalize_ingredient_names_to_dishes(dishes: list) -> None:
     """In-place: normalize ingredient names (singular + dish→SKU rewrite)."""
     for d in dishes or []:
         ings = getattr(d, "suggested_ingredients", None)
@@ -215,8 +215,8 @@ def combo_default_ingredients(name: str) -> list[str]:
     return []
 
 
-def _applywhole_product_names_to_dishes(dishes: list) -> None:
+def apply_whole_product_names_to_dishes(dishes: list) -> None:
     """In-place: części → całe produkty + singular PL (pomidory→pomidor)."""
-    _applynormalize_ingredient_names_to_dishes(dishes)
+    apply_normalize_ingredient_names_to_dishes(dishes)
 
 

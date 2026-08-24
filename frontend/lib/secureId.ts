@@ -59,16 +59,15 @@ export function secureId(prefix = 'id', randomBytes = 4): string {
 }
 
 /**
- * Stripe / billing idempotency key — wymaga prawdziwego CSPRNG.
- * Rzuca, gdy ani Web Crypto, ani expo-crypto nie działa.
+ * Stripe / billing idempotency key.
+ * Preferuje CSPRNG; gdy brak (stary bundel bez expo-crypto) — zwraca null,
+ * a backend generuje uuid4. NIGDY nie rzuca — inaczej blokuje upgrade/top-up.
  */
-export function secureIdempotencyKey(prefix: string): string {
+export function secureIdempotencyKey(prefix: string): string | null {
   const bytes = new Uint8Array(8);
   const source = fillRandomBytes(bytes);
   if (source === 'fallback') {
-    throw new Error(
-      'Brak bezpiecznego RNG (Web Crypto / expo-crypto). Nie można utworzyć klucza płatności.',
-    );
+    return null;
   }
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
   return `${prefix}_${Date.now()}_${hex}`;

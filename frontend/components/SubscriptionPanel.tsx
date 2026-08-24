@@ -34,8 +34,12 @@ export function SubscriptionPanel() {
       const d = await fn();
       if (d.message) {
         setToast(d.message);
-        setTimeout(() => setToast(null), 3500);
+        setTimeout(() => setToast(null), 4500);
       }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Nie udało się wykonać operacji płatności.';
+      setToast(msg);
+      setTimeout(() => setToast(null), 5000);
     } finally {
       setBusy(null);
     }
@@ -133,6 +137,10 @@ export function SubscriptionPanel() {
       </View>
 
       <Text style={styles.sectionTitle}>Plany subskrypcji</Text>
+      <Text style={styles.upgradeHint}>
+        Wyższy plan możesz wybrać od razu — nie trzeba wcześniej rezygnować. Po udanej płatności
+        niższy pakiet zostanie automatycznie zastąpiony.
+      </Text>
       <PlanList
         data={data}
         busy={busy}
@@ -141,24 +149,6 @@ export function SubscriptionPanel() {
         styles={styles}
         theme={theme}
       />
-
-      {activePaid && (
-        <View style={styles.resignBanner} testID="resign-plan-banner">
-          <Text style={styles.resignBannerTitle}>Twój plan: {data.tier_name}</Text>
-          <TouchableOpacity
-            style={styles.resignBannerBtn}
-            onPress={() => run('resign', resign)}
-            disabled={busy !== null}
-            testID="resign-subscription-primary"
-          >
-            {busy === 'resign'
-              ? <ActivityIndicator size="small" color={Colors.white} />
-              : <Text style={styles.resignBannerBtnText}>
-                  Zrezygnuj z planu
-                </Text>}
-          </TouchableOpacity>
-        </View>
-      )}
 
       {(activePaid || (data.status === 'canceled' && data.tier_level >= 1)) && (
         <TouchableOpacity
@@ -170,6 +160,21 @@ export function SubscriptionPanel() {
           {busy === 'cancel'
             ? <ActivityIndicator size="small" color={theme.danger} />
             : <Text style={styles.cancelText}>Anuluj subskrypcję (koniec okresu)</Text>}
+        </TouchableOpacity>
+      )}
+
+      {activePaid && (
+        <TouchableOpacity
+          style={styles.resignBtn}
+          onPress={() => run('resign', resign)}
+          disabled={busy !== null}
+          testID="resign-subscription-primary"
+        >
+          {busy === 'resign'
+            ? <ActivityIndicator size="small" color={theme.danger} />
+            : <Text style={styles.resignText}>
+                Zrezygnuj teraz → plan Free (tylko jeśli chcesz zejść z płatnego, nie przy upgrade)
+              </Text>}
         </TouchableOpacity>
       )}
 
@@ -387,6 +392,14 @@ function makeSubStyles(theme: ReturnType<typeof useAppTheme>) {
       lineHeight: 18,
     },
     sectionTitle: { fontSize: 14, fontWeight: '800', color: text, marginTop: 24, marginBottom: 12 },
+    upgradeHint: {
+      fontSize: 12.5,
+      color: body,
+      lineHeight: 18,
+      marginTop: -4,
+      marginBottom: 12,
+      fontWeight: '600',
+    },
     card: { backgroundColor: card, borderRadius: 16, borderWidth: 1, borderColor: border, paddingHorizontal: 16 },
     featureRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14 },
     featureBorder: { borderBottomWidth: 1, borderBottomColor: soft },

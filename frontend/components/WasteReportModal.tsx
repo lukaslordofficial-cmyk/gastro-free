@@ -1,7 +1,7 @@
 /**
  * WasteReportModal — ręczne zgłaszanie strat + logi pogrupowane okresami.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
@@ -28,6 +29,7 @@ import {
   piecesToKg,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
+import { rankCatalogForTyping } from '@/lib/fuzzyProductMatch';
 
 const BACKEND_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ??
@@ -41,6 +43,15 @@ type SuggestItem = {
   name: string;
   kind: 'dish' | 'ingredient';
   unit?: string;
+  unit_weight_volume?: number | null;
+  score?: number;
+};
+
+type CatalogRow = {
+  id: string;
+  name: string;
+  unit?: string;
+  unit_weight_volume?: number | null;
 };
 
 type WasteLogRow = {
@@ -128,11 +139,62 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const [okMsg, setOkMsg] = useState<string | null>(null);
   const [produceSize, setProduceSize] = useState<ProduceSizeKey | null>(null);
   const [convertedKg, setConvertedKg] = useState<number | null>(null);
+  const [catalog, setCatalog] = useState<CatalogRow[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  /** Waga/objętość 1 sztuki (g lub ml) — opcjonalnie przy jednostce szt/op */
+  const [pieceWeight, setPieceWeight] = useState('');
+  const pickingRef = useRef(false);
 
   const produceConverter = useMemo(() => {
     if (itemType !== 'ingredient') return null;
     return findProduceConverter(selected?.name || query);
   }, [itemType, selected?.name, query]);
+
+  const stockUnit = (selected?.unit || '').toLowerCase();
+  const showPieceWeightField =
+    itemType === 'ingredient' &&
+    (unit === 'szt' || unit === 'op') &&
+    !!selected &&
+    !produceConverter &&
+    (stockUnit === 'kg' ||
+      stockUnit === 'g' ||
+      stockUnit === 'l' ||
+      stockUnit === 'ml' ||
+      stockUnit === '' ||
+      stockUnit === 'szt' ||
+      stockUnit === 'op');
+
+  /** Podświetlenie fragmentu nazwy pasującego do zapytania (lub całość przy fuzzy). */
+  function renderHighlightedName(name: string, q: string, baseColor: string, hiColor: string) {
+    const trimmed = q.trim();
+    if (!trimmed) {
+      return <Text style={[styles.suggestName, { color: baseColor }]}>{name}</Text>;
+    }
+    const lower = name.toLowerCase();
+    const ql = trimmed.toLowerCase();
+    let idx = lower.indexOf(ql);
+    let len = trimmed.length;
+    if (idx < 0) {
+      // odmiana: bataty → batat
+      const stem = ql.length >= 4 ? ql.slice(0, Math.max(4, ql.length - 1)) : ql;
+      idx = lower.indexOf(stem);
+      len = stem.length;
+    }
+    if (idx < 0) {
+      return (
+        <Text style={[styles.suggestName, { color: hiColor, fontWeight: '800' }]}>{name}</Text>
+      );
+    }
+    return (
+      <Text style={[styles.suggestName, { color: baseColor }]}>
+        {name.slice(0, idx)}
+        <Text style={{ color: hiColor, fontWeight: '800', backgroundColor: 'rgba(0,200,120,0.18)' }}>
+          {name.slice(idx, idx + len)}
+        </Text>
+        {name.slice(idx + len)}
+      </Text>
+    );
+  }
 
   const fetchLogs = useCallback(async () => {
     setLoadingLogs(true);
@@ -159,6 +221,79 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     void fetchLogs();
   }, [visible, fetchLogs]);
 
+  // Katalog raz przy wejściu w formularz — fuzzy PL (bataty→Batat) lokalnie.
+  useEffect(() => {
+    if (mode !== 'add') {
+      setCatalog([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setCatalogLoading(true);
+      try {
+        if (itemType === 'ingredient') {
+          let { data, error: invErr } = await supabase
+            .from('inventory_items')
+            .select('id, name, unit, unit_weight_volume')
+            .order('name')
+            .limit(2000);
+          if (invErr && /unit_weight_volume/i.test(invErr.message ?? '')) {
+            const retry = await supabase
+              .from('inventory_items')
+              .select('id, name, unit')
+              .order('name')
+              .limit(2000);
+            data = retry.data;
+          }
+          if (!cancelled) {
+            setCatalog(
+              ((data as any[]) ?? []).map((r) => ({
+                id: String(r.id),
+                name: String(r.name || ''),
+                unit: r.unit || 'szt',
+                unit_weight_volume:
+                  r.unit_weight_volume != null && Number(r.unit_weight_volume) > 0
+                    ? Number(r.unit_weight_volume)
+                    : null,
+              })),
+            );
+          }
+        } else {
+          let { data, error: err } = await supabase
+            .from('menu_items')
+            .select('id, name')
+            .eq('is_active', true)
+            .order('name')
+            .limit(1000);
+          if (err) {
+            const retry = await supabase
+              .from('menu_items')
+              .select('id, name')
+              .order('name')
+              .limit(1000);
+            data = retry.data;
+          }
+          if (!cancelled) {
+            setCatalog(
+              ((data as any[]) ?? []).map((r) => ({
+                id: String(r.id),
+                name: String(r.name || ''),
+                unit: 'porcja',
+              })),
+            );
+          }
+        }
+      } catch {
+        if (!cancelled) setCatalog([]);
+      } finally {
+        if (!cancelled) setCatalogLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, itemType]);
+
   useEffect(() => {
     if (mode !== 'add' || selected) {
       setSuggestions([]);
@@ -169,66 +304,20 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       setSuggestions([]);
       return;
     }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      setSuggestLoading(true);
-      try {
-        if (itemType === 'ingredient') {
-          const { data } = await supabase
-            .from('inventory_items')
-            .select('id, name, unit')
-            .ilike('name', `%${q}%`)
-            .order('name')
-            .limit(8);
-          if (!cancelled) {
-            setSuggestions(
-              (data ?? []).map((r: any) => ({
-                id: String(r.id),
-                name: String(r.name),
-                kind: 'ingredient' as const,
-                unit: r.unit || 'szt',
-              })),
-            );
-          }
-        } else {
-          let { data, error: err } = await supabase
-            .from('menu_items')
-            .select('id, name')
-            .ilike('name', `%${q}%`)
-            .eq('is_active', true)
-            .order('name')
-            .limit(8);
-          if (err) {
-            const retry = await supabase
-              .from('menu_items')
-              .select('id, name')
-              .ilike('name', `%${q}%`)
-              .order('name')
-              .limit(8);
-            data = retry.data;
-          }
-          if (!cancelled) {
-            setSuggestions(
-              (data ?? []).map((r: any) => ({
-                id: String(r.id),
-                name: String(r.name),
-                kind: 'dish' as const,
-                unit: 'porcja',
-              })),
-            );
-          }
-        }
-      } catch {
-        if (!cancelled) setSuggestions([]);
-      } finally {
-        if (!cancelled) setSuggestLoading(false);
-      }
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [query, itemType, mode, selected]);
+    setSuggestLoading(catalogLoading);
+    const ranked = rankCatalogForTyping(q, catalog, (c) => c.name, { limit: 12 });
+    setSuggestions(
+      ranked.map(({ item, score }) => ({
+        id: item.id,
+        name: item.name,
+        kind: itemType,
+        unit: item.unit || (itemType === 'dish' ? 'porcja' : 'szt'),
+        unit_weight_volume: item.unit_weight_volume ?? null,
+        score,
+      })),
+    );
+    setSuggestLoading(false);
+  }, [query, itemType, mode, selected, catalog, catalogLoading]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, WasteLogRow[]>();
@@ -251,20 +340,31 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     setOkMsg(null);
     setProduceSize(null);
     setConvertedKg(null);
+    setPieceWeight('');
   }
 
   function pickSuggestion(s: SuggestItem) {
+    pickingRef.current = true;
     setSelected(s);
     setQuery(s.name);
     setSuggestions([]);
     setProduceSize(null);
     setConvertedKg(null);
-    // Produce often stored in kg but counted as pieces — prefer szt for converter
+    setError(null);
     if (findProduceConverter(s.name)) {
       setUnit('szt');
+      setPieceWeight('');
     } else if (s.unit) {
       setUnit(s.unit);
     }
+    if (s.unit_weight_volume != null && s.unit_weight_volume > 0) {
+      setPieceWeight(String(s.unit_weight_volume));
+    } else {
+      setPieceWeight('');
+    }
+    setTimeout(() => {
+      pickingRef.current = false;
+    }, 300);
   }
 
   async function handleSave() {
@@ -288,6 +388,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     // Size→kg: when user picked visual size for produce in pieces, deduct kg
     let saveQty = qty;
     let saveUnit = unit;
+    let pieceWeightG: number | null = null;
     if (produceConverter && produceSize && (unit === 'szt' || unit === 'op')) {
       const tier = produceConverter.sizes.find((s) => s.key === produceSize);
       if (tier) {
@@ -298,10 +399,21 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     } else if (produceSize && convertedKg != null && convertedKg > 0) {
       saveQty = convertedKg;
       saveUnit = 'kg';
+    } else if ((unit === 'szt' || unit === 'op') && pieceWeight.trim()) {
+      const pw = parseFloat(pieceWeight.replace(',', '.'));
+      if (Number.isFinite(pw) && pw > 0) {
+        pieceWeightG = pw;
+      }
     }
 
     setSaving(true);
     try {
+      const resolvedType: 'dish' | 'ingredient' =
+        selected?.kind === 'dish' || selected?.kind === 'ingredient'
+          ? selected.kind
+          : itemType === 'dish'
+            ? 'dish'
+            : 'ingredient';
       const res = await fetch(`${BACKEND_URL}/api/actions/apply`, {
         method: 'POST',
         headers: await apiJsonHeaders(),
@@ -309,12 +421,14 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           intent: 'waste',
           source: 'manual',
           payload: {
-            item_type: itemType,
+            item_type: resolvedType,
+            kind: resolvedType,
             item_name: name,
             related_id: selected.id,
             quantity: saveQty,
             unit: saveUnit,
             reason_text: reason.trim() || 'Strata ręczna',
+            ...(pieceWeightG != null ? { piece_weight_g: pieceWeightG } : {}),
             ...(produceSize
               ? {
                   produce_size: produceSize,
@@ -327,7 +441,14 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {
-        throw new Error(data.detail || data.message || `Błąd (${res.status})`);
+        const detail = data.detail;
+        const msg =
+          typeof detail === 'string'
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((d: any) => d?.msg || JSON.stringify(d)).join('; ')
+              : data.message || `Błąd (${res.status})`;
+        throw new Error(msg);
       }
       const detail =
         data.detail ||
@@ -429,7 +550,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           >
             <ScrollView
               contentContainerStyle={styles.formContent}
-              keyboardShouldPersistTaps="handled"
+              keyboardShouldPersistTaps="always"
               showsVerticalScrollIndicator={false}
             >
               <Text style={[styles.fieldLabel, { color: muted }]}>Typ</Text>
@@ -454,6 +575,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                         setSelected(null);
                         setQuery('');
                         setUnit(t.key === 'dish' ? 'porcja' : 'szt');
+                        setPieceWeight('');
                       }}
                       activeOpacity={0.8}
                     >
@@ -478,7 +600,8 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   value={query}
                   onChangeText={(v) => {
                     setQuery(v);
-                    setSelected(null);
+                    if (pickingRef.current) return;
+                    setSelected((prev) => (prev && v === prev.name ? prev : null));
                   }}
                   placeholder={itemType === 'dish' ? 'np. Krem z dyni' : 'np. Awokado'}
                   placeholderTextColor={muted}
@@ -486,21 +609,44 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   testID="waste-name-input"
                 />
               </View>
-              {suggestLoading ? <ActivityIndicator size="small" color={accent} style={{ marginVertical: 8 }} /> : null}
+              {suggestLoading || catalogLoading ? (
+                <ActivityIndicator size="small" color={accent} style={{ marginVertical: 8 }} />
+              ) : null}
+              {!selected && query.trim().length >= 1 && suggestions.length === 0 && !suggestLoading && !catalogLoading ? (
+                <Text style={{ color: muted, fontSize: 12, marginTop: 8, fontWeight: '600' }}>
+                  Brak pasujących pozycji — dopisz literę lub sprawdź, czy produkt jest w magazynie.
+                </Text>
+              ) : null}
               {!selected && suggestions.length > 0 && (
-                <View style={[styles.suggestBox, { backgroundColor: card, borderColor: border }]}>
+                <View
+                  style={[
+                    styles.suggestBox,
+                    {
+                      backgroundColor: card,
+                      borderColor: accent,
+                      borderWidth: 2,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.suggestHint, { color: muted }]}>
+                    Dotknij pozycję, żeby ją wybrać:
+                  </Text>
                   {suggestions.map((s) => (
-                    <TouchableOpacity
+                    <Pressable
                       key={s.id}
-                      style={styles.suggestRow}
+                      style={({ pressed }) => [
+                        styles.suggestRow,
+                        { borderBottomColor: border },
+                        pressed && { backgroundColor: 'rgba(0,200,120,0.12)' },
+                      ]}
                       onPress={() => pickSuggestion(s)}
-                      activeOpacity={0.75}
+                      testID={`waste-suggest-${s.id}`}
                     >
-                      <Text style={[styles.suggestName, { color: text }]}>{s.name}</Text>
+                      {renderHighlightedName(s.name, query, text, accent)}
                       <Text style={[styles.suggestMeta, { color: muted }]}>
                         {s.kind === 'dish' ? 'menu' : 'magazyn'}
                       </Text>
-                    </TouchableOpacity>
+                    </Pressable>
                   ))}
                 </View>
               )}
@@ -510,6 +656,15 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   <Text style={[styles.selectedText, { color: accent }]}>
                     Wybrano: {selected.name}
                   </Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSelected(null);
+                    }}
+                    hitSlop={8}
+                    style={{ marginLeft: 'auto' }}
+                  >
+                    <Text style={{ color: muted, fontSize: 12, fontWeight: '700' }}>Zmień</Text>
+                  </TouchableOpacity>
                 </View>
               ) : null}
 
@@ -582,6 +737,31 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                 <Text style={[styles.hint, { color: theme.isPremium ? PremiumTokens.color.warning : Colors.warning, marginTop: 8 }]}>
                   Wybierz rozmiar S/M/L, żeby odjąć kilogramy z magazynu (np. 4×L marchewki = 1 kg).
                 </Text>
+              ) : null}
+
+              {showPieceWeightField ? (
+                <View style={{ marginTop: 12 }}>
+                  <Text style={[styles.fieldLabel, { color: muted }]}>
+                    Ile g / ml ma 1 sztuka? (opcjonalnie)
+                  </Text>
+                  <TextInput
+                    style={[styles.inputSolo, { backgroundColor: card, borderColor: border, color: text }]}
+                    value={pieceWeight}
+                    onChangeText={setPieceWeight}
+                    keyboardType="decimal-pad"
+                    placeholder={
+                      selected?.unit_weight_volume
+                        ? String(selected.unit_weight_volume)
+                        : 'np. 250'
+                    }
+                    placeholderTextColor={muted}
+                    testID="waste-piece-weight"
+                  />
+                  <Text style={[styles.hint, { color: muted, marginTop: 6 }]}>
+                    Gdy magazyn jest w kg/g/ml, a wyrzucasz sztuki — podaj wagę jednej sztuki, żeby odjąć właściwą ilość.
+                    Puste = użyj wartości z karty produktu albo domyślnej (~200 g).
+                  </Text>
+                </View>
               ) : null}
 
               <Text style={[styles.fieldLabel, { color: muted }]}>Powód (opcjonalnie)</Text>
@@ -781,6 +961,14 @@ const styles = StyleSheet.create({
     marginTop: 8,
     overflow: 'hidden',
   },
+  suggestHint: {
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 4,
+    letterSpacing: 0.2,
+  },
   suggestRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -801,7 +989,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 14,
   },
-  selectedText: { fontSize: 13, fontWeight: '700' },
+  selectedText: { fontSize: 13, fontWeight: '700', flexShrink: 1 },
   qtyRow: { flexDirection: 'row', gap: 12, marginTop: 4 },
   unitRow: { gap: 6, paddingVertical: 4 },
   unitPill: {

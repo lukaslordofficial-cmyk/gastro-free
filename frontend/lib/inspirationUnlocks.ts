@@ -1,10 +1,12 @@
 /**
- * Persistencja odkrytych przepisów Inspiracji (per urządzenie).
- * Po pierwszym wygenerowaniu przepis zostaje na stałe — bez ponownego AI.
+ * Persistencja odkrytych przepisów Inspiracji — per account_key na urządzeniu.
+ * Po pierwszym wygenerowaniu przepis zostaje lokalnie (bez ponownego AI / Railway).
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { claimLegacyStorageKey, tenantStorageKey } from '@/lib/tenantStorage';
 
-const KEY = '@gm/inspiration_unlocks_v1';
+const LEGACY_KEY = '@gm/inspiration_unlocks_v1';
+const KEY_PREFIX = '@gm/inspiration_unlocks_v2:';
 
 export type InspirationRecipe = {
   dish_name: string;
@@ -32,9 +34,23 @@ export type UnlockedInspiration = {
 
 type Store = Record<string, UnlockedInspiration>;
 
+function storageKey(): string {
+  return tenantStorageKey(KEY_PREFIX);
+}
+
 async function readStore(): Promise<Store> {
   try {
-    const raw = await AsyncStorage.getItem(KEY);
+    const key = storageKey();
+    let raw = await AsyncStorage.getItem(key);
+    if (raw == null) {
+      raw = await claimLegacyStorageKey(
+        (k) => AsyncStorage.getItem(k),
+        (k, v) => AsyncStorage.setItem(k, v),
+        (k) => AsyncStorage.removeItem(k),
+        LEGACY_KEY,
+        key,
+      );
+    }
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Store;
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -44,7 +60,7 @@ async function readStore(): Promise<Store> {
 }
 
 async function writeStore(store: Store): Promise<void> {
-  await AsyncStorage.setItem(KEY, JSON.stringify(store));
+  await AsyncStorage.setItem(storageKey(), JSON.stringify(store));
 }
 
 export async function loadUnlockedInspirations(): Promise<Store> {

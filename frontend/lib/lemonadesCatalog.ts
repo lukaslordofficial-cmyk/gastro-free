@@ -4,7 +4,7 @@
 import type { DishImageEntry } from '@/lib/dishImagesCatalog';
 
 export const LEMONADES_CATALOG: DishImageEntry[] = [
-  { slug: 'lemoniada_cytrynowa', category: 'kuchnia_polska', labelPl: 'Klasyczna lemoniada cytrynowa', aliases: ['lemoniada cytrynowa', 'lemoniada klasyczna', 'lemonade', 'lemoniada z miętą'], storagePath: 'dania/lemonades/lemonade_01.webp', localAsset: require('@/assets/premium/dishes/lemonades/lemonade_01.webp') },
+  { slug: 'lemoniada_cytrynowa', category: 'kuchnia_polska', labelPl: 'Klasyczna lemoniada cytrynowa', aliases: ['lemoniada', 'lemoniada cytrynowa', 'lemoniada klasyczna', 'lemonade', 'lemoniada z miętą', 'lemoniada sezonowa'], storagePath: 'dania/lemonades/lemonade_01.webp', localAsset: require('@/assets/premium/dishes/lemonades/lemonade_01.webp') },
   { slug: 'lemoniada_ogorkowa_bazylia', category: 'kuchnia_polska', labelPl: 'Lemoniada ogórkowa z bazylią', aliases: ['lemoniada ogórkowa', 'ogórek bazylia', 'cucumber lemonade'], storagePath: 'dania/lemonades/lemonade_02.webp', localAsset: require('@/assets/premium/dishes/lemonades/lemonade_02.webp') },
   { slug: 'lemoniada_arbuzowa', category: 'kuchnia_polska', labelPl: 'Lemoniada arbuzowa z limonką', aliases: ['lemoniada arbuzowa', 'arbuz limonka', 'watermelon lemonade'], storagePath: 'dania/lemonades/lemonade_03.webp', localAsset: require('@/assets/premium/dishes/lemonades/lemonade_03.webp') },
   { slug: 'iced_tea_brzoskwinia_domowa', category: 'kuchnia_polska', labelPl: 'Domowa mrożona herbata brzoskwiniowa', aliases: ['mrożona herbata brzoskwiniowa', 'peach iced tea', 'iced tea brzoskwinia'], storagePath: 'dania/lemonades/lemonade_04.webp', localAsset: require('@/assets/premium/dishes/lemonades/lemonade_04.webp') },

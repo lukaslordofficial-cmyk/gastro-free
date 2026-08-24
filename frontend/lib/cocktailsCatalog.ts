@@ -4,7 +4,7 @@
 import type { DishImageEntry } from '@/lib/dishImagesCatalog';
 
 export const COCKTAILS_CATALOG: DishImageEntry[] = [
-  { slug: 'mojito', category: 'kuchnia_polska', labelPl: 'Mojito', aliases: ['mojito', 'mohito'], storagePath: 'dania/cocktails/cocktail_01.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_01.webp') },
+  { slug: 'mojito', category: 'kuchnia_polska', labelPl: 'Mojito', aliases: ['mojito', 'mohito', 'koktajl', 'koktajle', 'koktajle sezonowe', 'cocktail', 'cocktails'], storagePath: 'dania/cocktails/cocktail_01.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_01.webp') },
   { slug: 'aperol_spritz', category: 'kuchnia_polska', labelPl: 'Aperol Spritz', aliases: ['aperol', 'aperol spritz', 'spritz'], storagePath: 'dania/cocktails/cocktail_02.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_02.webp') },
   { slug: 'margarita', category: 'kuchnia_polska', labelPl: 'Margarita', aliases: ['margarita'], storagePath: 'dania/cocktails/cocktail_03.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_03.webp') },
   { slug: 'old_fashioned', category: 'kuchnia_polska', labelPl: 'Old Fashioned', aliases: ['old fashioned', 'oldfashioned'], storagePath: 'dania/cocktails/cocktail_04.webp', localAsset: require('@/assets/premium/dishes/cocktails/cocktail_04.webp') },

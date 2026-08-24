@@ -450,6 +450,56 @@ export function namesMatch(a: string, b: string, threshold = 72): boolean {
   return scoreProductNames(a, b) >= threshold;
 }
 
+/**
+ * Wyszukiwanie katalogu pod UI (straty, podpowiedzi) — od 1. litery.
+ * Krótkie zapytania: prefix/includes; dłuższe: fuzzy + contains.
+ */
+export function rankCatalogForTyping<T>(
+  query: string,
+  candidates: readonly T[],
+  getName: (c: T) => string,
+  opts?: { limit?: number },
+): Array<{ item: T; score: number }> {
+  const limit = opts?.limit ?? 12;
+  const qRaw = query.trim();
+  if (!qRaw || !candidates.length) return [];
+
+  const q = qRaw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const byId = new Map<T, number>();
+
+  const bump = (item: T, score: number) => {
+    const prev = byId.get(item) ?? 0;
+    if (score > prev) byId.set(item, score);
+  };
+
+  for (const c of candidates) {
+    const name = getName(c) || '';
+    const n = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (!n) continue;
+    if (n.startsWith(q)) bump(c, 100 - Math.min(20, n.length - q.length));
+    else if (n.includes(q)) bump(c, 78);
+    else {
+      // token starts with q (np. „ser kozi” przy „ko”)
+      const toks = n.split(/\s+/);
+      if (toks.some((t) => t.startsWith(q))) bump(c, 88);
+    }
+  }
+
+  if (q.length >= 3) {
+    for (const { item, score } of rankProductMatches(qRaw, candidates, getName, {
+      threshold: 38,
+      limit: limit * 2,
+    })) {
+      bump(item, score);
+    }
+  }
+
+  return Array.from(byId.entries())
+    .map(([item, score]) => ({ item, score }))
+    .sort((a, b) => b.score - a.score || getName(a.item).localeCompare(getName(b.item), 'pl'))
+    .slice(0, limit);
+}
+
 export function bestProductMatch<T>(
   query: string,
   candidates: readonly T[],

@@ -1083,17 +1083,29 @@ export function VoiceReportModal({
       };
 
       // Waste: visual size → kg for produce counted as pieces
-      if (applyIntent === 'waste' && payload.produce_size) {
-        const conv = findProduceConverter(String(payload.item_name || ''));
-        const pcs = Number(payload.quantity);
-        const sizeKey = String(payload.produce_size) as ProduceSizeKey;
-        const tier = conv?.sizes.find((s) => s.key === sizeKey);
-        if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
-          const { kg } = piecesToKg(pcs, tier);
-          payload.produce_pieces = pcs;
-          payload.produce_converter_id = conv.id;
-          payload.quantity = kg;
-          payload.unit = 'kg';
+      if (applyIntent === 'waste') {
+        const itype = String(payload.item_type || 'ingredient');
+        if (!payload.related_id) {
+          setErrorMsg(
+            itype === 'dish'
+              ? 'Wybierz danie z podpowiedzi przed zapisaniem straty.'
+              : 'Wybierz produkt z magazynu z podpowiedzi — inaczej odejdziemy zły towar.',
+          );
+          setStage('error');
+          return;
+        }
+        if (payload.produce_size) {
+          const conv = findProduceConverter(String(payload.item_name || ''));
+          const pcs = Number(payload.quantity);
+          const sizeKey = String(payload.produce_size) as ProduceSizeKey;
+          const tier = conv?.sizes.find((s) => s.key === sizeKey);
+          if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
+            const { kg } = piecesToKg(pcs, tier);
+            payload.produce_pieces = pcs;
+            payload.produce_converter_id = conv.id;
+            payload.quantity = kg;
+            payload.unit = 'kg';
+          }
         }
       }
 
@@ -1839,7 +1851,65 @@ function IntentEditor({ intent, edited, patch, categories, menuCategories }: Edi
             { key: 'dish', label: 'Danie z menu' },
           ]}
         />
-        <EditRow label="Pozycja" value={edited.item_name ?? ''} onChangeText={(v) => patch({ item_name: v, produce_size: null })} placeholder={isDish ? 'np. Krem z dyni' : 'np. Mleko'} />
+        {isDish ? (
+          <DishPickEditor
+            edited={{
+              ...edited,
+              dish_name: edited.dish_name || edited.item_name,
+              dish_name_resolved:
+                edited.dish_name_resolved || edited.item_name_resolved || edited.item_name,
+              dish_id: edited.dish_id || edited.related_id,
+              dish_accepted:
+                edited.dish_accepted === true ||
+                (!!edited.related_id && !!(edited.item_name_resolved || edited.dish_name_resolved)),
+            }}
+            patch={(p) => {
+              const next: Record<string, any> = { ...p, produce_size: null };
+              if (p.dish_name !== undefined) next.item_name = p.dish_name;
+              if (p.dish_name_resolved !== undefined) {
+                next.item_name = p.dish_name_resolved;
+                next.item_name_resolved = p.dish_name_resolved;
+              }
+              if (p.dish_id !== undefined) next.related_id = p.dish_id;
+              if (p.dish_accepted === true && (p.dish_id || edited.related_id)) {
+                next.related_id = p.dish_id ?? edited.related_id;
+              }
+              if (p.dish_accepted === false) next.related_id = null;
+              patch(next);
+            }}
+            title="Wybierz danie z menu (kliknij propozycję)."
+          />
+        ) : (
+          <View style={{ marginBottom: 8 }}>
+            <FieldLabel text="Pozycja z magazynu" />
+            <IngredientNameSuggest
+              value={String(edited.item_name_resolved || edited.item_name || '')}
+              onChange={(v) =>
+                patch({
+                  item_name: v,
+                  item_name_resolved: null,
+                  related_id: null,
+                  produce_size: null,
+                })
+              }
+              onPickUnit={(u) => patch({ unit: u })}
+              onPickItem={(item) =>
+                patch({
+                  item_name: item.name,
+                  item_name_resolved: item.name,
+                  related_id: item.id,
+                  produce_size: null,
+                  ...(item.unit ? { unit: item.unit } : {}),
+                })
+              }
+            />
+            {edited.related_id ? (
+              <Text style={styles.editHint2}>Wybrano z magazynu · ID powiązane</Text>
+            ) : (
+              <Text style={styles.editHint2}>Wybierz produkt z listy — inaczej strata nie zejdzie ze stanu.</Text>
+            )}
+          </View>
+        )}
         <View style={styles.twoCol}>
           <View style={{ flex: 1 }}>
             <EditRow label="Ilość" value={edited.quantity == null ? '' : String(edited.quantity)} onChangeText={(v) => patch({ quantity: numOrNull(v) })} keyboardType="decimal-pad" placeholder="0" />

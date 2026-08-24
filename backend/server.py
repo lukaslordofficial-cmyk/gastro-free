@@ -1271,39 +1271,34 @@ DOSTĘPNI DOSTAWCY (suppliers):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Voice CRUD Fuzzy Matching — próg 65 (permisywny dla błędów Whisper).
+# Przy strict_food=True: bataty ≠ bakłażan (food stem + bez agresywnego partial).
 # ─────────────────────────────────────────────────────────────────────────────
 
-VOICE_FUZZY_THRESHOLD = 65
+from voice_fuzzy_resolve import (  # noqa: E402
+    VOICE_FUZZY_THRESHOLD,
+    resolve_by_fuzzy as _resolve_by_fuzzy_impl,
+    verify_related_name as _verify_related_name_impl,
+)
 
 
-def _resolve_by_fuzzy(query: Optional[str], rows: list[dict],
-                      key: str = "name", threshold: int = VOICE_FUZZY_THRESHOLD
-                      ) -> tuple[Optional[dict], float]:
-    """Dopasowuje `query` (nazwa dyktowana głosem) do rekordów `rows` po polu `key`.
-    Używa token_set_ratio + partial_ratio (fallback), by tolerować krótsze zapytania
-    Whisper (np. "pana kota" ↔ "Panna cotta z owocami").
-    Zwraca (rekord, score) lub (None, 0.0)."""
-    if not query or not rows:
-        return None, 0.0
-    q = _norm_pl(query)
-    if not q:
-        return None, 0.0
-    best_row: Optional[dict] = None
-    best_score = 0.0
-    for row in rows:
-        cand = _norm_pl(row.get(key, "") or "")
-        if not cand:
-            continue
-        # dwa scorery: bierzemy większy
-        s1 = float(fuzz.token_set_ratio(q, cand))
-        s2 = float(fuzz.partial_ratio(q, cand))
-        s = max(s1, s2)
-        if s > best_score:
-            best_score = s
-            best_row = row
-    if best_score >= threshold:
-        return best_row, best_score
-    return None, best_score
+def _resolve_by_fuzzy(
+    query: Optional[str],
+    rows: list[dict],
+    key: str = "name",
+    threshold: int = VOICE_FUZZY_THRESHOLD,
+    *,
+    strict_food: bool = False,
+) -> tuple[Optional[dict], float]:
+    """Dopasowuje `query` do rekordów `rows`. Zob. voice_fuzzy_resolve.resolve_by_fuzzy."""
+    return _resolve_by_fuzzy_impl(
+        query,
+        rows,
+        key=key,
+        threshold=threshold,
+        norm_pl=_norm_pl,
+        food_names_compatible=_food_names_compatible,
+        strict_food=strict_food,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1735,19 +1730,60 @@ async def interpret(payload: InterpretRequest):
                 pl["dish_name_resolved"] = row["name"]
                 _remember_match("dish_name", row["name"], score, row["id"])
 
-        # item_name → inventory_items
+        # item_name → inventory_items (strict: bataty nie mogą wylądować na bakłażanie)
         if intent_val in ("edit_inventory_item", "delete_inventory_item", "add_expiration_batch"):
             q = pl.get("item_name")
-            row, score = _resolve_by_fuzzy(q, ingredients)
+            row, score = _resolve_by_fuzzy(q, ingredients, strict_food=True)
             if row:
                 pl["inventory_id"] = row["id"]
                 pl["item_name_resolved"] = row["name"]
                 _remember_match("item_name", row["name"], score, row["id"])
 
+        # waste: related_id z LLM bywa błędne — zawsze re-resolve po nazwie (strict)
+        if intent_val == "waste":
+            item_type_w = (pl.get("item_type") or "ingredient").strip().lower()
+            claimed_id = pl.get("related_id")
+            if item_type_w == "ingredient":
+                q = pl.get("item_name")
+                row, score = _resolve_by_fuzzy(q, ingredients, strict_food=True)
+                if row:
+                    pl["related_id"] = row["id"]
+                    pl["item_name"] = row["name"]
+                    pl["item_name_resolved"] = row["name"]
+                    _remember_match("item_name", row["name"], score, row["id"])
+                else:
+                    claimed = next((r for r in ingredients if str(r.get("id")) == str(claimed_id)), None) if claimed_id else None
+                    if claimed and q and _verify_related_name_impl(
+                        str(q), claimed, food_names_compatible=_food_names_compatible,
+                    ):
+                        pl["item_name"] = claimed.get("name") or pl.get("item_name")
+                        pl["item_name_resolved"] = claimed.get("name")
+                    else:
+                        pl["related_id"] = None
+            elif item_type_w == "dish":
+                q = pl.get("item_name")
+                row, score = _resolve_by_fuzzy(q, dishes)
+                if row:
+                    pl["related_id"] = row["id"]
+                    pl["item_name"] = row["name"]
+                    pl["item_name_resolved"] = row["name"]
+                    _remember_match("item_name", row["name"], score, row["id"])
+                else:
+                    claimed = next((r for r in dishes if str(r.get("id")) == str(claimed_id)), None) if claimed_id else None
+                    if claimed and q:
+                        sc = float(fuzz.token_set_ratio(_norm_pl(str(q)), _norm_pl(str(claimed.get("name") or ""))))
+                        if sc >= 80:
+                            pl["item_name"] = claimed.get("name") or pl.get("item_name")
+                            pl["item_name_resolved"] = claimed.get("name")
+                        else:
+                            pl["related_id"] = None
+                    else:
+                        pl["related_id"] = None
+
         # ingredient_name → inventory_items (bez resolvowania id, ale zwracamy resolved name)
         if intent_val in ("add_recipe_ingredient", "edit_recipe_ingredient_qty"):
             q = pl.get("ingredient_name")
-            row, score = _resolve_by_fuzzy(q, ingredients)
+            row, score = _resolve_by_fuzzy(q, ingredients, strict_food=True)
             if row:
                 pl["ingredient_inventory_id"] = row["id"]
                 pl["ingredient_name_resolved"] = row["name"]
@@ -1849,339 +1885,55 @@ from ingredient_name_norm import (
 )
 
 
-def _is_porcja_row(name: str) -> bool:
-    return _norm_name(name) in ("porcja", "porcje", "wielkosc porcji", "wielkość porcji",
-                                "wielkosc porc) i", "gramatura", "gramatura porcji")
-
-
-# ── Spójność jednostek składników zwracanych przez AI ────────────────────────
-# Bug: dla tego samego składnika (np. śmietana) AI raz zwracało g, raz ml,
-# przez co przelicznik porcji się sypał. Poniżej sprowadzamy KAŻDY składnik o tej
-# samej nazwie do JEDNEJ jednostki we WSZYSTKICH potrawach z danego skanu.
-_LIQUID_NAME_HINTS = (
-    "smietan", "śmietan", "mlek", "olej", "sos", "bulion", "wywar", "woda",
-    "sok", "krem", "ocet", "syrop", "wino", "piwo", "śmieta", "majonez",
-    "musztard", "ketchup", "passata", "przecier", "esencj", "napój", "napoj",
+from recipe_ingredient_units import (
+    LIQUID_NAME_HINTS as _LIQUID_NAME_HINTS,
+    apply_integer_quantities_to_dishes as _apply_integer_quantities_to_dishes,
+    canonicalize_ingredient_units as _canonicalize_ingredient_units,
+    is_porcja_row as _is_porcja_row_impl,
+    iter_ingredients as _iter_ingredients,
+    normalize_recipe_quantity as _normalize_recipe_quantity,
 )
 
 
-def _iter_ingredients(dish):
-    """Zwraca listę składników potrawy niezależnie od modelu (scan/suggest/confirm)."""
-    for attr in ("suggested_ingredients", "ingredients"):
-        val = getattr(dish, attr, None)
-        if val is not None:
-            return val
-    return []
-
-
-def _normalize_recipe_quantity(qty, unit: str = "") -> int:
-    """Ilości w recepturze: zawsze całkowite ≥ 1.
-    Ułamki typu 0.25 g pieprzu/soli → minimum 1 (idealnie 1–2 na porcję)."""
-    try:
-        q = float(qty)
-    except (TypeError, ValueError):
-        return 1
-    if q <= 0:
-        return 1
-    if q < 1:
-        return 1
-    return max(1, int(round(q)))
-
-
-def _apply_integer_quantities_to_dishes(dishes: list) -> None:
-    """In-place: quantity → int ≥ 1 dla suggest-recipe / confirm-scan.
-
-    Null quantity (OCR bez gramatury) → 1, żeby AI/skan nigdy nie zapisał 0.
-    """
-    for d in dishes:
-        for ing in _iter_ingredients(d):
-            if isinstance(ing, dict):
-                q = ing.get("quantity")
-                ing["quantity"] = _normalize_recipe_quantity(
-                    1 if q is None else q, ing.get("unit") or ""
-                )
-            else:
-                q = getattr(ing, "quantity", None)
-                setattr(
-                    ing,
-                    "quantity",
-                    _normalize_recipe_quantity(
-                        1 if q is None else q, getattr(ing, "unit", "") or ""
-                    ),
-                )
-
-
-def _normalize_inspiration_quantities(recipe) -> None:
-    """Inspiracje: base_quantity → całkowite; min. 1 jednostka na porcję."""
-    portions = max(1, int(getattr(recipe, "default_portions", None) or 1))
-    for sec in getattr(recipe, "ingredients_sections", None) or []:
-        ings = getattr(sec, "ingredients", None) or []
-        for ing in ings:
-            try:
-                base = float(getattr(ing, "base_quantity", 0) or 0)
-            except (TypeError, ValueError):
-                base = 0.0
-            per = base / portions
-            if per < 1:
-                # mikroilości (sól/pieprz) → 1 na porcję
-                setattr(ing, "base_quantity", float(portions))
-            else:
-                setattr(ing, "base_quantity", float(max(1, int(round(base)))))
-
-
-def _canonicalize_ingredient_units(dishes: list) -> None:
-    """In-place: ujednolica jednostkę każdego składnika w obrębie całego skanu.
-    Wszystkie wystąpienia „śmietana” dostaną tę samą jednostkę (g LUB ml),
-    a ilości zostaną przeliczone 1:1 (g↔ml) / 1000 (kg→g, l→ml)."""
-    from collections import Counter
-    votes: dict[str, Counter] = {}
-    for d in dishes:
-        for ing in _iter_ingredients(d):
-            name = _norm_name(getattr(ing, "name", "") or "")
-            unit = getattr(ing, "unit", "") or ""
-            if not name or _canon_dim(unit) != "gml":
-                continue
-            u = unit.strip().lower().rstrip(".")
-            base = "g" if u in ("g", "gram", "gramy", "kg", "kilogram") else "ml"
-            votes.setdefault(name, Counter())[base] += 1
-
-    canon: dict[str, str] = {}
-    for name, ctr in votes.items():
-        top = ctr.most_common()
-        best = top[0][1]
-        tied = [u for u, c in top if c == best]
-        if len(tied) == 1:
-            canon[name] = tied[0]
-        else:
-            canon[name] = "ml" if any(h in name for h in _LIQUID_NAME_HINTS) else "g"
-
-    for d in dishes:
-        for ing in _iter_ingredients(d):
-            name = _norm_name(getattr(ing, "name", "") or "")
-            if name not in canon:
-                continue
-            target = canon[name]
-            cur = getattr(ing, "unit", "") or ""
-            q = getattr(ing, "quantity", None)
-            if q is not None and (cur or "").strip().lower().rstrip(".") != target:
-                conv = _convert_culinary(float(q), cur, target)
-                if conv is not None:
-                    try:
-                        ing.quantity = round(conv, 2)
-                    except Exception:  # noqa: BLE001
-                        pass
-            ing.unit = target
+def _is_porcja_row(name: str) -> bool:
+    return _is_porcja_row_impl(name, norm_name_fn=_norm_name)
 
 
 async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[str], source: str):
-    warnings: list[str] = []
-    deductions: list[dict] = []
-
-    item_type = p.get("item_type") or "unknown"
-    if item_type not in ("dish", "ingredient"):
-        raise HTTPException(status_code=400, detail="Waste: item_type musi być 'dish' lub 'ingredient'.")
-
-    log_payload = {
-        "item_id": p.get("related_id") if item_type == "ingredient" else None,
-        "item_name": p.get("item_name") or "",
-        "quantity": p.get("quantity") or 0,
-        "unit": p.get("unit") or "",
-        "reason": p.get("reason_text") or "",
-        "item_type": item_type,
-        "related_id": p.get("related_id"),
-        "source": source,
-        "transcript": transcript,
-    }
-    try:
-        log_rows = await sb_post(client, "waste_logs", log_payload)
-    except httpx.HTTPStatusError as e:
-        body = e.response.text or ""
-        if any(k in body for k in ("item_type", "related_id", "source", "transcript")):
-            warnings.append("Migracja SQL nie zastosowana — zapisano tylko podstawowe pola.")
-            log_rows = await sb_post(client, "waste_logs", {
-                "item_id": log_payload["item_id"], "item_name": log_payload["item_name"],
-                "quantity": log_payload["quantity"], "unit": log_payload["unit"],
-                "reason": log_payload["reason"],
-            })
-        else:
-            raise HTTPException(status_code=502, detail=f"waste_logs insert: {body}") from e
-    log_id = (log_rows[0] if isinstance(log_rows, list) else log_rows)["id"]
-
-    related_id = p.get("related_id")
-    qty = float(p.get("quantity") or 0)
-    unit_in = p.get("unit") or ""
-    if item_type == "ingredient" and related_id:
-        rows: list = []
-        try:
-            rows = await sb_get(client, "inventory_items",
-                                params={"select": "id,name,quantity,unit,unit_weight_volume",
-                                        "id": f"eq.{related_id}"})
-        except httpx.HTTPStatusError:
-            try:
-                rows = await sb_get(client, "inventory_items",
-                                    params={"select": "id,name,quantity,unit", "id": f"eq.{related_id}"})
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"Nie udało się pobrać produktu z magazynu "
-                                f"(kod {e.response.status_code}) — magazyn niezmieniony.")
-                rows = []
-        if rows:
-            inv = rows[0]
-            conv = _convert_culinary(qty, unit_in, inv["unit"], inv.get("unit_weight_volume"))
-            delta = conv if conv is not None else qty
-            new_qty = max(0.0, float(inv.get("quantity") or 0) - float(delta))
-            try:
-                await sb_patch(client, "inventory_items", {"id": f"eq.{related_id}"}, {"quantity": new_qty})
-                deductions.append({"inventory_id": inv["id"], "name": inv["name"],
-                                   "deducted": round(float(delta), 4), "unit": inv["unit"],
-                                   "new_quantity": round(new_qty, 4)})
-            except Exception as e:  # noqa: BLE001
-                warnings.append(f"Nie udało się zaktualizować stanu {inv['name']} ({str(e)[:60]}).")
-        else:
-            warnings.append(f"Zgłoszono stratę. Uwaga: Składnik [{p.get('item_name') or 'surowiec'}] "
-                            "nie był wcześniej wprowadzony na magazyn – stan ustawiono na 0.")
-    elif item_type == "dish" and related_id:
-        try:
-            recipe = await sb_get(client, "recipe_ingredients",
-                                  params={"select": "ingredient_name,quantity,unit",
-                                          "menu_item_id": f"eq.{related_id}"}) or []
-        except httpx.HTTPStatusError as e:
-            warnings.append(f"Nie udało się odczytać receptury (kod {e.response.status_code}) — "
-                            "zapisano tylko log straty, magazyn niezmieniony.")
-            recipe = []
-        # Wielkość porcji (baza g/ml): z menu_items.portion_size_grams lub legacy wiersza "Porcja".
-        portion_base: Optional[float] = None
-        try:
-            mi = await sb_get(client, "menu_items",
-                              params={"select": "portion_size_grams", "id": f"eq.{related_id}", "limit": "1"})
-            if mi and mi[0].get("portion_size_grams"):
-                portion_base = float(mi[0]["portion_size_grams"])
-        except httpx.HTTPStatusError:
-            portion_base = None
-        if portion_base is None:
-            for r in recipe:
-                if _is_porcja_row(r.get("ingredient_name")):
-                    pv = _to_gml(float(r.get("quantity") or 0), r.get("unit") or "g", _PIECE_DEFAULT_SIZE)
-                    if pv:
-                        portion_base = pv
-                    break
-        # Liczba porcji na podstawie zgłoszonego ubytku (0.5 l zupy → 500 g → n porcji).
-        wu = _norm_name(unit_in)
-        if wu in ("", "szt", "szt.", "porcja", "porcje", "opak", "danie", "dania"):
-            portions = qty
-        else:
-            waste_base = _to_gml(qty, unit_in, _PIECE_DEFAULT_SIZE)
-            portions = (waste_base / portion_base) if (waste_base and portion_base) else qty
-        if not portions or portions <= 0:
-            portions = 1.0
-
-        inv_all: list = []
-        try:
-            inv_all = await sb_get(client, "inventory_items",
-                                   params={"select": "id,name,quantity,unit,unit_weight_volume",
-                                           "limit": "1000"}) or []
-        except httpx.HTTPStatusError:
-            try:
-                inv_all = await sb_get(client, "inventory_items",
-                                       params={"select": "id,name,quantity,unit", "limit": "1000"}) or []
-            except httpx.HTTPStatusError as e:
-                warnings.append(f"Nie udało się pobrać magazynu (kod {e.response.status_code}) — "
-                                "zapisano tylko log straty.")
-                inv_all = []
-        inv_map = {_norm_name(r["name"]): r for r in inv_all}
-        for ing in recipe:
-            iname = ing.get("ingredient_name") or ""
-            if _is_porcja_row(iname):
-                continue  # "Porcja" to parametr potrawy, nie składnik do odjęcia
-            try:
-                key = _norm_name(iname)
-                inv = inv_map.get(key) or next(
-                    (v for k, v in inv_map.items() if key and (key in k or k in key)), None)
-                if not inv:
-                    warnings.append(f"Zgłoszono stratę. Uwaga: Składnik [{iname}] nie był wcześniej "
-                                    "wprowadzony na magazyn – stan ustawiono na 0.")
-                    continue
-                used = float(ing.get("quantity") or 0) * portions
-                conv = _convert_culinary(used, ing.get("unit") or "g", inv["unit"],
-                                         inv.get("unit_weight_volume"))
-                if conv is None:
-                    warnings.append(f"Pominięto {iname}: nieobsługiwana jednostka "
-                                    f"{ing.get('unit')}→{inv['unit']}.")
-                    continue
-                new_qty = max(0.0, float(inv.get("quantity") or 0) - conv)
-                await sb_patch(client, "inventory_items", {"id": f"eq.{inv['id']}"}, {"quantity": new_qty})
-                deductions.append({"inventory_id": inv["id"], "name": inv["name"],
-                                   "deducted": round(conv, 4), "unit": inv["unit"],
-                                   "new_quantity": round(new_qty, 4)})
-            except Exception as e:  # noqa: BLE001
-                warnings.append(f"Zgłoszono stratę. Uwaga: składnik [{iname}] pominięto przy "
-                                f"odejmowaniu ({str(e)[:60]}).")
-                continue
-
-    # POS Bottleneck Engine: przelicz dostępność dań po każdej zmianie stanu magazynu.
-    if deductions:
-        try:
-            await _recompute_menu_availability(client, changed_inventory_ids={d["inventory_id"] for d in deductions})
-        except Exception as e:
-            logger.debug(f"_recompute_menu_availability skipped: {e}")
-
-    return log_id, {"deductions": deductions}, warnings
+    from rapidfuzz import fuzz as _fuzz
+    from voice_actions_waste import apply_waste as _apply_waste_impl
+    return await _apply_waste_impl(
+        client, p, transcript, source,
+        resolve_by_fuzzy=_resolve_by_fuzzy,
+        food_names_compatible=_food_names_compatible,
+        norm_pl=_norm_pl,
+        fuzz_token_set_ratio=lambda a, b: float(_fuzz.token_set_ratio(a, b)),
+        is_porcja_row=_is_porcja_row,
+        to_gml=_to_gml,
+        norm_name=_norm_name,
+        piece_default_size=_PIECE_DEFAULT_SIZE,
+        recompute_menu_availability=_recompute_menu_availability,
+    )
 
 
 async def _apply_revenue(client, p, transcript, source):
-    desc = (p.get("description") or "").strip() or "Wpływ (dyktowane)"
-    amt = float(p.get("amount_pln") or 0)
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="Revenue: amount_pln musi być > 0.")
-    row = await sb_post(client, "revenue_entries", {
-        "year_month": _current_year_month(),
-        "description": desc, "amount_pln": amt,
-        "note": p.get("note") or transcript,
-    })
-    return row[0]["id"], {"description": desc, "amount_pln": amt}, []
+    from voice_actions_finance import apply_revenue
+    return await apply_revenue(client, p, transcript, source)
 
 
 async def _apply_fixed_cost(client, p, transcript, source):
-    name = (p.get("cost_name") or p.get("description") or "").strip() or "Koszt stały"
-    amt = float(p.get("amount_pln") or 0)
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="Fixed cost: amount_pln musi być > 0.")
-    typ = p.get("cost_type") or "other"
-    if typ not in ("rent", "media", "payroll", "other"):
-        typ = "other"
-    row = await sb_post(client, "fixed_costs", {
-        "year_month": _current_year_month(),
-        "type": typ, "name": name, "amount_pln": amt,
-        "note": p.get("note") or transcript,
-    })
-    return row[0]["id"], {"type": typ, "name": name, "amount_pln": amt}, []
+    from voice_actions_finance import apply_fixed_cost
+    return await apply_fixed_cost(client, p, transcript, source)
 
 
 async def _apply_variable_cost(client, p, transcript, source):
-    name = (p.get("cost_name") or p.get("description") or "").strip() or "Koszt zmienny"
-    amt = float(p.get("amount_pln") or 0)
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="Variable cost: amount_pln musi być > 0.")
-    typ = p.get("cost_type") or "other"
-    if typ not in ("materials", "waste", "other"):
-        typ = "other"
-    row = await sb_post(client, "variable_cost_entries", {
-        "year_month": _current_year_month(),
-        "type": typ, "name": name, "amount_pln": amt,
-        "note": p.get("note") or transcript,
-    })
-    return row[0]["id"], {"type": typ, "name": name, "amount_pln": amt}, []
+    from voice_actions_finance import apply_variable_cost
+    return await apply_variable_cost(client, p, transcript, source)
 
 
 async def _resolve_category_id(client, name: Optional[str]) -> Optional[str]:
-    if not name:
-        return None
-    rows = await sb_get(client, "inventory_categories",
-                        params={"select": "id,name", "name": f"ilike.{name}", "limit": "1"})
-    if rows:
-        return rows[0]["id"]
-    # create new
-    new = await sb_post(client, "inventory_categories", {"name": name, "color": "#6B7280", "icon_name": "package"})
-    return new[0]["id"]
+    from voice_actions_finance import resolve_category_id
+    return await resolve_category_id(client, name)
 
 
 async def _apply_expiration_batch(client, p, transcript, source):
@@ -2235,6 +1987,31 @@ async def _apply_expiration_batch(client, p, transcript, source):
 
     inv_id = p.get("inventory_id") or p.get("related_id")
     inv_name = name
+    if inv_id:
+        # Nie ufaj ślepo related_id z LLM — musi pasować do nazwy produktu.
+        try:
+            rows = await sb_get(
+                client, "inventory_items",
+                params={"select": "id,name,quantity,unit", "id": f"eq.{inv_id}", "limit": "1"},
+            ) or []
+            if not rows:
+                inv_id = None
+            else:
+                claimed_name = str(rows[0].get("name") or "")
+                if name and not _food_names_compatible(name, claimed_name):
+                    warnings.append(
+                        f"Odrzucono niespójne ID magazynu ({claimed_name}) dla „{name}”."
+                    )
+                    inv_id = None
+                else:
+                    inv_name = claimed_name or name
+                    unit = rows[0].get("unit") or unit
+        except HTTPException:
+            raise
+        except Exception:
+            warnings.append("Nie udało się zweryfikować ID produktu — szukam po nazwie.")
+            inv_id = None
+
     if not inv_id:
         inv_all = await sb_get(client, "inventory_items", params={"select": "id,name,quantity,unit", "limit": "2000"}) or []
         best = None
@@ -2243,6 +2020,8 @@ async def _apply_expiration_batch(client, p, transcript, source):
         for row in inv_all:
             cand = _norm_pl(str(row.get("name") or ""))
             if not cand:
+                continue
+            if not _food_names_compatible(name, str(row.get("name") or "")):
                 continue
             score = max(float(fuzz.token_set_ratio(qn, cand)), float(fuzz.partial_ratio(qn, cand)))
             if score > best_score:
@@ -2259,20 +2038,6 @@ async def _apply_expiration_batch(client, p, transcript, source):
         inv_id = best["id"]
         inv_name = best.get("name") or name
         unit = (best.get("unit") or unit or "szt")
-    else:
-        try:
-            rows = await sb_get(
-                client, "inventory_items",
-                params={"select": "id,name,quantity,unit", "id": f"eq.{inv_id}", "limit": "1"},
-            ) or []
-            if not rows:
-                raise HTTPException(status_code=404, detail="Produkt nie istnieje w magazynie.")
-            inv_name = rows[0].get("name") or name
-            unit = rows[0].get("unit") or unit
-        except HTTPException:
-            raise
-        except Exception:
-            warnings.append("Nie udało się odczytać produktu — zapisuję partie dat.")
 
     saved_ids = []
     for b in batches:
@@ -4295,55 +4060,11 @@ class MenuScanDish(BaseModel):
     image_context_tags: list[str] = Field(default_factory=list)
 
 
-def _norm_pl_tag(raw: str) -> str:
-    import unicodedata
-    s = (raw or "").lower()
-    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-    s = re.sub(r"[^a-z0-9\s]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _extract_image_context_tags(name: str) -> list[str]:
-    """Heurystyczne tagi grafiki z nazwy dania (bez dodatkowego kosztu OpenAI)."""
-    n = _norm_pl_tag(name)
-    tags: list[str] = []
-    rules = [
-        (r"\bkaczk", ["kaczka", "drób", "mięso pieczone"]),
-        (r"\b(kurczak|chicken|de volaille)", ["kurczak", "drób"]),
-        (r"\bindyk", ["indyk", "drób"]),
-        (r"\b(wolow|beef|stek|ribeye|tatar)", ["wołowina", "mięso"]),
-        (r"\b(wieprz|schab|golonk|boczek|zeberk)", ["wieprzowina", "mięso"]),
-        (r"\b(ryb|losos|dorsz|pstrag|tunczyk|fish)", ["ryba"]),
-        (r"\b(wege|vegan|tofu|falafel)", ["wege"]),
-        (r"\b(zupa|rosol|barszcz|zurek|gazpacho|ramen|pho)", ["zupa"]),
-        (r"\bpomidor|tomato", ["pomidor", "czerwone"]),
-        (r"\bburger", ["burger"]),
-        (r"\bpizza", ["pizza"]),
-        (r"\b(makaron|pasta|spaghetti)", ["makaron"]),
-        (r"\bsalatk|salad", ["sałatka"]),
-        (r"\b(udko|udo)\b", ["udo", "pieczeń"]),
-        (r"\b(pieczon|roast|grill)", ["pieczeń", "mięso pieczone"]),
-        (r"\bchrupiac|crispy", ["chrupiące"]),
-        (r"\bjablk|apple", ["jabłko"]),
-        (r"\bpekin|peking", ["kaczka", "azja"]),
-        (r"\bsushi|nigiri|maki", ["sushi", "ryba"]),
-        (r"\b(deser|ciasto|lody|tiramisu)", ["deser"]),
-    ]
-    seen: set[str] = set()
-    for pattern, add in rules:
-        if re.search(pattern, n):
-            for t in add:
-                if t not in seen:
-                    seen.add(t)
-                    tags.append(t)
-    return tags
-
-
-def _attach_image_context_tags(dishes: list[MenuScanDish]) -> None:
-    for d in dishes:
-        if d.image_context_tags:
-            continue
-        d.image_context_tags = _extract_image_context_tags(d.name)
+from menu_image_context_tags import (
+    attach_image_context_tags as _attach_image_context_tags,
+    extract_image_context_tags as _extract_image_context_tags,
+    norm_pl_tag as _norm_pl_tag,
+)
 
 
 class MenuScanResponse(BaseModel):
@@ -4389,13 +4110,8 @@ _EXPIRY_SCAN_JSON_SCHEMA = {
 
 
 async def _list_tenant_account_keys(client: httpx.AsyncClient) -> list[str]:
-    """Wszystkie account_key z profiles — cron musi obejść każdego tenanta osobno."""
-    rows = await sb_get(
-        client,
-        "profiles",
-        params={"select": "account_key", "limit": "5000"},
-    ) or []
-    return collect_tenant_account_keys(rows)
+    from tenant_expiry_alerts import list_tenant_account_keys
+    return await list_tenant_account_keys(client)
 
 
 async def _run_expiry_alerts_for_tenant(
@@ -4405,144 +4121,35 @@ async def _run_expiry_alerts_for_tenant(
     warn_until,
 ) -> tuple[list[dict], Optional[str]]:
     """Jeden tenant: partie kończące ważność + opcjonalne danie dnia + Expo Push."""
-    from datetime import date as _date
+    from tenant_expiry_alerts import run_expiry_alerts_for_tenant
 
-    alerts: list[dict] = []
-    dish: Optional[str] = None
-
-    rows = await sb_get(
-        httpx_c,
-        "warehouse_inventory",
-        params={
-            "select": "id,restaurant_id,product_name,quantity,unit,expiration_date,status,alert_triggers",
-            "expiration_date": f"lte.{warn_until.isoformat()}",
-            "quantity": "gt.0",
-            "limit": "500",
-        },
-    ) or []
-
-    batches = []
-    for r in rows:
-        try:
-            exp = _date.fromisoformat(str(r.get("expiration_date"))[:10])
-        except Exception:
-            continue
-        if exp < today:
-            continue
-        if float(r.get("quantity") or 0) <= 0:
-            continue
-        batches.append(r)
-
-    names = [str(b.get("product_name") or "") for b in batches if b.get("product_name")]
-    if names:
-        try:
-            await _guard_ai(needs_credits=False)
-            client = _openai()
-            resp = await client.chat.completions.create(
-                model=CHAT_MODEL,
-                temperature=0.4,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
-                            "zaproponuj jedno konkretne „Danie dnia” po polsku "
-                            "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
-                        ),
-                    },
-                    {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
-                ],
-            )
-            dish = (resp.choices[0].message.content or "").strip() or None
-        except Exception:
-            logging.exception("expiry job: dish suggestion failed")
-
-    for i, b in enumerate(batches):
-        exp = _date.fromisoformat(str(b["expiration_date"])[:10])
-        days_left = (exp - today).days
-        triggers = b.get("alert_triggers") or [7, 3, 1]
-        if not isinstance(triggers, list):
-            triggers = [7, 3, 1]
-        triggers_i = {int(x) for x in triggers if str(x).lstrip('-').isdigit() or isinstance(x, (int, float))}
-        if days_left not in triggers_i and days_left != 0:
-            continue
-        message = (
-            f"Produkt {b['product_name']} kończy ważność DZIŚ! Użyj go!"
-            if days_left == 0
-            else f"Produkt {b['product_name']} kończy ważność za {days_left} dni! Użyj go!"
-        )
-        logging.info("EXPIRY_ALERT %s", message)
-        alerts.append({
-            "restaurant_id": b.get("restaurant_id"),
-            "batch_id": b.get("id"),
-            "product_name": b.get("product_name"),
-            "days_left": days_left,
-            "alert_day": days_left,
-            "message": message,
-            "dish_of_the_day": dish if i == 0 else None,
-        })
-    if not alerts:
-        return alerts, dish
-
-    try:
-        await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
-    except Exception:
-        for a in alerts:
-            a.pop("alert_day", None)
-        try:
-            await sb_post(httpx_c, "warehouse_expiry_alerts", alerts)
-        except Exception:
-            logging.exception("expiry job: alert insert failed")
-
-    try:
-        profiles = await sb_get(
-            httpx_c,
-            "profiles",
-            params={
-                "select": "id",
-                "account_key": f"eq.{get_account_key()}",
-                "limit": "200",
-            },
-        ) or []
-        uids = [str(p.get("id")) for p in profiles if p.get("id")]
-        tokens: list[dict] = []
-        if uids:
-            tokens = await sb_get(
-                httpx_c,
-                "device_push_tokens",
-                params={
-                    "select": "token",
-                    "user_id": f"in.({','.join(uids)})",
-                    "limit": "500",
+    async def _suggest(names: list[str]) -> Optional[str]:
+        await _guard_ai(needs_credits=False)
+        client = _openai()
+        resp = await client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.4,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Jesteś szefem kuchni. Na podstawie produktów kończących ważność "
+                        "zaproponuj jedno konkretne „Danie dnia” po polsku "
+                        "(nazwa + 1 zdanie). Odpowiedz samym tekstem."
+                    ),
                 },
-            ) or []
-        push_msgs = []
-        for t in tokens:
-            tok = str(t.get("token") or "").strip()
-            if not tok:
-                continue
-            for a in alerts[:20]:
-                push_msgs.append({
-                    "to": tok,
-                    "title": "Termin przydatności",
-                    "body": a["message"],
-                    "sound": "default",
-                    "data": {"type": "expiry", "product_name": a.get("product_name")},
-                })
-        for i in range(0, len(push_msgs), 80):
-            chunk = push_msgs[i:i + 80]
-            if not chunk:
-                continue
-            await httpx_c.post(
-                "https://exp.host/--/api/v2/push/send",
-                json=chunk,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=30.0,
-            )
-    except Exception:
-        logging.exception("expiry job: Expo Push failed")
+                {"role": "user", "content": f"Produkty do wykorzystania: {', '.join(names)}"},
+            ],
+        )
+        return (resp.choices[0].message.content or "").strip() or None
 
-    return alerts, dish
+    return await run_expiry_alerts_for_tenant(
+        httpx_c,
+        today=today,
+        warn_until=warn_until,
+        account_key=get_account_key(),
+        suggest_dish_fn=_suggest,
+    )
 
 
 async def menu_scan(file: UploadFile = File(...)):
@@ -4908,216 +4515,15 @@ async def menu_suggest_recipe(req: SuggestRecipeRequest):
     )
 
 
-# --- 6b2) Inspiracje Kulinarne — pełny przepis AI + cache --------------------
-
-_INSPIRATION_CACHE_FILE = Path(__file__).parent / ".inspiration_recipe_cache.json"
-
-_INSPIRATION_SYSTEM = (
-    "You are a professional Head Chef and Food Technologist acting as an AI assistant "
-    "for a culinary mobile application's \"Inspirations\" section. Your task is to generate "
-    "a comprehensive, restaurant-quality recipe based ONLY on the Polish dish name provided "
-    "by the user.\n\n"
-    "CRITICAL RULES:\n"
-    "1. Language: You must always respond in Polish.\n"
-    "2. Output Format: You must return the data strictly as a valid JSON object. "
-    "Do not include any markdown formatting (like ```json) in the raw API response.\n"
-    "3. Scaling: Default measurements must be calculated for exactly 2 portions "
-    "(except for shared platters/boards, which should be scaled for 4-6 portions). "
-    "All ingredients must use strict metric units (g, ml, pcs, tbsp, tsp) as separate "
-    "numeric values and text labels to allow frontend scaling. "
-    "Use Polish unit labels: g, ml, szt, łyżeczka, łyżka.\n"
-    "3b. QUANTITIES (CRITICAL): base_quantity MUST be whole integers ≥ 1. "
-    "Never use fractions like 0.25. For spices/salt/pepper use at least 1–2 units "
-    "PER PORTION (so for 2 portions: base_quantity ≥ 2–4).\n"
-    "4. Tone: Impersonal verbs for steps (e.g., \"Pokroić\", \"Rozgrzać\")."
+# --- 6b2) Inspiracje Kulinarne — pełny przepis AI + cache (moduł) ------------
+from inspiration_recipes import (  # noqa: E402
+    InspirationIngredient,
+    InspirationIngredientSection,
+    InspirationRecipeRequest,
+    InspirationRecipeResponse,
+    inspiration_recipe,
+    normalize_inspiration_quantities as _normalize_inspiration_quantities,
 )
-
-_INSPIRATION_JSON_SCHEMA = {
-    "name": "InspirationRecipe",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "dish_name",
-            "prep_time_minutes",
-            "difficulty",
-            "default_portions",
-            "short_teaser",
-            "ingredients_sections",
-            "steps",
-            "chef_tip",
-        ],
-        "properties": {
-            "dish_name": {"type": "string"},
-            "prep_time_minutes": {"type": "integer"},
-            "difficulty": {"type": "string", "enum": ["Łatwy", "Średni", "Trudny"]},
-            "default_portions": {"type": "integer"},
-            "short_teaser": {"type": "string"},
-            "ingredients_sections": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["section_name", "ingredients"],
-                    "properties": {
-                        "section_name": {"type": "string"},
-                        "ingredients": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["name", "base_quantity", "unit"],
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "base_quantity": {"type": "number"},
-                                    "unit": {"type": "string"},
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-            "steps": {"type": "array", "items": {"type": "string"}},
-            "chef_tip": {"type": "string"},
-        },
-    },
-}
-
-
-def _inspiration_cache_key(slug: str, dish_name: str) -> str:
-    raw = (slug or "").strip().lower() or (dish_name or "").strip().lower()
-    return re.sub(r"\s+", "_", raw)
-
-
-def _read_inspiration_cache() -> dict:
-    try:
-        if _INSPIRATION_CACHE_FILE.exists():
-            return json.loads(_INSPIRATION_CACHE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-
-def _write_inspiration_cache(cache: dict) -> None:
-    try:
-        _INSPIRATION_CACHE_FILE.write_text(
-            json.dumps(cache, ensure_ascii=False, indent=0), encoding="utf-8"
-        )
-    except Exception as e:
-        logger.warning("inspiration cache write failed: %s", e)
-
-
-class InspirationRecipeRequest(BaseModel):
-    dish_name: str
-    slug: Optional[str] = None
-    force_refresh: bool = False
-
-
-class InspirationIngredient(BaseModel):
-    name: str
-    base_quantity: float
-    unit: str
-
-
-class InspirationIngredientSection(BaseModel):
-    section_name: str
-    ingredients: list[InspirationIngredient] = Field(default_factory=list)
-
-
-class InspirationRecipeResponse(BaseModel):
-    dish_name: str
-    prep_time_minutes: int
-    difficulty: str
-    default_portions: int
-    short_teaser: str
-    ingredients_sections: list[InspirationIngredientSection]
-    steps: list[str]
-    chef_tip: str
-    cached: bool = False
-    slug: Optional[str] = None
-    credits_deducted: int = 0
-    credits_remaining: Optional[int] = None
-
-
-async def inspiration_recipe(req: InspirationRecipeRequest):
-    """Pełny przepis JSON dla modułu Inspiracje — z cache po slug/nazwie."""
-    # Wymuś prawdziwy tenant (X-Account-Key / JWT) — nigdy nie debituj shared „default”.
-    require_tenant_account_key()
-    dish_name = (req.dish_name or "").strip()
-    if not dish_name:
-        raise HTTPException(status_code=400, detail="Podaj nazwę potrawy.")
-    slug = (req.slug or "").strip() or None
-    key = _inspiration_cache_key(slug or "", dish_name)
-
-    if not req.force_refresh:
-        cache = _read_inspiration_cache()
-        hit = cache.get(key)
-        if isinstance(hit, dict) and hit.get("dish_name"):
-            try:
-                cached_recipe = InspirationRecipeResponse(
-                    **{**hit, "cached": True, "slug": slug,
-                       "credits_deducted": 0, "credits_remaining": None}
-                )
-                _normalize_inspiration_quantities(cached_recipe)
-                return cached_recipe
-            except Exception:
-                pass
-
-    client = _openai()
-    await _guard_ai()
-
-    try:
-        resp = await client.chat.completions.create(
-            model=INSPIRATIONS_MODEL,
-            temperature=0.35,
-            messages=[
-                {"role": "system", "content": _INSPIRATION_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Wygeneruj przepis dla potrawy: {dish_name}. "
-                        "Zwróć wyłącznie JSON zgodny ze schematem."
-                    ),
-                },
-            ],
-            response_format={"type": "json_schema", "json_schema": _INSPIRATION_JSON_SCHEMA},
-        )
-    except APIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e.message}") from e
-    except OpenAIError as e:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"OpenAI: {e}") from e
-
-    billing = {"credits_deducted": 0, "credits_remaining": None}
-    async with httpx.AsyncClient(timeout=30.0, verify=_httpx_verify()) as httpx_c:
-        billing = await _bill_openai_response(
-            httpx_c, resp, endpoint="/api/inspirations/recipe", model=INSPIRATIONS_MODEL,
-            extras={"dish_name": dish_name, "slug": slug},
-        )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Model zwrócił nie-JSON: {e}: {raw[:200]}") from e
-
-    try:
-        recipe = InspirationRecipeResponse(
-            **data,
-            cached=False,
-            slug=slug,
-            credits_deducted=int(billing.get("credits_deducted") or 0),
-            credits_remaining=billing.get("credits_remaining"),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Niepoprawna struktura przepisu: {e}") from e
-
-    _normalize_inspiration_quantities(recipe)
-
-    cache = _read_inspiration_cache()
-    cache[key] = recipe.model_dump(exclude={"cached", "credits_deducted", "credits_remaining"})
-    _write_inspiration_cache(cache)
-    return recipe
 
 
 # --- 6c) Zapis zatwierdzonych potraw -----------------------------------------

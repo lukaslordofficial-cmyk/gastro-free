@@ -1,11 +1,6 @@
-/**
- * Cascading dish image matcher (waterfall):
- *  1) Exact / near-exact primaryName / alias
- *  2) Strict fallbackTags (main protein) + forbiddenTags
- *  3) Category placeholder (never packaging / warehouse crates)
- *
- * Runtime sanitization strips over-broad tags (np. „mięso pieczone” na frytkach).
- */
+import {
+  normalizeFoodName,
+} from '@/lib/foodNameNormalize';
 import type { DishImageEntry } from '@/lib/dishImagesCatalog';
 import {
   getLibraryEntryBySlug,
@@ -60,22 +55,7 @@ function getImageLibraryCached(): ImageLibraryEntry[] {
 }
 
 export function normalizeDishName(raw: string): string {
-  return raw
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    // Polskie znaki bez pełnej dekompozycji NFD (ł, ą, ę…)
-    .replace(/ł/g, 'l')
-    .replace(/ą/g, 'a')
-    .replace(/ę/g, 'e')
-    .replace(/ó/g, 'o')
-    .replace(/ń/g, 'n')
-    .replace(/ś/g, 's')
-    .replace(/ć/g, 'c')
-    .replace(/ź|ż/g, 'z')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return normalizeFoodName(raw);
 }
 
 /** Lekki stem PL dla mięs / części tuszy (udko↔udo, kaczki↔kaczka). */
@@ -749,9 +729,32 @@ export function categoryPlaceholderSlug(name: string, catalog: DishImageEntry[])
         ?? catalog.find((e) => /steak|kotlet|grill|mieso|roast|dinner|kebab/.test(e.storagePath) && !/soup|side|fries/.test(e.storagePath))?.slug;
     case 'sides':
       return pick('warzywa_grillowane', 'french_fries', 'coleslaw', 'mlode_ziemniaki');
-    case 'drink':
-      return pick('espresso', 'lemoniada_cytrynowa')
-        ?? catalog.find((e) => /coffee|tea|lemonade|juice/.test(e.storagePath))?.slug;
+    case 'drink': {
+      const n = normalizeDishName(name);
+      if (/\blemoniad/.test(n)) {
+        return pick('lemoniada_cytrynowa', 'lemoniada_dzbanek')
+          ?? catalog.find((e) => /lemoniad|lemonade/.test(e.storagePath + e.slug))?.slug;
+      }
+      if (/\b(sok|wyciskan|juice)\b/.test(n)) {
+        return pick('sok_pomaranczowy_miazsz', 'sok_pomaranczowy_karafka', 'sok_jablkowy_szklanka')
+          ?? catalog.find((e) => /sok|juice/.test(e.storagePath + e.slug) && !/kawa|coffee|latte/.test(e.storagePath))?.slug;
+      }
+      if (/\b(koktajl|cocktail)\b/.test(n)) {
+        return pick('mojito', 'aperol_spritz', 'milkshake_truskawkowy')
+          ?? catalog.find((e) => /cocktail|koktajl|milkshake|smoothie/.test(e.storagePath + e.slug) && !/kawa|coffee|latte|pierog|pyz|pasta|pizza/.test(e.storagePath + e.slug))?.slug;
+      }
+      if (/\bsmoothie\b/.test(n)) {
+        return pick('smoothie_owoce_lesne', 'smoothie_mango_banan', 'milkshake_truskawkowy')
+          ?? catalog.find((e) => /smoothie|milkshake/.test(e.storagePath + e.slug))?.slug;
+      }
+      if (/\b(kawa|espresso|latte|cappuccino|americano)\b/.test(n)) {
+        return pick('espresso', 'latte_klasyczne')
+          ?? catalog.find((e) => /coffee|kawa|espresso|latte/.test(e.storagePath))?.slug;
+      }
+      // Ogólny napój — nie domyślaj kawy (lemoniada/sok częściej w menu)
+      return pick('lemoniada_cytrynowa', 'sok_pomaranczowy_miazsz')
+        ?? catalog.find((e) => /lemoniad|lemonade|juice|smoothie|sok/.test(e.storagePath + e.slug))?.slug;
+    }
     default:
       return undefined;
   }

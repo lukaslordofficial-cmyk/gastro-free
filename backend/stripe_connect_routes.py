@@ -200,7 +200,8 @@ async def stripe_connect_status(producer_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Dystrybutor nie istnieje")
     p = rows[0]
     owner = (p.get("auth_user_id") or "").strip()
-    if owner and owner != uid:
+    # Bez przypisanego właściciela — nie udostępniaj statusu obcym zalogowanym.
+    if not owner or owner != uid:
         raise HTTPException(status_code=403, detail="To nie jest Twój profil dystrybutora")
     acct = producer_connect_id(p)
     return {

@@ -23,12 +23,12 @@ async def expiry_daily_job(request: Request):
     from datetime import date as _date, timedelta
 
     from server import (
-        _list_tenant_account_keys,
         _push_account_key,
         _reset_account_key,
         _run_expiry_alerts_for_tenant,
         get_account_key,
     )
+    from tenant_expiry_alerts import list_tenant_account_keys
 
     require_cron_secret(request)
     today = _date.today()
@@ -43,7 +43,7 @@ async def expiry_daily_job(request: Request):
         except Exception:
             logging.exception("expiry job: refresh_status RPC failed")
 
-        tenant_keys = await _list_tenant_account_keys(httpx_c)
+        tenant_keys = await list_tenant_account_keys(httpx_c)
         if not tenant_keys:
             fallback = (get_account_key() or "").strip()
             if fallback and fallback != "default":
@@ -75,12 +75,12 @@ async def expiry_daily_job(request: Request):
 async def manager_core_alerts_job(request: Request, push: bool = True):
     """Cron: alerty CORE dla każdego tenanta (+ opcjonalny Expo Push)."""
     from server import (
-        _list_tenant_account_keys,
         _push_account_key,
         _reset_account_key,
         _run_manager_core_alerts,
         get_account_key,
     )
+    from tenant_expiry_alerts import list_tenant_account_keys
 
     require_cron_secret(request)
     all_alerts: list[dict] = []
@@ -89,7 +89,7 @@ async def manager_core_alerts_job(request: Request, push: bool = True):
     tenants_done = 0
 
     async with httpx.AsyncClient(timeout=60.0, verify=httpx_verify()) as httpx_c:
-        tenant_keys = await _list_tenant_account_keys(httpx_c)
+        tenant_keys = await list_tenant_account_keys(httpx_c)
         if not tenant_keys:
             fallback = (get_account_key() or "").strip()
             if fallback and fallback != "default":

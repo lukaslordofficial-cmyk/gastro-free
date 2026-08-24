@@ -15,8 +15,8 @@ const PENDING_SESSION_KEY = 'stripe_pending_checkout_session';
 
 export type CheckoutKind = 'subscription' | 'topup';
 
-function makeIdempotencyKey(prefix: string): string {
-  return secureIdempotencyKey(prefix);
+function makeIdempotencyKey(prefix: string): string | undefined {
+  return secureIdempotencyKey(prefix) ?? undefined;
 }
 
 async function authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
@@ -43,55 +43,66 @@ export async function createCheckoutAndOpen(opts: {
   if (!BACKEND_URL) {
     return { ok: false, message: 'Brak EXPO_PUBLIC_BACKEND_URL — ustaw adres backendu (port 8001).' };
   }
-  const res = await fetch(`${BACKEND_URL}/api/billing/create-checkout-session`, {
-    method: 'POST',
-    headers: await authHeaders(),
-    body: JSON.stringify({
+  try {
+    const idem = makeIdempotencyKey(opts.kind);
+    const body: Record<string, unknown> = {
       kind: opts.kind,
       tier_level: opts.tier_level,
       package: opts.package,
-      idempotency_key: makeIdempotencyKey(opts.kind),
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    return {
-      ok: false,
-      message: data.detail || data.message || `Błąd Stripe (${res.status})`,
     };
-  }
+    if (idem) body.idempotency_key = idem;
 
-  // Istniejąca subskrypcja → backend zmienił plan w Stripe bez nowego Checkout
-  if (data.upgraded) {
+    const res = await fetch(`${BACKEND_URL}/api/billing/create-checkout-session`, {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || data.message || `Błąd Stripe (${res.status})`;
+      return {
+        ok: false,
+        message: typeof detail === 'string' ? detail : JSON.stringify(detail),
+      };
+    }
+
+    // Istniejąca subskrypcja → backend zmienił plan w Stripe bez nowego Checkout
+    if (data.upgraded) {
+      return {
+        ok: true,
+        upgraded: true,
+        message:
+          data.message
+          || 'Plan zaktualizowany. Nie musisz rezygnować z poprzedniego — został zastąpiony.',
+      };
+    }
+
+    const url = data.url as string | undefined;
+    const sessionId = data.id as string | undefined;
+    if (!url) return { ok: false, message: 'Stripe nie zwrócił URL Checkout.' };
+
+    if (sessionId) {
+      try {
+        await AsyncStorage.setItem(PENDING_SESSION_KEY, sessionId);
+      } catch { /* ignore */ }
+    }
+
+    const can = await Linking.canOpenURL(url);
+    if (!can && Platform.OS !== 'web') {
+      return { ok: false, message: 'Nie można otworzyć okna płatności Stripe.' };
+    }
+    await Linking.openURL(url);
     return {
       ok: true,
-      upgraded: true,
-      message: data.message || 'Plan zaktualizowany bez nowej płatności Checkout.',
+      url,
+      session_id: sessionId,
+      message:
+        'Otwarto Stripe Checkout. Po płatności wróć do aplikacji i kliknij „Potwierdź płatność”.',
     };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Nie udało się uruchomić płatności.';
+    return { ok: false, message: msg };
   }
-
-  const url = data.url as string | undefined;
-  const sessionId = data.id as string | undefined;
-  if (!url) return { ok: false, message: 'Stripe nie zwrócił URL Checkout.' };
-
-  if (sessionId) {
-    try {
-      await AsyncStorage.setItem(PENDING_SESSION_KEY, sessionId);
-    } catch { /* ignore */ }
-  }
-
-  const can = await Linking.canOpenURL(url);
-  if (!can && Platform.OS !== 'web') {
-    return { ok: false, message: 'Nie można otworzyć okna płatności Stripe.' };
-  }
-  await Linking.openURL(url);
-  return {
-    ok: true,
-    url,
-    session_id: sessionId,
-    message:
-      'Otwarto Stripe Checkout. Po płatności wróć do aplikacji i kliknij „Potwierdź płatność”.',
-  };
 }
 
 /** Backend pyta Stripe, czy sesja jest opłacona — i dopiero wtedy dolicza kredyty. */

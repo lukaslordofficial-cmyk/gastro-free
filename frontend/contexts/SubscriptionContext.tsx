@@ -86,9 +86,14 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
   }, [authReady, refresh]);
 
   const wrap = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
-    const result = await fn();
-    await refresh();
-    return result;
+    try {
+      const result = await fn();
+      await refresh();
+      return result;
+    } catch (e) {
+      await refresh();
+      throw e;
+    }
   }, [refresh]);
 
   const value = useMemo<SubscriptionContextValue>(() => {

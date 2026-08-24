@@ -141,6 +141,14 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
                         up_err,
                     )
 
+            replace_sub_id = None
+            if (
+                req.kind == "subscription"
+                and (sub.get("stripe_subscription_id") or "").startswith("sub_")
+            ):
+                # Nowy Checkout zastąpi starą subskrypcję po opłaceniu (bez ręcznej rezygnacji).
+                replace_sub_id = str(sub["stripe_subscription_id"])
+
             session = await create_checkout_session(
                 account_key=account_key,
                 kind=req.kind,
@@ -150,6 +158,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
                 cancel_url=cancel,
                 customer_id=customer_id,
                 idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+                replace_subscription_id=replace_sub_id,
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

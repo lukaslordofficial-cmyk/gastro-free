@@ -5,7 +5,7 @@ Data: 2026-07-25.
 ## Co zrobiono.
 
 | Zmiana | Efekt |.
-|--------|--------|
+|--------|--------|.
 | Profile EAS `preview` + `production` → `buildType: "app-bundle"` | Dystrybucja jako **AAB** (Play / wewnętrzny share EAS) |
 | Profil `preview-apk` | Opcjonalny APK gdy tester potrzebuje bezpośredniej instalacji |
 | `.easignore`: `frontend/assets/premium/dishes/_board_*.png` | ~1,8 MB arkuszy źródłowych **nie trafia** do AAB (nie są `require()` w appce) |

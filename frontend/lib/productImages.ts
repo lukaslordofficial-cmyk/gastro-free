@@ -269,7 +269,7 @@ export const SEAFOOD_CATALOG: ProductImageEntry[] = [
     slug: 'losos_stek_fillet',
     category: 'ryby_owoce_morza',
     labelPl: 'Łosoś stek / filet',
-    aliases: ['łosoś', 'losos', 'salmon', 'filet z łososia'],
+    aliases: ['łosoś', 'losos', 'salmon', 'filet z łososia', 'łosoś płat', 'łosoś surowy', 'łosoś filet', 'płat łososia'],
     storagePath: 'ryby/losos_stek_fillet.png',
   },
   {
@@ -873,7 +873,7 @@ export const DRINKS_CATALOG: ProductImageEntry[] = [
   { slug: 'red_bull_energetyk_puszka', category: 'napoje', labelPl: 'Red Bull', aliases: ['red bull', 'redbull'], storagePath: 'napoje/red_bull_energetyk_puszka.png', localAsset: require('@/assets/premium/drinks/red_bull_energetyk_puszka.webp') },
   { slug: 'monster_energetyk_puszka', category: 'napoje', labelPl: 'Monster', aliases: ['monster', 'monster energy'], storagePath: 'napoje/monster_energetyk_puszka.png', localAsset: require('@/assets/premium/drinks/monster_energetyk_puszka.webp') },
   { slug: 'sok_pomidorowy_szklanka', category: 'napoje', labelPl: 'Sok pomidorowy', aliases: ['sok pomidorowy', 'tomato juice'], storagePath: 'napoje/sok_pomidorowy_szklanka.png', localAsset: require('@/assets/premium/drinks/sok_pomidorowy_szklanka.webp') },
-  { slug: 'lemoniada_dzbanek', category: 'napoje', labelPl: 'Lemoniada', aliases: ['lemoniada', 'lemonade'], storagePath: 'napoje/lemoniada_dzbanek.png', localAsset: require('@/assets/premium/drinks/lemoniada_dzbanek.webp') },
+  { slug: 'lemoniada_dzbanek', category: 'napoje', labelPl: 'Lemoniada', aliases: ['lemoniada', 'lemonade', 'lemoniada domowa', 'lemoniada sezonowa'], storagePath: 'napoje/lemoniada_dzbanek.png', localAsset: require('@/assets/premium/drinks/lemoniada_dzbanek.webp') },
   { slug: 'somersby_cydr_butelka', category: 'napoje', labelPl: 'Cydr', aliases: ['somersby', 'cydr', 'cider'], storagePath: 'napoje/somersby_cydr_butelka.png', localAsset: require('@/assets/premium/drinks/somersby_cydr_butelka.webp') },
   { slug: 'snapple_lemoniada_butelka', category: 'napoje', labelPl: 'Snapple', aliases: ['snapple'], storagePath: 'napoje/snapple_lemoniada_butelka.png', localAsset: require('@/assets/premium/drinks/snapple_lemoniada_butelka.webp') },
   { slug: 'tropicana_sok_butelka', category: 'napoje', labelPl: 'Tropicana', aliases: ['tropicana'], storagePath: 'napoje/tropicana_sok_butelka.png', localAsset: require('@/assets/premium/drinks/tropicana_sok_butelka.webp') },
@@ -1281,14 +1281,15 @@ function resolveDishCategoryPlaceholder(
   return null;
 }
 
+import {
+  candidateAnchoredToQuery,
+  foodHeadToken,
+  FOOD_MODIFIER_TOKENS,
+  normalizeFoodName,
+} from '@/lib/foodNameNormalize';
+
 function normalizeName(raw: string): string {
-  return raw
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return normalizeFoodName(raw);
 }
 
 export type ResolvedProductImage = {
@@ -1443,7 +1444,8 @@ export function resolveProductImage(
       : new Set(excludeSlugs)
     : null;
   const hasExclude = !!(excluded && excluded.size > 0);
-  const cacheKey = `${preferDishes ? 'd' : 'i'}|${q}|${normalizeName(menuCategory ?? '')}`;
+  // v4: PL normalize + head-token anchors (łosoś płat ≠ butelka)
+  const cacheKey = `${preferDishes ? 'd4' : 'i4'}|${q}|${normalizeName(menuCategory ?? '')}`;
   if (!hasExclude) {
     const hit = RESOLVE_CACHE.get(cacheKey);
     if (hit !== undefined) return hit;
@@ -1511,6 +1513,7 @@ export function resolveProductImage(
   }
 
   const cookedHints = /\b(confitur|glazur|pieczon|grillowan|smazo|smazon|duszon|gotowan|sous.?vide|bbq|w sosie|z sosem)\b/.test(q);
+  const head = foodHeadToken(q);
 
   for (const pool of pools) {
     for (const entry of pool) {
@@ -1526,7 +1529,10 @@ export function resolveProductImage(
         if (q === c) score = Math.max(score, 100);
         else if (c.length >= 5 && q.length >= 5 && (q.includes(c) || c.includes(q))) {
           const cTok = c.split(' ').filter((t) => t.length > 2);
-          if (cTok.length >= 2 || c.length >= 10) {
+          // „łosoś” ⊂ „łosoś płat” — mocny anchor, nie 62
+          if (q.includes(c) && !FOOD_MODIFIER_TOKENS.has(c)) {
+            score = Math.max(score, 94);
+          } else if (cTok.length >= 2 || c.length >= 10) {
             score = Math.max(score, 85 + Math.min(c.length, 10));
           } else {
             score = Math.max(score, 62);
@@ -1540,9 +1546,40 @@ export function resolveProductImage(
           if (hit > 0) {
             let s = 50 + hit * 18;
             if (hit === 1 && qTokens.length >= 2) s = Math.min(s, 54);
+            // Hit tylko na modyfikatorze (np. „plat”) — prawie ignoruj
+            const hitOnlyModifiers = qTokens
+              .filter((t) => cTokens.some((ct) => tokensConflictSafe(t, ct)))
+              .every((t) => FOOD_MODIFIER_TOKENS.has(t));
+            if (hitOnlyModifiers) s = Math.min(s, 35);
             score = Math.max(score, s);
           }
         }
+      }
+      if (candidateAnchoredToQuery(q, [entry.labelPl, ...entry.aliases])) {
+        score = Math.max(score, 93);
+      }
+      // Kara: butelki / opakowania gdy zapytanie ma rdzeń spożywczy (łosoś, sok…)
+      if (head && isPackagingEntry(entry)) {
+        score = Math.min(score, 25);
+      }
+      if (
+        head &&
+        /butelka|snapple|tropicana|fiji|opakowan|karton|pojemnik/.test(
+          `${entry.slug} ${entry.storagePath}`.toLowerCase(),
+        ) &&
+        !new RegExp(`\\b${head}\\b`).test(normalizeName(entry.labelPl + ' ' + entry.aliases.join(' ')))
+      ) {
+        score = Math.min(score, 30);
+      }
+      // Napoje: lemoniada / sok / koktajl — nie kawa
+      if (/\blemoniad/.test(q) && /kawa|coffee|espresso|latte|herbata|tea/.test(`${entry.slug} ${entry.storagePath}`)) {
+        score = Math.min(score, 20);
+      }
+      if (/\b(sok|wyciskan|juice)\b/.test(q) && /kawa|coffee|espresso|latte/.test(`${entry.slug} ${entry.storagePath}`)) {
+        score = Math.min(score, 20);
+      }
+      if (/\b(koktajl|cocktail|smoothie)\b/.test(q) && /kawa|coffee|espresso|latte|pierog|pyz|pasta|pizza/.test(`${entry.slug} ${entry.storagePath}`)) {
+        score = Math.min(score, 20);
       }
       if (preferDishes && isCookedDishPath(entry) && score > 0) {
         score = Math.min(100, score + 6);
@@ -1554,8 +1591,10 @@ export function resolveProductImage(
         if (wantFamily === 'meat' && isSoup) score = Math.max(0, score - 45);
         else if (wantFamily === 'soups' && isMeat) score = Math.max(0, score - 45);
         else if (wantFamily === 'meat' && isMeat) score = Math.min(100, score + 8);
-        else if (wantFamily === 'drink' && /napoj|drink|woda|sok|kawa|tea/.test(path)) {
-          score = Math.min(100, score + 10);
+        else if (wantFamily === 'drink' && /napoj|drink|woda|sok|lemoniad|smoothie|cocktail|koktajl/.test(path)) {
+          score = Math.min(100, score + 12);
+        } else if (wantFamily === 'drink' && /kawa|coffee|espresso|latte/.test(path) && !/\bkawa\b/.test(q)) {
+          score = Math.max(0, score - 40);
         }
       }
       if (score > 0) ranked.push({ entry, score });
@@ -1720,7 +1759,7 @@ export function imageSourceForProduct(
   excludeSlugs?: Set<string> | string[],
 ): number | { uri: string } {
   const hasExclude = !!(excludeSlugs && (excludeSlugs instanceof Set ? excludeSlugs.size : excludeSlugs.length));
-  const srcKey = `i|${normalizeName(productName)}`;
+  const srcKey = `i4|${normalizeName(productName)}`;
   if (!hasExclude) {
     const cached = SOURCE_CACHE.get(srcKey);
     if (cached !== undefined) return cached;

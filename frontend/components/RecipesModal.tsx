@@ -140,6 +140,7 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
   const [busyVoice, setBusyVoice] = useState(false);
   const [recording, setRecording] = useState(false);
   const [scanSheetVisible, setScanSheetVisible] = useState(false);
+  const savingRef = useRef(false);
 
   const reload = useCallback(async () => {
     const list = await loadUserRecipes();
@@ -189,6 +190,7 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
   const previewAsset = useMemo(() => resolveThumb(name || 'danie', findSlugForName(name)), [name]);
 
   const handleSave = async () => {
+    if (savingRef.current) return;
     const trimmed = name.trim();
     if (!trimmed) {
       premiumAlert(
@@ -209,16 +211,24 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
       premiumAlert('Treść', 'Dodaj składniki albo wpisz / zeskanuj / wygłoś przepis.');
       return;
     }
-    const slug = findSlugForName(trimmed);
-    await saveUserRecipe({
-      name: trimmed,
-      imageSlug: slug,
-      ingredients,
-      instructions: instr,
-    });
-    resetAdd();
-    await reload();
-    setStage('grid');
+    savingRef.current = true;
+    try {
+      const slug = findSlugForName(trimmed);
+      await saveUserRecipe({
+        name: trimmed,
+        imageSlug: slug,
+        ingredients,
+        instructions: instr,
+      });
+      premiumAlert('Zapisano', `Receptura „${trimmed}” została dodana.`);
+      resetAdd();
+      await reload();
+      setStage('grid');
+    } catch (e: any) {
+      premiumAlert('Błąd zapisu', e?.message ?? 'Nie udało się zapisać receptury.');
+    } finally {
+      savingRef.current = false;
+    }
   };
 
   const handleDelete = (id: string) => {

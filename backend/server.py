@@ -1885,110 +1885,18 @@ from ingredient_name_norm import (
 )
 
 
-def _is_porcja_row(name: str) -> bool:
-    return _norm_name(name) in ("porcja", "porcje", "wielkosc porcji", "wielkość porcji",
-                                "wielkosc porc) i", "gramatura", "gramatura porcji")
-
-
-# ── Spójność jednostek składników zwracanych przez AI ────────────────────────
-# Bug: dla tego samego składnika (np. śmietana) AI raz zwracało g, raz ml,
-# przez co przelicznik porcji się sypał. Poniżej sprowadzamy KAŻDY składnik o tej
-# samej nazwie do JEDNEJ jednostki we WSZYSTKICH potrawach z danego skanu.
-_LIQUID_NAME_HINTS = (
-    "smietan", "śmietan", "mlek", "olej", "sos", "bulion", "wywar", "woda",
-    "sok", "krem", "ocet", "syrop", "wino", "piwo", "śmieta", "majonez",
-    "musztard", "ketchup", "passata", "przecier", "esencj", "napój", "napoj",
+from recipe_ingredient_units import (
+    LIQUID_NAME_HINTS as _LIQUID_NAME_HINTS,
+    apply_integer_quantities_to_dishes as _apply_integer_quantities_to_dishes,
+    canonicalize_ingredient_units as _canonicalize_ingredient_units,
+    is_porcja_row as _is_porcja_row_impl,
+    iter_ingredients as _iter_ingredients,
+    normalize_recipe_quantity as _normalize_recipe_quantity,
 )
 
 
-def _iter_ingredients(dish):
-    """Zwraca listę składników potrawy niezależnie od modelu (scan/suggest/confirm)."""
-    for attr in ("suggested_ingredients", "ingredients"):
-        val = getattr(dish, attr, None)
-        if val is not None:
-            return val
-    return []
-
-
-def _normalize_recipe_quantity(qty, unit: str = "") -> int:
-    """Ilości w recepturze: zawsze całkowite ≥ 1.
-    Ułamki typu 0.25 g pieprzu/soli → minimum 1 (idealnie 1–2 na porcję)."""
-    try:
-        q = float(qty)
-    except (TypeError, ValueError):
-        return 1
-    if q <= 0:
-        return 1
-    if q < 1:
-        return 1
-    return max(1, int(round(q)))
-
-
-def _apply_integer_quantities_to_dishes(dishes: list) -> None:
-    """In-place: quantity → int ≥ 1 dla suggest-recipe / confirm-scan.
-
-    Null quantity (OCR bez gramatury) → 1, żeby AI/skan nigdy nie zapisał 0.
-    """
-    for d in dishes:
-        for ing in _iter_ingredients(d):
-            if isinstance(ing, dict):
-                q = ing.get("quantity")
-                ing["quantity"] = _normalize_recipe_quantity(
-                    1 if q is None else q, ing.get("unit") or ""
-                )
-            else:
-                q = getattr(ing, "quantity", None)
-                setattr(
-                    ing,
-                    "quantity",
-                    _normalize_recipe_quantity(
-                        1 if q is None else q, getattr(ing, "unit", "") or ""
-                    ),
-                )
-
-
-def _canonicalize_ingredient_units(dishes: list) -> None:
-    """In-place: ujednolica jednostkę każdego składnika w obrębie całego skanu.
-    Wszystkie wystąpienia „śmietana” dostaną tę samą jednostkę (g LUB ml),
-    a ilości zostaną przeliczone 1:1 (g↔ml) / 1000 (kg→g, l→ml)."""
-    from collections import Counter
-    votes: dict[str, Counter] = {}
-    for d in dishes:
-        for ing in _iter_ingredients(d):
-            name = _norm_name(getattr(ing, "name", "") or "")
-            unit = getattr(ing, "unit", "") or ""
-            if not name or _canon_dim(unit) != "gml":
-                continue
-            u = unit.strip().lower().rstrip(".")
-            base = "g" if u in ("g", "gram", "gramy", "kg", "kilogram") else "ml"
-            votes.setdefault(name, Counter())[base] += 1
-
-    canon: dict[str, str] = {}
-    for name, ctr in votes.items():
-        top = ctr.most_common()
-        best = top[0][1]
-        tied = [u for u, c in top if c == best]
-        if len(tied) == 1:
-            canon[name] = tied[0]
-        else:
-            canon[name] = "ml" if any(h in name for h in _LIQUID_NAME_HINTS) else "g"
-
-    for d in dishes:
-        for ing in _iter_ingredients(d):
-            name = _norm_name(getattr(ing, "name", "") or "")
-            if name not in canon:
-                continue
-            target = canon[name]
-            cur = getattr(ing, "unit", "") or ""
-            q = getattr(ing, "quantity", None)
-            if q is not None and (cur or "").strip().lower().rstrip(".") != target:
-                conv = _convert_culinary(float(q), cur, target)
-                if conv is not None:
-                    try:
-                        ing.quantity = round(conv, 2)
-                    except Exception:  # noqa: BLE001
-                        pass
-            ing.unit = target
+def _is_porcja_row(name: str) -> bool:
+    return _is_porcja_row_impl(name, norm_name_fn=_norm_name)
 
 
 async def _apply_waste(client: httpx.AsyncClient, p: dict, transcript: Optional[str], source: str):
@@ -2079,6 +1987,31 @@ async def _apply_expiration_batch(client, p, transcript, source):
 
     inv_id = p.get("inventory_id") or p.get("related_id")
     inv_name = name
+    if inv_id:
+        # Nie ufaj ślepo related_id z LLM — musi pasować do nazwy produktu.
+        try:
+            rows = await sb_get(
+                client, "inventory_items",
+                params={"select": "id,name,quantity,unit", "id": f"eq.{inv_id}", "limit": "1"},
+            ) or []
+            if not rows:
+                inv_id = None
+            else:
+                claimed_name = str(rows[0].get("name") or "")
+                if name and not _food_names_compatible(name, claimed_name):
+                    warnings.append(
+                        f"Odrzucono niespójne ID magazynu ({claimed_name}) dla „{name}”."
+                    )
+                    inv_id = None
+                else:
+                    inv_name = claimed_name or name
+                    unit = rows[0].get("unit") or unit
+        except HTTPException:
+            raise
+        except Exception:
+            warnings.append("Nie udało się zweryfikować ID produktu — szukam po nazwie.")
+            inv_id = None
+
     if not inv_id:
         inv_all = await sb_get(client, "inventory_items", params={"select": "id,name,quantity,unit", "limit": "2000"}) or []
         best = None
@@ -2087,6 +2020,8 @@ async def _apply_expiration_batch(client, p, transcript, source):
         for row in inv_all:
             cand = _norm_pl(str(row.get("name") or ""))
             if not cand:
+                continue
+            if not _food_names_compatible(name, str(row.get("name") or "")):
                 continue
             score = max(float(fuzz.token_set_ratio(qn, cand)), float(fuzz.partial_ratio(qn, cand)))
             if score > best_score:
@@ -2103,20 +2038,6 @@ async def _apply_expiration_batch(client, p, transcript, source):
         inv_id = best["id"]
         inv_name = best.get("name") or name
         unit = (best.get("unit") or unit or "szt")
-    else:
-        try:
-            rows = await sb_get(
-                client, "inventory_items",
-                params={"select": "id,name,quantity,unit", "id": f"eq.{inv_id}", "limit": "1"},
-            ) or []
-            if not rows:
-                raise HTTPException(status_code=404, detail="Produkt nie istnieje w magazynie.")
-            inv_name = rows[0].get("name") or name
-            unit = rows[0].get("unit") or unit
-        except HTTPException:
-            raise
-        except Exception:
-            warnings.append("Nie udało się odczytać produktu — zapisuję partie dat.")
 
     saved_ids = []
     for b in batches:
@@ -4139,55 +4060,11 @@ class MenuScanDish(BaseModel):
     image_context_tags: list[str] = Field(default_factory=list)
 
 
-def _norm_pl_tag(raw: str) -> str:
-    import unicodedata
-    s = (raw or "").lower()
-    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-    s = re.sub(r"[^a-z0-9\s]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _extract_image_context_tags(name: str) -> list[str]:
-    """Heurystyczne tagi grafiki z nazwy dania (bez dodatkowego kosztu OpenAI)."""
-    n = _norm_pl_tag(name)
-    tags: list[str] = []
-    rules = [
-        (r"\bkaczk", ["kaczka", "drób", "mięso pieczone"]),
-        (r"\b(kurczak|chicken|de volaille)", ["kurczak", "drób"]),
-        (r"\bindyk", ["indyk", "drób"]),
-        (r"\b(wolow|beef|stek|ribeye|tatar)", ["wołowina", "mięso"]),
-        (r"\b(wieprz|schab|golonk|boczek|zeberk)", ["wieprzowina", "mięso"]),
-        (r"\b(ryb|losos|dorsz|pstrag|tunczyk|fish)", ["ryba"]),
-        (r"\b(wege|vegan|tofu|falafel)", ["wege"]),
-        (r"\b(zupa|rosol|barszcz|zurek|gazpacho|ramen|pho)", ["zupa"]),
-        (r"\bpomidor|tomato", ["pomidor", "czerwone"]),
-        (r"\bburger", ["burger"]),
-        (r"\bpizza", ["pizza"]),
-        (r"\b(makaron|pasta|spaghetti)", ["makaron"]),
-        (r"\bsalatk|salad", ["sałatka"]),
-        (r"\b(udko|udo)\b", ["udo", "pieczeń"]),
-        (r"\b(pieczon|roast|grill)", ["pieczeń", "mięso pieczone"]),
-        (r"\bchrupiac|crispy", ["chrupiące"]),
-        (r"\bjablk|apple", ["jabłko"]),
-        (r"\bpekin|peking", ["kaczka", "azja"]),
-        (r"\bsushi|nigiri|maki", ["sushi", "ryba"]),
-        (r"\b(deser|ciasto|lody|tiramisu)", ["deser"]),
-    ]
-    seen: set[str] = set()
-    for pattern, add in rules:
-        if re.search(pattern, n):
-            for t in add:
-                if t not in seen:
-                    seen.add(t)
-                    tags.append(t)
-    return tags
-
-
-def _attach_image_context_tags(dishes: list[MenuScanDish]) -> None:
-    for d in dishes:
-        if d.image_context_tags:
-            continue
-        d.image_context_tags = _extract_image_context_tags(d.name)
+from menu_image_context_tags import (
+    attach_image_context_tags as _attach_image_context_tags,
+    extract_image_context_tags as _extract_image_context_tags,
+    norm_pl_tag as _norm_pl_tag,
+)
 
 
 class MenuScanResponse(BaseModel):

@@ -1,10 +1,13 @@
 /**
  * Lokalne receptury użytkownika (kafelek Receptury w Menu).
+ * Storage scoped per account_key — bez wycieku między kontami na jednym telefonie.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { secureId } from '@/lib/secureId';
+import { claimLegacyStorageKey, tenantStorageKey } from '@/lib/tenantStorage';
 
-const KEY = '@gm/user_recipes_v1';
+const LEGACY_KEY = '@gm/user_recipes_v1';
+const KEY_PREFIX = '@gm/user_recipes_v2:';
 
 export type UserRecipeIngredient = {
   name: string;
@@ -26,9 +29,23 @@ export type UserRecipe = {
   updatedAt: string;
 };
 
+function storageKey(): string {
+  return tenantStorageKey(KEY_PREFIX);
+}
+
 async function readAll(): Promise<UserRecipe[]> {
   try {
-    const raw = await AsyncStorage.getItem(KEY);
+    const key = storageKey();
+    let raw = await AsyncStorage.getItem(key);
+    if (raw == null) {
+      raw = await claimLegacyStorageKey(
+        (k) => AsyncStorage.getItem(k),
+        (k, v) => AsyncStorage.setItem(k, v),
+        (k) => AsyncStorage.removeItem(k),
+        LEGACY_KEY,
+        key,
+      );
+    }
     if (!raw) return [];
     const parsed = JSON.parse(raw) as UserRecipe[];
     return Array.isArray(parsed) ? parsed : [];
@@ -38,14 +55,16 @@ async function readAll(): Promise<UserRecipe[]> {
 }
 
 async function writeAll(list: UserRecipe[]): Promise<void> {
-  await AsyncStorage.setItem(KEY, JSON.stringify(list));
+  await AsyncStorage.setItem(storageKey(), JSON.stringify(list));
 }
 
 export async function loadUserRecipes(): Promise<UserRecipe[]> {
   return readAll();
 }
 
-export async function saveUserRecipe(recipe: Omit<UserRecipe, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): Promise<UserRecipe> {
+export async function saveUserRecipe(
+  recipe: Omit<UserRecipe, 'id' | 'createdAt' | 'updatedAt'> & { id?: string },
+): Promise<UserRecipe> {
   const list = await readAll();
   const now = new Date().toISOString();
   if (recipe.id) {

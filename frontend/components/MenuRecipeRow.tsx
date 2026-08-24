@@ -30,6 +30,7 @@ import { emitRecipeIngredientsChanged } from '@/lib/recipeSync';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { bestProductMatch, ingredientDedupeKey } from '@/lib/fuzzyProductMatch';
 import { normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
+import { claimLegacyStorageKey, tenantStorageKey } from '@/lib/tenantStorage';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
   deleteRecipeIngredientIds,
@@ -42,14 +43,29 @@ import {
   updateRecipeIngredientRow,
 } from '@/services/menuRecipeService';
 
-const RECIPE_WH_MAP_KEY = '@gm/recipe_wh_map';
+const RECIPE_WH_MAP_LEGACY = '@gm/recipe_wh_map';
+const RECIPE_WH_MAP_PREFIX = '@gm/recipe_wh_map_v2:';
 const UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
 const PIECE_WEIGHT_HINT =
   'Pole nieobowiązkowe — wpisz, jeśli ten produkt kupujesz u dostawcy na wagę. Dzięki temu możliwe będzie monitorowanie stanu tego produktu na magazynie.';
 
+function recipeWhMapKey(): string {
+  return tenantStorageKey(RECIPE_WH_MAP_PREFIX);
+}
+
 async function loadSoftMap(): Promise<Record<string, string>> {
   try {
-    const raw = await AsyncStorage.getItem(RECIPE_WH_MAP_KEY);
+    const key = recipeWhMapKey();
+    let raw = await AsyncStorage.getItem(key);
+    if (raw == null) {
+      raw = await claimLegacyStorageKey(
+        (k) => AsyncStorage.getItem(k),
+        (k, v) => AsyncStorage.setItem(k, v),
+        (k) => AsyncStorage.removeItem(k),
+        RECIPE_WH_MAP_LEGACY,
+        key,
+      );
+    }
     return raw ? (JSON.parse(raw) as Record<string, string>) : {};
   } catch {
     return {};
@@ -57,7 +73,7 @@ async function loadSoftMap(): Promise<Record<string, string>> {
 }
 
 async function saveSoftMap(map: Record<string, string>) {
-  await AsyncStorage.setItem(RECIPE_WH_MAP_KEY, JSON.stringify(map));
+  await AsyncStorage.setItem(recipeWhMapKey(), JSON.stringify(map));
 }
 
 function normName(s: string) {

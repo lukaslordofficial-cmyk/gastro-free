@@ -39,7 +39,7 @@ async def menu_suggest_recipe(request: Request):
 @router.post("/api/inspirations/recipe")
 async def inspiration_recipe(request: Request):
     _tenant()
-    from server import InspirationRecipeRequest, inspiration_recipe as _impl
+    from inspiration_recipes import InspirationRecipeRequest, inspiration_recipe as _impl
     body = await request.json()
     return await _impl(InspirationRecipeRequest.model_validate(body))
 

@@ -1,11 +1,11 @@
 /**
  * Katalog ikon produktowych (mięso, ryby, …).
  *
- * Strategia wydajności:
- * - W APK/IPA NIE pakujemy setek PNG — tylko lekki katalog (slug + URL + aliasy).
- * - Obrazki lebą w publicznym buckecie Supabase `product-icons`.
+ * Strategia wydajności / koszt Railway:
+ * - Obrazki NIE idą przez backend Railway — zero transferu i CPU na ikony.
+ * - W APK/IPA: lokalne WebP (require) + publiczny bucket Supabase `product-icons`
+ *   (CDN Supabase; aplikacja ładuje URL bezpośrednio).
  * - expo-image cache'uje po URL; ładowanie dopiero gdy UI pokazuje produkt.
- * - Lokalne fallbacki (wymagają require) tylko dla offline/demo premium.
  */
 
 export type ProductImageCategory =

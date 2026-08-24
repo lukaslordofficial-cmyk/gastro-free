@@ -21,6 +21,8 @@ import { setAccountKey, getAccountKey, accountKeyFromUserId } from '@/lib/accoun
 import { polishAuthError } from '@/lib/authErrors';
 import * as authService from '@/services/authService';
 import type { UserProfile } from '@/services/authService';
+import { resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
+import { resetDishCustomImagesMemory } from '@/lib/dishCustomImages';
 
 export type { UserProfile };
 
@@ -83,10 +85,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!next?.user) {
         setProfile(null);
         setAccountKey('default');
+        resetMenuThumbCacheMemory();
+        resetDishCustomImagesMemory();
         return;
       }
       // Synchronicznie — zanim await — żeby SubscriptionContext / skany nie czytały „default".
       const immediateKey = accountKeyFromUserId(next.user.id);
+      if (getAccountKey() !== immediateKey) {
+        resetMenuThumbCacheMemory();
+        resetDishCustomImagesMemory();
+      }
       setAccountKey(immediateKey);
       try {
         const p = await ensureLocalProfile(next.user);
@@ -205,6 +213,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSession(null);
     setProfile(null);
     setAccountKey('default');
+    resetMenuThumbCacheMemory();
+    resetDishCustomImagesMemory();
   }, []);
 
   const refreshProfile = useCallback(async () => {

@@ -3,22 +3,26 @@
  *
  * Przepływ:
  * 1) PNG/JPG/HEIC z galerii/aparatu → resize (max krawędź 1280) + WebP ~0.8
- * 2) Zapis do FileSystem documentDirectory/dish-custom/{dishId}.webp
- * 3) Mapowanie dishId → file:// URI w AsyncStorage (@gm/dish_custom_images_v1)
+ * 2) Zapis do FileSystem documentDirectory/dish-custom/{account_key}/{dishId}.webp
+ * 3) Mapowanie dishId → file:// URI w AsyncStorage (@gm/dish_custom_images_v2:{account_key})
  *
- * Nie wysyłamy do Supabase w tym przebiegu — tylko lokalnie na urządzeniu.
+ * Nie wysyłamy do Railway ani Supabase — tylko lokalnie na urządzeniu (zero kosztu backendu).
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import { getAccountKey } from '@/lib/accountKey';
+import { claimLegacyStorageKey, tenantStorageKey } from '@/lib/tenantStorage';
 
-const KEY = '@gm/dish_custom_images_v1';
+const LEGACY_KEY = '@gm/dish_custom_images_v1';
+const KEY_PREFIX = '@gm/dish_custom_images_v2:';
 const MAX_EDGE = 1280;
 const WEBP_QUALITY = 0.8;
 
 export type DishCustomImageMap = Record<string, string>;
 
 let memory: DishCustomImageMap | null = null;
+let memoryAccountKey = '';
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -31,9 +35,14 @@ function notify() {
   }
 }
 
+function storageKey(): string {
+  return tenantStorageKey(KEY_PREFIX);
+}
+
 function customDir(): string {
   const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
-  return `${base}dish-custom/`;
+  const ak = (getAccountKey() || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${base}dish-custom/${ak}/`;
 }
 
 async function ensureCustomDir(): Promise<string> {
@@ -83,13 +92,33 @@ export function subscribeDishCustomImages(fn: () => void): () => void {
   return () => listeners.delete(fn);
 }
 
+/** Po przelogowaniu — wyczyść pamięć, żeby nie pokazać zdjęć innego konta. */
+export function resetDishCustomImagesMemory(): void {
+  memory = null;
+  memoryAccountKey = '';
+  notify();
+}
+
 export async function loadDishCustomImages(): Promise<DishCustomImageMap> {
-  if (memory) return memory;
+  const ak = getAccountKey() || 'default';
+  if (memory && memoryAccountKey === ak) return memory;
   try {
-    const raw = await AsyncStorage.getItem(KEY);
+    const key = storageKey();
+    let raw = await AsyncStorage.getItem(key);
+    if (raw == null) {
+      raw = await claimLegacyStorageKey(
+        (k) => AsyncStorage.getItem(k),
+        (k, v) => AsyncStorage.setItem(k, v),
+        (k) => AsyncStorage.removeItem(k),
+        LEGACY_KEY,
+        key,
+      );
+    }
     memory = raw ? (JSON.parse(raw) as DishCustomImageMap) : {};
+    memoryAccountKey = ak;
   } catch {
     memory = {};
+    memoryAccountKey = ak;
   }
   return memory;
 }
@@ -129,7 +158,8 @@ export async function setDishCustomImage(dishId: string, sourceUri: string): Pro
   const map = await loadDishCustomImages();
   map[id] = dest;
   memory = { ...map };
-  await AsyncStorage.setItem(KEY, JSON.stringify(memory));
+  memoryAccountKey = getAccountKey() || 'default';
+  await AsyncStorage.setItem(storageKey(), JSON.stringify(memory));
   notify();
   return dest;
 }
@@ -140,7 +170,8 @@ export async function clearDishCustomImage(dishId: string): Promise<void> {
   const uri = map[dishId];
   delete map[dishId];
   memory = { ...map };
-  await AsyncStorage.setItem(KEY, JSON.stringify(memory));
+  memoryAccountKey = getAccountKey() || 'default';
+  await AsyncStorage.setItem(storageKey(), JSON.stringify(memory));
   if (uri && uri.startsWith('file://')) {
     await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
   }

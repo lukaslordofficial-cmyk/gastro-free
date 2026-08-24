@@ -58,6 +58,7 @@ import {
   findSlugForDishName,
 } from '@/lib/dishImageMatch';
 import { fetchJson } from '@/lib/safeFetch';
+import { useAuth } from '@/contexts/AuthContext';
 
 const COLS = 2;
 const GAP = 10;
@@ -110,6 +111,7 @@ function findSlugForName(name: string): string | undefined {
 
 export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }: Props) {
   const theme = useAppTheme();
+  const { accountKey } = useAuth();
   const { alert: premiumAlert } = usePremiumAlert();
   const prem = theme.isPremium;
   const accent = prem ? DS.color.greenEnd : Colors.accent;
@@ -149,8 +151,11 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
       void reload();
       setStage('grid');
       setSelected(null);
+      resetAdd();
     }
-  }, [visible, reload]);
+    // accountKey: po przelogowaniu przeładuj listę tenanta (nie pokazuj receptur innego konta)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, reload, accountKey]);
 
   const cleanupWebMic = () => {
     try {
@@ -186,14 +191,17 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
   const handleSave = async () => {
     const trimmed = name.trim();
     if (!trimmed) {
-      premiumAlert('Nazwa', 'Podaj nazwę receptury.');
+      premiumAlert(
+        'Brak nazwy potrawy',
+        'Wpisz nazwę u góry formularza w polu „Nazwa potrawy” (to nie to samo co wiersz składnika). Potem kliknij Zapisz.',
+      );
       return;
     }
     const ingredients: UserRecipeIngredient[] = ings
-      .filter((i) => i.name.trim() && parseFloat(i.quantity) > 0)
+      .filter((i) => i.name.trim() && parseFloat(String(i.quantity).replace(',', '.')) > 0)
       .map((i) => ({
         name: i.name.trim(),
-        quantity: parseFloat(i.quantity.replace(',', '.')) || 0,
+        quantity: parseFloat(String(i.quantity).replace(',', '.')) || 0,
         unit: i.unit || 'g',
       }));
     const instr = instructions.trim();
@@ -479,13 +487,15 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
         {stage === 'add' && (
           <ScrollView contentContainerStyle={styles.formPad} keyboardShouldPersistTaps="handled">
             <Image source={previewAsset} style={styles.previewImg} resizeMode="contain" />
-            <Text style={[styles.fieldLabel, { color: muted }]}>Nazwa potrawy</Text>
+            <Text style={[styles.fieldLabel, { color: muted }]}>Nazwa potrawy (wymagana)</Text>
             <TextInput
               style={[styles.input, { backgroundColor: card, borderColor: border, color: text }]}
               value={name}
               onChangeText={setName}
               placeholder="np. Margherita"
               placeholderTextColor={muted}
+              testID="recipe-dish-name"
+              autoCorrect={false}
             />
             <Text style={[styles.fieldLabel, { color: muted, marginTop: 14 }]}>Składniki</Text>
             {ings.map((ing, idx) => (
@@ -496,7 +506,7 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
                   onChangeText={(v) =>
                     setIngs((prev) => prev.map((p, i) => (i === idx ? { ...p, name: v } : p)))
                   }
-                  placeholder="Nazwa"
+                  placeholder="Składnik"
                   placeholderTextColor={muted}
                 />
                 <TextInput

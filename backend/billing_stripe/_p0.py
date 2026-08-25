@@ -1,20 +1,22 @@
+from __future__ import annotations
+
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from http_ssl import httpx_verify as _ssl_verify
+from typing import Any
+from typing import Optional
+from urllib.parse import urlencode
+import httpx
+import logging
+import os
+
 """
 Bezpieczna integracja Stripe Checkout + Webhooks.
 Kredyty i tiery zmienia WYŁĄCZNIE webhook (nigdy sygnał z aplikacji).
 
 Na Windows używamy httpx + systemowy SSL (jak OpenAI), bo certifi bywa zepsute.
 """
-from __future__ import annotations
-
-import logging
-import os
-from datetime import datetime, timezone, timedelta
-from typing import Any, Optional
-from urllib.parse import urlencode
-
-import httpx
-
-from http_ssl import httpx_verify as _ssl_verify
 
 logger = logging.getLogger("billing.stripe")
 
@@ -690,3 +692,5 @@ async def handle_stripe_event(
     if event_id:
         await _mark_processed(client, sb_post, event_id, event_type)
     return result
+
+__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'upgrade_existing_subscription']

@@ -61,7 +61,11 @@ export function IngredientRow({
 }) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
-  const showSuggestions = draft.name.length >= 2 && suggestions.length > 0;
+  // Po wybraniu podpowiedzi nazwa == podpowiedź → odfiltruj dokładne trafienie,
+  // dzięki czemu lista znika po podstawieniu (a nie „wisi” dalej).
+  const nameKey = draft.name.trim().toLowerCase();
+  const filteredSuggestions = suggestions.filter((s) => s.trim().toLowerCase() !== nameKey);
+  const showSuggestions = draft.name.length >= 2 && filteredSuggestions.length > 0;
   const inputPrem = prem
     ? {
         backgroundColor: DS.color.bgTertiary,
@@ -95,7 +99,7 @@ export function IngredientRow({
             </View>
             {showSuggestions && (
               <View style={[ingStyles.suggestionsBox, prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle }]}>
-                {suggestions.slice(0, 5).map((s) => (
+                {filteredSuggestions.slice(0, 5).map((s) => (
                   <TouchableOpacity
                     key={s}
                     style={ingStyles.suggestionRow}

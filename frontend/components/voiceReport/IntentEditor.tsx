@@ -168,27 +168,29 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
           </View>
         </View>
         {produce && (edited.unit === 'szt' || edited.unit === 'op' || edited.unit === 'kg' || !edited.unit) ? (
-          <ProduceSizePicker
-            converter={produce}
-            counts={sizeCounts}
-            onChangeCounts={(next) => {
-              const tot = mixedPiecesToKg(next, produce);
-              patch({
-                produce_size_counts: next,
-                produce_size: (['S', 'M', 'L'] as ProduceSizeKey[])
-                  .filter((k) => (tot.counts[k] || 0) > 0)
-                  .map((k) => `${tot.counts[k]}×${k}`)
-                  .join('+') || null,
-                unit: 'szt',
-                quantity: tot.pieces > 0 ? tot.pieces : edited.quantity,
-              });
-            }}
-          />
-          {mixedPreview && mixedPreview.pieces > 0 ? (
-            <Text style={styles.editHint2}>
-              Razem ≈ {mixedPreview.kg} kg ({mixedPreview.pieces} szt.)
-            </Text>
-          ) : null}
+          <>
+            <ProduceSizePicker
+              converter={produce}
+              counts={sizeCounts}
+              onChangeCounts={(next) => {
+                const tot = mixedPiecesToKg(next, produce);
+                patch({
+                  produce_size_counts: next,
+                  produce_size: (['S', 'M', 'L'] as ProduceSizeKey[])
+                    .filter((k) => (tot.counts[k] || 0) > 0)
+                    .map((k) => `${tot.counts[k]}×${k}`)
+                    .join('+') || null,
+                  unit: 'szt',
+                  quantity: tot.pieces > 0 ? tot.pieces : edited.quantity,
+                });
+              }}
+            />
+            {mixedPreview && mixedPreview.pieces > 0 ? (
+              <Text style={styles.editHint2}>
+                Razem ≈ {mixedPreview.kg} kg ({mixedPreview.pieces} szt.)
+              </Text>
+            ) : null}
+          </>
         ) : null}
         {isDish && (
           <Text style={styles.editHint2}>

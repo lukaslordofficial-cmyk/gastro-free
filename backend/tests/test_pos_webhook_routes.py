@@ -19,12 +19,16 @@ def test_pos_webhook_models():
 
 
 def test_single_recompute_definition():
+    import importlib
     import server as srv
 
-    src = inspect.getsource(srv)
-    # dokładnie jedna definicja (pełna), bez cienia stubu
+    # Po podziale monolitu funkcja mieszka w module domenowym; sprawdzamy tam,
+    # że istnieje dokładnie jedna pełna definicja (bez cienia/stubu).
+    fn = srv._recompute_menu_availability
+    mod = importlib.import_module(fn.__module__)
+    src = inspect.getsource(mod)
     assert src.count("async def _recompute_menu_availability") == 1
-    sig = inspect.signature(srv._recompute_menu_availability)
+    sig = inspect.signature(fn)
     assert "changed_inventory_ids" in sig.parameters
 
 

@@ -65,18 +65,24 @@ export async function saveOrderItems(orderId: string, rows: Row[], notes: string
 }
 
 export async function fetchGlobalBasket(): Promise<{ offerItems: Row[]; drafts: Row[] }> {
+  const accountKey = getAccountKey();
+  const draftsQuery = supabase
+    .from('supplier_orders')
+    .select(
+      'id, supplier_id, notes, status, suppliers(name, email), supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net)',
+    )
+    .eq('status', 'draft')
+    .order('created_at', { ascending: false });
+  // RLS i tak filtruje, ale jawny filtr chroni przed wyciekiem na 'default'
+  if (accountKey && accountKey !== 'default') {
+    draftsQuery.eq('account_key', accountKey);
+  }
   const [{ data: offerData }, { data: drafts }] = await Promise.all([
     supabase
       .from('supplier_offer_items')
       .select('id, supplier_id, raw_product_name, price_net, unit, suppliers(name, icon_color)')
       .order('raw_product_name'),
-    supabase
-      .from('supplier_orders')
-      .select(
-        'id, supplier_id, notes, status, suppliers(name, email), supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net)',
-      )
-      .eq('status', 'draft')
-      .order('created_at', { ascending: false }),
+    draftsQuery,
   ]);
   return { offerItems: offerData ?? [], drafts: drafts ?? [] };
 }
@@ -89,23 +95,11 @@ function emitBasketChanged(): void {
   }
 }
 
-/** Draft → sent (Przygotowywane) + wyczyść pozostałe drafty tego dostawcy z koszyka. */
+/** Draft → sent (Przygotowywane). Tylko ten konkretny szkic — nie kasuj innych koszyków
+ * tego samego dostawcy (użytkownik mógł zapisać kilka niezależnych draftów). */
 export async function markDraftSent(orderId: string): Promise<void> {
-  const { data: row } = await supabase
-    .from('supplier_orders')
-    .select('id, supplier_id')
-    .eq('id', orderId)
-    .maybeSingle();
   const { error } = await supabase.from('supplier_orders').update({ status: 'sent' }).eq('id', orderId);
   if (error) throw error;
-  const sid = (row as { supplier_id?: string } | null)?.supplier_id;
-  if (sid) {
-    await supabase
-      .from('supplier_orders')
-      .update({ status: 'sent' })
-      .eq('supplier_id', sid)
-      .eq('status', 'draft');
-  }
   emitBasketChanged();
 }
 

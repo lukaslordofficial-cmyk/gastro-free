@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  DeviceEventEmitter,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import {
@@ -64,6 +65,7 @@ import {
 } from '@/lib/bargainHunter';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { withAccountKey } from '@/lib/tenantScope';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import {
   type DealHunterSearchScope,
@@ -521,11 +523,13 @@ export function DealHunterModal({
 
         const { data: order, error: orderErr } = await supabase
           .from('supplier_orders')
-          .insert({
-            supplier_id: g.supplier_id,
-            status: 'draft',
-            notes: null,
-          })
+          .insert(
+            withAccountKey({
+              supplier_id: g.supplier_id,
+              status: 'draft',
+              notes: null,
+            }),
+          )
           .select('id')
           .single();
         if (orderErr || !order) throw orderErr ?? new Error('Nie utworzono koszyka');
@@ -552,12 +556,15 @@ export function DealHunterModal({
         saved += 1;
       }
       lastDraftFpRef.current = fp;
+      try {
+        DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
+      } catch { /* ignore */ }
       const parts: string[] = [];
       if (saved) parts.push(`${saved} szkic(ów) u hurtowników (Dostawcy → Koszyk)`);
       if (savedLocal) parts.push(`${savedLocal} szkic(ów) u lokalnych przetwórców`);
       setDraftSavedInfo(
         parts.length
-          ? `Utworzono: ${parts.join(' · ')}.`
+          ? `Utworzono: ${parts.join(' · ')}. Otwórz Dostawcy → Koszyk, żeby zobaczyć zapis.`
           : 'Brak koszyków do zapisania.',
       );
     } catch (e: any) {
@@ -926,14 +933,20 @@ export function DealHunterModal({
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
         if (m.supplier_id) {
           try {
-            const { data } = await supabase
+            const ak = getAccountKey();
+            let q = supabase
               .from('supplier_orders')
               .select('id')
               .eq('supplier_id', m.supplier_id)
               .eq('status', 'draft');
+            if (ak && ak !== 'default') q = q.eq('account_key', ak);
+            const { data } = await q;
             const ids = (data || []).map((r: { id: string }) => r.id);
             if (ids.length) {
               await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+              try {
+                DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
+              } catch { /* ignore */ }
             }
           } catch {
             /* best-effort */
@@ -965,14 +978,20 @@ export function DealHunterModal({
       setSendStatus((s) => ({ ...s, [key]: 'sent' }));
       if (m.supplier_id) {
         try {
-          const { data } = await supabase
+          const ak = getAccountKey();
+          let q = supabase
             .from('supplier_orders')
             .select('id')
             .eq('supplier_id', m.supplier_id)
             .eq('status', 'draft');
+          if (ak && ak !== 'default') q = q.eq('account_key', ak);
+          const { data } = await q;
           const ids = (data || []).map((r: { id: string }) => r.id);
           if (ids.length) {
             await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+            try {
+              DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
+            } catch { /* ignore */ }
           }
         } catch {
           /* best-effort */
@@ -1034,21 +1053,74 @@ export function DealHunterModal({
     const ctaBg = C.isPremium ? '#5CFFB0' : C.accent;
     const ctaFg = C.isPremium ? '#0A0A0A' : C.white;
 
-    // Notka „brak” — TYLKO produkty, których NIE MA w ofercie żadnego dostawcy
-    // (found=false). Nie pokazuj produktów odrzuconych przez reguły min. zamówienia.
-    const missingNotes: string[] = (() => {
-      if (!result) return [];
-      const seen = new Set<string>();
-      const out: string[] = [];
+    // Braki: (1) nie ma w katalogach, (2) są w katalogu, ale nie weszły do koszyka (min. zamówienia itd.)
+    const { catalogMissing, basketMissing } = (() => {
+      const catalog: string[] = [];
+      const basket: string[] = [];
+      const seenCat = new Set<string>();
+      const seenBasket = new Set<string>();
+      const pushUnique = (list: string[], seen: Set<string>, name: string) => {
+        const n = String(name || '').trim();
+        const key = n.toLowerCase();
+        if (!n || seen.has(key)) return;
+        seen.add(key);
+        list.push(n);
+      };
+
+      if (!result) return { catalogMissing: catalog, basketMissing: basket };
+
       for (const r of result.items_requested ?? []) {
         if (r.found) continue;
+        pushUnique(catalog, seenCat, r.product_name);
+      }
+      for (const name of result.not_found_products ?? []) {
+        pushUnique(catalog, seenCat, name);
+      }
+
+      // Braki scenariusza (znalezione, ale nie przypisane do koszyka)
+      const opt = effectiveSelectedOption;
+      let scenarioMissing: string[] = [];
+      if (opt === 'split_max' || opt === 'monolith' || opt === 'smart_hybrid') {
+        const sc =
+          (result.scenarios ?? []).find((s) => s.id === opt)
+          ?? (opt === 'split_max' ? result.scenario_split_max : null)
+          ?? (opt === 'monolith' ? result.scenario_monolith : null)
+          ?? (opt === 'smart_hybrid' ? result.scenario_smart_hybrid : null);
+        scenarioMissing = sc?.missing ?? [];
+      } else if (opt === 'optimized') {
+        scenarioMissing =
+          result.option_optimized?.missing
+          ?? result.variant_split?.missing
+          ?? [];
+      } else if (opt === 'all_one') {
+        scenarioMissing =
+          result.option_all_one?.missing
+          ?? result.best_option?.missing
+          ?? [];
+      }
+      for (const name of scenarioMissing) {
+        pushUnique(basket, seenBasket, name);
+      }
+
+      // Pozycje „found” których nie ma w aktualnych grupach koszyka
+      const inCart = new Set<string>();
+      for (const g of groups) {
+        for (const it of g.items ?? []) {
+          const k = String(it.product_name || '').trim().toLowerCase();
+          if (k) inCart.add(k);
+        }
+      }
+      for (const r of result.items_requested ?? []) {
+        if (!r.found) continue;
         const name = String(r.product_name || '').trim();
         const key = name.toLowerCase();
-        if (!name || seen.has(key)) continue;
-        seen.add(key);
-        out.push(name);
+        if (!name || inCart.has(key) || seenCat.has(key)) continue;
+        pushUnique(basket, seenBasket, name);
       }
-      return out;
+
+      // Nie duplikuj nazw już w „brak w katalogu”
+      const basketFiltered = basket.filter((n) => !seenCat.has(n.toLowerCase()));
+      return { catalogMissing: catalog, basketMissing: basketFiltered };
     })();
     const packNotes: string[] = Array.isArray((result as any)?.pack_adjustment_notes)
       ? ((result as any).pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
@@ -1221,13 +1293,35 @@ export function DealHunterModal({
             ))}
           </View>
         ) : null}
-        {missingNotes.length > 0 ? (
-          <View style={styles.missingBox} testID="deal-hunter-missing-notes">
+        {catalogMissing.length > 0 || basketMissing.length > 0 ? (
+          <Text style={[styles.editCartHint, { marginBottom: 6 }]} testID="deal-hunter-missing-count">
+            Braki łącznie: {catalogMissing.length + basketMissing.length}
+            {result?.items_requested?.length
+              ? ` z ${result.items_requested.length} pozycji`
+              : ''}
+          </Text>
+        ) : null}
+        {catalogMissing.length > 0 ? (
+          <View style={styles.missingBox} testID="deal-hunter-missing-catalog">
             <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
-              Tych produktów nie ma w kategoriach twoich dostawców.
+              Brak w katalogach dostawców ({catalogMissing.length})
             </Text>
-            {missingNotes.map((name) => (
-              <Text key={name} style={styles.missingName} numberOfLines={2}>
+            {catalogMissing.map((name) => (
+              <Text key={`cat-${name}`} style={styles.missingName} numberOfLines={2}>
+                • {name}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+        {basketMissing.length > 0 ? (
+          <View style={styles.missingBox} testID="deal-hunter-missing-basket">
+            <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
+              Znalezione, ale nie weszły do koszyka ({basketMissing.length})
+              {'\n'}
+              (np. za daleko do minimum zamówienia albo reguły optymalizacji)
+            </Text>
+            {basketMissing.map((name) => (
+              <Text key={`bask-${name}`} style={styles.missingName} numberOfLines={2}>
                 • {name}
               </Text>
             ))}

@@ -37,6 +37,7 @@ import { formatPlnNumber } from '@/lib/format';
 import { fetchOrderEmailTemplate } from '@/lib/orderEmailTemplate';
 import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
+import { withAccountKey } from '@/lib/tenantScope';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   checkSupplierMinOrder,
@@ -261,11 +262,13 @@ export function OrderModal({
     try {
       const { data: order, error: orderErr } = await supabase
         .from('supplier_orders')
-        .insert({
-          supplier_id: supplierId,
-          status: 'draft',
-          notes: notes.trim() || null,
-        })
+        .insert(
+          withAccountKey({
+            supplier_id: supplierId,
+            status: 'draft',
+            notes: notes.trim() || null,
+          }),
+        )
         .select()
         .single();
       if (orderErr || !order) throw orderErr ?? new Error('Błąd zapisu koszyka');
@@ -280,6 +283,10 @@ export function OrderModal({
       }));
       const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
       if (itemsErr) throw itemsErr;
+
+      try {
+        DeviceEventEmitter.emit(SUPPLIER_BASKET_CHANGED);
+      } catch { /* ignore */ }
 
       alert('Dodano do koszyka', `Zapisano na później · ${cartItems.length} poz.`, [
         { text: 'OK', style: 'primary', onPress: onClose },
@@ -319,11 +326,13 @@ export function OrderModal({
       // status=sent → panel Zamówienia / Przygotowywane (po przejściu do maila)
       const { data: order, error: orderErr } = await supabase
         .from('supplier_orders')
-        .insert({
-          supplier_id: supplierId,
-          status: 'sent',
-          notes: notes.trim() || null,
-        })
+        .insert(
+          withAccountKey({
+            supplier_id: supplierId,
+            status: 'sent',
+            notes: notes.trim() || null,
+          }),
+        )
         .select()
         .single();
       if (orderErr || !order) throw orderErr ?? new Error('Błąd tworzenia zamówienia');
@@ -339,12 +348,7 @@ export function OrderModal({
       const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
       if (itemsErr) throw itemsErr;
 
-      // Koszyk (drafty) → już w „Przygotowywane”
-      await supabase
-        .from('supplier_orders')
-        .update({ status: 'sent' })
-        .eq('supplier_id', supplierId)
-        .eq('status', 'draft');
+      // Nie przenoś innych niezależnych draftów tego dostawcy — tylko ten flow z OrderModal
       try {
         DeviceEventEmitter.emit(SUPPLIER_BASKET_CHANGED);
       } catch {

@@ -169,6 +169,30 @@ export function piecesToKg(pieceCount: number, tier: ProduceSizeTier): {
   };
 }
 
+export type ProduceSizeCounts = Partial<Record<ProduceSizeKey, number>>;
+
+/** Sumuje mieszane rozmiary: np. 2S + 2M + 2L → sztuki + przybliżona waga. */
+export function mixedPiecesToKg(
+  counts: ProduceSizeCounts,
+  converter: ProduceConverter,
+): { pieces: number; grams: number; kg: number; counts: Record<ProduceSizeKey, number> } {
+  const normalized: Record<ProduceSizeKey, number> = { S: 0, M: 0, L: 0 };
+  let pieces = 0;
+  let grams = 0;
+  for (const tier of converter.sizes) {
+    const n = Math.max(0, Math.floor(Number(counts[tier.key]) || 0));
+    normalized[tier.key] = n;
+    pieces += n;
+    grams += n * tier.avgWeightG;
+  }
+  return {
+    pieces,
+    grams: Math.round(grams * 10) / 10,
+    kg: Math.round((grams / 1000) * 1000) / 1000,
+    counts: normalized,
+  };
+}
+
 /** Whether waste UI should offer the size picker (ingredient + piece-like unit). */
 export function shouldOfferSizeConverter(
   itemType: string | null | undefined,

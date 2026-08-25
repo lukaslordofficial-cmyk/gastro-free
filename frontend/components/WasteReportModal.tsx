@@ -26,10 +26,13 @@ import { supabase } from '@/lib/supabase';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import {
   findProduceConverter,
-  piecesToKg,
+  formatKg,
+  mixedPiecesToKg,
+  type ProduceSizeCounts,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
 import { rankCatalogForTyping } from '@/lib/fuzzyProductMatch';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 
 const BACKEND_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ??
@@ -137,7 +140,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [okMsg, setOkMsg] = useState<string | null>(null);
-  const [produceSize, setProduceSize] = useState<ProduceSizeKey | null>(null);
+  const [produceCounts, setProduceCounts] = useState<ProduceSizeCounts>({});
   const [convertedKg, setConvertedKg] = useState<number | null>(null);
   const [catalog, setCatalog] = useState<CatalogRow[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -338,7 +341,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     setReason('');
     setError(null);
     setOkMsg(null);
-    setProduceSize(null);
+    setProduceCounts({});
     setConvertedKg(null);
     setPieceWeight('');
   }
@@ -348,7 +351,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     setSelected(s);
     setQuery(s.name);
     setSuggestions([]);
-    setProduceSize(null);
+    setProduceCounts({});
     setConvertedKg(null);
     setError(null);
     if (findProduceConverter(s.name)) {
@@ -371,7 +374,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
     setError(null);
     setOkMsg(null);
     const name = (selected?.name || query).trim();
-    const qty = parseFloat(quantity.replace(',', '.'));
+    let qty = parseFloat(quantity.replace(',', '.'));
     if (!name) {
       setError('Wpisz nazwę potrawy lub składnika.');
       return;
@@ -380,26 +383,29 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       setError('Wybierz pozycję z podpowiedzi (po pierwszej literze).');
       return;
     }
-    if (!Number.isFinite(qty) || qty <= 0) {
-      setError('Podaj poprawną ilość.');
-      return;
-    }
 
-    // Size→kg: when user picked visual size for produce in pieces, deduct kg
+    // Size→kg: mieszane rozmiary (np. 2S+2M+2L) → suma kg do magazynu
     let saveQty = qty;
     let saveUnit = unit;
     let pieceWeightG: number | null = null;
-    if (produceConverter && produceSize && (unit === 'szt' || unit === 'op')) {
-      const tier = produceConverter.sizes.find((s) => s.key === produceSize);
-      if (tier) {
-        const conv = piecesToKg(qty, tier);
-        saveQty = conv.kg;
+    let mixed: ReturnType<typeof mixedPiecesToKg> | null = null;
+    if (produceConverter && (unit === 'szt' || unit === 'op' || unit === 'kg')) {
+      mixed = mixedPiecesToKg(produceCounts, produceConverter);
+      if (mixed.pieces > 0) {
+        qty = mixed.pieces;
+        saveQty = mixed.kg;
         saveUnit = 'kg';
       }
-    } else if (produceSize && convertedKg != null && convertedKg > 0) {
-      saveQty = convertedKg;
-      saveUnit = 'kg';
-    } else if ((unit === 'szt' || unit === 'op') && pieceWeight.trim()) {
+    }
+    if ((!Number.isFinite(qty) || qty <= 0) && !(mixed && mixed.pieces > 0)) {
+      setError('Podaj poprawną ilość albo ustaw sztuki przy rozmiarach S/M/L.');
+      return;
+    }
+    if (produceConverter && (unit === 'szt' || unit === 'op') && (!mixed || mixed.pieces <= 0)) {
+      setError('Ustaw liczbę sztuk przy rozmiarach S/M/L (możesz mieszać, np. 2 małe + 2 duże).');
+      return;
+    }
+    if (!(mixed && mixed.pieces > 0) && (unit === 'szt' || unit === 'op') && pieceWeight.trim()) {
       const pw = parseFloat(pieceWeight.replace(',', '.'));
       if (Number.isFinite(pw) && pw > 0) {
         pieceWeightG = pw;
@@ -414,6 +420,13 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           : itemType === 'dish'
             ? 'dish'
             : 'ingredient';
+      const sizeBreakdown =
+        mixed && mixed.pieces > 0
+          ? (['S', 'M', 'L'] as ProduceSizeKey[])
+              .filter((k) => (mixed!.counts[k] || 0) > 0)
+              .map((k) => `${mixed!.counts[k]}×${k}`)
+              .join(' + ')
+          : null;
       const res = await fetch(`${BACKEND_URL}/api/actions/apply`, {
         method: 'POST',
         headers: await apiJsonHeaders(),
@@ -429,11 +442,12 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
             unit: saveUnit,
             reason_text: reason.trim() || 'Strata ręczna',
             ...(pieceWeightG != null ? { piece_weight_g: pieceWeightG } : {}),
-            ...(produceSize
+            ...(mixed && mixed.pieces > 0
               ? {
-                  produce_size: produceSize,
-                  produce_pieces: qty,
+                  produce_size_counts: mixed.counts,
+                  produce_pieces: mixed.pieces,
                   produce_converter_id: produceConverter?.id,
+                  produce_size: sizeBreakdown,
                 }
               : {}),
           },
@@ -452,12 +466,13 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       }
       const detail =
         data.detail ||
-        (produceSize && saveUnit === 'kg'
-          ? `Strata zapisana — odjęto ${saveQty} kg (${qty} szt. rozmiar ${produceSize}).`
+        (mixed && mixed.pieces > 0 && saveUnit === 'kg'
+          ? `Strata zapisana — odjęto ${formatKg(saveQty)} (${mixed.pieces} szt.${sizeBreakdown ? `: ${sizeBreakdown}` : ''}).`
           : 'Strata zapisana — składniki odjęte z magazynu.');
       setOkMsg(detail);
       resetForm();
       await fetchLogs();
+      emitAppDataChanged('inventory');
       onSaved?.();
       setTimeout(() => setMode('list'), 500);
     } catch (e: any) {
@@ -670,24 +685,18 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
 
               <View style={styles.qtyRow}>
                 <View style={{ flex: 1 }}>
-                  <Text style={[styles.fieldLabel, { color: muted }]}>Ilość</Text>
+                  <Text style={[styles.fieldLabel, { color: muted }]}>
+                    {produceConverter ? 'Ilość (opcjonalnie / ręcznie)' : 'Ilość'}
+                  </Text>
                   <TextInput
                     style={[styles.inputSolo, { backgroundColor: card, borderColor: border, color: text }]}
                     value={quantity}
-                    onChangeText={(v) => {
-                      setQuantity(v);
-                      if (produceConverter && produceSize) {
-                        const tier = produceConverter.sizes.find((s) => s.key === produceSize);
-                        const pcs = parseFloat(v.replace(',', '.'));
-                        if (tier && Number.isFinite(pcs) && pcs > 0) {
-                          setConvertedKg(piecesToKg(pcs, tier).kg);
-                        }
-                      }
-                    }}
+                    onChangeText={setQuantity}
                     keyboardType="decimal-pad"
                     placeholder="0"
                     placeholderTextColor={muted}
                     testID="waste-qty-input"
+                    editable={!produceConverter || unit === 'kg'}
                   />
                 </View>
                 <View style={{ flex: 1 }}>
@@ -724,18 +733,21 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
               {produceConverter && (unit === 'szt' || unit === 'op' || unit === 'kg') ? (
                 <ProduceSizePicker
                   converter={produceConverter}
-                  pieceCount={parseFloat(quantity.replace(',', '.')) || 0}
-                  selectedSize={produceSize}
-                  onSelectSize={(size, tier, kg) => {
-                    setProduceSize(size);
-                    setConvertedKg(kg);
-                    setUnit('szt');
+                  counts={produceCounts}
+                  onChangeCounts={(next) => {
+                    setProduceCounts(next);
+                    const tot = mixedPiecesToKg(next, produceConverter);
+                    setConvertedKg(tot.pieces > 0 ? tot.kg : null);
+                    if (tot.pieces > 0) {
+                      setQuantity(String(tot.pieces));
+                      setUnit('szt');
+                    }
                   }}
                 />
               ) : null}
-              {produceConverter && (unit === 'szt' || unit === 'op') && !produceSize ? (
+              {produceConverter && (unit === 'szt' || unit === 'op') && mixedPiecesToKg(produceCounts, produceConverter).pieces <= 0 ? (
                 <Text style={[styles.hint, { color: theme.isPremium ? PremiumTokens.color.warning : Colors.warning, marginTop: 8 }]}>
-                  Wybierz rozmiar S/M/L, żeby odjąć kilogramy z magazynu (np. 4×L marchewki = 1 kg).
+                  Ustaw sztuki przy S/M/L (możesz mieszać, np. 2 małe + 2 średnie + 2 duże) — licznik pokaże sztuki i ≈ kg.
                 </Text>
               ) : null}
 

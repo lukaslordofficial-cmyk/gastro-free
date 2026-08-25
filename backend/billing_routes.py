@@ -106,7 +106,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
             sub = await _ensure_sub(client)
             customer_id = sub.get("stripe_customer_id")
 
-            # Upgrade/downgrade istniejącej subskrypcji — bez drugiego Checkout
+            # Upgrade/downgrade istniejącej subskrypcji — bez drugiego Checkout i bez rezygnacji
             if (
                 req.kind == "subscription"
                 and req.tier_level in (1, 2)
@@ -136,10 +136,17 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
                     )
                     return {"ok": True, **result}
                 except Exception as up_err:
-                    logger.warning(
-                        "upgrade_existing_subscription failed, fallback to Checkout: %s",
-                        up_err,
-                    )
+                    # Nie otwieraj drugiego Checkout przy aktywnej subskrypcji
+                    # (Stripe i tak odrzuci „customer already has subscription”).
+                    logger.exception("upgrade_existing_subscription failed")
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            "Nie udało się zmienić planu w Stripe. "
+                            "Nie musisz rezygnować — spróbuj ponownie albo użyj „Zarządzaj subskrypcją”. "
+                            f"({str(up_err)[:180]})"
+                        ),
+                    ) from up_err
 
             replace_sub_id = None
             if (

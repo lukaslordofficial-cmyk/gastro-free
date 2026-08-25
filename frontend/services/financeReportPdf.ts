@@ -168,14 +168,22 @@ function statusLabel(s: string): string {
     case 'draft':
       return 'Szkic';
     case 'sent':
-      return 'Wysłane';
+      return 'Oczekujące na odbiór';
     case 'confirmed':
-      return 'Potwierdzone';
+      return 'Oczekujące na odbiór';
     case 'received':
       return 'Odebrane';
     default:
       return s;
   }
+}
+
+function isReceivedOrder(o: { status: string }): boolean {
+  return o.status === 'received';
+}
+
+function isPendingOrder(o: { status: string }): boolean {
+  return o.status === 'sent' || o.status === 'confirmed';
 }
 
 export async function fetchFinanceForRange(from: string, to: string): Promise<{
@@ -398,10 +406,18 @@ function buildPurchasesHtml(
   orders: OrderRow[],
 ): string {
   const matSum = materials.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
-  let orderSum = 0;
-  for (const o of orders) {
+  const received = orders.filter(isReceivedOrder);
+  const pending = orders.filter(isPendingOrder);
+  let receivedSum = 0;
+  for (const o of received) {
     for (const it of o.supplier_order_items || []) {
-      orderSum += (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0);
+      receivedSum += (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0);
+    }
+  }
+  let pendingSum = 0;
+  for (const o of pending) {
+    for (const it of o.supplier_order_items || []) {
+      pendingSum += (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0);
     }
   }
 
@@ -428,39 +444,44 @@ function buildPurchasesHtml(
     })
     .join('');
 
-  const orderBlocks = orders
-    .map((o) => {
-      const supplier = o.suppliers?.name || 'Dostawca';
-      const date = formatPlDate(o.created_at.slice(0, 10));
-      const items = o.supplier_order_items || [];
-      const total = items.reduce(
-        (s, it) => s + (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0),
-        0,
-      );
-      const rows = items.map((it) => [
-        escapeHtml(it.raw_product_name || '—'),
-        escapeHtml(`${it.quantity_ordered} ${it.unit || ''}`),
-        escapeHtml(formatPLN((Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0))),
-      ]);
-      return `<div class="order-block">
+  const renderOrderBlocks = (list: OrderRow[]) =>
+    list
+      .map((o) => {
+        const supplier = o.suppliers?.name || 'Dostawca';
+        const date = formatPlDate(o.created_at.slice(0, 10));
+        const items = o.supplier_order_items || [];
+        const total = items.reduce(
+          (s, it) => s + (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0),
+          0,
+        );
+        const rows = items.map((it) => [
+          escapeHtml(it.raw_product_name || '—'),
+          escapeHtml(`${it.quantity_ordered} ${it.unit || ''}`),
+          escapeHtml(formatPLN((Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0))),
+        ]);
+        return `<div class="order-block">
         <div class="order-head">${escapeHtml(date)} — ${escapeHtml(supplier)} · ${escapeHtml(statusLabel(o.status))} · ${escapeHtml(formatPLN(total))}</div>
         ${rowsTable(['Produkt', 'Ilość', 'Wartość netto'], rows, 'Brak pozycji w zamówieniu.')}
         ${o.notes ? `<p class="muted">Notatka: ${escapeHtml(o.notes)}</p>` : ''}
       </div>`;
-    })
-    .join('');
+      })
+      .join('');
 
   const body = `
     <div class="kpi">
       <div class="kpi-card"><div class="label">Zakupy (koszty mat.)</div><div class="value">${escapeHtml(formatPLN(matSum))}</div></div>
-      <div class="kpi-card"><div class="label">Zamówienia do dostawców</div><div class="value">${escapeHtml(formatPLN(orderSum))}</div></div>
+      <div class="kpi-card"><div class="label">Dostawy odebrane (suma)</div><div class="value">${escapeHtml(formatPLN(receivedSum))}</div></div>
+      <div class="kpi-card"><div class="label">Oczekujące na odbiór</div><div class="value">${escapeHtml(formatPLN(pendingSum))}</div></div>
       <div class="kpi-card"><div class="label">Liczba faktur/zakupów</div><div class="value">${materials.length}</div></div>
-      <div class="kpi-card"><div class="label">Liczba zamówień</div><div class="value">${orders.length}</div></div>
     </div>
     <h2>Zakupy i faktury (${materials.length})</h2>
     ${purchaseBlocks || '<p class="empty">Brak zakupów / faktur materiałowych w wybranym okresie.</p>'}
-    <h2>Dostawy i zamówienia (${orders.length})</h2>
-    ${orderBlocks || '<p class="empty">Brak zamówień do dostawców (poza szkicami) w wybranym okresie.</p>'}
+    <h2>Dostawy odebrane (${received.length}) — podsumowanie</h2>
+    ${renderOrderBlocks(received) || '<p class="empty">Brak odebranych dostaw w wybranym okresie.</p>'}
+    <p class="muted"><strong>Suma odebranych:</strong> ${escapeHtml(formatPLN(receivedSum))} · pozycji: ${received.length}</p>
+    <h2>Oczekujące na odbiór (${pending.length})</h2>
+    <p class="muted">Wysłane / potwierdzone — jeszcze nie przyjęte do magazynu. Osobno od odebranych.</p>
+    ${renderOrderBlocks(pending) || '<p class="empty">Brak oczekujących dostaw.</p>'}
   `;
   return htmlShell('Raport: dostawy i zakupy', range, body);
 }
@@ -644,23 +665,49 @@ function buildComprehensiveHtml(
       'Brak zakupów materiałowych.',
     )}
 
-    <h2>Zamówienia do dostawców (${orders.length})</h2>
+    <h2>Dostawy odebrane (${orders.filter(isReceivedOrder).length})</h2>
     ${
-      orders.length
-        ? orders
-            .map((o) => {
-              const supplier = o.suppliers?.name || 'Dostawca';
-              const items = o.supplier_order_items || [];
-              const total = items.reduce(
-                (s, it) => s + (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0),
-                0,
-              );
-              return `<div class="order-block">
-                <div class="order-head">${escapeHtml(formatPlDate(o.created_at.slice(0, 10)))} — ${escapeHtml(supplier)} · ${escapeHtml(statusLabel(o.status))} · ${escapeHtml(formatPLN(total))}</div>
+      (() => {
+        const received = orders.filter(isReceivedOrder);
+        if (!received.length) return '<p class="empty">Brak odebranych dostaw w okresie.</p>';
+        let sum = 0;
+        const blocks = received
+          .map((o) => {
+            const supplier = o.suppliers?.name || 'Dostawca';
+            const items = o.supplier_order_items || [];
+            const total = items.reduce(
+              (s, it) => s + (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0),
+              0,
+            );
+            sum += total;
+            return `<div class="order-block">
+                <div class="order-head">${escapeHtml(formatPlDate(o.created_at.slice(0, 10)))} — ${escapeHtml(supplier)} · Odebrane · ${escapeHtml(formatPLN(total))}</div>
               </div>`;
-            })
-            .join('')
-        : '<p class="empty">Brak zamówień do dostawców w okresie.</p>'
+          })
+          .join('');
+        return `${blocks}<p class="muted"><strong>Suma odebranych:</strong> ${escapeHtml(formatPLN(sum))}</p>`;
+      })()
+    }
+
+    <h2>Oczekujące na odbiór (${orders.filter(isPendingOrder).length})</h2>
+    ${
+      (() => {
+        const pending = orders.filter(isPendingOrder);
+        if (!pending.length) return '<p class="empty">Brak oczekujących dostaw.</p>';
+        return pending
+          .map((o) => {
+            const supplier = o.suppliers?.name || 'Dostawca';
+            const items = o.supplier_order_items || [];
+            const total = items.reduce(
+              (s, it) => s + (Number(it.quantity_ordered) || 0) * (Number(it.price_net) || 0),
+              0,
+            );
+            return `<div class="order-block">
+                <div class="order-head">${escapeHtml(formatPlDate(o.created_at.slice(0, 10)))} — ${escapeHtml(supplier)} · Oczekujące na odbiór · ${escapeHtml(formatPLN(total))}</div>
+              </div>`;
+          })
+          .join('');
+      })()
     }
   `;
   return htmlShell('Raport zbiorczy', range, body);

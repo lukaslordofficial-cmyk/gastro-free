@@ -1,60 +1,90 @@
 /**
- * Visual S/M/L size picker for produce → kg conversion (dark premium).
+ * Visual S/M/L size picker — liczniki per rozmiar (np. 2 małe + 2 średnie + 2 duże).
  */
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { DS } from '@/constants/premiumTheme';
-import type { ProduceConverter, ProduceSizeKey, ProduceSizeTier } from '@/lib/produceSizeConverter';
-import { formatKg, piecesToKg } from '@/lib/produceSizeConverter';
+import type {
+  ProduceConverter,
+  ProduceSizeCounts,
+  ProduceSizeKey,
+} from '@/lib/produceSizeConverter';
+import { formatKg, mixedPiecesToKg } from '@/lib/produceSizeConverter';
 
 type Props = {
   converter: ProduceConverter;
-  pieceCount: number;
-  selectedSize: ProduceSizeKey | null;
-  onSelectSize: (size: ProduceSizeKey, tier: ProduceSizeTier, kg: number) => void;
+  counts: ProduceSizeCounts;
+  onChangeCounts: (counts: ProduceSizeCounts) => void;
 };
 
-export function ProduceSizePicker({
-  converter,
-  pieceCount,
-  selectedSize,
-  onSelectSize,
-}: Props) {
-  const pcs = Number.isFinite(pieceCount) && pieceCount > 0 ? pieceCount : 0;
+export function ProduceSizePicker({ converter, counts, onChangeCounts }: Props) {
+  const total = mixedPiecesToKg(counts, converter);
+
+  function bump(key: ProduceSizeKey, delta: number) {
+    const cur = Math.max(0, Math.floor(Number(counts[key]) || 0));
+    const next = Math.max(0, cur + delta);
+    onChangeCounts({ ...counts, [key]: next });
+  }
 
   return (
     <View style={styles.wrap} testID="produce-size-picker">
-      <Text style={styles.title}>Rozmiar → kg ({converter.namePl})</Text>
+      <Text style={styles.title}>Rozmiar „na oko” → kg ({converter.namePl})</Text>
       <Text style={styles.sub}>
-        Wybierz wizualny rozmiar — system przeliczy sztuki na kilogramy dla magazynu.
+        Ustaw ile sztuk każdego rozmiaru (np. 2 małe, 2 średnie, 2 duże). Magazyn dostanie
+        przybliżoną wagę w kg.
       </Text>
       <View style={styles.row}>
         {converter.sizes.map((tier) => {
-          const active = selectedSize === tier.key;
-          const { kg, grams } = piecesToKg(pcs || 1, tier);
+          const n = Math.max(0, Math.floor(Number(counts[tier.key]) || 0));
+          const active = n > 0;
+          const tierGrams = n * tier.avgWeightG;
           return (
-            <TouchableOpacity
+            <View
               key={tier.key}
               style={[styles.card, active && styles.cardActive]}
-              onPress={() => onSelectSize(tier.key, tier, piecesToKg(pcs || 0, tier).kg)}
-              activeOpacity={0.85}
               testID={`produce-size-${tier.key}`}
             >
               <Text style={[styles.sizeKey, active && styles.sizeKeyActive]}>{tier.key}</Text>
               <Text style={styles.label}>{tier.labelPl}</Text>
               <Text style={styles.meta}>~{tier.avgWeightG} g · {tier.pcsPerKgLabel}/kg</Text>
               <Text style={styles.visual}>{tier.visualPl}</Text>
-              {pcs > 0 ? (
-                <Text style={[styles.result, active && styles.resultActive]}>
-                  {pcs} szt. → {formatKg(kg)}
-                  {kg < 1 ? '' : ` (${Math.round(grams)} g)`}
+              <View style={styles.stepper}>
+                <TouchableOpacity
+                  style={styles.stepBtn}
+                  onPress={() => bump(tier.key, -1)}
+                  disabled={n <= 0}
+                  testID={`produce-size-${tier.key}-minus`}
+                >
+                  <Text style={styles.stepBtnText}>−</Text>
+                </TouchableOpacity>
+                <Text style={styles.stepCount} testID={`produce-size-${tier.key}-count`}>
+                  {n}
+                </Text>
+                <TouchableOpacity
+                  style={styles.stepBtn}
+                  onPress={() => bump(tier.key, 1)}
+                  testID={`produce-size-${tier.key}-plus`}
+                >
+                  <Text style={styles.stepBtnText}>+</Text>
+                </TouchableOpacity>
+              </View>
+              {n > 0 ? (
+                <Text style={[styles.result, styles.resultActive]}>
+                  {n} szt. ≈ {tierGrams >= 1000 ? formatKg(tierGrams / 1000) : `${Math.round(tierGrams)} g`}
                 </Text>
               ) : (
-                <Text style={styles.resultMuted}>Podaj liczbę sztuk</Text>
+                <Text style={styles.resultMuted}>0 szt.</Text>
               )}
-            </TouchableOpacity>
+            </View>
           );
         })}
+      </View>
+      <View style={styles.totalBox} testID="produce-size-total">
+        <Text style={styles.totalLabel}>Razem w liczniku strat</Text>
+        <Text style={styles.totalValue}>
+          {total.pieces} szt. · ≈ {formatKg(total.kg)}
+          {total.kg < 1 && total.pieces > 0 ? ` (${Math.round(total.grams)} g)` : ''}
+        </Text>
       </View>
     </View>
   );
@@ -104,6 +134,30 @@ const styles = StyleSheet.create({
   label: { color: DS.color.heading, fontSize: 13, fontWeight: '700' },
   meta: { color: DS.color.body, fontSize: 11, fontWeight: '500' },
   visual: { color: DS.color.muted, fontSize: 11, fontStyle: 'italic', marginTop: 2 },
+  stepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 8,
+  },
+  stepBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: DS.color.bgPrimary,
+    borderWidth: 1,
+    borderColor: DS.color.borderSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepBtnText: { color: DS.color.heading, fontSize: 20, fontWeight: '700', lineHeight: 22 },
+  stepCount: {
+    minWidth: 28,
+    textAlign: 'center',
+    color: DS.color.heading,
+    fontSize: 18,
+    fontWeight: '800',
+  },
   result: {
     marginTop: 6,
     color: DS.color.body,
@@ -112,4 +166,13 @@ const styles = StyleSheet.create({
   },
   resultActive: { color: DS.color.greenEnd },
   resultMuted: { marginTop: 6, color: DS.color.muted, fontSize: 11 },
+  totalBox: {
+    marginTop: 4,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: DS.color.borderSubtle,
+    gap: 2,
+  },
+  totalLabel: { color: DS.color.muted, fontSize: 11, fontWeight: '600' },
+  totalValue: { color: DS.color.greenEnd, fontSize: 15, fontWeight: '800' },
 });

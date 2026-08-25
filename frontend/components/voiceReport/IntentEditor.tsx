@@ -47,7 +47,8 @@ import {
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
 import {
   findProduceConverter,
-  piecesToKg,
+  mixedPiecesToKg,
+  type ProduceSizeCounts,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
 import { useAuth } from '@/contexts/AuthContext';
@@ -76,7 +77,7 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
     // Składnik z magazynu → jednostki magazynowe.
     const wasteUnits = isDish ? ['porcja', 'l', 'kg', 'g', 'ml'] : ['szt', 'op', 'l', 'ml', 'g', 'kg'];
     const changeType = (v: string) => {
-      const next: Record<string, any> = { item_type: v, produce_size: null };
+      const next: Record<string, any> = { item_type: v, produce_size: null, produce_size_counts: {} };
       const validNow = (v === 'dish' ? ['porcja', 'l', 'kg', 'g', 'ml'] : ['szt', 'op', 'l', 'ml', 'g', 'kg']);
       if (!validNow.includes(edited.unit)) {
         next.unit = v === 'dish' ? 'porcja' : 'szt';
@@ -84,8 +85,8 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
       patch(next);
     };
     const produce = !isDish ? findProduceConverter(String(edited.item_name || '')) : null;
-    const selectedSize = (edited.produce_size as ProduceSizeKey | null) || null;
-    const pcs = Number(edited.quantity) || 0;
+    const sizeCounts = (edited.produce_size_counts as ProduceSizeCounts) || {};
+    const mixedPreview = produce ? mixedPiecesToKg(sizeCounts, produce) : null;
     return (
       <Card>
         <SegmentedField
@@ -110,7 +111,7 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
                 (!!edited.related_id && !!(edited.item_name_resolved || edited.dish_name_resolved)),
             }}
             patch={(p) => {
-              const next: Record<string, any> = { ...p, produce_size: null };
+              const next: Record<string, any> = { ...p, produce_size: null, produce_size_counts: {} };
               if (p.dish_name !== undefined) next.item_name = p.dish_name;
               if (p.dish_name_resolved !== undefined) {
                 next.item_name = p.dish_name_resolved;
@@ -136,6 +137,7 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
                   item_name_resolved: null,
                   related_id: null,
                   produce_size: null,
+                  produce_size_counts: {},
                 })
               }
               onPickUnit={(u) => patch({ unit: u })}
@@ -145,6 +147,7 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
                   item_name_resolved: item.name,
                   related_id: item.id,
                   produce_size: null,
+                  produce_size_counts: {},
                   ...(item.unit ? { unit: item.unit } : {}),
                 })
               }
@@ -167,10 +170,25 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
         {produce && (edited.unit === 'szt' || edited.unit === 'op' || edited.unit === 'kg' || !edited.unit) ? (
           <ProduceSizePicker
             converter={produce}
-            pieceCount={pcs}
-            selectedSize={selectedSize}
-            onSelectSize={(size) => patch({ produce_size: size, unit: 'szt' })}
+            counts={sizeCounts}
+            onChangeCounts={(next) => {
+              const tot = mixedPiecesToKg(next, produce);
+              patch({
+                produce_size_counts: next,
+                produce_size: (['S', 'M', 'L'] as ProduceSizeKey[])
+                  .filter((k) => (tot.counts[k] || 0) > 0)
+                  .map((k) => `${tot.counts[k]}×${k}`)
+                  .join('+') || null,
+                unit: 'szt',
+                quantity: tot.pieces > 0 ? tot.pieces : edited.quantity,
+              });
+            }}
           />
+          {mixedPreview && mixedPreview.pieces > 0 ? (
+            <Text style={styles.editHint2}>
+              Razem ≈ {mixedPreview.kg} kg ({mixedPreview.pieces} szt.)
+            </Text>
+          ) : null}
         ) : null}
         {isDish && (
           <Text style={styles.editHint2}>

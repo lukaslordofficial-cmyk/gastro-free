@@ -263,7 +263,18 @@ export async function fetchWalletSnapshot(): Promise<WalletSnapshot> {
 export async function subscribeTier(tierLevel: 1 | 2): Promise<SubscriptionState> {
   const { createCheckoutAndOpen } = await import('@/lib/billingClient');
   const checkout = await createCheckoutAndOpen({ kind: 'subscription', tier_level: tierLevel });
+  // Po upgrade w Stripe (bez Checkout) odśwież wiersz; po Checkout — stan zmieni się po płatności.
   const row = await ensureRow();
+  if (checkout.upgraded) {
+    try {
+      await syncBackendSubscription();
+    } catch { /* ignore */ }
+    const fresh = await ensureRow();
+    return buildView(
+      fresh,
+      checkout.message || 'Plan zaktualizowany. Nie trzeba było rezygnować z poprzedniego.',
+    );
+  }
   return buildView(
     row,
     checkout.ok

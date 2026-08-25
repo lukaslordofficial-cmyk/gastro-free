@@ -138,8 +138,9 @@ export function SubscriptionPanel() {
 
       <Text style={styles.sectionTitle}>Plany subskrypcji</Text>
       <Text style={styles.upgradeHint}>
-        Wyższy plan możesz wybrać od razu — nie trzeba wcześniej rezygnować. Po udanej płatności
-        niższy pakiet zostanie automatycznie zastąpiony.
+        Wyższy plan możesz wybrać od razu — nie trzeba wcześniej rezygnować. Jeśli masz już aktywną
+        subskrypcję Stripe, plan zmieni się od razu (różnica doliczona do karty). Pierwsza płatność
+        lub brak ID Stripe otwiera okno Checkout.
       </Text>
       <PlanList
         data={data}

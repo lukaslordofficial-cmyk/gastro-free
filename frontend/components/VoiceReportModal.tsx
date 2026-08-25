@@ -47,7 +47,9 @@ import {
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
 import {
   findProduceConverter,
+  mixedPiecesToKg,
   piecesToKg,
+  type ProduceSizeCounts,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
 import { useAuth } from '@/contexts/AuthContext';
@@ -893,7 +895,20 @@ export function VoiceReportModal({
           setStage('error');
           return;
         }
-        if (payload.produce_size) {
+        const rawCounts = payload.produce_size_counts as ProduceSizeCounts | undefined;
+        if (rawCounts && typeof rawCounts === 'object') {
+          const conv = findProduceConverter(String(payload.item_name || ''));
+          if (conv) {
+            const mixed = mixedPiecesToKg(rawCounts, conv);
+            if (mixed.pieces > 0 && mixed.kg > 0) {
+              payload.produce_pieces = mixed.pieces;
+              payload.produce_size_counts = mixed.counts;
+              payload.produce_converter_id = conv.id;
+              payload.quantity = mixed.kg;
+              payload.unit = 'kg';
+            }
+          }
+        } else if (payload.produce_size) {
           const conv = findProduceConverter(String(payload.item_name || ''));
           const pcs = Number(payload.quantity);
           const sizeKey = String(payload.produce_size) as ProduceSizeKey;

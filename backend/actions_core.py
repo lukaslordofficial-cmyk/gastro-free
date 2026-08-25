@@ -9,6 +9,7 @@ from ingredient_name_norm import norm_name as _norm_name
 from ingredient_name_norm import whole_product_name as _whole_product_name
 from pl_fuzzy_norm import norm_pl as _norm_pl
 from supabase_rest import sb_get
+from supabase_rest import sb_patch
 from supabase_rest import sb_post
 from typing import Optional
 import httpx
@@ -16,7 +17,8 @@ import re
 from app_core import require_tenant_account_key
 from dispatch_impl import voice_dispatch
 from expiration_apply import _apply_expiration_batch
-from matching_utils import _food_names_compatible, _is_porcja_row, _resolve_by_fuzzy
+from inventory_match import _find_inventory_duplicate
+from matching_utils import _food_names_compatible, _is_porcja_row, _norm_unit, _resolve_by_fuzzy
 from models import ApplyRequest, ApplyResponse, ApplyWasteRequestLegacy, VoiceDispatchRequest
 from pos_availability import _recompute_menu_availability
 
@@ -87,6 +89,26 @@ async def _apply_inventory_item(client, p, transcript, source):
     }
     if opt_q is not None and opt_q > 0:
         payload["optimal_quantity"] = opt_q
+    # Dedup: jeśli produkt już jest w magazynie (np. „Jabłko Jonagold” ≈ „Jabłko jonagold”,
+    # marchew ≈ marchewka), zwiększ stan istniejącej pozycji zamiast tworzyć nową.
+    try:
+        inv_rows = await sb_get(client, "inventory_items", params={
+            "select": "id,name,quantity,unit", "limit": "5000",
+        }) or []
+    except httpx.HTTPStatusError:
+        inv_rows = []
+    dup = _find_inventory_duplicate(name, inv_rows, threshold=88) if inv_rows else None
+    if dup and qty > 0 and _norm_unit(dup.get("unit") or "") == _norm_unit(unit or ""):
+        new_qty = float(dup.get("quantity") or 0) + qty
+        await sb_patch(client, "inventory_items", {"id": f"eq.{dup['id']}"}, {"quantity": new_qty})
+        warnings.append(
+            f"Zwiększono stan istniejącej pozycji „{dup.get('name') or name}” (+{qty} {unit})."
+        )
+        return dup["id"], {
+            "name": dup.get("name") or name, "quantity": new_qty,
+            "unit": dup.get("unit") or unit, "min_quantity": minq,
+            "optimal_quantity": opt_q, "merged_into_existing": True,
+        }, warnings
     try:
         row = await sb_post(client, "inventory_items", payload)
     except httpx.HTTPStatusError as e:

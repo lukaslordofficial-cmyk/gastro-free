@@ -679,6 +679,7 @@ export default function MenuScreen() {
         emitRecipeIngredientsChanged(editingDish.id);
         setSelectedCat(form.category);
         handleCloseAddModal();
+        void fetchData();
       } else {
         // ── Insert new dish ──
         const posId = makePosId(form.category, dishes.length + 1);
@@ -716,6 +717,7 @@ export default function MenuScreen() {
         emitRecipeIngredientsChanged(newItem.id);
         setSelectedCat(form.category);
         handleCloseAddModal();
+        void fetchData();
       }
     } catch (e: unknown) {
       premiumAlert('Błąd zapisu', e instanceof Error ? e.message : 'Nieznany błąd');
@@ -793,6 +795,7 @@ export default function MenuScreen() {
       setInvForm(BLANK_INV_FORM);
       setPendingIngKey(null);
       setShowInvModal(false);
+      void fetchData();
     } catch (e: unknown) {
       premiumAlert('Błąd zapisu', e instanceof Error ? e.message : 'Nieznany błąd');
     } finally {
@@ -1257,6 +1260,24 @@ export default function MenuScreen() {
                     );
                   })}
                 </ScrollView>
+                <TextInput
+                  style={[
+                    styles.input,
+                    { marginTop: 8 },
+                    theme.isPremium && {
+                      backgroundColor: DS.color.bgTertiary,
+                      borderColor: DS.color.borderSubtle,
+                      color: DS.color.heading,
+                    },
+                  ]}
+                  placeholder="lub wpisz nową kategorię…"
+                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
+                  value={form.category}
+                  onChangeText={(v) => setForm((f) => ({ ...f, category: v }))}
+                  returnKeyType="next"
+                  autoCapitalize="sentences"
+                  testID="menu-new-category-input"
+                />
               </View>
 
               <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>Receptura — składniki</Text>

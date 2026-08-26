@@ -180,6 +180,7 @@ def checkout_redirect_public_base() -> str:
         "PUBLIC_API_URL",
         "BACKEND_PUBLIC_URL",
         "RAILWAY_PUBLIC_DOMAIN",
+        "NEXT_PUBLIC_API_URL",
     ):
         raw = (os.getenv(key) or "").strip().rstrip("/")
         if not raw:
@@ -215,6 +216,7 @@ def _allowed_redirect_hosts() -> set[str]:
         "PUBLIC_API_URL",
         "BACKEND_PUBLIC_URL",
         "RAILWAY_PUBLIC_DOMAIN",
+        "NEXT_PUBLIC_API_URL",
     ):
         raw = (os.getenv(key) or "").strip()
         if not raw:

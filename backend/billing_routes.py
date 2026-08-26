@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from http_ssl import httpx_verify
 from supabase_rest import sb_get, sb_patch, sb_post
-from url_safety import assert_safe_redirect_url
+from url_safety import assert_safe_redirect_url, checkout_redirect_public_base, is_safe_app_return_url
 
 logger = logging.getLogger("billing.routes")
 
@@ -91,14 +91,31 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
     account_key = _require_tenant()
     if not stripe_configured():
         raise HTTPException(status_code=503, detail="Brak STRIPE_SECRET_KEY — skonfiguruj backend/.env")
-    success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or "myapp://billing/success").strip()
-    cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or "myapp://billing/cancel").strip()
-    if success.startswith("myapp://"):
-        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
-        success = f"{public}/billing-success?session_id={{CHECKOUT_SESSION_ID}}"
-    if cancel.startswith("myapp://"):
-        public = (os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").rstrip("/")
-        cancel = f"{public}/billing-cancel"
+
+    # Stripe wymaga http(s). NIE używaj PUBLIC_APP_URL=localhost:8081 (Expo) —
+    # na telefonie / produkcji pada allowlista albo „witryna nieosiągalna”.
+    public = checkout_redirect_public_base()
+    billing_ok = f"{public}/api/billing/billing-return?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+    billing_cancel = f"{public}/api/billing/billing-return?status=cancel"
+
+    success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or billing_ok).strip()
+    cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or billing_cancel).strip()
+    if (
+        success.startswith("myapp://")
+        or success.startswith("exp://")
+        or success.startswith("exp+")
+        or "localhost" in success
+        or "127.0.0.1" in success
+    ):
+        success = billing_ok
+    if (
+        cancel.startswith("myapp://")
+        or cancel.startswith("exp://")
+        or cancel.startswith("exp+")
+        or "localhost" in cancel
+        or "127.0.0.1" in cancel
+    ):
+        cancel = billing_cancel
     success = assert_safe_redirect_url(success)
     cancel = assert_safe_redirect_url(cancel)
 
@@ -337,13 +354,100 @@ async def billing_portal(req: PortalSessionRequest):
         cid = sub.get("stripe_customer_id")
         if not cid:
             raise HTTPException(status_code=400, detail="Brak klienta Stripe — najpierw wykup plan.")
-        ret = (req.return_url or os.getenv("PUBLIC_APP_URL") or "http://localhost:8081").strip()
+        # Portal też nie może wracać na localhost Expo.
+        public = checkout_redirect_public_base()
+        ret = (req.return_url or f"{public}/api/billing/billing-return?status=portal").strip()
+        if "localhost" in ret or "127.0.0.1" in ret:
+            ret = f"{public}/api/billing/billing-return?status=portal"
         ret = assert_safe_redirect_url(ret)
         try:
             portal = await create_billing_portal_session(customer_id=cid, return_url=ret)
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e)[:300]) from e
         return {"ok": True, **portal}
+
+
+@router.get("/api/billing/billing-return")
+async def billing_return(
+    status: str = "success",
+    session_id: str = "",
+    app: str = "",
+):
+    """Stripe success/cancel (http/https) → HTML z deep linkiem do aplikacji."""
+    import json
+    from html import escape
+    from urllib.parse import quote, unquote
+
+    from fastapi.responses import HTMLResponse
+
+    st = (status or "").strip().lower()
+    ok = st in ("success", "ok", "paid", "portal")
+    sid = (session_id or "").strip()
+    suffix = f"?session_id={quote(sid, safe='')}" if sid.startswith("cs_") else ""
+    if st == "portal":
+        deep = "myapp:///billing/portal-return"
+        title = "Panel subskrypcji"
+        hint = "Wracamy do Gastro-Managera."
+    elif ok:
+        deep = f"myapp:///billing/success{suffix}"
+        title = "Płatność zrealizowana"
+        hint = "Wracamy do aplikacji. Jeśli kredyty się nie doliczyły — kliknij „Potwierdź płatność”."
+    else:
+        deep = "myapp:///billing/cancel"
+        title = "Płatność anulowana"
+        hint = "Możesz wrócić do aplikacji i spróbować ponownie."
+
+    app_url = unquote((app or "").strip())
+    if app_url and is_safe_app_return_url(app_url):
+        joiner = "&" if "?" in app_url else "?"
+        if ok and sid.startswith("cs_") and "session_id=" not in app_url:
+            app_url = f"{app_url}{joiner}session_id={quote(sid, safe='')}"
+        primary = app_url
+    else:
+        primary = deep
+
+    expo_primary = primary.startswith("exp://") or primary.startswith("exp+")
+    auto_fallback = "" if expo_primary else deep
+    safe_primary = escape(primary, quote=True)
+    safe_deep = escape(deep, quote=True)
+    html = f"""<!DOCTYPE html>
+<html lang="pl"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{escape(title)}</title>
+<style>
+body{{font-family:system-ui,sans-serif;background:#0A120E;color:#F5F5F5;
+display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:24px;text-align:center}}
+a.btn{{color:#0A120E;background:#00FF88;font-weight:800;display:inline-block;margin:12px 0;
+padding:14px 22px;border-radius:12px;text-decoration:none}}
+a.alt{{color:#00FF88;display:inline-block;margin:8px}}
+p{{opacity:.8;line-height:1.5;max-width:28rem}}
+</style></head><body>
+<div>
+<h1 style="font-size:1.35rem;margin:0 0 12px">{escape(title)}</h1>
+<p>{escape(hint)}</p>
+<p style="margin-top:20px"><a class="btn" id="open-app" href="{safe_primary}">Wróć do aplikacji</a></p>
+<p><a class="alt" href="{safe_deep}">Otwórz zainstalowaną aplikację</a></p>
+</div>
+<script>
+(function(){{
+  var primary = {json.dumps(primary)};
+  var fallback = {json.dumps(auto_fallback)};
+  function go(u){{ if (!u) return; try {{ window.location.href = u; }} catch (e) {{}} }}
+  go(primary);
+  setTimeout(function(){{ go(primary); }}, 250);
+  if (fallback && fallback !== primary) {{
+    setTimeout(function(){{ go(fallback); }}, 1600);
+  }}
+  var a = document.getElementById('open-app');
+  if (a) a.addEventListener('click', function(ev){{
+    ev.preventDefault();
+    go(primary);
+  }});
+}})();
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
 
 
 @router.post("/api/billing/webhook")

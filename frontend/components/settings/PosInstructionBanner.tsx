@@ -63,32 +63,20 @@ export function PosInstructionBanner({ providerId }: { providerId: PosProviderId
           </Text>
         </View>
         <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Ty (właściciel lokalu) nie musisz nic ekstra klikać. Wystarczy raz wkleić link webhooka powyżej
-          i włączyć integrację — tak jak zwykle.
+          Nic nie wpisujesz drugi raz. Nic nie przepisujesz z kartki do Gastro-Managera.
         </Text>
         <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Gastro-Manager pamięta każdą sprzedaż po numerze. Jeśli POS wyśle to samo zamówienie drugi raz,
-          nie odejmiemy produktów z magazynu drugi raz.
+          W normalnym POS (GoPOS, Dotykačka, POSbistro i podobne) kelner dalej klika kafelki
+          i drukuje paragony bez internetu. Sprzedaż zostaje w kasie. Jak net wróci — POS sam
+          dogania swoją chmurę.
         </Text>
         <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Jedyna rzecz po stronie POS (zrób to raz, albo poproś serwis POS):
+          Gastro-Manager też dogania się sam: przyjmuje te same sprzedaże jeszcze raz i nie
+          odejmuje produktów z magazynu drugi raz. Ty tylko raz wklejasz link webhooka powyżej.
         </Text>
-        {[
-          'Gdy nie ma internetu — zapisz sprzedaż u siebie i nie gub jej.',
-          'Jak internet wróci — wyślij te same sprzedaże jeszcze raz na nasz link.',
-          'Każda sprzedaż musi mieć ten sam stały numer (np. numer rachunku), żebyśmy wiedzieli, że to to samo.',
-        ].map((line, idx) => (
-          <View key={idx} style={instrStyles.stepRow}>
-            <View style={[instrStyles.stepBadge, { backgroundColor: theme.accent }]}>
-              <Text style={[instrStyles.stepNum, prem && { color: '#0A0A0A' }]}>{idx + 1}</Text>
-            </View>
-            <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A' }]}>
-              {line}
-            </Text>
-          </View>
-        ))}
-        <Text style={[instrStyles.panelHint, { color: prem ? theme.textMuted : '#3B82F6', marginBottom: 0, marginTop: 4 }]}>
-          Status poniżej pokazuje, czy wszystko się dogoniło. Zielono = spokój.
+        <Text style={[instrStyles.panelHint, { color: prem ? theme.textMuted : '#3B82F6', marginBottom: 0 }]}>
+          Jeśli Twój POS nie umie sam dosłać sprzedaży po awarii netu — poproś serwis POS o
+          „ponawianie webhooka / retry”. To robi komputer POS, nie kelner i nie Ty.
         </Text>
       </View>
     </View>

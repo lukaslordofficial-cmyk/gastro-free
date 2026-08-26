@@ -71,6 +71,16 @@ export async function createCheckoutAndOpen(opts: {
             + 'kliknij czerwony przycisk „Zrezygnuj z planu” w aplikacji, a potem wybierz wyższy plan '
             + '(albo spróbuj ponownie „Ulepsz plan”).'
           )
+          : (low.includes('allowlist') || low.includes('przekierowania spoza'))
+            ? (
+              'Serwer płatności ma złą konfigurację adresu powrotu. Na Railway ustaw PUBLIC_API_URL '
+              + 'na adres HTTPS API (np. …up.railway.app) — nie localhost:8081.'
+            )
+          : (low.includes('public_api_url') || low.includes('checkout_redirect'))
+            ? (
+              'Brak publicznego adresu API do powrotu ze Stripe. Ustaw na backendzie PUBLIC_API_URL '
+              + '(HTTPS Railway), potem zredeployuj.'
+            )
           : raw;
       return {
         ok: false,
@@ -112,8 +122,29 @@ export async function createCheckoutAndOpen(opts: {
         'Otwarto Stripe Checkout. Po płatności wróć do aplikacji i kliknij „Potwierdź płatność”.',
     };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'Nie udało się uruchomić płatności.';
-    return { ok: false, message: msg };
+    const raw = e instanceof Error ? e.message : 'Nie udało się uruchomić płatności.';
+    const low = raw.toLowerCase();
+    if (
+      low.includes('network request failed')
+      || low.includes('failed to fetch')
+      || low.includes('network error')
+    ) {
+      return {
+        ok: false,
+        message:
+          'Brak połączenia z serwerem płatności. Sprawdź internet i czy aplikacja ma dobry adres backendu '
+          + '(EXPO_PUBLIC_BACKEND_URL — port 8001 / Railway HTTPS, nie 8081).',
+      };
+    }
+    if (low.includes('allowlist') || low.includes('przekierowania spoza')) {
+      return {
+        ok: false,
+        message:
+          'Serwer płatności ma złą konfigurację adresu powrotu. Na Railway ustaw PUBLIC_API_URL '
+          + 'na adres HTTPS API (np. …up.railway.app) — nie localhost.',
+      };
+    }
+    return { ok: false, message: raw };
   }
 }
 

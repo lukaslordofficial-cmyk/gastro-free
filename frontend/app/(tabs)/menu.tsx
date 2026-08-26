@@ -641,7 +641,7 @@ export default function MenuScreen() {
     const nameKey = normIngredientName(nameTrim);
     const dupDish = dishes.find((d) => {
       if (editingDish && d.id === editingDish.id) return false;
-      return normIngredientName(d.name || '') === nameKey;
+      return normIngredientName(d.name || '') === nameKey || namesMatch(d.name || '', nameTrim, 86);
     });
     if (dupDish) {
       premiumAlert(

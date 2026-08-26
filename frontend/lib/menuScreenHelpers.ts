@@ -79,7 +79,9 @@ export function getIngredientStockStatus(
 ): StockStatus | null {
   const trimmed = name.trim();
   if (!trimmed) return null;
-  const match = inventory.find((i) => i.product_name.toLowerCase() === trimmed.toLowerCase());
+  const match = inventory.find(
+    (i) => ingredientDedupeKey(i.product_name) === ingredientDedupeKey(trimmed),
+  );
   if (match) return { found: true, qty: match.current_qty, unit: match.unit };
   return { found: false, qty: 0, unit: '' };
 }

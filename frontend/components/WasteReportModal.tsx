@@ -436,11 +436,22 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       setError('Podaj poprawną ilość albo ustaw sztuki przy rozmiarach S/M/L.');
       return;
     }
+    // Sztuki bez S/M/L: wzorzec M (bakłażan = 200 g). Wpisana waga sztuki ma pierwszeństwo.
     if (produceConverter && (unit === 'szt' || unit === 'op') && (!mixed || mixed.pieces <= 0)) {
-      setError('Ustaw liczbę sztuk przy rozmiarach S/M/L (możesz mieszać, np. 2 małe + 2 duże).');
-      return;
+      const pcs = Number.isFinite(qty) && qty > 0 ? qty : 0;
+      const typedG = parseFloat(pieceWeight.replace(',', '.'));
+      if (Number.isFinite(typedG) && typedG > 0 && pcs > 0) {
+        pieceWeightG = typedG;
+        saveQty = (pcs * typedG) / 1000;
+        saveUnit = 'kg';
+      } else if (pcs > 0) {
+        mixed = mixedPiecesToKg({ M: Math.max(1, Math.round(pcs)) }, produceConverter);
+        qty = mixed.pieces;
+        saveQty = mixed.kg;
+        saveUnit = 'kg';
+      }
     }
-    if (!(mixed && mixed.pieces > 0) && (unit === 'szt' || unit === 'op') && pieceWeight.trim()) {
+    if (!(mixed && mixed.pieces > 0) && (unit === 'szt' || unit === 'op') && pieceWeight.trim() && pieceWeightG == null) {
       const pw = parseFloat(pieceWeight.replace(',', '.'));
       if (Number.isFinite(pw) && pw > 0) {
         pieceWeightG = pw;
@@ -743,7 +754,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                     placeholder="0"
                     placeholderTextColor={muted}
                     testID="waste-qty-input"
-                    editable={!produceConverter || unit === 'kg'}
+                    editable
                   />
                 </View>
                 <View style={{ flex: 1 }}>
@@ -794,7 +805,8 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
               ) : null}
               {produceConverter && (unit === 'szt' || unit === 'op') && mixedPiecesToKg(produceCounts, produceConverter).pieces <= 0 ? (
                 <Text style={[styles.hint, { color: theme.isPremium ? PremiumTokens.color.warning : Colors.warning, marginTop: 8 }]}>
-                  Ustaw sztuki przy S/M/L (możesz mieszać, np. 2 małe + 2 średnie + 2 duże) — licznik pokaże sztuki i ≈ kg.
+                  Ustaw sztuki przy S/M/L albo wpisz liczbę sztuk powyżej — bez wyboru rozmiaru
+                  liczymy wzorzec M (~{produceConverter.sizes.find((s) => s.key === 'M')?.avgWeightG ?? 200} g).
                 </Text>
               ) : null}
 

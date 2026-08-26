@@ -113,6 +113,25 @@ export const PRODUCE_SIZE_CATALOG: ProduceConverter[] = [
     ],
   },
   {
+    id: 'eggplant',
+    namePl: 'Bakłażan',
+    aliases: [
+      'bakłażan',
+      'baklazany',
+      'baklazana',
+      'baklazan',
+      'oberżyna',
+      'oberzyna',
+      'eggplant',
+      'eggplants',
+    ],
+    sizes: [
+      tier('S', 'Mały (S)', 150, 6.5, '~6–7 szt.', 'Krótki, wąski'),
+      tier('M', 'Średni (M)', 200, 5, '5 szt.', 'Klasyczny sklepowy (~200 g)'),
+      tier('L', 'Duży (L)', 350, 3, '~3 szt.', 'Duży, mięsisty'),
+    ],
+  },
+  {
     id: 'pepper',
     namePl: 'Papryka',
     aliases: ['papryka', 'papryki', 'pepper', 'peppers', 'bell pepper'],
@@ -137,9 +156,9 @@ export const PRODUCE_SIZE_CATALOG: ProduceConverter[] = [
 function normalizeName(name: string): string {
   return name
     .toLowerCase()
+    .replace(/ł/g, 'l')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/ł/g, 'l')
     .trim();
 }
 
@@ -206,6 +225,40 @@ export function shouldOfferSizeConverter(
     if (u !== 'kg' && u !== 'g') return null;
   }
   return findProduceConverter(productName);
+}
+
+/** Średni rozmiar (M) — wzorzec, gdy użytkownik podał sztuki bez S/M/L. */
+export function mediumProduceTier(converter: ProduceConverter): ProduceSizeTier {
+  return converter.sizes.find((s) => s.key === 'M') ?? converter.sizes[0];
+}
+
+/** Przelicz sztuki ↔ kg/g przez wzorcową wagę M (np. bakłażan 200 g). */
+export function convertProduceQty(
+  qty: number,
+  fromUnit: string,
+  toUnit: string,
+  productName: string,
+): number | null {
+  if (!Number.isFinite(qty)) return null;
+  const from = (fromUnit || '').toLowerCase().trim();
+  const to = (toUnit || '').toLowerCase().trim();
+  if (from === to) return qty;
+  const conv = findProduceConverter(productName);
+  if (!conv) return null;
+  const mid = mediumProduceTier(conv);
+  const pieceFrom = from === 'szt' || from === 'opak' || from === 'op' || from === 'pcs' || from === 'pc';
+  const pieceTo = to === 'szt' || to === 'opak' || to === 'op' || to === 'pcs' || to === 'pc';
+  if (pieceFrom && (to === 'kg' || to === 'g')) {
+    const kg = piecesToKg(qty, mid).kg;
+    return to === 'g' ? kg * 1000 : kg;
+  }
+  if ((from === 'kg' || from === 'g') && pieceTo) {
+    const kg = from === 'g' ? qty / 1000 : qty;
+    const grams = mid.avgWeightG || 0;
+    if (grams <= 0) return null;
+    return Math.round((kg / (grams / 1000)) * 10) / 10;
+  }
+  return null;
 }
 
 export function formatKg(kg: number): string {

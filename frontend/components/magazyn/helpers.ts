@@ -58,7 +58,7 @@ import {
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
-import { namesMatch } from '@/lib/fuzzyProductMatch';
+import { namesMatch, ingredientDedupeKey } from '@/lib/fuzzyProductMatch';
 import {
   dedupeWarehouseCategories,
   ensureDefaultWarehouseCategories,
@@ -83,6 +83,19 @@ export function newComboIngredient(): ComboIngredientDraft {
     unit: 'g',
     warehouse_product_id: null,
   };
+}
+
+/** bakłażan === bakłażany (stem + fuzzy), z pominięciem edytowanego wiersza. */
+export function findExistingWarehouseItem(
+  inventory: MockInventoryItem[],
+  name: string,
+  editingId: string | null,
+): MockInventoryItem | undefined {
+  const key = ingredientDedupeKey(name);
+  return inventory.find((i) => {
+    if (editingId && i.id === editingId) return false;
+    return ingredientDedupeKey(i.product_name) === key || namesMatch(i.product_name, name, 86);
+  });
 }
 
 export function getStatus(item: MockInventoryItem): 'critical' | 'warning' | 'ok' {

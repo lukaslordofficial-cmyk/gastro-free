@@ -42,6 +42,41 @@ def test_inventory_dedup_increments_existing(monkeypatch):
     assert calls["post"] == []  # NIE utworzono nowej pozycji
 
 
+def test_inventory_dedup_baklazan_plural(monkeypatch):
+    """Magazyn „Bakłażan” + dodanie „bakłażany” ma scalić stan, nie tworzyć nowej pozycji."""
+    calls = {"post": [], "patch": []}
+
+    async def fake_sb_get(client, path, params=None):
+        if path == "inventory_items":
+            return [{"id": "egg-1", "name": "Bakłażan", "quantity": 2.0, "unit": "kg"}]
+        return []
+
+    async def fake_sb_post(client, path, payload):
+        calls["post"].append(payload)
+        return [{"id": "new-bad"}]
+
+    async def fake_sb_patch(client, path, params, payload):
+        calls["patch"].append((path, params, payload))
+        return [{"id": "egg-1"}]
+
+    async def fake_resolve_cat(client, name):
+        return "cat-1"
+
+    monkeypatch.setattr(actions_core, "sb_get", fake_sb_get)
+    monkeypatch.setattr(actions_core, "sb_post", fake_sb_post)
+    monkeypatch.setattr(actions_core, "sb_patch", fake_sb_patch)
+    monkeypatch.setattr(actions_core, "_resolve_category_id", fake_resolve_cat)
+
+    p = {"product_name": "bakłażany", "unit": "kg", "quantity": 1.5}
+    _id, summary, _w = asyncio.run(
+        actions_core._apply_inventory_item(None, p, None, "test")
+    )
+    assert _id == "egg-1"
+    assert summary.get("merged_into_existing") is True
+    assert summary["quantity"] == 3.5
+    assert calls["post"] == []
+
+
 def test_inventory_new_product_inserts(monkeypatch):
     """Zupełnie nowy produkt (brak dopasowania) tworzy nową pozycję."""
     calls = {"post": []}

@@ -35,9 +35,8 @@ export const POS_PROVIDERS: PosProvider[] = [
     panelHint: 'Ustawienia → Webhook / Integracje → URL + zdarzenie sprzedaży',
     steps: [
       'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
-      'W swoim POS wklej go jako endpoint zdarzenia „zamknięcie rachunku / sale”.',
-      'Upewnij się, że body to JSON z tablicą items (pos_external_id, quantity_sold).',
-      'Dodaj stały event_id (lub external_order_id) — przy offline kolejuj i ponawiaj do ACK; bez ryzyka podwójnego księgowania.',
+      'W swoim POS wklej go jako adres zdarzenia „zamknięcie rachunku / sprzedaż”.',
+      'To robisz raz. Potem kelner tylko zbija rachunki jak zawsze.',
       'W sekcji Mapowanie receptur wpisz te same kody produktów co w POS (SKU / ID).',
     ],
     samplePayload: `{

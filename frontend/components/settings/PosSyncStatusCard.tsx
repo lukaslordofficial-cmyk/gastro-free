@@ -145,9 +145,9 @@ export function PosSyncStatusCard() {
             </Text>
           ) : null}
           <Text style={[styles.fieldHint, { color: theme.textMuted, marginTop: 4 }]}>
-            Ty nic nie musisz tu klikać przy każdej sprzedaży. Ten pasek mówi tylko: czy POS i
-            Gastro-Manager się dogoniły. Zielono = OK. Czerwono = coś nie doszło — zadzwoń do
-            serwisu POS i powiedz: „wyślijcie zaległe sprzedaże jeszcze raz na ten sam link”.
+            Ten pasek tylko pokazuje, czy kasa dosłała sprzedaże. Nic tu nie klikasz przy
+            każdym rachunku. Zielono = POS sam wysyła. Jeśli po awarii netu nic nie wraca —
+            zadzwoń do serwisu kasy, nie przestawiaj nic w apce.
           </Text>
         </View>
       ) : null}

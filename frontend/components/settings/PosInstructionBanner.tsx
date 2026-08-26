@@ -63,20 +63,17 @@ export function PosInstructionBanner({ providerId }: { providerId: PosProviderId
           </Text>
         </View>
         <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Nic nie wpisujesz drugi raz. Nic nie przepisujesz z kartki do Gastro-Managera.
+          Wklejasz link webhooka w POS jeden raz. Potem nic nie ustawiasz w Gastro-Managerze,
+          gdy padnie internet.
         </Text>
         <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          W normalnym POS (GoPOS, Dotykačka, POSbistro i podobne) kelner dalej klika kafelki
-          i drukuje paragony bez internetu. Sprzedaż zostaje w kasie. Jak net wróci — POS sam
-          dogania swoją chmurę.
-        </Text>
-        <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Gastro-Manager też dogania się sam: przyjmuje te same sprzedaże jeszcze raz i nie
-          odejmuje produktów z magazynu drugi raz. Ty tylko raz wklejasz link webhooka powyżej.
+          Kelner dalej zbija rachunki na kasie. Gdy net wróci, POS sam powinien dosłać sprzedaże
+          na ten sam link — Ty nie klikasz nic drugi raz.
         </Text>
         <Text style={[instrStyles.panelHint, { color: prem ? theme.textMuted : '#3B82F6', marginBottom: 0 }]}>
-          Jeśli Twój POS nie umie sam dosłać sprzedaży po awarii netu — poproś serwis POS o
-          „ponawianie webhooka / retry”. To robi komputer POS, nie kelner i nie Ty.
+          Gastro-Manager nie dubluje magazynu, nawet gdy POS wyśle ten sam rachunek ponownie.
+          Jeśli po awarii sprzedaży nie wracają — to wina kolejki w POS; poproś serwis kasy,
+          żeby włączył ponawianie webhooka. Tego nie robi kelner.
         </Text>
       </View>
     </View>

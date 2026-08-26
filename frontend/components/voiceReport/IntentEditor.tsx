@@ -189,7 +189,11 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
               <Text style={styles.editHint2}>
                 Razem ≈ {mixedPreview.kg} kg ({mixedPreview.pieces} szt.)
               </Text>
-            ) : null}
+            ) : (
+              <Text style={styles.editHint2}>
+                Bez S/M/L wpisana liczba sztuk = wzorzec M (~{produce.sizes.find((s) => s.key === 'M')?.avgWeightG ?? 200} g).
+              </Text>
+            )}
           </>
         ) : null}
         {isDish && (

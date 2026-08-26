@@ -58,7 +58,8 @@ import {
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
-import { namesMatch } from '@/lib/fuzzyProductMatch';
+import { convertProduceQty } from '@/lib/produceSizeConverter';
+import { normalizeIngredientName } from '@/lib/fuzzyProductMatch';
 import {
   dedupeWarehouseCategories,
   ensureDefaultWarehouseCategories,
@@ -74,7 +75,7 @@ import { secureId } from '@/lib/secureId';
 
 import type { CategoryRow, ComboIngredientDraft, MagListRow, MockInventoryItem, WasteLogRow } from '../../components/magazyn/types';
 import { BLANK_FORM, CAT_AUTO_COLORS, FALLBACK_COLOR, UNIT_OPTIONS } from '../../components/magazyn/constants';
-import { getStatus, mapDbRow, newComboIngredient } from '../../components/magazyn/helpers';
+import { getStatus, mapDbRow, newComboIngredient, findExistingWarehouseItem } from '../../components/magazyn/helpers';
 import { ItemCard } from '../../components/magazyn/ItemCard';
 import { CategorySection, catStyles } from '../../components/magazyn/CategorySection';
 import { FieldLabel, NumericInput, formStyles } from '../../components/magazyn/formFields';
@@ -712,27 +713,37 @@ export default function MagazynScreen() {
     setSaving(true);
     try {
       const nameTrim = form.name.trim();
-      const nameKey = nameTrim
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      const dup = inventory.find((i) => {
-        if (editingId && i.id === editingId) return false;
-        const k = (i.product_name || '')
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        return k === nameKey;
-      });
-      if (dup) {
+      const dup = findExistingWarehouseItem(inventory, nameTrim, editingId);
+      if (dup && !editingId) {
+        let addQty = currentQty;
+        if (dup.unit !== form.unit) {
+          const converted = convertProduceQty(currentQty, form.unit, dup.unit, dup.product_name || nameTrim);
+          if (converted == null) {
+            premiumAlert(
+              'Produkt już istnieje',
+              `W magazynie jest już „${dup.product_name}” (${dup.unit}). Edytuj ten wpis — nie da się automatycznie dodać ${form.unit} do ${dup.unit}.`,
+            );
+            setSaving(false);
+            return;
+          }
+          addQty = converted;
+        }
+        const mergedQty = (dup.current_qty || 0) + addQty;
+        const row = await inventoryService.saveInventoryItem({
+          payload: { quantity: mergedQty },
+          editingId: dup.id,
+          ak: getAccountKey(),
+        });
+        const mapped = mapDbRow(row);
+        setInventory((prev) => prev.map((i) => (i.id === dup.id ? mapped : i)));
         premiumAlert(
-          'Produkt już istnieje',
-          `W magazynie jest już „${dup.product_name}”. Edytuj istniejący wpis zamiast tworzyć duplikat (Łowca Okazji scala oferty po nazwie).`,
+          'Scalono z istniejącym',
+          `„${nameTrim}” to to samo co „${dup.product_name}”. Stan: ${dup.current_qty} → ${mergedQty} ${dup.unit}.`,
         );
+        setForm({ ...BLANK_FORM, category: formCategories[0] ?? '' });
+        setComboIngredients([newComboIngredient()]);
+        setEditingId(null);
+        setShowAddModal(false);
         setSaving(false);
         return;
       }
@@ -746,7 +757,7 @@ export default function MagazynScreen() {
       }
       const ak = getAccountKey();
       const payload: any = {
-        name: nameTrim,
+        name: normalizeIngredientName(nameTrim) || nameTrim,
         variant: form.variant.trim() || null,
         category_id: categoryIdMap[form.category] ?? null,
         quantity: currentQty,

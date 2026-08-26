@@ -49,10 +49,39 @@ export async function fetchJson<T = unknown>(
 
   if (!res.ok) {
     const detail = (data as { detail?: string })?.detail;
+    const fromServer = typeof detail === 'string' && detail.trim() ? detail.trim() : '';
+    if (res.status === 401 || res.status === 403) {
+      return {
+        ok: false,
+        status: res.status,
+        error: fromServer || 'Zaloguj się ponownie, aby kontynuować.',
+      };
+    }
+    if (res.status === 429) {
+      return {
+        ok: false,
+        status: res.status,
+        error: fromServer || 'Zbyt wiele zapytań. Spróbuj za chwilę.',
+      };
+    }
+    if (res.status === 413) {
+      return {
+        ok: false,
+        status: res.status,
+        error: fromServer || 'Plik jest za duży. Wgraj mniejszy PDF lub zdjęcie.',
+      };
+    }
+    if (res.status === 503) {
+      return {
+        ok: false,
+        status: res.status,
+        error: fromServer || 'Usługa chwilowo niedostępna. Spróbuj za chwilę.',
+      };
+    }
     return {
       ok: false,
       status: res.status,
-      error: typeof detail === 'string' ? detail : `HTTP ${res.status}`,
+      error: fromServer || `HTTP ${res.status}`,
     };
   }
 

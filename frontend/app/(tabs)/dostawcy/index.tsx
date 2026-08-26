@@ -49,6 +49,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as suppliersService from '@/services/suppliersService';
 import * as supplierOrdersService from '@/services/supplierOrdersService';
 import { SUPPLIER_BASKET_CHANGED } from '@/services/supplierOrdersService';
+import { SUPPLIER_ORDERS_CHANGED } from '@/lib/appRefresh';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { OrderModal } from '@/components/OrderModal';
 import { SupplierInvoicesModal } from '@/components/suppliers/SupplierInvoicesModal';
@@ -159,6 +160,13 @@ export default function DostawcyScreen() {
   useEffect(() => {
     if (documentScanRevision > 0) void fetchSuppliers();
   }, [documentScanRevision, fetchSuppliers]);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(SUPPLIER_ORDERS_CHANGED, () => {
+      void fetchSuppliers();
+    });
+    return () => sub.remove();
+  }, [fetchSuppliers]);
 
   const handleUpload = useCallback(async (
     supplierId: string,

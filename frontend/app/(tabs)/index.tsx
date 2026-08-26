@@ -12,6 +12,7 @@ import {
   KeyboardAvoidingView,
   ActivityIndicator,
   Alert,
+  DeviceEventEmitter,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -32,6 +33,7 @@ import {
 } from 'lucide-react-native';
 import type { FixedCost, InventoryItem, RevenueEntry, VariableCostEntry } from '@/lib/types';
 import * as financeService from '@/services/financeService';
+import { FINANCE_CHANGED } from '@/lib/appRefresh';
 import { useAuth } from '@/contexts/AuthContext';
 import { KPICard } from '@/components/KPICard';
 import { AlertBanner } from '@/components/AlertBanner';
@@ -991,6 +993,13 @@ export default function FinanseScreen() {
     if (!accountKey || accountKey === 'default') return;
     void fetchData();
   }, [fetchData, accountKey]);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(FINANCE_CHANGED, () => {
+      void fetchData();
+    });
+    return () => sub.remove();
+  }, [fetchData]);
 
   // Po powrocie z Magazynu — zsynchronizuj licznik tylko gdy jeszcze nie ma danych.
   useFocusEffect(

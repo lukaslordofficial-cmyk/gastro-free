@@ -19,6 +19,7 @@ import {
   RECIPE_INGREDIENTS_CHANGED,
   type RecipeIngredientsChangedPayload,
 } from '@/lib/recipeSync';
+import { MENU_CHANGED } from '@/lib/appRefresh';
 import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -229,6 +230,13 @@ export default function MenuScreen() {
 
   const editingDishRef = useRef<Dish | null>(null);
   editingDishRef.current = editingDish;
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(MENU_CHANGED, () => {
+      void fetchData();
+    });
+    return () => sub.remove();
+  }, [fetchData]);
 
   // Sync receptur z Ustawień POS (ta sama tabela recipe_ingredients)
   useEffect(() => {

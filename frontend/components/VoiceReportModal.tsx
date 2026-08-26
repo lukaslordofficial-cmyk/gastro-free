@@ -45,14 +45,9 @@ import {
   isDealHunterIntent,
 } from '@/lib/dealHunterGate';
 import { ProduceSizePicker } from '@/components/ProduceSizePicker';
-import {
-  findProduceConverter,
-  mixedPiecesToKg,
-  piecesToKg,
-  type ProduceSizeCounts,
-  type ProduceSizeKey,
-} from '@/lib/produceSizeConverter';
 import { useAuth } from '@/contexts/AuthContext';
+import { emitAppDataChanged, refreshHintForIntent } from '@/lib/appRefresh';
+import { applyWasteQuantityToPayload } from './voiceReport/applyWastePayload';
 
 import type { Intent, Interpretation, Props, Stage } from './voiceReport/types';
 import { BACKEND_URL, COMMAND_EXAMPLES, CONFIRM_WORD, DESTRUCTIVE_INTENTS, INTENT_META, INTENT_SEARCH_ALIASES, NAV_INTENTS, PERIOD_INTENTS, UPLOAD_INTENTS } from './voiceReport/constants';
@@ -874,7 +869,7 @@ export function VoiceReportModal({
           return;
         }
       }
-      const payload = {
+      const payload: Record<string, any> = {
         ...curEdited,
         categories,
         selected_periods,
@@ -895,32 +890,7 @@ export function VoiceReportModal({
           setStage('error');
           return;
         }
-        const rawCounts = payload.produce_size_counts as ProduceSizeCounts | undefined;
-        if (rawCounts && typeof rawCounts === 'object') {
-          const conv = findProduceConverter(String(payload.item_name || ''));
-          if (conv) {
-            const mixed = mixedPiecesToKg(rawCounts, conv);
-            if (mixed.pieces > 0 && mixed.kg > 0) {
-              payload.produce_pieces = mixed.pieces;
-              payload.produce_size_counts = mixed.counts;
-              payload.produce_converter_id = conv.id;
-              payload.quantity = mixed.kg;
-              payload.unit = 'kg';
-            }
-          }
-        } else if (payload.produce_size) {
-          const conv = findProduceConverter(String(payload.item_name || ''));
-          const pcs = Number(payload.quantity);
-          const sizeKey = String(payload.produce_size) as ProduceSizeKey;
-          const tier = conv?.sizes.find((s) => s.key === sizeKey);
-          if (conv && tier && Number.isFinite(pcs) && pcs > 0) {
-            const { kg } = piecesToKg(pcs, tier);
-            payload.produce_pieces = pcs;
-            payload.produce_converter_id = conv.id;
-            payload.quantity = kg;
-            payload.unit = 'kg';
-          }
-        }
+        applyWasteQuantityToPayload(payload);
       }
 
       const result = await fetchJson<{
@@ -956,6 +926,7 @@ export function VoiceReportModal({
             warnings: data.warnings ?? [],
           });
           setStage('done');
+          emitAppDataChanged(refreshHintForIntent(applyIntent));
           onApplied?.(applyIntent);
           return;
         }
@@ -972,6 +943,7 @@ export function VoiceReportModal({
             extras.doc_kind === 'offer' ? 'offer' : extras.doc_kind === 'document' ? 'document' : 'invoice',
           );
         }
+        emitAppDataChanged(refreshHintForIntent(applyIntent));
         onApplied?.(applyIntent);
         onClose();
         return;
@@ -1000,6 +972,7 @@ export function VoiceReportModal({
           /* best-effort */
         }
       }
+      emitAppDataChanged(refreshHintForIntent(applyIntent));
       onApplied?.(applyIntent);
       // Bulk: od razu Łowca z edytowalnym koszykiem — nie trzymaj użytkownika na „done”.
       if (applyIntent === 'order_critical_items_by_category') {

@@ -76,12 +76,14 @@ class PortalSessionRequest(BaseModel):
 @router.post("/api/billing/create-checkout-session")
 async def billing_create_checkout(req: CheckoutSessionRequest):
     """
-    Subskrypcja: jeśli jest już stripe_subscription_id — zmienia plan w Stripe (upgrade/downgrade)
+    Subskrypcja: jeśli jest już stripe_subscription_id (lub aktywna w Stripe) — zmienia plan
     bez ręcznej rezygnacji. W przeciwnym razie tworzy Checkout Session.
     Top-up: zawsze Checkout. Kredyty z Checkout dolicza webhook / confirm-session.
     """
     from billing_stripe import (
+        cancel_stripe_subscription,
         create_checkout_session,
+        find_customer_active_subscription_id,
         stripe_configured,
         upgrade_existing_subscription,
     )
@@ -105,12 +107,34 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
         async with httpx.AsyncClient(timeout=45.0, verify=httpx_verify()) as client:
             sub = await _ensure_sub(client)
             customer_id = sub.get("stripe_customer_id")
+            sid = str(sub.get("stripe_subscription_id") or "").strip()
+
+            # DB bez sub_*, ale Stripe customer ma aktywną subskrypcję → odzyskaj ID i upgrade
+            if (
+                req.kind == "subscription"
+                and req.tier_level in (1, 2)
+                and not sid.startswith("sub_")
+                and str(customer_id or "").startswith("cus_")
+            ):
+                recovered = await find_customer_active_subscription_id(str(customer_id))
+                if recovered:
+                    sid = recovered
+                    try:
+                        await sb_patch(
+                            client,
+                            "subscriptions",
+                            {"account_key": f"eq.{account_key}"},
+                            {"stripe_subscription_id": sid},
+                        )
+                    except Exception as sync_err:
+                        logger.warning("sync recovered stripe_subscription_id failed: %s", sync_err)
+                    sub["stripe_subscription_id"] = sid
 
             # Upgrade/downgrade istniejącej subskrypcji — bez drugiego Checkout i bez rezygnacji
             if (
                 req.kind == "subscription"
                 and req.tier_level in (1, 2)
-                and (sub.get("stripe_subscription_id") or "").startswith("sub_")
+                and sid.startswith("sub_")
             ):
                 cur_tier = int(sub.get("tier_level") or 0)
                 if cur_tier == int(req.tier_level):
@@ -124,7 +148,7 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
                     result = await upgrade_existing_subscription(
                         account_key=account_key,
                         tier_level=int(req.tier_level),
-                        stripe_subscription_id=sub["stripe_subscription_id"],
+                        stripe_subscription_id=sid,
                         current_tier=cur_tier,
                         credits_balance=int(sub.get("credits_balance") or 0),
                         tier_config=_tier_config(),
@@ -136,42 +160,112 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
                     )
                     return {"ok": True, **result}
                 except Exception as up_err:
-                    # Nie otwieraj drugiego Checkout przy aktywnej subskrypcji
-                    # (Stripe i tak odrzuci „customer already has subscription”).
-                    logger.exception("upgrade_existing_subscription failed")
-                    raise HTTPException(
-                        status_code=502,
-                        detail=(
-                            "Nie udało się zmienić planu w Stripe. "
-                            "Nie musisz rezygnować — spróbuj ponownie albo użyj „Zarządzaj subskrypcją”. "
-                            f"({str(up_err)[:180]})"
-                        ),
-                    ) from up_err
+                    # Fallback: anuluj starą subskrypcję i otwórz Checkout nowego planu
+                    # (bez komunikatu „najpierw zrezygnuj” — robimy to automatycznie).
+                    logger.warning(
+                        "upgrade_existing_subscription failed, cancel+checkout: %s",
+                        up_err,
+                    )
+                    try:
+                        await cancel_stripe_subscription(sid, at_period_end=False)
+                        await sb_patch(
+                            client,
+                            "subscriptions",
+                            {"account_key": f"eq.{account_key}"},
+                            {"stripe_subscription_id": None},
+                        )
+                    except Exception as cancel_err:
+                        logger.warning("auto-cancel before checkout failed: %s", cancel_err)
+                        raise HTTPException(
+                            status_code=502,
+                            detail=(
+                                "Nie udało się automatycznie zmienić planu. "
+                                "Użyj przycisku „Zrezygnuj z planu”, a potem wybierz nowy — "
+                                f"albo „Zarządzaj subskrypcją”. ({str(up_err)[:140]})"
+                            ),
+                        ) from up_err
+                    sid = ""
+                    # fall through to Checkout poniżej
 
-            replace_sub_id = None
-            if (
-                req.kind == "subscription"
-                and (sub.get("stripe_subscription_id") or "").startswith("sub_")
-            ):
-                # Nowy Checkout zastąpi starą subskrypcję po opłaceniu (bez ręcznej rezygnacji).
-                replace_sub_id = str(sub["stripe_subscription_id"])
-
-            session = await create_checkout_session(
-                account_key=account_key,
-                kind=req.kind,
-                tier_level=req.tier_level,
-                package=req.package,
-                success_url=success,
-                cancel_url=cancel,
-                customer_id=customer_id,
-                idempotency_key=req.idempotency_key or str(uuid.uuid4()),
-                replace_subscription_id=replace_sub_id,
-            )
+            try:
+                session = await create_checkout_session(
+                    account_key=account_key,
+                    kind=req.kind,
+                    tier_level=req.tier_level,
+                    package=req.package,
+                    success_url=success,
+                    cancel_url=cancel,
+                    customer_id=customer_id,
+                    idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+                    replace_subscription_id=None,
+                )
+            except Exception as checkout_err:
+                err_l = str(checkout_err).lower()
+                # Customer ma już subskrypcję w Stripe, a my nie złapaliśmy jej wyżej
+                if (
+                    req.kind == "subscription"
+                    and str(customer_id or "").startswith("cus_")
+                    and (
+                        "already has a subscription" in err_l
+                        or "already subscribed" in err_l
+                        or "cannot create a subscription" in err_l
+                    )
+                ):
+                    recovered = await find_customer_active_subscription_id(str(customer_id))
+                    if recovered and req.tier_level in (1, 2):
+                        cur_tier = int(sub.get("tier_level") or 0)
+                        result = await upgrade_existing_subscription(
+                            account_key=account_key,
+                            tier_level=int(req.tier_level),
+                            stripe_subscription_id=recovered,
+                            current_tier=cur_tier,
+                            credits_balance=int(sub.get("credits_balance") or 0),
+                            tier_config=_tier_config(),
+                            client=client,
+                            sb_get=sb_get,
+                            sb_patch=sb_patch,
+                            sb_post=sb_post,
+                            idempotency_key=req.idempotency_key or str(uuid.uuid4()),
+                        )
+                        try:
+                            await sb_patch(
+                                client,
+                                "subscriptions",
+                                {"account_key": f"eq.{account_key}"},
+                                {"stripe_subscription_id": recovered},
+                            )
+                        except Exception:
+                            pass
+                        return {"ok": True, **result}
+                    # Ostatnia deska: Checkout bez customer (nowy customer) — unikamy blokady
+                    session = await create_checkout_session(
+                        account_key=account_key,
+                        kind=req.kind,
+                        tier_level=req.tier_level,
+                        package=req.package,
+                        success_url=success,
+                        cancel_url=cancel,
+                        customer_id=None,
+                        idempotency_key=(req.idempotency_key or str(uuid.uuid4())) + "-nocust",
+                        replace_subscription_id=None,
+                    )
+                else:
+                    raise
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.exception("create-checkout-session failed")
-        raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+        msg = str(e)[:300]
+        low = msg.lower()
+        if "already has a subscription" in low or "already subscribed" in low:
+            msg = (
+                "W Stripe jest już aktywna subskrypcja. Nie musisz nic anulować ręcznie — "
+                "kliknij ponownie „Ulepsz plan”, albo użyj „Zrezygnuj z planu” poniżej i wybierz nowy. "
+                f"({msg[:120]})"
+            )
+        raise HTTPException(status_code=502, detail=msg) from e
     return {"ok": True, **session}
 
 

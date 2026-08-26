@@ -10,6 +10,7 @@ import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
 import { DS } from '@/constants/premiumTheme';
 import { bestProductMatch, rankCatalogForTyping, rankProductMatches } from '@/lib/fuzzyProductMatch';
+import { inventoryDisplayName } from '@/lib/inventoryLabel';
 import {
   type DealHunterSearchScope,
   DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
@@ -285,41 +286,54 @@ export function IngredientNameSuggest({
   value: string;
   onChange: (v: string) => void;
   onPickUnit?: (unit: string) => void;
-  /** Gdy użytkownik wybierze podpowiedź — pełny rekord (id + nazwa). */
-  onPickItem?: (item: { id: string; name: string; unit?: string }) => void;
+  /** Gdy użytkownik wybierze podpowiedź — pełny rekord (id + nazwa + odmiana). */
+  onPickItem?: (item: {
+    id: string;
+    name: string;
+    unit?: string;
+    variant?: string | null;
+    label?: string;
+  }) => void;
 }) {
-  const [catalog, setCatalog] = useState<{ id: string; name: string; unit?: string }[]>([]);
-  const [suggestions, setSuggestions] = useState<{ id: string; name: string; unit?: string }[]>([]);
+  const [catalog, setCatalog] = useState<
+    { id: string; name: string; unit?: string; variant?: string | null; label: string }[]
+  >([]);
+  const [suggestions, setSuggestions] = useState<
+    { id: string; name: string; unit?: string; variant?: string | null; label: string }[]
+  >([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await supabase
+        let { data, error } = await supabase
           .from('inventory_items')
-          .select('id, name, unit')
+          .select('id, name, variant, unit')
           .eq('is_active', true)
           .order('name')
           .limit(2000);
+        if (error && /variant/i.test(error.message ?? '')) {
+          const retry = await supabase
+            .from('inventory_items')
+            .select('id, name, unit')
+            .eq('is_active', true)
+            .order('name')
+            .limit(2000);
+          data = retry.data;
+        }
         if (!cancelled) {
-          const seen = new Set<string>();
-          const rows = ((data as any[]) ?? [])
-            .map((r) => ({
+          const rows = ((data as any[]) ?? []).map((r) => {
+            const name = String(r.name || '');
+            const variant = r.variant != null && String(r.variant).trim() ? String(r.variant).trim() : null;
+            return {
               id: String(r.id),
-              name: String(r.name || ''),
+              name,
+              variant,
               unit: r.unit ? String(r.unit) : undefined,
-            }))
-            .filter((row) => {
-              const k = row.name
-                .trim()
-                .toLowerCase()
-                .normalize('NFD')
-                .replace(/[\u0300-\u036f]/g, '');
-              if (!k || seen.has(k)) return false;
-              seen.add(k);
-              return true;
-            });
+              label: inventoryDisplayName(name, variant),
+            };
+          }).filter((row) => row.name.trim());
           setCatalog(rows);
         }
       } catch {
@@ -339,9 +353,12 @@ export function IngredientNameSuggest({
     }
     setLoading(true);
     const t = setTimeout(() => {
-      const ranked = rankCatalogForTyping(q, catalog, (c) => c.name, {
-        limit: 8,
-      });
+      const ranked = rankCatalogForTyping(
+        q,
+        catalog,
+        (c) => `${c.name} ${c.variant || ''} ${c.label}`,
+        { limit: 10 },
+      );
       setSuggestions(ranked.map((r) => r.item));
       setLoading(false);
     }, 80);
@@ -354,16 +371,29 @@ export function IngredientNameSuggest({
       onChangeQuery={onChange}
       suggestions={suggestions.map((s) => ({
         id: s.id,
-        name: s.name,
-        hint: s.unit ? `magazyn · ${s.unit}` : 'magazyn',
+        name: s.label,
+        hint: s.variant
+          ? `odmiana · ${s.variant}${s.unit ? ` · ${s.unit}` : ''}`
+          : s.unit
+            ? `magazyn · ${s.unit}`
+            : 'magazyn',
       }))}
       loading={loading}
       placeholder="Nazwa składnika z magazynu"
       onPick={(s) => {
-        onChange(s.name);
-        const hit = suggestions.find((x) => x.id === s.id || x.name === s.name);
+        const hit = suggestions.find((x) => x.id === s.id) || suggestions.find((x) => x.label === s.name);
+        const label = hit?.label || s.name;
+        onChange(label);
         if (hit?.unit && onPickUnit) onPickUnit(hit.unit);
-        if (hit && onPickItem) onPickItem(hit);
+        if (hit && onPickItem) {
+          onPickItem({
+            id: hit.id,
+            name: hit.name,
+            unit: hit.unit,
+            variant: hit.variant,
+            label: hit.label,
+          });
+        }
       }}
     />
   );

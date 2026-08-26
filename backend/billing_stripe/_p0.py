@@ -150,6 +150,29 @@ async def cancel_stripe_subscription(subscription_id: str, *, at_period_end: boo
     return await _stripe_delete(f"/subscriptions/{sid}")
 
 
+async def find_customer_active_subscription_id(customer_id: str) -> Optional[str]:
+    """Szuka aktywnej/trialing subskrypcji Stripe dla customera (gdy DB nie ma stripe_subscription_id)."""
+    cid = (customer_id or "").strip()
+    if not cid.startswith("cus_"):
+        return None
+    for status in ("active", "trialing", "past_due"):
+        try:
+            payload = await _stripe_get(
+                f"/subscriptions?customer={cid}&status={status}&limit=5"
+            )
+        except Exception as e:
+            logger.warning("list subscriptions (%s) failed: %s", status, e)
+            continue
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            sid = str((row or {}).get("id") or "")
+            if sid.startswith("sub_"):
+                return sid
+    return None
+
+
 async def upgrade_existing_subscription(
     *,
     account_key: str,
@@ -693,4 +716,4 @@ async def handle_stripe_event(
         await _mark_processed(client, sb_post, event_id, event_type)
     return result
 
-__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'upgrade_existing_subscription']
+__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'find_customer_active_subscription_id', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'upgrade_existing_subscription']

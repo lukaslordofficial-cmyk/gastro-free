@@ -34,6 +34,7 @@ import MenuRecipeRow, {
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { PosProviderPicker } from '@/components/PosProviderPicker';
 import { PosInstructionBanner } from '@/components/settings/PosInstructionBanner';
+import { PosSyncStatusCard } from '@/components/settings/PosSyncStatusCard';
 import { WebhookUrlRow } from '@/components/settings/WebhookUrlRow';
 import { RestaurantBillingForm } from '@/components/settings/RestaurantBillingForm';
 import { SettingsTopTabs, type SettingsPaneId } from '@/components/settings/SettingsTopTabs';
@@ -314,6 +315,8 @@ export default function UstawieniaScreen() {
         {settingsPane === 'pos' ? (
           <>
             <PosInstructionBanner providerId={posProvider} />
+
+            <PosSyncStatusCard />
 
             <View
               style={[

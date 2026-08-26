@@ -31,6 +31,7 @@ import {
   type ProduceSizeCounts,
   type ProduceSizeKey,
 } from '@/lib/produceSizeConverter';
+import { inventoryDisplayName, inventorySearchBlob } from '@/lib/inventoryLabel';
 import { rankCatalogForTyping } from '@/lib/fuzzyProductMatch';
 import { emitAppDataChanged } from '@/lib/appRefresh';
 
@@ -44,6 +45,9 @@ type PeriodTab = 'day' | 'week' | 'month' | 'year';
 type SuggestItem = {
   id: string;
   name: string;
+  /** Pełna etykieta z odmianą, np. „Ziemniak (Irys)” */
+  label?: string;
+  variant?: string | null;
   kind: 'dish' | 'ingredient';
   unit?: string;
   unit_weight_volume?: number | null;
@@ -53,6 +57,8 @@ type SuggestItem = {
 type CatalogRow = {
   id: string;
   name: string;
+  label: string;
+  variant?: string | null;
   unit?: string;
   unit_weight_volume?: number | null;
 };
@@ -237,28 +243,46 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
         if (itemType === 'ingredient') {
           let { data, error: invErr } = await supabase
             .from('inventory_items')
-            .select('id, name, unit, unit_weight_volume')
+            .select('id, name, variant, unit, unit_weight_volume')
             .order('name')
             .limit(2000);
+          if (invErr && /variant/i.test(invErr.message ?? '')) {
+            const retry = await supabase
+              .from('inventory_items')
+              .select('id, name, unit, unit_weight_volume')
+              .order('name')
+              .limit(2000);
+            data = retry.data;
+            invErr = retry.error;
+          }
           if (invErr && /unit_weight_volume/i.test(invErr.message ?? '')) {
             const retry = await supabase
               .from('inventory_items')
-              .select('id, name, unit')
+              .select('id, name, variant, unit')
               .order('name')
               .limit(2000);
             data = retry.data;
           }
           if (!cancelled) {
             setCatalog(
-              ((data as any[]) ?? []).map((r) => ({
-                id: String(r.id),
-                name: String(r.name || ''),
-                unit: r.unit || 'szt',
-                unit_weight_volume:
-                  r.unit_weight_volume != null && Number(r.unit_weight_volume) > 0
-                    ? Number(r.unit_weight_volume)
-                    : null,
-              })),
+              ((data as any[]) ?? []).map((r) => {
+                const name = String(r.name || '');
+                const variant =
+                  r.variant != null && String(r.variant).trim()
+                    ? String(r.variant).trim()
+                    : null;
+                return {
+                  id: String(r.id),
+                  name,
+                  variant,
+                  label: inventoryDisplayName(name, variant),
+                  unit: r.unit || 'szt',
+                  unit_weight_volume:
+                    r.unit_weight_volume != null && Number(r.unit_weight_volume) > 0
+                      ? Number(r.unit_weight_volume)
+                      : null,
+                };
+              }),
             );
           }
         } else {
@@ -278,11 +302,15 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           }
           if (!cancelled) {
             setCatalog(
-              ((data as any[]) ?? []).map((r) => ({
-                id: String(r.id),
-                name: String(r.name || ''),
-                unit: 'porcja',
-              })),
+              ((data as any[]) ?? []).map((r) => {
+                const name = String(r.name || '');
+                return {
+                  id: String(r.id),
+                  name,
+                  label: name,
+                  unit: 'porcja',
+                };
+              }),
             );
           }
         }
@@ -308,11 +336,18 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       return;
     }
     setSuggestLoading(catalogLoading);
-    const ranked = rankCatalogForTyping(q, catalog, (c) => c.name, { limit: 12 });
+    const ranked = rankCatalogForTyping(
+      q,
+      catalog,
+      (c) => inventorySearchBlob(c.name, c.variant) || c.label,
+      { limit: 12 },
+    );
     setSuggestions(
       ranked.map(({ item, score }) => ({
         id: item.id,
         name: item.name,
+        label: item.label,
+        variant: item.variant ?? null,
         kind: itemType,
         unit: item.unit || (itemType === 'dish' ? 'porcja' : 'szt'),
         unit_weight_volume: item.unit_weight_volume ?? null,
@@ -349,7 +384,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   function pickSuggestion(s: SuggestItem) {
     pickingRef.current = true;
     setSelected(s);
-    setQuery(s.name);
+    setQuery(s.label || inventoryDisplayName(s.name, s.variant) || s.name);
     setSuggestions([]);
     setProduceCounts({});
     setConvertedKg(null);
@@ -373,7 +408,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
   async function handleSave() {
     setError(null);
     setOkMsg(null);
-    const name = (selected?.name || query).trim();
+    const name = (selected?.label || selected?.name || query).trim();
     let qty = parseFloat(quantity.replace(',', '.'));
     if (!name) {
       setError('Wpisz nazwę potrawy lub składnika.');
@@ -644,7 +679,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                   ]}
                 >
                   <Text style={[styles.suggestHint, { color: muted }]}>
-                    Dotknij pozycję, żeby ją wybrać:
+                    Dotknij pozycję (z odmianą, jeśli jest):
                   </Text>
                   {suggestions.map((s) => (
                     <Pressable
@@ -657,7 +692,19 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                       onPress={() => pickSuggestion(s)}
                       testID={`waste-suggest-${s.id}`}
                     >
-                      {renderHighlightedName(s.name, query, text, accent)}
+                      <View style={{ flex: 1, gap: 2 }}>
+                        {renderHighlightedName(
+                          s.label || inventoryDisplayName(s.name, s.variant) || s.name,
+                          query,
+                          text,
+                          accent,
+                        )}
+                        {s.variant ? (
+                          <Text style={[styles.suggestMeta, { color: accent, marginLeft: 0 }]}>
+                            Odmiana: {s.variant}
+                          </Text>
+                        ) : null}
+                      </View>
                       <Text style={[styles.suggestMeta, { color: muted }]}>
                         {s.kind === 'dish' ? 'menu' : 'magazyn'}
                       </Text>
@@ -669,7 +716,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
                 <View style={[styles.selectedBanner, { backgroundColor: theme.isPremium ? PremiumTokens.color.neonSoft : Colors.accentLight }]}>
                   <Check size={14} color={accent} strokeWidth={2.5} />
                   <Text style={[styles.selectedText, { color: accent }]}>
-                    Wybrano: {selected.name}
+                    Wybrano: {selected.label || inventoryDisplayName(selected.name, selected.variant) || selected.name}
                   </Text>
                   <TouchableOpacity
                     onPress={() => {

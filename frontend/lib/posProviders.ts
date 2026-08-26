@@ -37,9 +37,11 @@ export const POS_PROVIDERS: PosProvider[] = [
       'Skopiuj cały link webhook z Ustawień (ma w sobie token — nie obcinaj).',
       'W swoim POS wklej go jako endpoint zdarzenia „zamknięcie rachunku / sale”.',
       'Upewnij się, że body to JSON z tablicą items (pos_external_id, quantity_sold).',
+      'Dodaj stały event_id (lub external_order_id) — przy offline kolejuj i ponawiaj do ACK; bez ryzyka podwójnego księgowania.',
       'W sekcji Mapowanie receptur wpisz te same kody produktów co w POS (SKU / ID).',
     ],
     samplePayload: `{
+  "event_id": "sale-ORD-1001",
   "external_order_id": "ORD-1001",
   "items": [
     { "pos_external_id": "BURGER-01", "quantity_sold": 2, "unit_price_pln": 32.00 }

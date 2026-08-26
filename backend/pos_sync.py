@@ -103,6 +103,7 @@ async def finalize_event(
     status: str,
     result: Optional[dict] = None,
     error: Optional[str] = None,
+    clear_error: bool = False,
 ) -> None:
     from datetime import datetime, timezone
     patch: dict[str, Any] = {
@@ -113,6 +114,8 @@ async def finalize_event(
         patch["result"] = result
     if error is not None:
         patch["error"] = error[:500]
+    elif clear_error or status == "processing":
+        patch["error"] = None
     try:
         await sb_patch(client, EVENT_TABLE, {"id": f"eq.{row_id}"}, patch)
     except httpx.HTTPStatusError:
@@ -177,8 +180,10 @@ async def missing_event_ids(client: httpx.AsyncClient, event_ids: list[str]) -> 
             "limit": "200",
         }) or []
         for r in rows:
-            # „znane” = przetworzone; processing/error → POS powinien dosłać ponownie
-            if (r.get("status") or "").lower() == "processed":
+            # „znane” = przetworzone LUB właśnie w toku (unikaj natychmiastowego podwójnego retry).
+            # error → POS powinien dosłać ponownie.
+            st = (r.get("status") or "").lower()
+            if st in ("processed", "processing"):
                 known.add(str(r.get("event_id")))
     return [e for e in wanted if e not in known]
 

@@ -58,6 +58,7 @@ async def optimizer_critical_order(req: CriticalOrderRequest):
                 unit=c["unit"],
                 quantity_min=c.get("order_qty_min"),
                 quantity_max=c.get("order_qty_max"),
+                variant=(c.get("variant") or None),
             )
             for c in critical
         ],
@@ -193,7 +194,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
         # Pobierz magazyn wraz z powiązaną kategorią — TYLKO aktywne (is_active).
         inv_all: list[dict] = []
         base_sel = (
-            "id,name,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
+            "id,name,variant,quantity,unit,min_quantity,optimal_quantity,safety_buffer_percent,"
             "unit_weight_volume,weight_volume_unit,is_active,"
             "category_id,inventory_categories(name)"
         )
@@ -207,9 +208,21 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 },
             ) or []
         except httpx.HTTPStatusError as e:
-            # Fallback: bez optimal_quantity / safety_buffer / joina / gramatury / is_active
+            # Fallback: bez optimal_quantity / safety_buffer / joina / gramatury / is_active / variant
             text = (e.response.text if e.response is not None else "") or ""
-            if "is_active" in text:
+            if "variant" in text.lower():
+                try:
+                    inv_all = await sb_get(
+                        client, "inventory_items",
+                        params={
+                            "select": base_sel.replace("name,variant,", "name,"),
+                            "is_active": "eq.true",
+                            "limit": "5000",
+                        },
+                    ) or []
+                except httpx.HTTPStatusError:
+                    inv_all = []
+            if not inv_all and "is_active" in text:
                 try:
                     inv_all = await sb_get(
                         client, "inventory_items",
@@ -411,6 +424,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 critical.append({
                     "id": r["id"],
                     "name": name,
+                    "variant": (r.get("variant") or "").strip() or None,
                     "unit": r.get("unit") or "szt",
                     "current_quantity": qty,
                     "min_quantity": minq,
@@ -491,6 +505,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             entry = {
                 "id": (hit or {}).get("id"),
                 "name": display_name,
+                "variant": ((hit or {}).get("variant") or "").strip() or None,
                 "unit": unit or "szt",
                 "current_quantity": float((hit or {}).get("quantity") or 0) if hit else None,
                 "min_quantity": float((hit or {}).get("min_quantity") or 0) if hit else None,
@@ -585,6 +600,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 quantity_max=c.get("order_qty_max"),
                 unit_weight_volume=c.get("unit_weight_volume"),
                 weight_volume_unit=c.get("weight_volume_unit"),
+                variant=(c.get("variant") or None),
             )
             for c in critical
         ],

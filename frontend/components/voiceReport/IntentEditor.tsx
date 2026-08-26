@@ -143,8 +143,8 @@ export function IntentEditor({ intent, edited, patch, categories, menuCategories
               onPickUnit={(u) => patch({ unit: u })}
               onPickItem={(item) =>
                 patch({
-                  item_name: item.name,
-                  item_name_resolved: item.name,
+                  item_name: item.label || item.name,
+                  item_name_resolved: item.label || item.name,
                   related_id: item.id,
                   produce_size: null,
                   produce_size_counts: {},

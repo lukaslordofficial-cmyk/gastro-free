@@ -264,6 +264,12 @@ export async function subscribeTier(tierLevel: 1 | 2): Promise<SubscriptionState
   const { createCheckoutAndOpen } = await import('@/lib/billingClient');
   const checkout = await createCheckoutAndOpen({ kind: 'subscription', tier_level: tierLevel });
   // Po upgrade w Stripe (bez Checkout) odśwież wiersz; po Checkout — stan zmieni się po płatności.
+  if (!checkout.ok) {
+    throw new Error(
+      checkout.message
+      || 'Nie udało się uruchomić płatności / zmiany planu. Użyj „Zrezygnuj z planu”, potem wybierz ponownie.',
+    );
+  }
   const row = await ensureRow();
   if (checkout.upgraded) {
     try {
@@ -275,12 +281,7 @@ export async function subscribeTier(tierLevel: 1 | 2): Promise<SubscriptionState
       checkout.message || 'Plan zaktualizowany. Nie trzeba było rezygnować z poprzedniego.',
     );
   }
-  return buildView(
-    row,
-    checkout.ok
-      ? checkout.message
-      : (checkout.message || 'Nie udało się otworzyć płatności Stripe.'),
-  );
+  return buildView(row, checkout.message);
 }
 
 export async function cancelSubscription(): Promise<SubscriptionState> {

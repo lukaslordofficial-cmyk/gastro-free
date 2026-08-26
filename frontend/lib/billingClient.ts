@@ -60,9 +60,21 @@ export async function createCheckoutAndOpen(opts: {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = data.detail || data.message || `Błąd Stripe (${res.status})`;
+      const raw = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      const low = raw.toLowerCase();
+      const friendly =
+        low.includes('already has a subscription')
+        || low.includes('already subscribed')
+        || low.includes('rezygnow')
+          ? (
+            'Masz już aktywną subskrypcję w Stripe. Nie anuluj nic ręcznie w banku — '
+            + 'kliknij czerwony przycisk „Zrezygnuj z planu” w aplikacji, a potem wybierz wyższy plan '
+            + '(albo spróbuj ponownie „Ulepsz plan”).'
+          )
+          : raw;
       return {
         ok: false,
-        message: typeof detail === 'string' ? detail : JSON.stringify(detail),
+        message: friendly,
       };
     }
 

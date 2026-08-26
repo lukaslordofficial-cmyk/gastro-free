@@ -22,6 +22,7 @@ export function SubscriptionPanel() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [toastIsError, setToastIsError] = useState(false);
   const [mockBilling, setMockBilling] = useState(false);
 
   useEffect(() => {
@@ -33,13 +34,15 @@ export function SubscriptionPanel() {
     try {
       const d = await fn();
       if (d.message) {
+        setToastIsError(false);
         setToast(d.message);
-        setTimeout(() => setToast(null), 4500);
+        setTimeout(() => setToast(null), 5000);
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się wykonać operacji płatności.';
+      setToastIsError(true);
       setToast(msg);
-      setTimeout(() => setToast(null), 5000);
+      setTimeout(() => setToast(null), 7000);
     } finally {
       setBusy(null);
     }
@@ -72,15 +75,30 @@ export function SubscriptionPanel() {
           data={data ?? { tier_level: 0, status: 'active', plans: TIER_PLANS }}
           busy={busy}
           onSubscribe={(t) => run(`sub-${t}`, () => subscribe(t))}
+          onResign={() => run('resign', resign)}
           styles={styles}
           theme={theme}
         />
+        <View style={styles.resignBanner} testID="resign-banner-migration">
+          <Text style={styles.resignBannerTitle}>
+            Masz problem z przejściem na wyższy plan? Zrezygnuj i wybierz nowy od razu.
+          </Text>
+          <TouchableOpacity
+            style={styles.resignBannerBtn}
+            onPress={() => run('resign', resign)}
+            disabled={busy !== null}
+            testID="resign-banner-btn-migration"
+          >
+            {busy === 'resign'
+              ? <ActivityIndicator size="small" color={Colors.white} />
+              : <Text style={styles.resignBannerBtnText}>Zrezygnuj z planu → Free</Text>}
+          </TouchableOpacity>
+        </View>
       </ScrollView>
     );
   }
 
-  const activePaid = data.tier_level >= 1 && data.status === 'active';
-  const onFreeTier = data.tier_level === 0;
+  const activePaid = data.tier_level >= 1 && (data.status === 'active' || data.status === 'canceled' || data.status === 'past_due');
   const trialLabel = data.trial_active
     ? formatTrialDaysLeft(trialDaysRemaining(data.trial_ends_at))
     : null;
@@ -108,9 +126,12 @@ export function SubscriptionPanel() {
       ) : null}
 
       {toast && (
-        <View style={styles.toast} testID="subscription-toast">
-          <Check size={15} color={theme.success} strokeWidth={2.4} />
-          <Text style={styles.toastText}>{toast}</Text>
+        <View
+          style={[styles.toast, toastIsError && styles.toastError]}
+          testID="subscription-toast"
+        >
+          <Check size={15} color={toastIsError ? theme.danger : theme.success} strokeWidth={2.4} />
+          <Text style={[styles.toastText, toastIsError && styles.toastErrorText]}>{toast}</Text>
         </View>
       )}
 
@@ -138,10 +159,29 @@ export function SubscriptionPanel() {
 
       <Text style={styles.sectionTitle}>Plany subskrypcji</Text>
       <Text style={styles.upgradeHint}>
-        Wyższy plan możesz wybrać od razu — nie trzeba wcześniej rezygnować. Jeśli masz już aktywną
-        subskrypcję Stripe, plan zmieni się od razu (różnica doliczona do karty). Pierwsza płatność
-        lub brak ID Stripe otwiera okno Checkout.
+        Wyższy plan możesz wybrać od razu — nie trzeba wcześniej rezygnować. Aplikacja sama
+        zamieni niższą subskrypcję albo otworzy płatność. Jeśli coś zablokuje zakup, użyj
+        czerwonego przycisku „Zrezygnuj z planu” poniżej.
       </Text>
+
+      <View style={styles.resignBanner} testID="resign-banner">
+        <Text style={styles.resignBannerTitle}>
+          {data.tier_level >= 1
+            ? `Aktywny plan: ${data.tier_name}. Możesz zrezygnować w każdej chwili.`
+            : 'Zrezygnuj z płatnej subskrypcji Stripe (jeśli została) i wróć do Free — potem wybierz nowy plan.'}
+        </Text>
+        <TouchableOpacity
+          style={styles.resignBannerBtn}
+          onPress={() => run('resign', resign)}
+          disabled={busy !== null}
+          testID="resign-banner-btn"
+        >
+          {busy === 'resign'
+            ? <ActivityIndicator size="small" color={Colors.white} />
+            : <Text style={styles.resignBannerBtnText}>Zrezygnuj z planu → Free</Text>}
+        </TouchableOpacity>
+      </View>
+
       <PlanList
         data={data}
         busy={busy}
@@ -151,7 +191,7 @@ export function SubscriptionPanel() {
         theme={theme}
       />
 
-      {(activePaid || (data.status === 'canceled' && data.tier_level >= 1)) && (
+      {(activePaid || data.tier_level >= 1) && (
         <TouchableOpacity
           style={styles.cancelBtn}
           onPress={() => run('cancel', cancel)}
@@ -161,34 +201,6 @@ export function SubscriptionPanel() {
           {busy === 'cancel'
             ? <ActivityIndicator size="small" color={theme.danger} />
             : <Text style={styles.cancelText}>Anuluj subskrypcję (koniec okresu)</Text>}
-        </TouchableOpacity>
-      )}
-
-      {activePaid && (
-        <TouchableOpacity
-          style={styles.resignBtn}
-          onPress={() => run('resign', resign)}
-          disabled={busy !== null}
-          testID="resign-subscription-primary"
-        >
-          {busy === 'resign'
-            ? <ActivityIndicator size="small" color={theme.danger} />
-            : <Text style={styles.resignText}>
-                Zrezygnuj teraz → plan Free (tylko jeśli chcesz zejść z płatnego, nie przy upgrade)
-              </Text>}
-        </TouchableOpacity>
-      )}
-
-      {!activePaid && (onFreeTier || data.tier_level >= 1) && (
-        <TouchableOpacity
-          style={styles.resignBtn}
-          onPress={() => run('resign', resign)}
-          disabled={busy !== null}
-          testID="resign-subscription"
-        >
-          {busy === 'resign'
-            ? <ActivityIndicator size="small" color={theme.danger} />
-            : <Text style={styles.resignText}>Zrezygnuj z subskrypcji → plan Free (bez ponownego pakietu 1000 kr.)</Text>}
         </TouchableOpacity>
       )}
 
@@ -283,7 +295,7 @@ function PlanList({
     <View style={styles.planRow}>
       {plans.slice().sort((a, b) => a.tier_level - b.tier_level).map((p) => {
         const isFree = p.tier_level === 0;
-        const current = data.tier_level === p.tier_level && (isFree ? true : data.status === 'active');
+        const current = data.tier_level === p.tier_level;
         const upgradeLabel = data.tier_level > 0 && p.tier_level > data.tier_level
           ? 'Ulepsz plan'
           : data.tier_level > p.tier_level
@@ -320,7 +332,9 @@ function PlanList({
               <>
                 <View style={styles.planActiveTag}>
                   <Check size={13} color={theme.success} strokeWidth={2.6} />
-                  <Text style={styles.planActiveText}>Aktywny</Text>
+                  <Text style={styles.planActiveText}>
+                    {isFree ? 'Aktywny' : `Aktywny${data.status && data.status !== 'active' ? ` (${data.status})` : ''}`}
+                  </Text>
                 </View>
                 {!isFree && onResign ? (
                   <TouchableOpacity
@@ -335,7 +349,20 @@ function PlanList({
                   </TouchableOpacity>
                 ) : null}
               </>
-            ) : isFree ? null : (
+            ) : isFree ? (
+              onResign ? (
+                <TouchableOpacity
+                  style={styles.planResignBtn}
+                  onPress={onResign}
+                  disabled={busy !== null}
+                  testID="resign-from-free-card"
+                >
+                  {busy === 'resign'
+                    ? <ActivityIndicator size="small" color={theme.danger} />
+                    : <Text style={styles.planResignText}>Zrezygnuj z płatnej (jeśli aktywna)</Text>}
+                </TouchableOpacity>
+              ) : null
+            ) : (
               <TouchableOpacity
                 style={styles.planBtn}
                 onPress={() => onSubscribe(p.tier_level as 1 | 2)}
@@ -374,6 +401,11 @@ function makeSubStyles(theme: ReturnType<typeof useAppTheme>) {
     retryText: { color: Colors.white, fontWeight: '700', fontSize: 13 },
     toast: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: successSoft, borderRadius: 12, borderWidth: 1, borderColor: theme.isPremium ? 'rgba(0,255,136,0.3)' : '#A7F3D0', padding: 12, marginTop: 14 },
     toastText: { flex: 1, fontSize: 12.5, color: theme.isPremium ? DS.color.greenEnd : '#065F46', fontWeight: '600', lineHeight: 18 },
+    toastError: {
+      backgroundColor: theme.isPremium ? 'rgba(255,80,80,0.12)' : '#FEF2F2',
+      borderColor: theme.isPremium ? 'rgba(255,80,80,0.4)' : '#FECACA',
+    },
+    toastErrorText: { color: theme.danger },
     trialBanner: {
       flexDirection: 'row',
       alignItems: 'center',

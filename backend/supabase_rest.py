@@ -32,6 +32,7 @@ _TENANT_TABLES = frozenset({
     "token_usage",
     "sales_log",
     "pos_sales_log",
+    "pos_sync_events",
     "financial_records",
     "subscriptions",
     "restaurant_profile",

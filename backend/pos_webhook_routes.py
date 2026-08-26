@@ -17,6 +17,7 @@ from http_ssl import httpx_verify
 from pos_adapters import normalize_pos_payload
 from pos_webhook_auth import require_pos_webhook_tenant
 from pos_webhook_consume import consume_pos_recipes, process_via_menu_item
+from pos_sync import claim_event, extract_event_id, finalize_event, payload_hash
 from supabase_rest import sb_get, sb_post
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,11 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
         if not req.items:
             raise HTTPException(status_code=400, detail="Brak pozycji w zamówieniu.")
 
+        # ── Idempotencja: event_id (opcjonalny — brak = zachowanie wsteczne). ──
+        event_id = extract_event_id(body if isinstance(body, dict) else {}, canonical)
+        p_hash = payload_hash(canonical)
+        sync_row_id: Optional[str] = None
+
         year_month = datetime.now(timezone.utc).strftime("%Y-%m")
         processed: list[dict] = []
         inventory_updates: list[dict] = []
@@ -80,6 +86,31 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
         sale_log_ids: list[str] = []
 
         async with httpx.AsyncClient(timeout=60.0, verify=httpx_verify()) as client:
+            # Rezerwacja zdarzenia — duplikat (retry POS) zwraca ACK bez ponownego księgowania.
+            if event_id:
+                claim_status, existing = await claim_event(
+                    client,
+                    event_id=event_id,
+                    provider=provider,
+                    external_order_id=req.external_order_id,
+                    p_hash=p_hash,
+                )
+                if claim_status == "duplicate":
+                    prev_status = (existing or {}).get("status")
+                    if prev_status == "processed":
+                        prev = (existing or {}).get("result") or {}
+                        return {
+                            "ok": True,
+                            "status": "duplicate",
+                            "event_id": event_id,
+                            "message": "Zdarzenie już przetworzone — pominięto (idempotencja).",
+                            "external_order_id": req.external_order_id,
+                            **({"previous_result": prev} if prev else {}),
+                        }
+                    # Wcześniejsza próba nie zakończyła się sukcesem (processing/error)
+                    # → przetwórz ponownie na istniejącym wierszu dziennika.
+                sync_row_id = (existing or {}).get("id")
+
             for it in req.items:
                 product: Optional[dict] = None
 
@@ -181,15 +212,29 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
                 except Exception as e:
                     logger.debug("_recompute_menu_availability skipped: %s", e)
 
-        return {
-            "ok": True,
-            "external_order_id": req.external_order_id,
-            "processed_items": processed,
-            "inventory_updates": inventory_updates,
-            "revenue_added_pln": revenue_total,
-            "revenue_entry_id": revenue_id,
-            "sale_log_ids": sale_log_ids,
-            "warnings": warnings,
-        }
+            response = {
+                "ok": True,
+                "status": "processed",
+                "event_id": event_id,
+                "external_order_id": req.external_order_id,
+                "processed_items": processed,
+                "inventory_updates": inventory_updates,
+                "revenue_added_pln": revenue_total,
+                "revenue_entry_id": revenue_id,
+                "sale_log_ids": sale_log_ids,
+                "warnings": warnings,
+            }
+            # ACK: potwierdź poprawne przetworzenie (idempotencja + reconciliation).
+            if sync_row_id:
+                await finalize_event(
+                    client, row_id=sync_row_id, status="processed",
+                    result={
+                        "revenue_added_pln": revenue_total,
+                        "revenue_entry_id": revenue_id,
+                        "processed_items": processed,
+                        "warnings": warnings,
+                    },
+                )
+        return response
     finally:
         _account_key_ctx.reset(ctx_token)

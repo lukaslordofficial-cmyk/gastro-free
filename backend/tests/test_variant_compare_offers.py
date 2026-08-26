@@ -41,9 +41,11 @@ def _catalog():
     ]
 
 
-def _patch(monkeypatch, catalog=None, suppliers=None):
+def _patch(monkeypatch, catalog=None, suppliers=None, inv_rows=None, inv_variant=None):
     catalog = catalog if catalog is not None else _catalog()
     suppliers = suppliers if suppliers is not None else _suppliers()
+    inv_rows = inv_rows or []
+    inv_variant = inv_variant or []
 
     async def fake_check(*a, **k):
         return None
@@ -55,6 +57,12 @@ def _patch(monkeypatch, catalog=None, suppliers=None):
         return False
 
     async def fake_sb_get(client, table, params=None):
+        params = params or {}
+        if table == "inventory_items":
+            sel = (params.get("select") or "").strip()
+            if sel == "id,variant":
+                return list(inv_variant)
+            return list(inv_rows)
         return []
 
     async def fake_reliability(client):
@@ -148,3 +156,22 @@ def test_no_base_product_at_all(monkeypatch):
     r = res["variant_reports"][0]
     assert r["exact_found"] is False
     assert r["substitute_variant_count"] == 0
+
+
+def test_variant_honored_from_warehouse_when_request_has_none(monkeypatch):
+    # Auto-zamówienia braków NIE ustawiają CompareItem.variant — odmiana pochodzi
+    # z magazynu (inv_variant_by_id). Musi być honorowana jak w ręcznym zamawianiu.
+    _patch(
+        monkeypatch,
+        inv_rows=[{"id": "inv1", "name": "ziemniak", "unit": "kg"}],
+        inv_variant=[{"id": "inv1", "variant": "Irys"}],
+    )
+    req = CompareOffersRequest(items=[
+        CompareItem(product_name_or_id="ziemniak", quantity=10, unit="kg"),  # brak variant
+    ])
+    res = _run(req)
+    reports = res.get("variant_reports")
+    assert reports and reports[0]["requested_variant"] == "Irys"
+    assert reports[0]["exact_found"] is True
+    labels = {s["variant_label"] for s in reports[0]["substitutes"]}
+    assert "Gala" in labels and "Lord" in labels

@@ -59,6 +59,7 @@ from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
 from pos_config_routes import router as pos_config_router
 from pos_webhook_routes import router as pos_webhook_router
+from pos_sync_routes import router as pos_sync_router
 from order_email_routes import router as order_email_router
 from voice_transcribe_routes import router as voice_transcribe_router
 from voice_crud_routes import router as voice_crud_router
@@ -127,6 +128,7 @@ app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
 app.include_router(pos_config_router)
 app.include_router(pos_webhook_router)
+app.include_router(pos_sync_router)
 app.include_router(order_email_router)
 app.include_router(voice_transcribe_router)
 app.include_router(voice_crud_router)

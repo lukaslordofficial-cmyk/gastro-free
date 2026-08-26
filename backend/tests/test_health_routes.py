@@ -74,3 +74,21 @@ def test_health_deep_without_supabase(monkeypatch):
     r = TestClient(_app()).get("/api/health/deep")
     assert r.status_code == 200
     assert r.json()["subscription"] == "not_configured"
+
+
+def test_ready_requires_env(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_ANON_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    r = TestClient(_app()).get("/api/ready")
+    assert r.status_code == 503
+
+
+def test_ready_ok_when_configured(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    r = TestClient(_app()).get("/ready")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ready"

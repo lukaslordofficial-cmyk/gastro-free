@@ -144,6 +144,25 @@ async def auth_auto_confirm(body: AutoConfirmBody, request: Request):
     return {"ok": True, "user_id": uid, "email_confirmed": True}
 
 
+@router.get("/ready")
+@router.get("/api/ready")
+async def ready():
+    """Readiness: env skonfigurowane. Bez outbound — nie blokuje event loop."""
+    supabase_url, supabase_key = _supabase_creds()
+    openai = bool((os.environ.get("OPENAI_API_KEY") or "").strip())
+    if not supabase_url or not supabase_key or not openai:
+        raise HTTPException(
+            status_code=503,
+            detail="Brak wymaganej konfiguracji (Supabase / OpenAI).",
+        )
+    return {
+        "status": "ready",
+        "service": "gastro-voice",
+        "supabase_configured": True,
+        "openai_configured": True,
+    }
+
+
 @router.get("/api/health/deep")
 async def health_deep():
     """Optional deep check (Supabase round-trip) — not used by Railway healthcheck."""

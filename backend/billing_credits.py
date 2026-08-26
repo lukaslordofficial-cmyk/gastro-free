@@ -20,26 +20,47 @@ from subscription_core import _ensure_subscription
 
 
 async def _deduct_credits(client: httpx.AsyncClient, credits: int, *, endpoint: str) -> int:
-    """Odejmuje kredyty; saldo nigdy nie spada poniżej 0. Zwraca nowe saldo."""
+    """Odejmuje kredyty; saldo nigdy nie spada poniżej 0. Zwraca nowe saldo.
+
+    Optimistic lock: PATCH tylko gdy credits_balance == odczytane saldo,
+    żeby równoległe retry nie ścięły podwójnie. Przy wyścigu — 1–2 ponowienia.
+    """
     if credits <= 0:
         try:
             sub = await _ensure_subscription(client)
             return int(sub.get("credits_balance") or 0)
         except Exception:
             return 0
+    last_bal = 0
     try:
-        sub = await _ensure_subscription(client)
-        new_bal = max(0, int(sub.get("credits_balance") or 0) - int(credits))
-        await sb_patch(client, "subscriptions", {"account_key": f"eq.{get_account_key()}"},
-                       {"credits_balance": new_bal})
-        return new_bal
+        for _ in range(3):
+            sub = await _ensure_subscription(client)
+            old_bal = int(sub.get("credits_balance") or 0)
+            last_bal = old_bal
+            new_bal = max(0, old_bal - int(credits))
+            if new_bal == old_bal:
+                return old_bal
+            rows = await sb_patch(
+                client,
+                "subscriptions",
+                {
+                    "account_key": f"eq.{get_account_key()}",
+                    "credits_balance": f"eq.{old_bal}",
+                },
+                {"credits_balance": new_bal},
+            )
+            # Pusta lista = ktoś zdążył zmienić saldo (wyścig) — ponów odczyt.
+            if isinstance(rows, list) and len(rows) == 0:
+                continue
+            return new_bal
+        return last_bal
     except Exception as e:  # noqa: BLE001
         logger.debug(f"_deduct_credits skipped ({endpoint}): {e}")
         try:
             sub = await _ensure_subscription(client)
             return int(sub.get("credits_balance") or 0)
         except Exception:
-            return 0
+            return last_bal
 
 
 async def _log_token_usage(client: httpx.AsyncClient, *,

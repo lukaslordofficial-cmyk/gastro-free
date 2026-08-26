@@ -141,9 +141,13 @@ def _openai() -> AsyncOpenAI:
             ),
         )
     if _openai_client is None:
+        try:
+            openai_timeout = max(15.0, min(120.0, float(os.environ.get("OPENAI_TIMEOUT_S", "90") or "90")))
+        except ValueError:
+            openai_timeout = 90.0
         _openai_client = AsyncOpenAI(
             api_key=OPENAI_API_KEY,
-            http_client=httpx.AsyncClient(verify=_httpx_verify(), timeout=120.0),
+            http_client=httpx.AsyncClient(verify=_httpx_verify(), timeout=openai_timeout),
         )
     return _openai_client
 

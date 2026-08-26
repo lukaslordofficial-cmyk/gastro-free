@@ -24,6 +24,7 @@ def test_public_mutate_webhooks():
 def test_ai_paths():
     assert is_ai_path("/api/voice/transcribe")
     assert is_ai_path("/api/menu/scan")
+    assert is_ai_path("/api/inspirations/recipe")
     assert not is_ai_path("/api/actions/apply")
     assert is_mutate_method("POST")
     assert not is_mutate_method("GET")

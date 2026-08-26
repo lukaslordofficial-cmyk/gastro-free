@@ -20,6 +20,7 @@ Wszystkie nazwy są re-eksportowane (`from <modul> import *`), więc historyczne
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional
 
 import httpx
@@ -34,8 +35,24 @@ from tenant_auth import (
     jwt_cache_put,
     prefer_jwt_account_key,
 )
-from request_guards import is_ai_path, is_mutate_method, is_public_mutate
+from request_guards import (
+    content_length_too_large,
+    is_ai_path,
+    is_deal_hunter_path,
+    is_lp_marketplace_path,
+    is_mutate_method,
+    is_public_mutate,
+    is_upload_path,
+    max_upload_bytes,
+)
 from rate_limit import allow_ai, allow_ip, allow_write
+from feature_flags import (
+    FEATURE_DISABLED_DETAIL,
+    deal_hunter_enabled,
+    lp_marketplace_enabled,
+)
+from openai_circuit import CIRCUIT_OPEN_DETAIL, openai_circuit
+from request_log import new_request_id, short_tenant_id
 from url_safety import build_supabase_auth_user_url, build_supabase_rest_url
 # Re-eksport aliasów, których historycznie używano jako `from server import ...`.
 from pl_fuzzy_norm import food_match_key as _food_match_key, norm_pl as _norm_pl
@@ -154,10 +171,19 @@ app.include_router(orders_hunter_router)
 app.include_router(local_producers_router)
 
 
+def _json_error(status: int, detail: str, request_id: str) -> JSONResponse:
+    resp = JSONResponse(status_code=status, content={"detail": detail})
+    resp.headers["X-Request-Id"] = request_id
+    return resp
+
+
 @app.middleware("http")
 async def account_key_middleware(request: Request, call_next):
     """Multi-tenant: X-Account-Key from logged-in app, else JWT→profiles, else ACCOUNT_KEY env."""
+    t0 = time.perf_counter()
     path = request.url.path or ""
+    method = (request.method or "GET").upper()
+    request_id = new_request_id(request.headers.get("x-request-id"))
     # Furgonetka „Własna” wysyła Bearer {shop_token} — to NIE jest JWT użytkownika.
     # Lookup w Supabase Auth mógłby wisieć i Furgonetka zgłasza „błąd API”.
     skip_jwt = (
@@ -233,33 +259,68 @@ async def account_key_middleware(request: Request, call_next):
         allow_header=is_service_role,
     )
 
+    if method != "OPTIONS":
+        if is_deal_hunter_path(path) and not deal_hunter_enabled():
+            return _json_error(503, FEATURE_DISABLED_DETAIL, request_id)
+        if is_lp_marketplace_path(path) and not lp_marketplace_enabled():
+            return _json_error(503, FEATURE_DISABLED_DETAIL, request_id)
+        if is_upload_path(path) and content_length_too_large(request.headers.get("content-length")):
+            mb = max(1, max_upload_bytes() // (1024 * 1024))
+            return _json_error(
+                413,
+                f"Plik jest za duży. Wgraj mniejszy PDF lub zdjęcie (limit {mb} MB).",
+                request_id,
+            )
+
+    ip = request.client.host if request.client else "0"
+    if method != "OPTIONS" and is_ai_path(path):
+        if not openai_circuit.allow():
+            return _json_error(503, CIRCUIT_OPEN_DETAIL, request_id)
+        bucket = key if key and key != "default" else f"ip:{ip}"
+        if not allow_ai(bucket) or not allow_ip(ip):
+            return _json_error(429, "Zbyt wiele zapytań AI. Spróbuj za chwilę.", request_id)
+
     if is_mutate_method(request.method) and not is_public_mutate(path):
         if key == "default":
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": "Zaloguj się ponownie — brak konta restauracji przy zapisie.",
-                },
+            return _json_error(
+                401,
+                "Zaloguj się ponownie — brak konta restauracji przy zapisie.",
+                request_id,
             )
-        ip = request.client.host if request.client else "0"
-        bucket_key = key
-        if is_ai_path(path):
-            if not allow_ai(bucket_key) or not allow_ip(ip):
-                return JSONResponse(
-                    status_code=429,
-                    content={"detail": "Zbyt wiele zapytań AI. Spróbuj za chwilę."},
-                )
-        elif not allow_write(bucket_key):
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Zbyt wiele zapytań. Spróbuj za chwilę."},
-            )
+        if not is_ai_path(path) and not allow_write(key):
+            return _json_error(429, "Zbyt wiele zapytań. Spróbuj za chwilę.", request_id)
 
     token = _account_key_ctx.set(key)
     try:
-        return await call_next(request)
+        response = await call_next(request)
+    except Exception:
+        if is_ai_path(path):
+            openai_circuit.record_failure()
+        raise
     finally:
         _account_key_ctx.reset(token)
+
+    status = getattr(response, "status_code", 0) or 0
+    if is_ai_path(path):
+        if status >= 500:
+            openai_circuit.record_failure()
+        elif 200 <= status < 400:
+            openai_circuit.record_success()
+    try:
+        response.headers["X-Request-Id"] = request_id
+    except Exception:  # noqa: BLE001
+        pass
+    ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "http %s %s %s %s %sms ak=%s",
+        request_id,
+        method,
+        path,
+        status,
+        ms,
+        short_tenant_id(key),
+    )
+    return response
 
 
 _jwt_http: httpx.AsyncClient | None = None

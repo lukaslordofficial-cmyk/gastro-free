@@ -2,49 +2,20 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   View,
   Text,
-  StyleSheet,
   Modal,
   TouchableOpacity,
-  TextInput,
   ScrollView,
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   Alert,
   DeviceEventEmitter,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import {
-  X,
-  Sparkles,
-  Truck,
-  Mail,
-  Copy,
-  Check,
-  ChevronRight,
-  ChevronDown,
-  Store,
-  Phone,
-  Send,
-  CircleAlert,
-  Minus,
-  Plus,
-  Trash2,
-  Search,
-  ShoppingCart,
-  Package,
-  CreditCard,
-  Landmark,
-} from 'lucide-react-native';
-import { Colors } from '@/constants/colors';
-import { DS } from '@/constants/premiumTheme';
-import { useAppTheme } from '@/hooks/useAppTheme';
+import { Package } from 'lucide-react-native';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
 import { rankProductMatches } from '@/lib/fuzzyProductMatch';
-import { formatPln } from '@/lib/format';
 import {
   checkSupplierMinOrder,
   minOrderAlertCopy,
@@ -69,7 +40,6 @@ import { withAccountKey } from '@/lib/tenantScope';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import {
   type DealHunterSearchScope,
-  DEAL_HUNTER_SEARCH_SCOPE_OPTIONS,
   DEFAULT_DEAL_HUNTER_SEARCH_SCOPE,
 } from '@/lib/dealHunterSearchScope';
 import { LocalProducerCheckoutSheet } from '@/components/dealHunter/LocalProducerCheckoutSheet';
@@ -77,13 +47,19 @@ import {
   ManualBankPaymentSheet,
   type ManualPaymentOrder,
 } from '@/components/dealHunter/ManualBankPaymentSheet';
+import { EditableCartPanel } from '@/components/dealHunter/EditableCartPanel';
+import { MessagePreviewStep } from '@/components/dealHunter/MessagePreviewStep';
+import { DealHunterHeader } from '@/components/dealHunter/DealHunterHeader';
+import { QtyStep } from '@/components/dealHunter/QtyStep';
+import { ContactStep } from '@/components/dealHunter/ContactStep';
+import { SingleBestOptionCard } from '@/components/dealHunter/SingleBestOptionCard';
+import { DraftSavedModal } from '@/components/dealHunter/DraftSavedModal';
 
-import { BACKEND_URL, themedStyles, useDealColors } from './dealHunter/theme';
-import type { CatalogRow, MessageCard, Props, SelectedOption, Step } from './dealHunter/types';
-import { recalcGroup, resolveSelectionFromCompare, suggestQty } from './dealHunter/helpers';
-import { MinOrderBadge, OfferLine } from './dealHunter/smallComponents';
-import { SupplierCatalogPicker } from './dealHunter/SupplierCatalogPicker';
-import { NewOrderBrowser } from './dealHunter/NewOrderBrowser';
+import { BACKEND_URL, themedStyles, useDealColors } from '@/components/dealHunter/theme';
+import type { CatalogRow, MessageCard, Props, SelectedOption, Step } from '@/components/dealHunter/types';
+import { recalcGroup, resolveSelectionFromCompare, suggestQty } from '@/components/dealHunter/helpers';
+import { SupplierCatalogPicker } from '@/components/dealHunter/SupplierCatalogPicker';
+import { NewOrderBrowser } from '@/components/dealHunter/NewOrderBrowser';
 
 export function DealHunterModal({
   visible,
@@ -1108,426 +1084,29 @@ export function DealHunterModal({
           : 0
     : stepIndex;
 
+  const cartGroups = effectiveSelectedOption
+    ? selectedSuppliers().filter((g) => g.items.length > 0)
+    : [];
+
   const renderEditableCart = () => {
     if (!effectiveSelectedOption) return null;
-    const groups = selectedSuppliers().filter((g) => g.items.length > 0);
-    const orderable = groups.filter(
-      (g) => (g.min_order_value ?? 0) <= 0 || g.meets_minimum_order !== false,
-    );
-    const grand = Math.round(groups.reduce((s, g) => s + g.subtotal_pln, 0) * 100) / 100;
-    const ctaBg = C.isPremium ? '#5CFFB0' : C.accent;
-    const ctaFg = C.isPremium ? '#0A0A0A' : C.white;
-
-    // Braki: (1) nie ma w katalogach, (2) są w katalogu, ale nie weszły do koszyka (min. zamówienia itd.)
-    const { catalogMissing, basketMissing } = (() => {
-      const catalog: string[] = [];
-      const basket: string[] = [];
-      const seenCat = new Set<string>();
-      const seenBasket = new Set<string>();
-      const pushUnique = (list: string[], seen: Set<string>, name: string) => {
-        const n = String(name || '').trim();
-        const key = n.toLowerCase();
-        if (!n || seen.has(key)) return;
-        seen.add(key);
-        list.push(n);
-      };
-
-      if (!result) return { catalogMissing: catalog, basketMissing: basket };
-
-      for (const r of result.items_requested ?? []) {
-        if (r.found) continue;
-        pushUnique(catalog, seenCat, r.product_name);
-      }
-      for (const name of result.not_found_products ?? []) {
-        pushUnique(catalog, seenCat, name);
-      }
-
-      // Braki scenariusza (znalezione, ale nie przypisane do koszyka)
-      const opt = effectiveSelectedOption;
-      let scenarioMissing: string[] = [];
-      if (opt === 'split_max' || opt === 'monolith' || opt === 'smart_hybrid') {
-        const sc =
-          (result.scenarios ?? []).find((s) => s.id === opt)
-          ?? (opt === 'split_max' ? result.scenario_split_max : null)
-          ?? (opt === 'monolith' ? result.scenario_monolith : null)
-          ?? (opt === 'smart_hybrid' ? result.scenario_smart_hybrid : null);
-        scenarioMissing = sc?.missing ?? [];
-      } else if (opt === 'optimized') {
-        scenarioMissing =
-          result.option_optimized?.missing
-          ?? result.variant_split?.missing
-          ?? [];
-      } else if (opt === 'all_one') {
-        scenarioMissing =
-          result.option_all_one?.missing
-          ?? result.best_option?.missing
-          ?? [];
-      }
-      for (const name of scenarioMissing) {
-        pushUnique(basket, seenBasket, name);
-      }
-
-      // Pozycje „found” których nie ma w aktualnych grupach koszyka
-      const inCart = new Set<string>();
-      for (const g of groups) {
-        for (const it of g.items ?? []) {
-          const k = String(it.product_name || '').trim().toLowerCase();
-          if (k) inCart.add(k);
-        }
-      }
-      for (const r of result.items_requested ?? []) {
-        if (!r.found) continue;
-        const name = String(r.product_name || '').trim();
-        const key = name.toLowerCase();
-        if (!name || inCart.has(key) || seenCat.has(key)) continue;
-        pushUnique(basket, seenBasket, name);
-      }
-
-      // Nie duplikuj nazw już w „brak w katalogu”
-      const basketFiltered = basket.filter((n) => !seenCat.has(n.toLowerCase()));
-      return { catalogMissing: catalog, basketMissing: basketFiltered };
-    })();
-    const packNotes: string[] = Array.isArray((result as any)?.pack_adjustment_notes)
-      ? ((result as any).pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
-      : [];
-
     return (
-      <View style={styles.editCart} testID="deal-hunter-edit-cart">
-        <Text style={styles.editCartTitle}>
-          {effectiveSelectedOption === 'split_max' || effectiveSelectedOption === 'optimized'
-            ? 'Zamówienie · Najniższa cena'
-            : effectiveSelectedOption === 'monolith' || effectiveSelectedOption === 'all_one'
-              ? 'Zamówienie · Wygoda (mało dostaw)'
-              : 'Zamówienia u dostawców'}
-        </Text>
-        {(result?.variant_reports ?? []).length > 0 ? (
-          <View style={{ gap: 10, marginBottom: 12 }} testID="deal-hunter-variant-reports">
-            {(result?.variant_reports ?? []).map((vr, vi) => {
-              const searchLabel = `${vr.base_name}${vr.requested_variant ? ' ' + vr.requested_variant : ''}`;
-              return (
-                <View
-                  key={`vr-${vi}`}
-                  style={{
-                    borderWidth: 1,
-                    borderColor: vr.exact_found ? C.accent : C.warning,
-                    backgroundColor: C.isPremium ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)',
-                    borderRadius: 12,
-                    padding: 12,
-                    gap: 6,
-                  }}
-                  testID={`variant-report-${vi}`}
-                >
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Search size={14} color={C.accent} strokeWidth={2.4} />
-                    <Text style={{ fontWeight: '800', color: C.accentDark }}>Szukasz: {searchLabel}</Text>
-                  </View>
-                  {vr.exact_found ? (
-                    <Text style={{ color: C.accent, fontWeight: '700', fontSize: 12 }}>
-                      Znaleziono dokładnie tę odmianę — jest w koszyku poniżej.
-                    </Text>
-                  ) : (
-                    <Text style={{ color: C.warning, fontWeight: '700', fontSize: 12 }} testID={`variant-not-found-${vi}`}>
-                      Nie znaleźliśmy odmiany „{vr.requested_variant}”.
-                      {vr.substitute_variant_count > 0
-                        ? ` Znaleźliśmy jednak ${vr.substitute_variant_count} inn${vr.substitute_variant_count === 1 ? 'ą odmianę' : 'e odmiany'} tego produktu — możesz dodać zamiennik do koszyka.`
-                        : ' Brak zamienników w katalogu dostawców.'}
-                    </Text>
-                  )}
-                  {vr.substitutes.map((sub, si) => (
-                    <View key={`sub-${vi}-${si}`} style={{ gap: 4, marginTop: 4 }}>
-                      <Text style={{ fontWeight: '700', color: C.accentDark, fontSize: 13 }}>
-                        {vr.base_name} {sub.variant_label}
-                      </Text>
-                      {sub.offers.map((off, oi) => (
-                        <View
-                          key={`off-${vi}-${si}-${oi}`}
-                          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-                        >
-                          <Text style={{ color: C.textSecondary, fontSize: 12, flex: 1 }} numberOfLines={2}>
-                            {formatPln(off.unit_price_base)}/{off.base_dim} · {off.supplier_name}
-                          </Text>
-                          <TouchableOpacity
-                            onPress={() => addSubstituteToCart(off, sub.variant_label)}
-                            style={{
-                              width: 30, height: 30, borderRadius: 15,
-                              alignItems: 'center', justifyContent: 'center',
-                              backgroundColor: C.accent,
-                            }}
-                            activeOpacity={0.85}
-                            testID={`add-substitute-${vi}-${si}-${oi}`}
-                          >
-                            <Plus size={16} color={C.isPremium ? '#0A0A0A' : '#FFFFFF'} strokeWidth={2.6} />
-                          </TouchableOpacity>
-                        </View>
-                      ))}
-                    </View>
-                  ))}
-                </View>
-              );
-            })}
-          </View>
-        ) : null}
-        {groups.length > 0 ? (
-          <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 4 }]} testID="deal-hunter-suppliers-summary">
-            Od: {groups.map((g) => {
-              const name = (g.supplier_name || '').trim() || 'Dostawca';
-              return g.is_local_producer ? `${name}` : name;
-            }).join(' · ')}
-          </Text>
-        ) : null}
-        <Text style={styles.editCartHint}>
-          Edytuj pozycje. Dorzuć z katalogu tego dostawcy albo „Nowe zamówienie” (inni dostawcy).
-        </Text>
-        <TouchableOpacity
-          style={[styles.newOrderBtn, { marginBottom: 8 }]}
-          onPress={() => setShowNewOrder(true)}
-          activeOpacity={0.85}
-          testID="deal-hunter-new-order-btn-top"
-        >
-          <Package size={16} color={C.accent} strokeWidth={2.2} />
-          <Text style={styles.newOrderBtnText} numberOfLines={2}>
-            Dodaj z katalogów
-          </Text>
-        </TouchableOpacity>
-        {groups.length === 0 ? (
-          <Text style={styles.newOrderHint}>
-            Brak pozycji w koszyku. Skorzystaj z przycisku powyżej, aby dodać produkty.
-          </Text>
-        ) : (
-          groups.map((g, gi) => {
-            const blocked = (g.min_order_value ?? 0) > 0 && g.meets_minimum_order === false;
-            return (
-            <View key={`${g.supplier_id}-${gi}`} style={styles.supplierOrderCard}>
-              <View style={styles.groupHeader}>
-                <Truck size={16} color={C.accent} strokeWidth={2.2} />
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
-                    {g.is_local_producer ? 'Lokalny przetwórca' : 'Zamówienie od'}
-                  </Text>
-                  <Text style={styles.groupName} numberOfLines={2}>
-                    {(g.supplier_name || '').trim() || 'Dostawca (uzupełnij nazwę)'}
-                  </Text>
-                  {g.is_local_producer && g.local_producer_city ? (
-                    <Text style={[styles.editCartHint, { marginBottom: 0 }]}>
-                      {g.local_producer_city}
-                      {g.local_producer_voivodeship ? ` · ${g.local_producer_voivodeship}` : ''}
-                    </Text>
-                  ) : null}
-                </View>
-                <Text style={styles.groupSub}>{formatPln(g.subtotal_pln)}</Text>
-              </View>
-              <Text style={[styles.editCartHint, { marginBottom: 6 }]}>
-                {g.is_local_producer
-                  ? 'Płatność Stripe (produkty + kurier + 5% serwisu) — bez e-maila do dystrybutora.'
-                  : g.supplier_email
-                    ? `E-mail: ${g.supplier_email}`
-                    : 'Brak e-maila dostawcy — uzupełnij w module Dostawcy.'}
-              </Text>
-              <MinOrderBadge meets={g.meets_minimum_order} minVal={g.min_order_value} />
-              {g.items.map((it, idx) => (
-                <OfferLine
-                  key={`edit-${g.supplier_id}-${it.product_name}-${idx}`}
-                  item={it}
-                  productKey={it.product_name}
-                  onQtyChange={updateQty}
-                  editable
-                  onRemove={() => removeCartItem(g.supplier_id, it.product_name)}
-                />
-              ))}
-              // „Dodaj z katalogu” tylko dla hurtowników — lokalni mają produkty marketplace
-              {!g.is_local_producer ? (
-              <TouchableOpacity
-                style={styles.addFromCatalogBtn}
-                onPress={() => {
-                  if (g.supplier_id) {
-                    setCatalogPicker({
-                      id: g.supplier_id,
-                      name: (g.supplier_name || '').trim() || 'Dostawca',
-                    });
-                  } else {
-                    setShowNewOrder(true);
-                  }
-                }}
-                activeOpacity={0.8}
-                testID={`deal-hunter-add-catalog-${g.supplier_id ?? gi}`}
-              >
-                <Plus size={14} color={C.accent} strokeWidth={2.5} />
-                <Text style={styles.addFromCatalogText}>
-                  {g.supplier_id
-                    ? 'Dodaj z katalogu tego dostawcy'
-                    : 'Dodaj produkt z katalogów dostawców'}
-                </Text>
-              </TouchableOpacity>
-              ) : null}
-              <TouchableOpacity
-                style={[
-                  styles.prepareSupplierBtn,
-                  { backgroundColor: blocked ? C.dangerLight : ctaBg },
-                  (loading || blocked) && styles.primaryBtnDisabled,
-                ]}
-                onPress={() => {
-                  if (g.is_local_producer) setLpPayGroup(g);
-                  else void prepareEmailForGroups([g]);
-                }}
-                disabled={loading || blocked}
-                activeOpacity={0.85}
-                testID={`deal-hunter-prepare-${g.supplier_id ?? gi}`}
-              >
-                {loading ? (
-                  <ActivityIndicator size="small" color={ctaFg} />
-                ) : (
-                  <>
-                    {g.is_local_producer && !blocked ? (
-                      <CreditCard size={15} color={ctaFg} strokeWidth={2.2} />
-                    ) : (
-                      <Mail size={15} color={blocked ? C.danger : ctaFg} strokeWidth={2.2} />
-                    )}
-                    <Text style={[styles.prepareSupplierBtnText, { color: blocked ? C.danger : ctaFg }]}>
-                      {blocked
-                        ? 'Poniżej minimum — uzupełnij koszyk'
-                        : g.is_local_producer
-                          ? 'Zamów i zapłać'
-                          : 'Przygotuj e-mail/SMS'}
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
-              {!g.is_local_producer && !blocked ? (
-                <TouchableOpacity
-                  style={styles.payBtn}
-                  onPress={() =>
-                    setManualPayOrder({
-                      supplierId: g.supplier_id,
-                      supplierName: (g.supplier_name || '').trim() || 'Dostawca',
-                      orderTitle: `Zamówienie — ${(g.supplier_name || '').trim() || 'Dostawca'}`,
-                      totalPln: Number(g.total_pln ?? g.subtotal_pln) || 0,
-                    })
-                  }
-                  activeOpacity={0.85}
-                  testID={`deal-hunter-cart-manual-pay-${g.supplier_id ?? gi}`}
-                >
-                  <Landmark size={16} color={C.accent} strokeWidth={2.2} />
-                  <Text style={styles.payBtnText}>Opłać zamówienie</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-            );
-          })
-        )}
-
-        {packNotes.length > 0 ? (
-          <View style={[styles.missingBox, { borderColor: C.accent, backgroundColor: C.isPremium ? 'rgba(92,255,176,0.08)' : 'rgba(0,0,0,0.04)' }]} testID="deal-hunter-pack-notes">
-            <Text style={[styles.missingTitle, { color: C.accentDark || C.accent }]}>Dopasowanie opakowań</Text>
-            {packNotes.map((note, i) => (
-              <Text key={`pack-note-${i}`} style={[styles.missingName, { color: C.text, marginBottom: 6 }]}>
-                {note}
-              </Text>
-            ))}
-          </View>
-        ) : null}
-        {catalogMissing.length > 0 || basketMissing.length > 0 ? (
-          <Text style={[styles.editCartHint, { marginBottom: 6 }]} testID="deal-hunter-missing-count">
-            Braki łącznie: {catalogMissing.length + basketMissing.length}
-            {result?.items_requested?.length
-              ? ` z ${result.items_requested.length} pozycji`
-              : ''}
-          </Text>
-        ) : null}
-        {catalogMissing.length > 0 ? (
-          <View style={styles.missingBox} testID="deal-hunter-missing-catalog">
-            <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
-              Brak w katalogach dostawców ({catalogMissing.length})
-            </Text>
-            {catalogMissing.map((name) => (
-              <Text key={`cat-${name}`} style={styles.missingName} numberOfLines={2}>
-                • {name}
-              </Text>
-            ))}
-          </View>
-        ) : null}
-        {basketMissing.length > 0 ? (
-          <View style={styles.missingBox} testID="deal-hunter-missing-basket">
-            <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
-              Znalezione, ale nie weszły do koszyka ({basketMissing.length})
-              {'\n'}
-              (np. za daleko do minimum zamówienia albo reguły optymalizacji)
-            </Text>
-            {basketMissing.map((name) => (
-              <Text key={`bask-${name}`} style={styles.missingName} numberOfLines={2}>
-                • {name}
-              </Text>
-            ))}
-          </View>
-        ) : null}
-
-        {groups.length > 0 && (
-          <View style={styles.optTotalRow}>
-            <Text style={styles.optTotalLabel}>Suma wszystkich zamówień</Text>
-            <Text style={styles.optTotalValue}>{formatPln(grand)}</Text>
-          </View>
-        )}
-
-        {orderable.length > 1 && (
-          <TouchableOpacity
-            style={[styles.prepareSupplierBtn, { backgroundColor: ctaBg }, loading && styles.primaryBtnDisabled]}
-            onPress={() => prepareEmailForGroups(orderable)}
-            disabled={loading}
-            activeOpacity={0.85}
-            testID="deal-hunter-order-all"
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color={ctaFg} />
-            ) : (
-              <>
-                {orderable.every((g) => g.is_local_producer) ? (
-                  <CreditCard size={15} color={ctaFg} strokeWidth={2.2} />
-                ) : (
-                  <Send size={15} color={ctaFg} strokeWidth={2.2} />
-                )}
-                <Text style={[styles.prepareSupplierBtnText, { color: ctaFg }]}>
-                  {orderable.every((g) => g.is_local_producer)
-                    ? `Zamów i zapłać (${orderable.length})`
-                    : orderable.some((g) => g.is_local_producer)
-                      ? `Zamów hurtowników · lokalni osobno (${orderable.length})`
-                      : `Zamów wszystkie (${orderable.length})`}
-                </Text>
-              </>
-            )}
-          </TouchableOpacity>
-        )}
-
-        {groups.length > 0 && (
-          <TouchableOpacity
-            style={[styles.saveDraftBtn, savingDraft && { opacity: 0.6 }]}
-            onPress={() => void saveDraftCart()}
-            disabled={savingDraft}
-            activeOpacity={0.85}
-            testID="deal-hunter-save-draft"
-          >
-            {savingDraft ? (
-              <ActivityIndicator size="small" color={C.accent} />
-            ) : (
-              <>
-                <ShoppingCart size={16} color={C.accent} strokeWidth={2.2} />
-                <Text style={styles.saveDraftBtnText}>Dodaj do koszyka (na później)</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        )}
-
-        <TouchableOpacity
-          style={styles.newOrderBtn}
-          onPress={() => setShowNewOrder(true)}
-          activeOpacity={0.85}
-          testID="deal-hunter-new-order-btn"
-        >
-          <Package size={16} color={C.accent} strokeWidth={2.2} />
-          <Text style={styles.newOrderBtnText}>Nowe zamówienie</Text>
-        </TouchableOpacity>
-        <Text style={styles.newOrderHint}>
-          Przeszukaj katalogi dostawców i ręcznie dodaj produkty (także od innych hurtowników).
-        </Text>
-      </View>
+      <EditableCartPanel
+        effectiveSelectedOption={effectiveSelectedOption}
+        result={result}
+        groups={cartGroups}
+        loading={loading}
+        savingDraft={savingDraft}
+        onQtyChange={updateQty}
+        onRemoveItem={removeCartItem}
+        onAddSubstitute={addSubstituteToCart}
+        onOpenNewOrder={() => setShowNewOrder(true)}
+        onOpenCatalog={setCatalogPicker}
+        onPrepareEmail={(groups) => void prepareEmailForGroups(groups)}
+        onLocalProducerPay={setLpPayGroup}
+        onManualPay={setManualPayOrder}
+        onSaveDraft={() => void saveDraftCart()}
+      />
     );
   };
 
@@ -1535,59 +1114,17 @@ export function DealHunterModal({
     if (!result) return null;
     const best = result.best_option;
     const tied = result.tied_suppliers ?? [];
-    const showTied = tied.length > 1;
 
     return (
       <>
         {renderEditableCart()}
         {best?.supplier_name ? (
-        <View style={styles.singleCard} testID="deal-hunter-single-option">
-          <View style={styles.optHeader}>
-            <View style={styles.optBadge}>
-              <Store size={13} color={C.accent} strokeWidth={2.2} />
-              <Text style={styles.optBadgeText}>Najlepsza oferta</Text>
-            </View>
-          </View>
-
-          {showTied ? (
-            <>
-              <Text style={styles.tiedHint}>
-                Ten sam koszyk u {tied.length} dostawców — wybierz, u kogo zamawiasz:
-              </Text>
-              <View style={styles.tiedRow}>
-                {tied.map((t) => {
-                  const active = tiedSupplierId === t.supplier_id;
-                  return (
-                    <TouchableOpacity
-                      key={t.supplier_id}
-                      style={[styles.tiedChip, active && styles.tiedChipActive]}
-                      onPress={() => { setTiedSupplierId(t.supplier_id); setManualCart(null); }}
-                      testID={`deal-hunter-tied-${t.supplier_id}`}
-                    >
-                      <Text style={[styles.tiedChipText, active && styles.tiedChipTextActive]}>
-                        {t.supplier_name}
-                      </Text>
-                      <Text style={[styles.tiedChipSub, active && styles.tiedChipTextActive]}>
-                        {formatPln(t.total_pln)}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </>
-          ) : (
-            <Text style={styles.optSupplier}>{best?.supplier_name ?? '—'}</Text>
-          )}
-
-          {!!best?.supplier_email && (
-            <Text style={styles.editCartHint}>E-mail: {best.supplier_email}</Text>
-          )}
-          <MinOrderBadge meets={best?.meets_minimum_order} minVal={best?.min_order_value} />
-          <View style={styles.optTotalRow}>
-            <Text style={styles.optTotalLabel}>Propozycja AI</Text>
-            <Text style={styles.optTotalValue}>{formatPln(best?.total_pln ?? 0)}</Text>
-          </View>
-        </View>
+          <SingleBestOptionCard
+            best={best}
+            tied={tied}
+            tiedSupplierId={tiedSupplierId}
+            onSelectTied={(id) => { setTiedSupplierId(id); setManualCart(null); }}
+          />
         ) : null}
       </>
     );
@@ -1602,122 +1139,23 @@ export function DealHunterModal({
     <>
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <View style={styles.container} testID="deal-hunter-modal">
-        <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <View style={styles.headerIcon}>
-              <Sparkles size={16} color={C.accent} strokeWidth={2.4} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.headerTitle}>Łowca Okazji</Text>
-              <Text style={styles.headerSub} numberOfLines={1}>
-                {bulkContextLabel ?? product?.product_name ?? ''}
-              </Text>
-            </View>
-          </View>
-          <TouchableOpacity onPress={onClose} testID="deal-hunter-close" hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <X size={22} color={C.textSecondary} strokeWidth={2} />
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.steps}>
-          {stepLabels.map((label, i) => {
-            const active = bulkStepIndex === i;
-            const done = bulkStepIndex > i;
-            return (
-              <View key={label} style={styles.stepItem}>
-                <View style={[styles.stepDot, active && styles.stepDotActive, done && styles.stepDotDone]}>
-                  {done ? (
-                    <Check size={11} color={C.white} strokeWidth={3} />
-                  ) : (
-                    <Text style={[styles.stepNum, active && styles.stepNumActive]}>{i + 1}</Text>
-                  )}
-                </View>
-                <Text style={[styles.stepLabel, active && styles.stepLabelActive]}>{label}</Text>
-              </View>
-            );
-          })}
-        </View>
-
-        {error && (
-          <View style={styles.errorBanner} testID="deal-hunter-error">
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        )}
+        <DealHunterHeader
+          subtitle={bulkContextLabel ?? product?.product_name ?? ''}
+          stepLabels={stepLabels}
+          activeStepIndex={bulkStepIndex}
+          error={error}
+          onClose={onClose}
+        />
 
         {step === 'qty' && product && (
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-              <View style={styles.stockCard}>
-                <View style={styles.stockRow}>
-                  <Text style={styles.stockLabel}>Stan aktualny</Text>
-                  <Text style={styles.stockValue}>
-                    {product.current_qty} {product.unit}
-                  </Text>
-                </View>
-                <View style={styles.stockRow}>
-                  <Text style={styles.stockLabel}>Próg krytyczny</Text>
-                  <Text style={styles.stockValueMuted}>
-                    {product.critical_threshold} {product.unit}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.qtyHint}>
-                Zaproponowaliśmy ilość o połowę większą niż aktualny stan. Możesz ją zmienić przed
-                porównaniem ofert.
-              </Text>
-              <Text style={styles.fieldLabel}>Gdzie szukać ofert?</Text>
-              <View style={{ gap: 8, marginBottom: 14 }}>
-                {DEAL_HUNTER_SEARCH_SCOPE_OPTIONS.map((opt) => {
-                  const on = searchScope === opt.key;
-                  return (
-                    <TouchableOpacity
-                      key={opt.key}
-                      onPress={() => setSearchScope(opt.key)}
-                      activeOpacity={0.85}
-                      testID={`deal-hunter-scope-${opt.key}`}
-                      style={{
-                        borderWidth: StyleSheet.hairlineWidth,
-                        borderColor: on ? C.accent : C.border,
-                        backgroundColor: on ? C.accentLight : C.card,
-                        borderRadius: 12,
-                        paddingHorizontal: 12,
-                        paddingVertical: 10,
-                      }}
-                    >
-                      <Text style={{ color: C.textPrimary, fontWeight: '800', fontSize: 14 }}>
-                        {opt.label}
-                      </Text>
-                      <Text style={{ color: C.textSecondary, fontSize: 12, marginTop: 2 }}>
-                        {opt.hint}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-              <Text style={styles.fieldLabel}>Ilość do zamówienia</Text>
-              <View style={styles.qtyInputRow}>
-                <TextInput
-                  style={styles.qtyInput}
-                  value={qty}
-                  onChangeText={setQty}
-                  keyboardType="decimal-pad"
-                  selectTextOnFocus
-                  placeholder="0"
-                  placeholderTextColor={C.textTertiary}
-                  testID="deal-hunter-qty-input"
-                />
-                <View style={styles.qtyUnit}>
-                  <Text style={styles.qtyUnitText}>{product.unit}</Text>
-                </View>
-              </View>
-            </ScrollView>
-            <View style={styles.footer}>
-              <TouchableOpacity style={styles.primaryBtn} onPress={runCompare} activeOpacity={0.85} testID="deal-hunter-compare-btn">
-                <Sparkles size={17} color={C.white} strokeWidth={2.2} />
-                <Text style={styles.primaryBtnText}>Porównaj oferty dostawców</Text>
-              </TouchableOpacity>
-            </View>
-          </KeyboardAvoidingView>
+          <QtyStep
+            product={product}
+            qty={qty}
+            searchScope={searchScope}
+            onQtyChange={setQty}
+            onSearchScopeChange={setSearchScope}
+            onCompare={runCompare}
+          />
         )}
 
         {step === 'compare' && (
@@ -1765,237 +1203,35 @@ export function DealHunterModal({
         )}
 
         {step === 'contact' && (
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-              <View style={styles.infoCard}>
-                <Text style={styles.infoTitle}>Dane kontaktowe dla dostawców</Text>
-                <Text style={styles.infoText}>
-                  Wpisz dane, na które hurtownia ma się z Tobą kontaktować w sprawie tego zamówienia.
-                </Text>
-              </View>
-              <Text style={styles.fieldLabel}>Twój e-mail kontaktowy</Text>
-              <View style={styles.inputRow}>
-                <Mail size={16} color={C.textSecondary} strokeWidth={2} />
-                <TextInput
-                  style={styles.textInput}
-                  value={contactEmail}
-                  onChangeText={setContactEmail}
-                  placeholder="np. kontakt@twojarestauracja.pl"
-                  placeholderTextColor={C.textTertiary}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  testID="deal-hunter-contact-email"
-                />
-              </View>
-              <Text style={styles.fieldLabel}>Twój telefon</Text>
-              <View style={styles.inputRow}>
-                <Phone size={16} color={C.textSecondary} strokeWidth={2} />
-                <TextInput
-                  style={styles.textInput}
-                  value={contactPhone}
-                  onChangeText={setContactPhone}
-                  placeholder="np. +48 600 100 200"
-                  placeholderTextColor={C.textTertiary}
-                  keyboardType="phone-pad"
-                  testID="deal-hunter-contact-phone"
-                />
-              </View>
-            </ScrollView>
-            <View style={styles.footer}>
-              <TouchableOpacity
-                style={[styles.primaryBtn, savingProfile && styles.primaryBtnDisabled]}
-                onPress={saveProfile}
-                disabled={savingProfile}
-                activeOpacity={0.85}
-                testID="deal-hunter-save-profile-btn"
-              >
-                {savingProfile ? (
-                  <ActivityIndicator size="small" color={C.white} />
-                ) : (
-                  <>
-                    <Text style={styles.primaryBtnText}>Zapisz i przejdź do podglądu</Text>
-                    <ChevronRight size={17} color={C.white} strokeWidth={2.2} />
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
-          </KeyboardAvoidingView>
+          <ContactStep
+            contactEmail={contactEmail}
+            contactPhone={contactPhone}
+            savingProfile={savingProfile}
+            onEmailChange={setContactEmail}
+            onPhoneChange={setContactPhone}
+            onSave={saveProfile}
+          />
         )}
 
         {step === 'preview' && (
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-              <Text style={styles.msgIntro}>
-                Sprawdź treści zamówień. Wysyłaj pojedynczo albo wszystkie naraz (gdy nadawca to asystent dostaw).
-              </Text>
-              {messages.length > 1 && (
-                <TouchableOpacity
-                  style={[
-                    styles.sendBtn,
-                    C.isPremium && { backgroundColor: '#5CFFB0' },
-                    messages.every((m) => sendStatus[m.supplier_id ?? m.supplier_name] === 'sent') && styles.btnDisabled,
-                  ]}
-                  onPress={() => void sendAllEmails()}
-                  activeOpacity={0.85}
-                  testID="deal-hunter-send-all"
-                >
-                  <Send size={16} color={C.isPremium ? '#0A0A0A' : C.white} strokeWidth={2.2} />
-                  <Text style={[styles.sendBtnText, C.isPremium && { color: '#0A0A0A' }]}>
-                    Wyślij wszystkie ({messages.length})
-                  </Text>
-                </TouchableOpacity>
-              )}
-              {messages.map((m) => {
-                const key = m.supplier_id ?? m.supplier_name;
-                const st = sendStatus[key];
-                return (
-                  <View key={key} style={styles.msgCard} testID={`deal-hunter-message-${m.supplier_name}`}>
-                    <View style={styles.msgHeader}>
-                      <Truck size={14} color={C.accent} strokeWidth={2.2} />
-                      <Text style={styles.msgSupplier}>{m.supplier_name}</Text>
-                      <Text style={styles.msgTotal}>{formatPln(m.subtotal_pln)}</Text>
-                    </View>
-                    <View style={styles.metaRow}>
-                      <Text style={styles.metaLabel}>Nadawca:</Text>
-                    </View>
-                    <TextInput
-                      style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}
-                      value={fromEmails[key] ?? ASSISTANT_FROM_EMAIL}
-                      onChangeText={(t) => {
-                        setFromEmails((b) => ({ ...b, [key]: t }));
-                        if (t.trim().toLowerCase() !== ASSISTANT_FROM_EMAIL.toLowerCase()) {
-                          setBodyText((b) => ({
-                            ...b,
-                            [key]: stripAssistantOrderFooter(b[key] ?? m.email_body_text ?? ''),
-                          }));
-                        }
-                      }}
-                      autoCapitalize="none"
-                      keyboardType="email-address"
-                      placeholder={ASSISTANT_FROM_EMAIL}
-                      testID={`deal-hunter-from-${m.supplier_name}`}
-                    />
-                    <Text style={{ fontSize: 11, color: C.textTertiary, marginBottom: 8 }}>
-                      {(fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim().toLowerCase() ===
-                      ASSISTANT_FROM_EMAIL.toLowerCase()
-                        ? 'Wysyłka przez asystenta dostaw (backend :8001).'
-                        : 'Otworzymy Twoją aplikację pocztową — bez stopki asystenta.'}
-                    </Text>
-                    <View style={styles.metaRow}>
-                      <Text style={styles.metaLabel}>Odbiorca:</Text>
-                    </View>
-                    <TextInput
-                      style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}
-                      value={toEmails[key] ?? m.supplier_email ?? ''}
-                      onChangeText={(t) => setToEmails((b) => ({ ...b, [key]: t }))}
-                      autoCapitalize="none"
-                      keyboardType="email-address"
-                      placeholder="zamowienia@dostawca.pl"
-                      testID={`deal-hunter-to-${m.supplier_name}`}
-                    />
-                    <View style={styles.metaRow}>
-                      <Text style={styles.metaLabel}>Temat:</Text>
-                    </View>
-                    <TextInput
-                      style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}
-                      value={subjectText[key] ?? m.email_subject ?? ''}
-                      onChangeText={(t) => setSubjectText((b) => ({ ...b, [key]: t }))}
-                      placeholder="Temat wiadomości"
-                      placeholderTextColor={C.textTertiary}
-                      testID={`deal-hunter-subject-${m.supplier_name}`}
-                    />
-                    <Text style={styles.msgSectionLabel}>Treść wiadomości (edytowalna)</Text>
-                    <TextInput
-                      style={styles.bodyInput}
-                      value={bodyText[key] ?? ''}
-                      onChangeText={(t) => setBodyText((b) => ({ ...b, [key]: t }))}
-                      multiline
-                      textAlignVertical="top"
-                      testID={`deal-hunter-body-input-${m.supplier_name}`}
-                    />
-                    {st === 'sent' ? (
-                      <View style={styles.successBox} testID={`deal-hunter-sent-${m.supplier_name}`}>
-                        <Check size={16} color={C.success} strokeWidth={2.5} />
-                        <Text style={styles.successText}>Zamówienie zostało wysłane pomyślnie!</Text>
-                      </View>
-                    ) : (
-                      <>
-                        <TouchableOpacity
-                          style={[
-                            styles.sendBtn,
-                            C.isPremium && { backgroundColor: '#5CFFB0' },
-                            (!(toEmails[key] ?? m.supplier_email) || st === 'sending') && styles.btnDisabled,
-                          ]}
-                          onPress={() => sendEmail(m)}
-                          disabled={!(toEmails[key] ?? m.supplier_email) || st === 'sending'}
-                          activeOpacity={0.85}
-                          testID={`deal-hunter-send-email-${m.supplier_name}`}
-                        >
-                          {st === 'sending' ? (
-                            <ActivityIndicator size="small" color={C.isPremium ? '#0A0A0A' : C.white} />
-                          ) : (
-                            <>
-                              <Send size={16} color={C.isPremium ? '#0A0A0A' : C.white} strokeWidth={2.2} />
-                              <Text style={[styles.sendBtnText, C.isPremium && { color: '#0A0A0A' }]}>Wyślij maila</Text>
-                            </>
-                          )}
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.smsBtn}
-                          onPress={() => copySms(m)}
-                          activeOpacity={0.85}
-                          testID={`deal-hunter-copy-sms-${m.supplier_name}`}
-                        >
-                          {copiedId === key ? (
-                            <>
-                              <Check size={14} color={C.accent} strokeWidth={2.4} />
-                              <Text style={styles.smsBtnText}>Skopiowano SMS</Text>
-                            </>
-                          ) : (
-                            <>
-                              <Copy size={14} color={C.accent} strokeWidth={2.2} />
-                              <Text style={styles.smsBtnText}>Kopiuj do SMS</Text>
-                            </>
-                          )}
-                        </TouchableOpacity>
-                      </>
-                    )}
-                    <TouchableOpacity
-                      style={styles.payBtn}
-                      onPress={() =>
-                        setManualPayOrder({
-                          supplierId: m.supplier_id,
-                          supplierName: m.supplier_name,
-                          orderTitle:
-                            (subjectText[key] ?? m.email_subject ?? '').trim()
-                            || `Zamówienie — ${m.supplier_name}`,
-                          totalPln: m.subtotal_pln,
-                        })
-                      }
-                      activeOpacity={0.85}
-                      testID={`deal-hunter-manual-pay-${m.supplier_name}`}
-                    >
-                      <Landmark size={16} color={C.accent} strokeWidth={2.2} />
-                      <Text style={styles.payBtnText}>Opłać zamówienie</Text>
-                    </TouchableOpacity>
-                    {st === 'error' && (
-                      <View style={styles.errRow}>
-                        <CircleAlert size={13} color={C.danger} strokeWidth={2.2} />
-                        <Text style={styles.emailError}>
-                          Nie udało się wysłać. Sprawdź weryfikację domeny w Resend i spróbuj ponownie.
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                );
-              })}
-              <TouchableOpacity style={styles.doneBtn} onPress={onClose} activeOpacity={0.85} testID="deal-hunter-done-btn">
-                <Text style={styles.doneBtnText}>Zakończ</Text>
-              </TouchableOpacity>
-              <View style={{ height: 24 }} />
-            </ScrollView>
-          </KeyboardAvoidingView>
+          <MessagePreviewStep
+            messages={messages}
+            sendStatus={sendStatus}
+            copiedId={copiedId}
+            fromEmails={fromEmails}
+            toEmails={toEmails}
+            subjectText={subjectText}
+            bodyText={bodyText}
+            setFromEmails={setFromEmails}
+            setToEmails={setToEmails}
+            setSubjectText={setSubjectText}
+            setBodyText={setBodyText}
+            onSendEmail={sendEmail}
+            onSendAll={() => void sendAllEmails()}
+            onCopySms={copySms}
+            onManualPay={setManualPayOrder}
+            onDone={onClose}
+          />
         )}
         {catalogPicker ? (
           <SupplierCatalogPicker
@@ -2016,50 +1252,10 @@ export function DealHunterModal({
         ) : null}
       </View>
     </Modal>
-    <Modal
-      visible={!!draftSavedInfo}
-      transparent
-      animationType="fade"
-      onRequestClose={() => setDraftSavedInfo(null)}
-    >
-      <View style={{
-        flex: 1,
-        backgroundColor: 'rgba(0,0,0,0.78)',
-        justifyContent: 'center',
-        paddingHorizontal: 28,
-      }}>
-        <View style={{
-          backgroundColor: DS.color.surfaceCard,
-          borderRadius: 16,
-          borderWidth: 1,
-          borderColor: DS.color.borderSubtle,
-          padding: 20,
-          gap: 14,
-        }}>
-          <Text style={{ fontSize: 17, fontWeight: '800', color: DS.color.heading }}>
-            Zapisano w koszyku
-          </Text>
-          <Text style={{ fontSize: 13, lineHeight: 19, color: DS.color.muted }}>
-            {draftSavedInfo}
-          </Text>
-          <TouchableOpacity
-            onPress={() => setDraftSavedInfo(null)}
-            activeOpacity={0.85}
-            style={{
-              marginTop: 4,
-              minHeight: 44,
-              borderRadius: 10,
-              backgroundColor: DS.color.greenEnd,
-              alignItems: 'center',
-              justifyContent: 'center',
-              paddingHorizontal: 16,
-            }}
-          >
-            <Text style={{ fontSize: 14, fontWeight: '800', color: '#0A0A0A' }}>OK</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
+    <DraftSavedModal
+      info={draftSavedInfo}
+      onClose={() => setDraftSavedInfo(null)}
+    />
     <LocalProducerCheckoutSheet
       visible={!!lpPayGroup}
       group={lpPayGroup}

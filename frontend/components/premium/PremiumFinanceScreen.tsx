@@ -6,13 +6,11 @@ import React, { useMemo, useState } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   RefreshControl,
   TouchableOpacity,
   TextInput,
   ActivityIndicator,
-  Dimensions,
   Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -20,45 +18,36 @@ import { Image } from 'expo-image';
 import {
   Plus,
   Trash2,
-  Pencil,
-  MessageSquare,
-  TrendingUp,
   Mic,
-  ChevronDown,
   ChevronRight,
   X,
   TriangleAlert,
   FileDown,
+  TrendingUp,
 } from 'lucide-react-native';
 import { FinancePdfExportModal } from '@/components/FinancePdfExportModal';
-import { PremiumColors, PremiumTokens } from '@/constants/premiumTheme';
+import { PremiumColors } from '@/constants/premiumTheme';
 import { PremiumScreenBackground } from '@/components/premium/PremiumScreenBackground';
 import {
   AiWaveOrb,
   AnimatedCounter,
-  GlitchTyping,
 } from '@/components/premium/premiumAnimations';
 import { PremiumJarvisCard, PremiumAlertBanner } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
-import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
-import { AlertBanner } from '@/components/AlertBanner';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { ReportsArchive } from '@/components/ReportsArchive';
 import { SubscriptionPanel } from '@/components/SubscriptionPanel';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
-import { formatInvoiceLineLabel, parseInvoiceCostNote } from '@/lib/invoiceCostNote';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { ChartYAxis, GreenAreaLineChart } from '@/components/GreenAreaLineChart';
+import { PremiumFinanceBarChart } from '@/components/premium/PremiumFinanceBarChart';
+import { formatPLN, MONTH_SHORT, WEEKDAYS_PL } from '@/components/premium/premiumFinanceHelpers';
+import { premiumFinanceStyles as styles } from '@/components/premium/premiumFinanceStyles';
+import { PremiumFinanceKpiStrip } from '@/components/premium/PremiumFinanceKpiStrip';
+import { PremiumFinanceJournals } from '@/components/premium/PremiumFinanceJournals';
 
 const LOGO = require('@/assets/premium/gastro-manager-logo.webp');
-const { width: SCREEN_W } = Dimensions.get('window');
-const WEEKDAYS_PL = ['niedz.', 'pon.', 'wt.', 'śr.', 'czw.', 'pt.', 'sob.'];
-
-function formatPLN(n: number): string {
-  return Math.round(n).toLocaleString('pl-PL', { maximumFractionDigits: 0 }) + ' PLN';
-}
 
 type ChartRecord = {
   year_month: string;
@@ -106,202 +95,6 @@ type Props = {
   syncHint?: boolean;
 };
 
-const MONTH_SHORT: Record<string, string> = {
-  '01': 'Sty', '02': 'Lut', '03': 'Mar', '04': 'Kwi',
-  '05': 'Maj', '06': 'Cze', '07': 'Lip', '08': 'Sie',
-  '09': 'Wrz', '10': 'Paź', '11': 'Lis', '12': 'Gru',
-};
-
-/** Kompaktowa kwota na dolną oś / chipy (musi mieścić się w wąskim boxie). */
-function compactAxisAmount(n: number): string {
-  const v = Number(n) || 0;
-  const abs = Math.abs(v);
-  const sign = v < 0 ? '-' : '';
-  if (abs >= 100000) return `${sign}${Math.round(abs / 1000)}k`;
-  if (abs >= 10000) return `${sign}${Math.round(abs / 1000)}k`;
-  if (abs >= 1000) return `${sign}${(abs / 1000).toFixed(1).replace(/\.0$/, '')}k`;
-  return `${sign}${Math.round(abs)}`;
-}
-
-function BarChart({
-  points,
-  onBarPress,
-  metricLabel,
-}: {
-  points: { label: string; value: number; dateKey?: string; weekday?: string }[];
-  onBarPress?: (p: { label: string; value: number; dateKey?: string; weekday?: string }) => void;
-  metricLabel?: string;
-}) {
-  const values = points.map((r) => Number(r.value) || 0);
-
-  if (!values.length) {
-    return (
-      <View style={{ height: 140, alignItems: 'center', justifyContent: 'center' }}>
-        <Text style={{ color: PremiumColors.textMuted, fontSize: 12 }}>
-          Brak danych sprzedaży — dodaj przychody, a wykres się zaktualizuje.
-        </Text>
-      </View>
-    );
-  }
-
-  const total = values.reduce((a, b) => a + b, 0);
-  const mid = Math.floor(values.length / 2) || 1;
-  const firstHalf = values.slice(0, mid);
-  const secondHalf = values.slice(mid);
-  const first = firstHalf.reduce((a, b) => a + b, 0) / mid;
-  const second = secondHalf.reduce((a, b) => a + b, 0) / Math.max(secondHalf.length, 1);
-  const trendPct = Math.abs(first) > 1e-6 ? ((second - first) / Math.abs(first)) * 100 : null;
-  const lineColor = total < 0 ? '#FF5252' : PremiumColors.neon;
-
-  // Dolna oś SVG = kwoty. Nie używaj weekday.slice(0,3) — dla miesięcy/lat
-  // weekday bywało „2026-01” / „2026” i dawało „202” na każdym ticku.
-  const chartPts = points.map((p) => {
-    const value = Number(p.value) || 0;
-    return { label: compactAxisAmount(value), value };
-  });
-
-  const slot = Math.max(56, Math.min(72, Math.floor((SCREEN_W - 64) / Math.min(points.length, 7))));
-  const chipW = Math.max(56, slot - 6);
-  const chipGap = 6;
-  // Szerokość musi uwzględniać gap między chipami — inaczej ostatnie dni miesiąca są obcinane (~27 zamiast 28–31).
-  const plotW = Math.max(
-    SCREEN_W - 88,
-    points.length * chipW + Math.max(0, points.length - 1) * chipGap + 8,
-  );
-  const chartH = 170;
-
-  return (
-    <View>
-      {/* Stały nagłówek — nie scrolluje się z wykresem */}
-      <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8, gap: 8 }}>
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: PremiumColors.textMuted, fontSize: 12, fontWeight: '700', marginBottom: 2 }}>
-            {metricLabel ?? 'Sprzedaż'}
-          </Text>
-          <Text style={{ color: lineColor, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 }}>
-            {formatPLN(total)}
-          </Text>
-        </View>
-        <View style={{ alignItems: 'flex-end', gap: 4 }}>
-          {trendPct != null && Number.isFinite(trendPct) ? (
-            <View style={{ backgroundColor: `${lineColor}22`, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 }}>
-              <Text style={{ color: lineColor, fontSize: 11, fontWeight: '800' }}>
-                {trendPct >= 0 ? '+' : ''}{trendPct.toFixed(1)}%
-              </Text>
-            </View>
-          ) : null}
-          <Text style={{ color: PremiumColors.textMuted, fontSize: 11, fontWeight: '600' }}>
-            {points.length} pkt
-          </Text>
-        </View>
-      </View>
-
-      {/* Stała oś Y + scroll tylko wykresu i dolnej osi dat */}
-      <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-        <ChartYAxis points={chartPts} height={chartH} dark />
-        <ScrollView horizontal showsHorizontalScrollIndicator decelerationRate="fast" style={{ flex: 1 }}>
-          <View style={{ width: plotW }}>
-            <GreenAreaLineChart
-              points={chartPts}
-              color={lineColor}
-              height={chartH}
-              hideHeader
-              hideYAxis
-              dark
-              width={plotW}
-            />
-            <View style={{ flexDirection: 'row', gap: chipGap, marginTop: 4, paddingLeft: 4, width: plotW }}>
-              {points.map((r, i) => {
-                const v = values[i];
-                const neg = v < 0;
-                return (
-                  <TouchableOpacity
-                    key={`${r.label}-${i}`}
-                    onPress={() => onBarPress?.(r)}
-                    activeOpacity={0.8}
-                    style={{
-                      backgroundColor: neg ? 'rgba(255,82,82,0.12)' : 'rgba(0,230,118,0.12)',
-                      borderRadius: 10,
-                      paddingHorizontal: 6,
-                      paddingVertical: 8,
-                      minWidth: chipW,
-                      width: chipW,
-                      alignItems: 'center',
-                      overflow: 'visible',
-                    }}
-                    testID={`premium-bar-${r.dateKey || i}`}
-                  >
-                    <Text
-                      style={{ color: PremiumColors.textMuted, fontSize: 10, fontWeight: '700' }}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.75}
-                    >
-                      {r.label}
-                    </Text>
-                    <Text
-                      style={{
-                        color: neg ? '#FF5252' : PremiumColors.neon,
-                        fontSize: 11,
-                        fontWeight: '800',
-                        marginTop: 2,
-                        width: '100%',
-                        textAlign: 'center',
-                      }}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.65}
-                      allowFontScaling={false}
-                    >
-                      {compactAxisAmount(v)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-        </ScrollView>
-      </View>
-      <Text style={{ color: PremiumColors.textMuted, fontSize: 11, textAlign: 'center', marginTop: 8 }}>
-        Przesuń wykres · dotknij punkt → raport
-      </Text>
-    </View>
-  );
-}
-
-function CollapsibleTile({
-  title,
-  summary,
-  open,
-  onToggle,
-  right,
-  children,
-}: {
-  title: string;
-  summary?: string;
-  open: boolean;
-  onToggle: () => void;
-  right?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <View style={styles.card}>
-      <TouchableOpacity style={styles.collapseHead} onPress={onToggle} activeOpacity={0.8}>
-        {open ? (
-          <ChevronDown size={16} color={PremiumColors.neon} strokeWidth={2.5} />
-        ) : (
-          <ChevronRight size={16} color={PremiumColors.textMuted} strokeWidth={2.5} />
-        )}
-        <View style={{ flex: 1 }}>
-          <Text style={styles.cardTitle}>{title}</Text>
-          {summary ? <Text style={styles.kpiSub}>{summary}</Text> : null}
-        </View>
-        {right}
-      </TouchableOpacity>
-      {open ? <View style={{ marginTop: 10 }}>{children}</View> : null}
-    </View>
-  );
-}
 
 export function PremiumFinanceScreen(props: Props) {
   const [pdfOpen, setPdfOpen] = useState(false);
@@ -635,147 +428,33 @@ export function PremiumFinanceScreen(props: Props) {
               <ChevronRight size={16} color={PremiumColors.textMuted} />
             </TouchableOpacity>
 
-            <CollapsibleTile
-              title="Dziennik przychodów"
-              summary={`${props.revenueJournal.length} wpisów · ${formatPLN(totalRevenue)}`}
-              open={openRevenue}
-              onToggle={() => setOpenRevenue((v) => !v)}
-              right={
-                <TouchableOpacity style={styles.sectionAdd} onPress={props.onAddRevenue}>
-                  <Plus size={14} color={PremiumColors.neon} />
-                </TouchableOpacity>
-              }
-            >
-              <ExpandableDateJournal
-                items={props.revenueJournal.map((e) => ({
-                  id: e.id,
-                  created_at: e.created_at,
-                  title: e.description || 'Przychód',
-                  amount: Number(e.amount_pln),
-                  meta: (e as any).note ?? undefined,
-                }))}
-                emptyText="Brak przychodów — kliknij +"
-                formatAmount={formatPLN}
-                amountPositive
-                renderActions={(item) => (
-                  <View style={{ flexDirection: 'row', gap: 4 }}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        const entry = props.revenueJournal.find((r) => r.id === item.id);
-                        props.onToggleNote(item.id, (entry as any)?.note);
-                      }}
-                      style={styles.iconBtn}
-                    >
-                      <MessageSquare
-                        size={13}
-                        color={
-                          props.expandedNoteId === item.id
-                            ? PremiumColors.neon
-                            : PremiumColors.textMuted
-                        }
-                      />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      onPress={() => props.onDelete(item.id, 'revenue')}
-                      style={styles.iconBtn}
-                    >
-                      <Trash2 size={13} color={PremiumColors.alert} />
-                    </TouchableOpacity>
-                  </View>
-                )}
-              />
-              {revenueNoteEditor}
-            </CollapsibleTile>
+            <PremiumFinanceJournals
+              revenueJournal={props.revenueJournal}
+              fixedCosts={props.fixedCosts}
+              fixedCostsJournal={props.fixedCostsJournal}
+              variableEntries={props.variableEntries}
+              variableCostsJournal={props.variableCostsJournal}
+              totalRevenue={totalRevenue}
+              openRevenue={openRevenue}
+              openFixed={openFixed}
+              openVariable={openVariable}
+              setOpenRevenue={setOpenRevenue}
+              setOpenFixed={setOpenFixed}
+              setOpenVariable={setOpenVariable}
+              expandedNoteId={props.expandedNoteId}
+              noteText={props.noteText}
+              noteSaving={props.noteSaving}
+              onToggleNote={props.onToggleNote}
+              onNoteChange={props.onNoteChange}
+              onSaveNote={props.onSaveNote}
+              onAddRevenue={props.onAddRevenue}
+              onAddFixed={props.onAddFixed}
+              onAddVariable={props.onAddVariable}
+              onEditCost={props.onEditCost}
+              onDelete={props.onDelete}
+              revenueNoteEditor={revenueNoteEditor}
+            />
 
-            <CollapsibleTile
-              title="Koszty stałe"
-              summary={`${(props.fixedCostsJournal?.length ? props.fixedCostsJournal : props.fixedCosts).length} pozycji · ${formatPLN(
-                (props.fixedCostsJournal?.length ? props.fixedCostsJournal : props.fixedCosts).reduce(
-                  (s, c) => s + Number(c.amount_pln),
-                  0,
-                ),
-              )}`}
-              open={openFixed}
-              onToggle={() => setOpenFixed((v) => !v)}
-              right={
-                <TouchableOpacity style={styles.sectionAdd} onPress={props.onAddFixed}>
-                  <Plus size={14} color={PremiumColors.neon} />
-                </TouchableOpacity>
-              }
-            >
-              <ExpandableDateJournal
-                items={(props.fixedCostsJournal?.length ? props.fixedCostsJournal : props.fixedCosts).map((c) => ({
-                  id: c.id,
-                  created_at: c.created_at || `${c.year_month}-01T12:00:00`,
-                  title: c.name,
-                  amount: Number(c.amount_pln),
-                  meta: c.year_month,
-                }))}
-                emptyText="Brak kosztów stałych — kliknij +"
-                formatAmount={formatPLN}
-                renderActions={(item) => (
-                  <View style={{ flexDirection: 'row', gap: 4 }}>
-                    {props.onEditCost ? (
-                      <TouchableOpacity onPress={() => props.onEditCost!(item.id, 'fixed')} style={styles.iconBtn}>
-                        <Pencil size={13} color={PremiumColors.textMuted} />
-                      </TouchableOpacity>
-                    ) : null}
-                    <TouchableOpacity onPress={() => props.onDelete(item.id, 'fixed')} style={styles.iconBtn}>
-                      <Trash2 size={13} color={PremiumColors.alert} />
-                    </TouchableOpacity>
-                  </View>
-                )}
-              />
-            </CollapsibleTile>
-
-            <CollapsibleTile
-              title="Koszty zmienne"
-              summary={`${(props.variableCostsJournal?.length ? props.variableCostsJournal : props.variableEntries).length} pozycji · ${formatPLN(
-                (props.variableCostsJournal?.length ? props.variableCostsJournal : props.variableEntries).reduce(
-                  (s, e) => s + Number(e.amount_pln),
-                  0,
-                ),
-              )}`}
-              open={openVariable}
-              onToggle={() => setOpenVariable((v) => !v)}
-              right={
-                <TouchableOpacity style={styles.sectionAdd} onPress={props.onAddVariable}>
-                  <Plus size={14} color={PremiumColors.alert} />
-                </TouchableOpacity>
-              }
-            >
-              <ExpandableDateJournal
-                items={(props.variableCostsJournal?.length ? props.variableCostsJournal : props.variableEntries).map((e) => {
-                  const invoice = parseInvoiceCostNote(e.note);
-                  return {
-                    id: e.id,
-                    created_at: e.created_at || `${e.year_month}-01T12:00:00`,
-                    title: e.name,
-                    amount: Number(e.amount_pln),
-                    meta: invoice?.supplier_name
-                      ? `${e.year_month} · ${invoice.supplier_name}`
-                      : e.year_month,
-                    detailLines: invoice
-                      ? invoice.lines.map(formatInvoiceLineLabel)
-                      : undefined,
-                  };
-                })}
-                emptyText="Brak kosztów zmiennych — kliknij +"
-                formatAmount={formatPLN}
-                renderActions={(item) => (
-                  <View style={{ flexDirection: 'row', gap: 4 }}>
-                    {props.onEditCost ? (
-                      <TouchableOpacity onPress={() => props.onEditCost!(item.id, 'variable')} style={styles.iconBtn}>
-                        <Pencil size={13} color={PremiumColors.textMuted} />
-                      </TouchableOpacity>
-                    ) : null}
-                    <TouchableOpacity onPress={() => props.onDelete(item.id, 'variable')} style={styles.iconBtn}>
-                      <Trash2 size={13} color={PremiumColors.alert} />
-                    </TouchableOpacity>
-                  </View>
-                )}
-              />
-            </CollapsibleTile>
 
             <ReportsArchive onClosedDay={props.onFetchApplied} />
           </>
@@ -799,54 +478,16 @@ export function PremiumFinanceScreen(props: Props) {
               orb={<AiWaveOrb listening />}
             />
 
-            <Text style={styles.sectionLabel}>Wyniki bieżącego miesiąca</Text>
-            <View style={styles.kpiRow}>
-              <Animated.View entering={FadeInDown.delay(120).duration(400)} style={styles.kpi}>
-                <TouchableOpacity
-                  style={styles.kpiTap}
-                  onPress={openRaportyRevenueTree}
-                  activeOpacity={0.85}
-                  testID="kpi-przychod-open-tree"
-                >
-                  <Text style={styles.kpiTitle}>Przychód</Text>
-                  <AnimatedCounter value={totalRevenue} formatValue={formatPLN} style={styles.kpiValue} />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.kpiAdd} onPress={props.onAddRevenue}>
-                  <Plus size={14} color={PremiumColors.neon} strokeWidth={2.5} />
-                </TouchableOpacity>
-              </Animated.View>
-              <Animated.View entering={FadeInDown.delay(180).duration(400)} style={styles.kpi}>
-                <TouchableOpacity
-                  style={styles.kpiTap}
-                  onPress={openRaportyCostsTrees}
-                  activeOpacity={0.85}
-                  testID="kpi-koszty-open-trees"
-                >
-                  <Text style={styles.kpiTitle}>Koszty łącznie</Text>
-                  <AnimatedCounter value={totalCosts} formatValue={formatPLN} style={styles.kpiValue} />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.kpiAdd} onPress={props.onAddFixed}>
-                  <Plus size={14} color={PremiumColors.neon} strokeWidth={2.5} />
-                </TouchableOpacity>
-              </Animated.View>
-            </View>
-            <Animated.View
-              entering={FadeInDown.delay(220).duration(400)}
-              style={[styles.kpi, { marginBottom: 12, alignItems: 'center' }]}
-            >
-              <Text style={[styles.kpiTitle, { textAlign: 'center' }]}>Zysk netto</Text>
-              <AnimatedCounter
-                value={Math.abs(netProfit)}
-                formatValue={(n) => (netProfit >= 0 ? '+' : '−') + formatPLN(n)}
-                style={[
-                  styles.kpiValue,
-                  { color: netProfit >= 0 ? PremiumColors.neon : PremiumColors.alert, textAlign: 'center' },
-                ]}
-              />
-              <Text style={[styles.kpiSub, { textAlign: 'center' }]}>
-                {netProfit >= 0 ? 'Rentowność pozytywna' : 'Wynik ujemny — wymaga reakcji'}
-              </Text>
-            </Animated.View>
+            <PremiumFinanceKpiStrip
+              totalRevenue={totalRevenue}
+              totalCosts={totalCosts}
+              netProfit={netProfit}
+              onOpenRevenueTree={openRaportyRevenueTree}
+              onOpenCostsTrees={openRaportyCostsTrees}
+              onAddRevenue={props.onAddRevenue}
+              onAddFixed={props.onAddFixed}
+            />
+
 
             <View style={styles.card}>
               <Text style={styles.cardTitle}>Przegląd sprzedaży</Text>
@@ -942,7 +583,7 @@ export function PremiumFinanceScreen(props: Props) {
                 {chartMetric === 'revenue' ? 'Przychody' : 'Zysk / strata'} ·{' '}
                 {chartGrain === 'day' ? chartMonthYm : chartGrain === 'month' ? chartYear : 'lata'}
               </Text>
-              <BarChart
+              <PremiumFinanceBarChart
                 points={salesChartPoints}
                 metricLabel={chartMetric === 'revenue' ? 'Przychód łącznie' : 'Zysk / strata łącznie'}
                 onBarPress={(p) => {
@@ -1059,243 +700,3 @@ export function PremiumFinanceScreen(props: Props) {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: PremiumColors.bg },
-  content: { padding: PremiumTokens.space.screen, paddingBottom: 56 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: PremiumTokens.space.headerGap },
-  logo: { width: 72, height: 72 },
-  brand: {
-    color: PremiumColors.neon,
-    fontSize: 17,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-  },
-  brandSub: {
-    color: PremiumTokens.color.textMuted,
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 1.4,
-    marginTop: 4,
-  },
-  monthLabel: { color: PremiumColors.textSecondary, fontSize: 13, marginTop: 6 },
-  devToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: PremiumColors.card,
-    borderRadius: PremiumTokens.radius.md,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  devToggleText: { color: PremiumColors.neon, fontSize: 12, fontWeight: '700' },
-  metaRow: {
-    marginBottom: PremiumTokens.space.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  voiceStatus: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  voiceStatusText: { color: PremiumColors.neon, fontSize: 12, fontWeight: '600' },
-  reportBtnWrap: { alignItems: 'center', marginBottom: PremiumTokens.space.lg },
-  pdfExportBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: PremiumTokens.color.card,
-    borderRadius: PremiumTokens.radius.lg,
-    borderWidth: 1,
-    borderColor: PremiumTokens.color.neonLine,
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    marginBottom: PremiumTokens.space.md,
-  },
-  pdfExportTitle: { color: PremiumColors.text, fontSize: 14, fontWeight: '700' },
-  pdfExportSub: { color: PremiumColors.textMuted, fontSize: 11, marginTop: 2 },
-  collapseHead: { flexDirection: 'row', alignItems: 'center', gap: PremiumTokens.icon.gap },
-  segment: {
-    flexDirection: 'row',
-    backgroundColor: PremiumTokens.color.bgMid,
-    borderRadius: PremiumTokens.radius.lg,
-    padding: 5,
-    marginBottom: PremiumTokens.space.lg,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-  },
-  segmentBtn: { flex: 1, paddingVertical: 11, borderRadius: 14, alignItems: 'center' },
-  segmentBtnActive: { backgroundColor: PremiumColors.cardElevated },
-  segmentText: { fontSize: 13, fontWeight: '600', color: PremiumColors.textMuted },
-  segmentTextActive: { color: PremiumColors.neon },
-  jarvisCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: PremiumColors.card,
-    borderRadius: PremiumTokens.radius.xl,
-    padding: PremiumTokens.space.cardPad,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-    marginBottom: PremiumTokens.space.cardGap,
-    shadowColor: '#00FF88',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.12,
-    shadowRadius: 18,
-  },
-  jarvisText: { color: PremiumColors.textSecondary, fontSize: 15, lineHeight: 22, marginTop: 6 },
-  sectionLabel: {
-    color: PremiumColors.textMuted,
-    fontSize: 13,
-    fontWeight: '600',
-    letterSpacing: 0.4,
-    marginBottom: PremiumTokens.space.headerGap,
-    textTransform: 'uppercase',
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: PremiumTokens.space.headerGap,
-  },
-  sectionAdd: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
-    backgroundColor: PremiumColors.neonSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  kpiRow: { flexDirection: 'row', gap: PremiumTokens.space.cardGap, marginBottom: PremiumTokens.space.cardGap },
-  kpi: {
-    flex: 1,
-    backgroundColor: PremiumColors.card,
-    borderRadius: PremiumTokens.radius.xl,
-    padding: PremiumTokens.space.cardPad,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-  },
-  kpiTitle: { color: PremiumColors.textMuted, fontSize: 11, fontWeight: '500', marginBottom: 6 },
-  kpiValue: { color: PremiumColors.text, fontSize: 18, fontWeight: '700', letterSpacing: -0.4 },
-  kpiSub: { color: PremiumColors.textSecondary, fontSize: 12, marginTop: 6 },
-  kpiTap: { paddingRight: 28 },
-  kpiAdd: {
-    position: 'absolute',
-    top: 10,
-    right: 10,
-    width: 26,
-    height: 26,
-    borderRadius: 8,
-    backgroundColor: PremiumColors.neonSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  card: {
-    backgroundColor: PremiumColors.card,
-    borderRadius: PremiumTokens.radius.xl,
-    padding: PremiumTokens.space.cardPad,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-    marginBottom: PremiumTokens.space.cardGap,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.28,
-    shadowRadius: 18,
-    elevation: 6,
-  },
-  cardTitle: {
-    color: PremiumColors.text,
-    fontSize: PremiumTokens.type.cardTitle.fontSize,
-    fontWeight: PremiumTokens.type.cardTitle.fontWeight,
-    marginBottom: 12,
-  },
-  cardHeadRow: { flexDirection: 'row', alignItems: 'center', gap: PremiumTokens.icon.gap, marginBottom: 6 },
-  seeAll: { color: PremiumColors.neon, fontSize: 13, fontWeight: '700' },
-  chartTabs: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 10,
-    marginBottom: 12,
-  },
-  chartTab: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: PremiumTokens.radius.md,
-    backgroundColor: PremiumTokens.color.bgMid,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-    alignItems: 'center',
-  },
-  chartTabActive: {
-    borderColor: PremiumColors.neon,
-    backgroundColor: PremiumColors.neonSoft,
-  },
-  chartTabText: { color: PremiumColors.textMuted, fontSize: 12, fontWeight: '600' },
-  chartTabTextActive: { color: PremiumColors.neon },
-  customRangeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
-  },
-  dateInput: {
-    flex: 1,
-    backgroundColor: '#0E0E0E',
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-    borderRadius: 8,
-    color: PremiumColors.text,
-    fontSize: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-  },
-  costRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: PremiumColors.border,
-  },
-  costName: { color: PremiumColors.text, fontSize: 13, fontWeight: '600' },
-  costAmt: { color: PremiumColors.textSecondary, fontSize: 13, fontWeight: '700' },
-  iconBtn: { padding: 4 },
-  empty: { color: PremiumColors.textMuted, fontSize: 13, textAlign: 'center', padding: 12 },
-  noteBox: { marginTop: 8, gap: 8 },
-  noteInput: {
-    backgroundColor: '#0F0F0F',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: PremiumColors.border,
-    color: PremiumColors.text,
-    padding: 10,
-    minHeight: 56,
-    textAlignVertical: 'top',
-  },
-  noteSave: {
-    alignSelf: 'flex-end',
-    backgroundColor: PremiumColors.neon,
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  noteSaveText: { color: '#0A0A0A', fontWeight: '800', fontSize: 12 },
-  syncHint: {
-    marginBottom: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,255,120,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,255,120,0.22)',
-  },
-  syncHintTitle: { color: PremiumColors.text, fontSize: 13, fontWeight: '700' },
-  syncHintBody: { color: PremiumColors.textMuted, fontSize: 12, marginTop: 4, lineHeight: 17 },
-  lowRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  lowBadge: {
-    backgroundColor: PremiumColors.alertSoft,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  lowBadgeText: { color: PremiumColors.alert, fontSize: 10, fontWeight: '800' },
-});

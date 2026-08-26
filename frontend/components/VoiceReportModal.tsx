@@ -1,12 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import {
-  Modal, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Platform, ScrollView, TextInput,
-} from 'react-native';
-import { Mic, Square, X, Check, AlertTriangle, RefreshCw, Send, Info, Plus, Trash2, ShieldAlert } from 'lucide-react-native';
+import { Platform } from 'react-native';
 import { useAudioRecorder, RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import { useRouter } from 'expo-router';
-import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import {
@@ -17,24 +12,8 @@ import {
   stripWakeWord,
 } from '@/lib/jarvisWakeWord';
 import { DealHunterModal } from './DealHunterModal';
-import { ExpirationVoiceForm } from './ExpirationVoiceForm';
-import { PeriodPickerTree, labelForSelections, parsePeriodHintToSelection, type PeriodSelection } from './PeriodPickerTree';
-import {
-  BulkPriceEditor,
-  CriticalOrderEditor,
-  DishPickEditor,
-  IngredientNameSuggest,
-  JarvisSuggestBox,
-  MenuCategorySuggest,
-  NavigateScreenEditor,
-  OrderProductEditor,
-  SupplierWithCatalogEditor,
-} from './JarvisFormExtras';
+import { labelForSelections, parsePeriodHintToSelection, type PeriodSelection } from './PeriodPickerTree';
 import { type OptimizeResult, normalizeOptimizeResult } from '@/lib/bargainHunter';
-import {
-  buildExpiryTipsForItem,
-  EXPIRY_TIPS_LEGAL_DISCLAIMER,
-} from '@/lib/expiryTipsCatalog';
 import { fetchJson } from '@/lib/safeFetch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -44,17 +23,20 @@ import {
   DEAL_HUNTER_GATE_TITLE,
   isDealHunterIntent,
 } from '@/lib/dealHunterGate';
-import { ProduceSizePicker } from '@/components/ProduceSizePicker';
 import { useAuth } from '@/contexts/AuthContext';
 import { emitAppDataChanged, refreshHintForIntent } from '@/lib/appRefresh';
 import { applyWasteQuantityToPayload } from './voiceReport/applyWastePayload';
 
 import type { Intent, Interpretation, Props, Stage } from './voiceReport/types';
 import { BACKEND_URL, COMMAND_EXAMPLES, CONFIRM_WORD, DESTRUCTIVE_INTENTS, INTENT_META, INTENT_SEARCH_ALIASES, NAV_INTENTS, PERIOD_INTENTS, UPLOAD_INTENTS } from './voiceReport/constants';
-import { IntentEditor } from './voiceReport/IntentEditor';
 import { correctPeriodIntentFromTranscript, extractAmountFromText, seedPayload } from './voiceReport/helpers';
-import { IntentDoneSummary } from './voiceReport/IntentDoneSummary';
-import { styles } from './voiceReport/styles';
+import { performNavigation } from './voiceReport/performNavigation';
+import { VoiceModalChrome } from './voiceReport/VoiceModalChrome';
+import { VoiceIdleStage } from './voiceReport/VoiceIdleStage';
+import { VoiceRecordingStage } from './voiceReport/VoiceRecordingStage';
+import { VoiceWorkingStage } from './voiceReport/VoiceWorkingStage';
+import { VoiceReviewStage } from './voiceReport/VoiceReviewStage';
+import { VoiceDoneStage } from './voiceReport/VoiceDoneStage';
 
 export type { Intent } from './voiceReport/types';
 
@@ -584,7 +566,13 @@ export function VoiceReportModal({
       setClarifyQuery('');
       // Intencje nawigacji/filtrów wykonujemy natychmiast (bez ekranu potwierdzenia).
       if (NAV_INTENTS.has(data.intent)) {
-        performNavigation(data.intent, data.payload || {});
+        performNavigation(data.intent, data.payload || {}, {
+          transcript,
+          onClose,
+          router,
+          openProductCascade,
+          fetchInventoryRows,
+        });
         return;
       }
       // Seed editable form state with AI defaults — user may freely change values.
@@ -613,94 +601,6 @@ export function VoiceReportModal({
       minQuantity: Number(i.min_quantity) || 0,
       unit: String(i.unit || 'szt'),
     }));
-  }
-
-  async function openInventoryCascadeFromVoice(
-    mode: 'critical' | 'stock_asc',
-    title?: string,
-  ) {
-    try {
-      const rows = await fetchInventoryRows();
-      const items =
-        mode === 'critical'
-          ? rows.filter((r) => r.quantity <= r.minQuantity)
-          : [...rows].sort((a, b) => a.quantity - b.quantity);
-      openProductCascade({
-        title:
-          title ||
-          (mode === 'critical' ? 'Produkty krytyczne' : 'Stan magazynowy (rosnąco)'),
-        subtitle:
-          mode === 'critical'
-            ? `${items.length} produktów poniżej progu`
-            : `${items.length} produktów · od najniższego stanu`,
-        mode: mode === 'critical' ? 'critical' : 'stock_asc',
-        items,
-      });
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  function performNavigation(intent: Intent, payload: Record<string, any>) {
-    const textHint = `${JSON.stringify(payload)} ${transcript}`.toLowerCase();
-    const wantsCritical =
-      payload?.critical ||
-      payload?.low_stock ||
-      payload?.mode === 'critical' ||
-      /krytycz|niski stan|uzupeln|uzupełn|brak(i)? magazyn/.test(textHint);
-    const wantsStockAsc =
-      payload?.sort === 'quantity_asc' ||
-      payload?.mode === 'stock_asc' ||
-      /od najnizsz|od najniższ|rosnąco|rosnaco|stan(u)? magazyn/.test(textHint);
-
-    void (async () => {
-      try {
-        if (wantsCritical || (intent === 'filter_ui_inventory' && wantsCritical)) {
-          await openInventoryCascadeFromVoice('critical');
-          onClose();
-          return;
-        }
-        if (wantsStockAsc || (intent === 'filter_ui_inventory' && wantsStockAsc)) {
-          await openInventoryCascadeFromVoice('stock_asc');
-          onClose();
-          return;
-        }
-        if (intent === 'navigate_screen') {
-          const screen = String(payload.screen || '');
-          if (screen === 'magazyn' && wantsCritical) {
-            await openInventoryCascadeFromVoice('critical');
-            onClose();
-            return;
-          }
-          const map: Record<string, any> = {
-            index: '/(tabs)',
-            menu: '/(tabs)/menu',
-            magazyn: '/(tabs)/magazyn',
-            dostawcy: '/(tabs)/dostawcy',
-            ustawienia: '/(tabs)/ustawienia',
-          };
-          router.push(map[screen] ?? '/(tabs)');
-        } else if (intent === 'filter_ui_inventory') {
-          // Domyślnie: kaskada produktów kategorii / całego magazynu
-          const rows = await fetchInventoryRows();
-          const cat = String(payload.category || '').toLowerCase();
-          const filtered = cat
-            ? rows // brak kategorii w inventory_items w tym select — pokaż wszystkie
-            : rows;
-          openProductCascade({
-            title: cat ? `Magazyn · ${payload.category}` : 'Magazyn — produkty',
-            subtitle: `${filtered.length} pozycji`,
-            mode: 'custom',
-            items: filtered,
-          });
-        } else if (intent === 'filter_ui_menu_blocked') {
-          router.push({ pathname: '/(tabs)/menu', params: { voiceBlocked: '1' } });
-        }
-      } catch {
-        /* navigation best-effort */
-      }
-      onClose();
-    })();
   }
 
   async function handleApply(opts?: {
@@ -774,7 +674,13 @@ export function VoiceReportModal({
           : 'bulk_edit_menu_prices_percentage';
       }
       if (applyIntent === 'navigate_screen' || applyIntent === 'filter_ui_inventory' || applyIntent === 'filter_ui_menu_blocked') {
-        performNavigation(applyIntent, curEdited);
+        performNavigation(applyIntent, curEdited, {
+          transcript,
+          onClose,
+          router,
+          openProductCascade,
+          fetchInventoryRows,
+        });
         return;
       }
 
@@ -1023,7 +929,13 @@ export function VoiceReportModal({
 
     // Filtry UI — od razu; nawigacja i reszta → formularz (użytkownik wybiera zakładkę / okres)
     if (c.intent === 'filter_ui_inventory' || c.intent === 'filter_ui_menu_blocked') {
-      performNavigation(c.intent, seeded);
+      performNavigation(c.intent, seeded, {
+        transcript,
+        onClose,
+        router,
+        openProductCascade,
+        fetchInventoryRows,
+      });
       return;
     }
     if (c.intent === 'list_expiring_soon') {
@@ -1159,438 +1071,87 @@ export function VoiceReportModal({
       : '';
 
   return (
-    <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <View style={[styles.overlay, { backgroundColor: 'rgba(0,0,0,0.72)' }]}>
-        <View style={[
-          styles.sheet,
-          {
-            backgroundColor: DS.color.bgSecondary,
-            borderTopWidth: 1,
-            borderColor: DS.color.borderSubtle,
-          },
-        ]}>
-          <View style={[styles.header, { borderBottomColor: DS.color.borderSubtle }]}>
-            <View style={styles.headerLeft}>
-              <View style={[styles.iconBadge, { backgroundColor: jarvisAccent, shadowColor: jarvisAccent }]}>
-                <Mic size={16} color={jarvisCtaText} strokeWidth={2.5} />
-              </View>
-              <View>
-                <Text style={[styles.title, { color: jarvisAccent }]} testID="voice-modal-title">
-                  Jarvis · dyktowanie
-                </Text>
-                <Text style={[styles.subtitle, { color: DS.color.muted }]}>
-                  {contextHint ? `${contextHint} · ` : ''}dyktowanie AI
-                </Text>
-              </View>
-            </View>
-            <TouchableOpacity
-              onPress={onClose}
-              style={[styles.closeBtn, { backgroundColor: '#222' }]}
-              testID="voice-modal-close"
-            >
-              <X size={20} color={DS.color.muted} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-
-          {creditsNotice ? (
-            <View style={styles.creditsNotice} testID="voice-credits-notice">
-              <Text style={styles.creditsNoticeText}>{creditsNotice}</Text>
-            </View>
-          ) : null}
-
-          <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-            {(stage === 'idle' || stage === 'error') && (
-              <View style={styles.idleWrap}>
-                <Text
-                  style={[
-                    styles.idleHint,
-                    { color: DS.color.heading },
-                  ]}
-                >
-                  Powiedz jedną z komend lub kliknij ją na liście
-                  {commandHint ? `:\n„${commandHint}"` : ', np.:\n„Dodaj do menu pizzę margherita za 32 zł"'}
-                </Text>
-
-                {commandsUnlocked ? (
-                  <>
-                <TouchableOpacity
-                  style={[
-                    styles.commandsToggle,
-                    {
-                      borderColor: 'rgba(0,255,136,0.35)',
-                      backgroundColor: 'rgba(0,255,120,0.08)',
-                    },
-                  ]}
-                  onPress={() => setShowCommands((v) => !v)}
-                  activeOpacity={0.85}
-                >
-                  <Text
-                    style={[
-                      styles.commandsToggleText,
-                      { color: jarvisAccent },
-                    ]}
-                  >
-                    {showCommands ? 'Ukryj listę komend' : 'Komendy głosowe'}
-                  </Text>
-                </TouchableOpacity>
-
-                {showCommands ? (
-                  <ScrollView
-                    style={[
-                      styles.commandsList,
-                      {
-                        backgroundColor: 'rgba(22,22,22,0.92)',
-                        borderColor: 'rgba(255,255,255,0.08)',
-                      },
-                    ]}
-                    nestedScrollEnabled
-                    showsVerticalScrollIndicator
-                  >
-                    {visibleCommands.map((c) => {
-                      const meta = INTENT_META[c.intent];
-                      return (
-                        <TouchableOpacity
-                          key={c.intent + c.example}
-                          style={styles.commandRow}
-                          onPress={() => { void runLegendCommand(c); }}
-                          activeOpacity={0.75}
-                        >
-                          <Text style={styles.commandIcon}>{meta?.icon ?? '🎤'}</Text>
-                          <View style={{ flex: 1 }}>
-                            <Text
-                              style={[
-                                styles.commandLabel,
-                                { color: '#F8F8F8' },
-                              ]}
-                            >
-                              {meta?.label ?? c.intent}
-                            </Text>
-                            <Text
-                              style={[
-                                styles.commandExample,
-                                { color: '#A0A0A0' },
-                              ]}
-                              numberOfLines={2}
-                            >
-                              „{c.example}"
-                            </Text>
-                          </View>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                ) : null}
-                  </>
-                ) : (
-                  <Text style={[styles.idleHint, { color: DS.color.muted, marginTop: 8 }]}>
-                    Brak kredytów — lista komend AI jest ukryta. Dostępna pozostaje edycja manualna.
-                    Doładuj kredyty lub wykup subskrypcję, aby odblokować Jarvis.
-                  </Text>
-                )}
-
-                <TouchableOpacity
-                  style={[styles.recBtn, styles.recBtnStart, { backgroundColor: jarvisAccent, shadowColor: jarvisAccent }]}
-                  onPress={startRecording}
-                  activeOpacity={0.85}
-                  testID="voice-record-start"
-                >
-                  <Mic size={30} color={Colors.white} strokeWidth={2.5} />
-                </TouchableOpacity>
-                <Text style={styles.recBtnLabel}>Rozpocznij nagrywanie</Text>
-                {stage === 'error' && errorMsg && (
-                  <View style={styles.errorBox} testID="voice-error-box">
-                    <AlertTriangle size={14} color={Colors.danger} strokeWidth={2.5} />
-                    <Text style={styles.errorText}>{errorMsg}</Text>
-                  </View>
-                )}
-              </View>
-            )}
-
-            {stage === 'recording' && (
-              <View style={styles.idleWrap}>
-                <View style={styles.pulseRing}>
-                  <TouchableOpacity
-                    style={[styles.recBtn, styles.recBtnStop]}
-                    onPress={stopRecording}
-                    activeOpacity={0.85}
-                    testID="voice-record-stop"
-                  >
-                    <Square size={22} color={Colors.white} strokeWidth={2.5} />
-                  </TouchableOpacity>
-                </View>
-                <Text style={[styles.recBtnLabel, { color: Colors.danger }]}>
-                  Nagrywanie… {elapsed}s
-                </Text>
-                <Text style={styles.idleHint}>Kliknij ponownie aby zakończyć</Text>
-              </View>
-            )}
-
-            {(stage === 'transcribing' || stage === 'interpreting' || stage === 'applying') && (
-              <View style={styles.workingWrap}>
-                <ActivityIndicator size="large" color={Colors.accent} />
-                <Text style={styles.workingText}>{workingMessage}</Text>
-                {transcript && stage !== 'transcribing' && (
-                  <View style={styles.transcriptBox}>
-                    <Text style={styles.transcriptLabel}>Rozpoznany tekst:</Text>
-                    <Text style={styles.transcriptText}>{transcript}</Text>
-                  </View>
-                )}
-              </View>
-            )}
-
-            {stage === 'review' && interp && (
-              <View>
-                <View style={styles.transcriptBox}>
-                  <Text style={styles.transcriptLabel}>Rozpoznany tekst</Text>
-                  <Text style={styles.transcriptText}>{transcript}</Text>
-                </View>
-
-                <Text style={styles.sectionLabel}>Intencja AI</Text>
-                <View style={[styles.intentBadge, { backgroundColor: `${meta.color}18`, borderColor: `${meta.color}55` }]}>
-                  <Text style={styles.intentBadgeIcon}>{meta.icon}</Text>
-                  <Text style={[styles.intentBadgeText, { color: meta.color }]}>{meta.label}</Text>
-                  <Text style={styles.intentBadgeConf}>{Math.round((interp.confidence ?? 0) * 100)}%</Text>
-                </View>
-
-                {interp.reason ? (
-                  <Text style={styles.intentReason}>{interp.reason}</Text>
-                ) : null}
-
-                {Array.isArray(interp.alternate_intents) && interp.alternate_intents.length >= 2 ? (
-                  <View style={styles.altIntentsBox} testID="voice-alt-intents">
-                    <Text style={styles.periodConfirmWarn}>Jarvis nie jest pewien — wybierz:</Text>
-                    {interp.alternate_intents.slice(0, 2).map((alt) => (
-                      <TouchableOpacity
-                        key={alt.intent}
-                        style={[
-                          styles.altIntentBtn,
-                          interp.intent === alt.intent && styles.altIntentBtnOn,
-                        ]}
-                        onPress={() => applyClarifiedIntent(alt.intent as Intent)}
-                        activeOpacity={0.85}
-                      >
-                        <Text style={[styles.altIntentText, interp.intent === alt.intent && { color: '#0A0A0A' }]}>
-                          {alt.label}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                    <Text style={styles.clarifyHint}>Albo wpisz, co chcesz zrobić:</Text>
-                    <JarvisSuggestBox
-                      query={clarifyQuery}
-                      onChangeQuery={setClarifyQuery}
-                      suggestions={clarifySuggestions}
-                      onPick={(s) => {
-                        const intent = (s.id || '') as Intent;
-                        if (intent && INTENT_META[intent]) applyClarifiedIntent(intent);
-                      }}
-                      placeholder="np. dodaj przychód, koszt stały…"
-                      testID="voice-clarify-input"
-                    />
-                  </View>
-                ) : needsIntentClarify ? (
-                  <View style={styles.altIntentsBox} testID="voice-clarify-box">
-                    <Text style={styles.periodConfirmWarn}>
-                      {interp.intent === 'unknown'
-                        ? 'Nie rozpoznano komendy — wpisz, co chcesz zrobić:'
-                        : 'Jarvis nie jest pewien — doprecyzuj wpisując komendę:'}
-                    </Text>
-                    <JarvisSuggestBox
-                      query={clarifyQuery}
-                      onChangeQuery={setClarifyQuery}
-                      suggestions={clarifySuggestions}
-                      onPick={(s) => {
-                        const intent = (s.id || '') as Intent;
-                        if (intent && INTENT_META[intent]) applyClarifiedIntent(intent);
-                      }}
-                      placeholder="np. dodaj przychód, koszt stały…"
-                      testID="voice-clarify-input"
-                    />
-                  </View>
-                ) : null}
-
-                {interp.intent !== 'unknown' && !isDestructive && (
-                  <Text style={styles.editHint}>
-                    Sprawdź i popraw dane przed zapisem — możesz edytować każde pole.
-                  </Text>
-                )}
-
-                {isDestructive && (
-                  <View style={styles.dangerBox} testID="voice-danger-box">
-                    <View style={styles.dangerHeader}>
-                      <ShieldAlert size={20} color="#FFFFFF" strokeWidth={2.5} />
-                      <Text style={styles.dangerTitle}>⚠️ Uwaga! Operacja nieodwracalna</Text>
-                    </View>
-                    <Text style={styles.dangerText}>
-                      Jarvis wykrył intencję masowego usunięcia / resetu danych
-                      („{meta.label}"). Aby kontynuować, wpisz poniżej słowo{'\n'}
-                      <Text style={styles.dangerWord}>{CONFIRM_WORD}</Text>.
-                    </Text>
-                    <TextInput
-                      style={styles.dangerInput}
-                      value={confirmText}
-                      onChangeText={setConfirmText}
-                      placeholder={CONFIRM_WORD}
-                      placeholderTextColor="rgba(255,255,255,0.5)"
-                      autoCapitalize="characters"
-                      autoCorrect={false}
-                      testID="voice-confirm-input"
-                    />
-                  </View>
-                )}
-
-                {!isDestructive && (
-                  <IntentEditor
-                    intent={interp.intent}
-                    edited={edited}
-                    patch={patchEdited}
-                    categories={categories}
-                    menuCategories={menuCategories}
-                  />
-                )}
-
-                {interp.intent === 'unknown' && !needsIntentClarify && (
-                  <View style={styles.errorBox}>
-                    <AlertTriangle size={14} color={Colors.danger} strokeWidth={2.5} />
-                    <Text style={styles.errorText}>
-                      AI nie rozpoznało jednoznacznej intencji. Nagraj ponownie
-                      z konkretnymi słowami: „wyrzuciłem", „dodaj do menu",
-                      „rachunek za…", „nowy dostawca…".
-                    </Text>
-                  </View>
-                )}
-
-                {interp.intent === 'unknown' && needsIntentClarify ? (
-                  <Text style={styles.editHint}>
-                    Wybierz podpowiedź powyżej albo nagraj jeszcze raz z jaśniejszą komendą.
-                  </Text>
-                ) : null}
-
-                <View style={styles.actionsRow}>
-                  <TouchableOpacity style={styles.secondaryBtn} onPress={resetAll} activeOpacity={0.85} testID="voice-review-retry">
-                    <RefreshCw size={14} color={DS.color.muted} strokeWidth={2.5} />
-                    <Text style={styles.secondaryBtnText} numberOfLines={2}>Nagraj jeszcze raz</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.primaryBtn,
-                      isDestructive && styles.dangerBtn,
-                      !canApply && styles.primaryBtnDisabled,
-                    ]}
-                    onPress={() => { void handleApply(); }}
-                    disabled={!canApply}
-                    activeOpacity={0.85}
-                    testID="voice-review-apply"
-                  >
-                    {isDestructive
-                      ? <Trash2 size={14} color={Colors.white} strokeWidth={2.5} />
-                      : <Send size={14} color="#0A0A0A" strokeWidth={2.5} />}
-                    <Text style={[styles.primaryBtnText, isDestructive && { color: Colors.white }]} numberOfLines={2}>
-                      {isDestructive ? 'Usuń bezpowrotnie'
-                        : interp.intent === 'restore_last_deleted_menu' ? 'Przywróć menu'
-                        : interp.intent === 'restore_deleted_inventory' ? 'Przywróć magazyn'
-                        : interp.intent === 'scale_recipe' ? 'Otwórz kalkulator'
-                        : interp.intent === 'toggle_menu_item_availability'
-                          ? (edited.available === true ? 'Włącz danie' : 'Wyłącz danie')
-                        : PERIOD_INTENTS.has(interp.intent) ? 'Analizuj'
-                        : (interp.intent === 'order_product' || interp.intent === 'order_critical_items_by_category')
-                          ? 'Zamów'
-                        : UPLOAD_INTENTS.has(interp.intent)
-                          ? (interp.intent === 'upload_offer' ? 'Wgraj ofertę' : interp.intent === 'upload_document' ? 'Wgraj dokument' : 'Wgraj fakturę')
-                        : 'Zapisz'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-              </View>
-            )}
-
-            {stage === 'done' && applyResult && interp && (
-              <View>
-                <View style={[styles.successBox, { backgroundColor: meta.color }]}>
-                  <Check size={20} color={Colors.white} strokeWidth={3} />
-                  <Text style={styles.successText}>
-                    {interp.intent === 'scale_recipe'
-                      ? 'Kalkulator porcji'
-                      : PERIOD_INTENTS.has(interp.intent)
-                        ? `${meta.label} — wynik`
-                        : UPLOAD_INTENTS.has(interp.intent)
-                          ? `${meta.label}`
-                          : `${meta.label} — zapisano`}
-                  </Text>
-                </View>
-
-                <IntentDoneSummary
-                  intent={interp.intent}
-                  extras={applyResult.extras}
-                  onExtrasChange={(next) => setApplyResult((prev) => prev ? { ...prev, extras: next } : prev)}
-                />
-
-                {(() => {
-                  const visibleWarnings = (applyResult.warnings ?? []).filter((w) => {
-                    const t = String(w || '').toLowerCase();
-                    if (/było usunięte|bylo usuniete|przywrócono w magazynie|przywrocono w magazynie/.test(t)) {
-                      return false;
-                    }
-                    if (/klasyfikacja ai|przekroczyła limit czasu|przekroczyla limit czasu|niedostępna — użyto|niedostepna - uzyto/.test(t)) {
-                      return false;
-                    }
-                    return true;
-                  });
-                  if (!visibleWarnings.length) return null;
-                  return (
-                    <View style={styles.warnBox}>
-                      <AlertTriangle size={13} color={Colors.warning} strokeWidth={2.5} />
-                      <View style={{ flex: 1 }}>
-                        {visibleWarnings.map((w, i) => (
-                          <Text key={i} style={styles.warnText}>• {w}</Text>
-                        ))}
-                      </View>
-                    </View>
-                  );
-                })()}
-
-                <View style={styles.actionsRow}>
-                  <TouchableOpacity style={styles.secondaryBtn} onPress={resetAll} activeOpacity={0.85} testID="voice-done-again">
-                    <Mic size={14} color={DS.color.muted} strokeWidth={2.5} />
-                    <Text style={styles.secondaryBtnText} numberOfLines={2}>Zgłoś kolejną</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.primaryBtn} onPress={onClose} activeOpacity={0.85} testID="voice-done-close">
-                    <Check size={14} color="#0A0A0A" strokeWidth={2.5} />
-                    <Text style={styles.primaryBtnText}>Zamknij</Text>
-                  </TouchableOpacity>
-                </View>
-                {(interp.intent === 'scale_recipe') ? (
-                  <TouchableOpacity
-                    style={[styles.wakeListenBtn, { marginTop: 10 }]}
-                    onPress={startFollowUpRecording}
-                    activeOpacity={0.85}
-                  >
-                    <Mic size={14} color="#0A0A0A" strokeWidth={2.5} />
-                    <Text style={[styles.wakeListenText, { color: '#0A0A0A' }]} numberOfLines={2}>
-                      Zmień porcje głosem (np. „na 40 porcji”)
-                    </Text>
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            )}
-          </ScrollView>
-        </View>
-      </View>
-      {/* Bulk Deal Hunter — otwierany po zbiorczym zamówieniu braków. */}
-      {bulkCompare ? (
-        <DealHunterModal
-          visible={!!bulkCompare}
-          product={null}
-          restaurantName={undefined}
-          initialCompare={bulkCompare}
-          bulkContextLabel={bulkContextLabel}
-          onClose={() => { setBulkCompare(null); setBulkContextLabel(''); }}
+    <VoiceModalChrome
+      visible={visible}
+      onClose={onClose}
+      contextHint={contextHint}
+      jarvisAccent={jarvisAccent}
+      jarvisCtaText={jarvisCtaText}
+      creditsNotice={creditsNotice}
+      footer={
+        bulkCompare ? (
+          <DealHunterModal
+            visible={!!bulkCompare}
+            product={null}
+            restaurantName={undefined}
+            initialCompare={bulkCompare}
+            bulkContextLabel={bulkContextLabel}
+            onClose={() => { setBulkCompare(null); setBulkContextLabel(''); }}
+          />
+        ) : null
+      }
+    >
+      {(stage === 'idle' || stage === 'error') && (
+        <VoiceIdleStage
+          stage={stage}
+          errorMsg={errorMsg}
+          commandHint={commandHint}
+          commandsUnlocked={commandsUnlocked}
+          showCommands={showCommands}
+          onToggleCommands={() => setShowCommands((v) => !v)}
+          visibleCommands={visibleCommands}
+          onLegendCommand={(c) => { void runLegendCommand(c); }}
+          onStartRecording={startRecording}
+          jarvisAccent={jarvisAccent}
         />
-      ) : null}
-    </Modal>
+      )}
+
+      {stage === 'recording' && (
+        <VoiceRecordingStage elapsed={elapsed} onStopRecording={stopRecording} />
+      )}
+
+      {(stage === 'transcribing' || stage === 'interpreting' || stage === 'applying') && (
+        <VoiceWorkingStage
+          workingMessage={workingMessage}
+          transcript={transcript}
+          showTranscript={stage !== 'transcribing'}
+        />
+      )}
+
+      {stage === 'review' && interp && (
+        <VoiceReviewStage
+          transcript={transcript}
+          interp={interp}
+          meta={meta}
+          needsIntentClarify={needsIntentClarify}
+          clarifyQuery={clarifyQuery}
+          onClarifyQueryChange={setClarifyQuery}
+          clarifySuggestions={clarifySuggestions}
+          onApplyClarifiedIntent={applyClarifiedIntent}
+          isDestructive={isDestructive}
+          confirmText={confirmText}
+          onConfirmTextChange={setConfirmText}
+          edited={edited}
+          patchEdited={patchEdited}
+          categories={categories}
+          menuCategories={menuCategories}
+          canApply={canApply}
+          onResetAll={resetAll}
+          onApply={() => { void handleApply(); }}
+        />
+      )}
+
+      {stage === 'done' && applyResult && interp && (
+        <VoiceDoneStage
+          interp={interp}
+          meta={meta}
+          applyResult={applyResult}
+          onExtrasChange={(next) => setApplyResult((prev) => prev ? { ...prev, extras: next } : prev)}
+          onResetAll={resetAll}
+          onClose={onClose}
+          onFollowUpRecording={startFollowUpRecording}
+        />
+      )}
+    </VoiceModalChrome>
   );
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Intent-specific EDITORS (user can modify AI defaults before confirming)
-// ────────────────────────────────────────────────────────────────────────────

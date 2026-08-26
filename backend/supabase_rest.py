@@ -38,6 +38,7 @@ _TENANT_TABLES = frozenset({
     "restaurant_profile",
     "kitchen_utensils",
     "supplier_orders",
+    "invoices",
 })
 
 _GetAccountKey = Callable[[], str]

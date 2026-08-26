@@ -5,10 +5,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Modal,
-  KeyboardAvoidingView,
-  Platform,
-  Switch,
   RefreshControl,
   DeviceEventEmitter,
   ActivityIndicator,
@@ -25,19 +21,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   ChefHat,
   Search,
-  Mic,
   Camera,
   Ruler,
   Leaf,
   X,
   UtensilsCrossed,
   Plus,
-  Trash2,
-  Check,
-  FlaskConical,
-  Bell,
-  Box,
-  BookOpen,
 } from 'lucide-react-native';
 import {
   deleteMenuDish,
@@ -61,28 +50,26 @@ import { MenuScanModal } from '@/components/MenuScanModal';
 import { BatchPrepModal, type BatchPrepDish } from '@/components/BatchPrepModal';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { DishCard } from '@/components/menu/DishCard';
-import { IngredientRow } from '@/components/menu/IngredientRow';
+import { DishFormModal } from '@/components/menu/DishFormModal';
+import { QuickAddInventoryModal } from '@/components/menu/QuickAddInventoryModal';
+import { MenuListHeader } from '@/components/menu/MenuListHeader';
+import {
+  buildMenuRows,
+  filterMenuDishes,
+  groupDishesByCategory,
+} from '@/components/menu/buildMenuRows';
 import { menuScreenStyles as styles } from '@/components/menu/menuScreenStyles';
 import { BLANK_DISH_FORM, BLANK_INV_FORM } from '@/constants/menuFormDefaults';
 import { PremiumTabChrome } from '@/components/premium/PremiumTabChrome';
 import {
   PremiumCapsule,
-  PremiumGlowCta,
   PremiumOutlineBtn,
-  PremiumStatTile,
 } from '@/components/premium/PremiumUI';
-import {
-  CATEGORY_COLORS,
-  FORM_CATEGORIES,
-  INV_CATEGORY_COLORS,
-  INV_PRESET_CATEGORIES,
-  INV_UNIT_OPTIONS,
-} from '@/constants/menuUi';
+import { CATEGORY_COLORS, FORM_CATEGORIES } from '@/constants/menuUi';
 import {
   dishToFormIngredients,
   getIngredientStockStatus,
   makePosId,
-  mapInvDbRow,
   newDraftIngredient,
   normIngredientName,
   patchIngredientDraft,
@@ -112,7 +99,7 @@ import { getMenuThumbSync, subscribeMenuThumbs, resetMenuThumbCacheMemory } from
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/contexts/AuthContext';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
-import { normalizeIngredientName, namesMatch } from '@/lib/fuzzyProductMatch';
+import { namesMatch } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
@@ -303,33 +290,14 @@ export default function MenuScreen() {
 
   const activeCat = selectedCat ?? fewestCategory ?? 'Wszystkie';
 
-  const filtered = useMemo(() => {
-    let list = dishes;
-    if (activeCat !== 'Wszystkie') list = list.filter((d) => d.category === activeCat);
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      list = list.filter((d) => d.name.toLowerCase().includes(q));
-    }
-    return list;
-  }, [dishes, search, activeCat]);
+  const filtered = useMemo(
+    () => filterMenuDishes(dishes, search, activeCat),
+    [dishes, search, activeCat],
+  );
 
-  const grouped = useMemo(() => {
-    const map: Record<string, Dish[]> = {};
-    filtered.forEach((d) => {
-      if (!map[d.category]) map[d.category] = [];
-      map[d.category].push(d);
-    });
-    return map;
-  }, [filtered]);
+  const grouped = useMemo(() => groupDishesByCategory(filtered), [filtered]);
 
-  const menuRows = useMemo((): MenuListRow[] => {
-    const rows: MenuListRow[] = [];
-    for (const [category, items] of Object.entries(grouped)) {
-      rows.push({ type: 'header', category, count: items.length });
-      for (const dish of items) rows.push({ type: 'dish', dish });
-    }
-    return rows;
-  }, [grouped]);
+  const menuRows = useMemo(() => buildMenuRows(grouped), [grouped]);
 
   const [thumbTick, setThumbTick] = useState(0);
   const [customImageTick, setCustomImageTick] = useState(0);
@@ -913,7 +881,6 @@ export default function MenuScreen() {
             </View>
           <FlashList
             data={menuRows}
-            estimatedItemSize={104}
             extraData={`${customImageTick}:${thumbTick}`}
             keyExtractor={(item) =>
               item.type === 'header' ? `h-${item.category}` : `dish-${item.dish.id}`
@@ -927,35 +894,13 @@ export default function MenuScreen() {
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.accent} />}
             ListHeaderComponent={
-              <View style={{ marginTop: 10, marginBottom: DS.space[16], gap: 10 }}>
-                <PremiumGlowCta
-                  label="Receptury"
-                  onPress={() => setShowRecipes(true)}
-                  icon={<BookOpen size={16} color="#0A0A0A" strokeWidth={2.5} />}
-                />
-                <PremiumGlowCta
-                  label="Zgłoś informację"
-                  onPress={() => openVoiceReport()}
-                  icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
-                />
-                <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
-                  <PremiumStatTile
-                    value={filtered.length}
-                    label="Dań"
-                    icon={<Bell size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                  />
-                  <PremiumStatTile
-                    value={Object.keys(grouped).length}
-                    label="Kategorii"
-                    icon={<Box size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                  />
-                  <PremiumStatTile
-                    value={filtered.reduce((s, d) => s + d.recipe.length, 0)}
-                    label="Składników"
-                    icon={<Trash2 size={14} color={DS.color.greenEnd} strokeWidth={2} />}
-                  />
-                </View>
-              </View>
+              <MenuListHeader
+                filteredCount={filtered.length}
+                categoryCount={Object.keys(grouped).length}
+                ingredientCount={filtered.reduce((s, d) => s + d.recipe.length, 0)}
+                onOpenRecipes={() => setShowRecipes(true)}
+                onOpenVoiceReport={() => openVoiceReport()}
+              />
             }
             ListEmptyComponent={
               <View style={styles.empty}>
@@ -1156,404 +1101,33 @@ export default function MenuScreen() {
       </ScrollView>
       )}
 
-      {/* ── Add / Edit Dish Modal ───────────────────────────────────────────── */}
-      <Modal visible={showAddModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleCloseAddModal}>
-        <SafeAreaView
-          style={[styles.modalSafe, theme.isPremium && { backgroundColor: DS.color.bgPrimary }]}
-          edges={['top']}
-        >
-          <View
-            style={[
-              styles.modalHeader,
-              theme.isPremium && {
-                backgroundColor: DS.color.bgPrimary,
-                borderBottomColor: DS.color.borderSubtle,
-              },
-            ]}
-          >
-            <View>
-              <Text style={[styles.modalTitle, theme.isPremium && { color: DS.color.heading }]}>
-                {isEditing ? 'Edytuj Danie' : 'Nowe Danie'}
-              </Text>
-              <Text style={[styles.modalSubtitle, theme.isPremium && { color: DS.color.muted }]}>
-                {isEditing ? `Zmiana: ${editingDish?.name}` : 'Uzupełnij dane i recepturę'}
-              </Text>
-            </View>
-            <TouchableOpacity onPress={handleCloseAddModal} style={styles.closeBtn}>
-              <X size={20} color={theme.isPremium ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
+      <DishFormModal
+        visible={showAddModal}
+        isEditing={isEditing}
+        editingName={editingDish?.name}
+        form={form}
+        setForm={setForm}
+        ingredients={ingredients}
+        setIngredients={setIngredients}
+        inventoryCount={inventory.length}
+        getSuggestions={getSuggestions}
+        getStockStatus={getStockStatus}
+        onIngredientChange={handleIngredientChange}
+        onIngredientRemove={handleIngredientRemove}
+        onSelectSuggestion={handleSelectSuggestion}
+        onSave={handleSave}
+        saving={saving}
+        onClose={handleCloseAddModal}
+      />
 
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <ScrollView contentContainerStyle={styles.formScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-              <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>Podstawowe dane</Text>
-
-              <View style={styles.fieldWrap}>
-                <Text style={[styles.fieldLabel, theme.isPremium && { color: DS.color.muted }]}>
-                  Nazwa dania <Text style={{ color: Colors.danger }}>*</Text>
-                </Text>
-                <TextInput
-                  style={[
-                    styles.input,
-                    theme.isPremium && {
-                      backgroundColor: DS.color.bgTertiary,
-                      borderColor: DS.color.borderSubtle,
-                      color: DS.color.heading,
-                    },
-                  ]}
-                  placeholder="np. Burger Podwójny"
-                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                  value={form.name}
-                  onChangeText={(v) => setForm((f) => ({ ...f, name: v }))}
-                  returnKeyType="next"
-                />
-              </View>
-
-              <View style={styles.fieldWrap}>
-                <Text style={[styles.fieldLabel, theme.isPremium && { color: DS.color.muted }]}>
-                  Cena sprzedaży (PLN) <Text style={{ color: Colors.danger }}>*</Text>
-                </Text>
-                <TextInput
-                  style={[
-                    styles.input,
-                    theme.isPremium && {
-                      backgroundColor: DS.color.bgTertiary,
-                      borderColor: DS.color.borderSubtle,
-                      color: DS.color.heading,
-                    },
-                  ]}
-                  placeholder="np. 36"
-                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                  value={form.price}
-                  onChangeText={(v) => setForm((f) => ({ ...f, price: v }))}
-                  keyboardType="decimal-pad"
-                  returnKeyType="done"
-                />
-              </View>
-
-              <View style={styles.fieldWrap}>
-                <Text style={[styles.fieldLabel, theme.isPremium && { color: DS.color.muted }]}>
-                  Kategoria <Text style={{ color: Colors.danger }}>*</Text>
-                </Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.formCatBar}>
-                  {FORM_CATEGORIES.map((cat) => {
-                    const active = form.category === cat;
-                    const color = CATEGORY_COLORS[cat] ?? Colors.textSecondary;
-                    return (
-                      <TouchableOpacity
-                        key={cat}
-                        style={[
-                          styles.formCatPill,
-                          theme.isPremium && {
-                            backgroundColor: DS.color.bgTertiary,
-                            borderColor: DS.color.borderSubtle,
-                          },
-                          active && { backgroundColor: color, borderColor: color },
-                        ]}
-                        onPress={() => setForm((f) => ({ ...f, category: cat }))}
-                        activeOpacity={0.7}
-                      >
-                        {active && <Check size={11} color={Colors.white} strokeWidth={3} />}
-                        <View style={[styles.catDotSmall, { backgroundColor: active ? Colors.white : color }]} />
-                        <Text
-                          style={[
-                            styles.formCatText,
-                            theme.isPremium && !active && { color: DS.color.muted },
-                            active && { color: Colors.white, fontWeight: '700' },
-                          ]}
-                        >
-                          {cat}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-                <TextInput
-                  style={[
-                    styles.input,
-                    { marginTop: 8 },
-                    theme.isPremium && {
-                      backgroundColor: DS.color.bgTertiary,
-                      borderColor: DS.color.borderSubtle,
-                      color: DS.color.heading,
-                    },
-                  ]}
-                  placeholder="lub wpisz nową kategorię…"
-                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                  value={form.category}
-                  onChangeText={(v) => setForm((f) => ({ ...f, category: v }))}
-                  returnKeyType="next"
-                  autoCapitalize="sentences"
-                  testID="menu-new-category-input"
-                />
-              </View>
-
-              <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>Receptura — składniki</Text>
-
-              <View
-                style={[
-                  styles.invHintRow,
-                  theme.isPremium && {
-                    backgroundColor: 'rgba(0,255,120,0.08)',
-                    borderColor: DS.color.borderSubtle,
-                  },
-                ]}
-              >
-                <Check size={12} color={theme.isPremium ? DS.color.greenEnd : Colors.success} strokeWidth={3} />
-                <Text style={[styles.invHintText, theme.isPremium && { color: DS.color.muted }]}>
-                  Podpowiedzi pobierane z magazynu ({inventory.length} produktów). Nieznane składniki będziesz mógł dodać na bieżąco.
-                </Text>
-              </View>
-
-              {ingredients.map((ing, idx) => (
-                <IngredientRow
-                  key={ing.key}
-                  draft={ing}
-                  index={idx}
-                  suggestions={getSuggestions(ing.name)}
-                  stock={getStockStatus(ing.name)}
-                  onChange={handleIngredientChange}
-                  onRemove={handleIngredientRemove}
-                  onSelectSuggestion={handleSelectSuggestion}
-                />
-              ))}
-
-              <TouchableOpacity
-                style={[
-                  styles.addIngBtn,
-                  theme.isPremium && {
-                    borderColor: DS.color.greenEnd,
-                    backgroundColor: 'rgba(0,255,120,0.1)',
-                  },
-                ]}
-                onPress={() => setIngredients((prev) => [...prev, newDraftIngredient()])}
-                activeOpacity={0.8}
-              >
-                <Plus size={15} color={theme.isPremium ? DS.color.greenEnd : Colors.accent} strokeWidth={2.5} />
-                <Text style={[styles.addIngBtnText, theme.isPremium && { color: DS.color.greenEnd }]}>Dodaj składnik</Text>
-              </TouchableOpacity>
-
-              {form.name.trim() !== '' && form.price !== '' && (
-                <View
-                  style={[
-                    styles.previewCard,
-                    theme.isPremium && {
-                      backgroundColor: DS.color.surfaceCard,
-                      borderColor: DS.color.borderSubtle,
-                    },
-                  ]}
-                >
-                  <Text style={[styles.previewLabel, theme.isPremium && { color: DS.color.muted }]}>Podgląd</Text>
-                  <View style={styles.previewRow}>
-                    <View style={[styles.catDotSmall, { backgroundColor: CATEGORY_COLORS[form.category] ?? Colors.textSecondary }]} />
-                    <Text style={[styles.previewName, theme.isPremium && { color: DS.color.heading }]}>{form.name.trim()}</Text>
-                    <Text style={[styles.previewPrice, theme.isPremium && { color: DS.color.greenEnd }]}>{form.price} PLN</Text>
-                  </View>
-                  <Text style={[styles.previewMeta, theme.isPremium && { color: DS.color.muted }]}>
-                    {form.category} · {ingredients.filter((i) => i.name.trim()).length} składnik(ów)
-                  </Text>
-                </View>
-              )}
-
-              <TouchableOpacity
-                style={[
-                  styles.saveBtn,
-                  isEditing && styles.saveBtnEdit,
-                  theme.isPremium && { backgroundColor: DS.color.greenEnd, shadowColor: DS.color.greenEnd },
-                  saving && { opacity: 0.6 },
-                ]}
-                onPress={handleSave}
-                disabled={saving}
-                activeOpacity={0.85}
-              >
-                <Check size={18} color={theme.isPremium ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
-                <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
-                  {saving ? 'Zapisywanie...' : isEditing ? 'Aktualizuj Danie' : 'Zapisz Danie'}
-                </Text>
-              </TouchableOpacity>
-
-              <View style={{ height: 32 }} />
-            </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      </Modal>
-
-      {/* ── Quick-add Inventory Sub-Modal ──────────────────────────────────── */}
-      <Modal visible={showInvModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleCloseInvModal}>
-        <SafeAreaView
-          style={[styles.modalSafe, theme.isPremium && { backgroundColor: DS.color.bgPrimary }]}
-          edges={['top']}
-        >
-          <View
-            style={[
-              styles.modalHeader,
-              styles.invModalHeader,
-              theme.isPremium && {
-                backgroundColor: DS.color.bgPrimary,
-                borderBottomColor: DS.color.borderSubtle,
-              },
-            ]}
-          >
-            <View style={styles.invModalTitleWrap}>
-              <View style={[styles.invModalBadge, theme.isPremium && { backgroundColor: DS.color.greenEnd }]}>
-                <FlaskConical size={13} color={theme.isPremium ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
-                <Text style={[styles.invModalBadgeText, theme.isPremium && { color: '#0A0A0A' }]}>Nowy produkt</Text>
-              </View>
-              <Text style={[styles.modalTitle, theme.isPremium && { color: DS.color.heading }]}>Dodaj do Magazynu</Text>
-              <Text style={[styles.modalSubtitle, theme.isPremium && { color: DS.color.muted }]}>
-                Produkt zostanie automatycznie dodany do receptury
-              </Text>
-            </View>
-            <TouchableOpacity onPress={handleCloseInvModal} style={styles.closeBtn}>
-              <X size={20} color={theme.isPremium ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <ScrollView contentContainerStyle={styles.formScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-
-              <View style={styles.fieldWrap}>
-                <Text style={[styles.fieldLabel, theme.isPremium && { color: DS.color.muted }]}>
-                  Nazwa produktu <Text style={{ color: Colors.danger }}>*</Text>
-                </Text>
-                <TextInput
-                  style={[
-                    styles.input,
-                    theme.isPremium && {
-                      backgroundColor: DS.color.bgTertiary,
-                      borderColor: DS.color.borderSubtle,
-                      color: DS.color.heading,
-                    },
-                  ]}
-                  placeholder="np. Kurczak filet"
-                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                  value={invForm.name}
-                  onChangeText={(v) => setInvForm((f) => ({ ...f, name: v }))}
-                  returnKeyType="next"
-                />
-              </View>
-
-              <View style={styles.fieldWrap}>
-                <Text style={styles.fieldLabel}>Kategoria</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.formCatBar}>
-                  {INV_PRESET_CATEGORIES.map((cat) => {
-                    const active = invForm.category === cat;
-                    const color = INV_CATEGORY_COLORS[cat] ?? Colors.textSecondary;
-                    return (
-                      <TouchableOpacity
-                        key={cat}
-                        style={[styles.formCatPill, active && { backgroundColor: color, borderColor: color }]}
-                        onPress={() => setInvForm((f) => ({ ...f, category: cat }))}
-                        activeOpacity={0.7}
-                      >
-                        {active && <Check size={11} color={Colors.white} strokeWidth={3} />}
-                        <Text style={[styles.formCatText, active && { color: Colors.white, fontWeight: '700' }]}>{cat}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-
-              <View style={styles.fieldRow}>
-                <View style={[styles.fieldWrap, { flex: 1 }]}>
-                  <Text style={styles.fieldLabel}>
-                    Aktualna ilość <Text style={{ color: Colors.danger }}>*</Text>
-                  </Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="np. 1500"
-                    placeholderTextColor={Colors.textTertiary}
-                    value={invForm.currentQty}
-                    onChangeText={(v) => setInvForm((f) => ({ ...f, currentQty: v }))}
-                    keyboardType="decimal-pad"
-                    returnKeyType="next"
-                  />
-                </View>
-                <View style={[styles.fieldWrap, { flex: 1 }]}>
-                  <Text style={styles.fieldLabel}>
-                    Stan krytyczny <Text style={{ color: Colors.danger }}>*</Text>
-                  </Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="np. 500"
-                    placeholderTextColor={Colors.textTertiary}
-                    value={invForm.criticalThreshold}
-                    onChangeText={(v) => setInvForm((f) => ({ ...f, criticalThreshold: v }))}
-                    keyboardType="decimal-pad"
-                    returnKeyType="done"
-                  />
-                </View>
-              </View>
-
-              <View style={styles.fieldWrap}>
-                <Text style={styles.fieldLabel}>Jednostka</Text>
-                <View style={styles.unitRow}>
-                  {INV_UNIT_OPTIONS.map((u) => {
-                    const active = invForm.unit === u;
-                    return (
-                      <TouchableOpacity
-                        key={u}
-                        style={[styles.unitBtn, active && styles.unitBtnActive]}
-                        onPress={() => setInvForm((f) => ({ ...f, unit: u }))}
-                        activeOpacity={0.7}
-                      >
-                        <Text style={[styles.unitBtnText, active && styles.unitBtnTextActive]}>{u}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </View>
-
-              <View style={styles.fieldWrap}>
-                <Text style={styles.fieldLabel}>Wielkość porcji w Menu ({invForm.unit})</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="np. 200 (opcjonalne)"
-                  placeholderTextColor={Colors.textTertiary}
-                  value={invForm.portionSize}
-                  onChangeText={(v) => setInvForm((f) => ({ ...f, portionSize: v }))}
-                  keyboardType="decimal-pad"
-                  returnKeyType="done"
-                />
-              </View>
-
-              <View style={styles.switchRow}>
-                <View style={styles.switchInfo}>
-                  <FlaskConical size={16} color={Colors.accent} strokeWidth={2} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.switchLabel}>Półprodukt / Combo</Text>
-                    <Text style={styles.switchHint}>Produkt przygotowywany wewnętrznie z innych składników</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={invForm.isCombo}
-                  onValueChange={(v) => setInvForm((f) => ({ ...f, isCombo: v }))}
-                  trackColor={{ false: Colors.borderLight, true: Colors.accentLight }}
-                  thumbColor={invForm.isCombo ? Colors.accent : Colors.textTertiary}
-                />
-              </View>
-
-              <TouchableOpacity
-                style={[
-                  styles.saveBtn,
-                  theme.isPremium && { backgroundColor: DS.color.greenEnd, shadowColor: DS.color.greenEnd },
-                  invSaving && { opacity: 0.6 },
-                ]}
-                onPress={handleSaveInventoryItem}
-                disabled={invSaving}
-                activeOpacity={0.85}
-              >
-                <Check size={18} color={theme.isPremium ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
-                <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
-                  {invSaving ? 'Zapisywanie...' : 'Zapisz i Dodaj do Receptury'}
-                </Text>
-              </TouchableOpacity>
-
-              <View style={{ height: 32 }} />
-            </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      </Modal>
+      <QuickAddInventoryModal
+        visible={showInvModal}
+        invForm={invForm}
+        setInvForm={setInvForm}
+        invSaving={invSaving}
+        onSave={handleSaveInventoryItem}
+        onClose={handleCloseInvModal}
+      />
 
       {/* ── Menu Scan Modal ─────────────────────────────────────────────────── */}
       <MenuScanModal

@@ -6,7 +6,7 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { parseInvoiceCostNote } from '@/lib/invoiceCostNote';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
@@ -77,8 +77,9 @@ type OrderRow = {
   }> | null;
 };
 
-function isRealKey(ak: string): boolean {
-  return !!ak && ak !== 'default';
+/** Zawsze filtruj po tenancie — bez fallbacku na „wszystkie wiersze”. */
+function requireAccountKeyForReports(): string {
+  return requireTenantAccountKey();
 }
 
 function escapeHtml(s: string): string {
@@ -191,34 +192,30 @@ export async function fetchFinanceForRange(from: string, to: string): Promise<{
   fixed: FixedCost[];
   variable: VariableCostEntry[];
 }> {
-  const ak = getAccountKey();
+  const ak = requireAccountKeyForReports();
   const months = yearMonthsInRange(from, to);
   if (!months.length) return { revenue: [], fixed: [], variable: [] };
 
-  const scoped = <T,>(q: T & { eq: (col: string, val: string) => T }): T =>
-    isRealKey(ak) ? q.eq('account_key', ak) : q;
-
-  let revQ = scoped(supabase.from('revenue_entries').select('*')).in('year_month', months).order('created_at');
-  let fixQ = scoped(supabase.from('fixed_costs').select('*')).in('year_month', months).order('year_month');
-  let varQ = scoped(
-    supabase.from('variable_cost_entries').select('*'),
-  )
-    .in('year_month', months)
-    .order('created_at');
-
-  let [revRes, fixRes, varRes] = await Promise.all([revQ, fixQ, varQ]);
-
-  if (
-    (revRes.error && /account_key/i.test(revRes.error.message ?? '')) ||
-    (fixRes.error && /account_key/i.test(fixRes.error.message ?? '')) ||
-    (varRes.error && /account_key/i.test(varRes.error.message ?? ''))
-  ) {
-    [revRes, fixRes, varRes] = await Promise.all([
-      supabase.from('revenue_entries').select('*').in('year_month', months).order('created_at'),
-      supabase.from('fixed_costs').select('*').in('year_month', months).order('year_month'),
-      supabase.from('variable_cost_entries').select('*').in('year_month', months).order('created_at'),
-    ]);
-  }
+  const [revRes, fixRes, varRes] = await Promise.all([
+    supabase
+      .from('revenue_entries')
+      .select('*')
+      .eq('account_key', ak)
+      .in('year_month', months)
+      .order('created_at'),
+    supabase
+      .from('fixed_costs')
+      .select('*')
+      .eq('account_key', ak)
+      .in('year_month', months)
+      .order('year_month'),
+    supabase
+      .from('variable_cost_entries')
+      .select('*')
+      .eq('account_key', ak)
+      .in('year_month', months)
+      .order('created_at'),
+  ]);
 
   if (revRes.error) throw revRes.error;
   if (fixRes.error) throw fixRes.error;
@@ -237,31 +234,18 @@ export async function fetchFinanceForRange(from: string, to: string): Promise<{
 }
 
 export async function fetchOrdersForRange(from: string, to: string): Promise<OrderRow[]> {
-  const ak = getAccountKey();
-  let q = supabase
+  const ak = requireAccountKeyForReports();
+  const { data, error } = await supabase
     .from('supplier_orders')
     .select(
       'id, status, notes, created_at, suppliers(name), supplier_order_items(raw_product_name, quantity_ordered, unit, price_net)',
     )
+    .eq('account_key', ak)
     .gte('created_at', dayStartIso(from))
     .lte('created_at', dayEndIso(to))
     .neq('status', 'draft')
     .order('created_at', { ascending: true });
 
-  if (isRealKey(ak)) q = q.eq('account_key', ak);
-
-  let { data, error } = await q;
-  if (error && /account_key/i.test(error.message ?? '')) {
-    ({ data, error } = await supabase
-      .from('supplier_orders')
-      .select(
-        'id, status, notes, created_at, suppliers(name), supplier_order_items(raw_product_name, quantity_ordered, unit, price_net)',
-      )
-      .gte('created_at', dayStartIso(from))
-      .lte('created_at', dayEndIso(to))
-      .neq('status', 'draft')
-      .order('created_at', { ascending: true }));
-  }
   if (error) throw error;
   return (data ?? []) as OrderRow[];
 }

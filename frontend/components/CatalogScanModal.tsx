@@ -2,12 +2,9 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   Modal,
   TouchableOpacity,
   ScrollView,
-  ActivityIndicator,
-  Platform,
   TextInput,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,20 +12,12 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import {
   X,
-  FileText,
-  Camera,
-  Sparkles,
-  Check,
   CircleAlert,
   ScanLine,
   ReceiptText,
-  Tags,
-  Eye,
-  EyeOff,
-  TrendingUp,
+  Check,
   ChevronDown,
 } from 'lucide-react-native';
-import { DS } from '@/constants/premiumTheme';
 import { formatPln, formatPlnNumber, parsePln } from '@/lib/format';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useAds } from '@/contexts/AdsProvider';
@@ -36,87 +25,37 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
-
 import {
   InvoiceExpiryReviewForm,
   buildExpiryDrafts,
   type ExpiryProductDraft,
   type CommitProduct,
 } from '@/components/InvoiceExpiryReviewForm';
-import { DOC_WAREHOUSE_CATEGORIES } from '@/lib/warehouseCategories';
+import { CatalogScanChooseStage } from '@/components/catalogScan/CatalogScanChooseStage';
+import { CatalogScanProcessingStage } from '@/components/catalogScan/CatalogScanProcessingStage';
+import { CatalogScanResultStage } from '@/components/catalogScan/CatalogScanResultStage';
+import {
+  DOC_CATEGORIES,
+  type CatalogScanStage,
+  type DocResult,
+  type InvoiceProduct,
+  type SupplierScanMeta,
+} from '@/components/catalogScan/catalogScanTypes';
+import {
+  CATALOG_SCAN_BACKEND_URL as BACKEND_URL,
+  PROCESS_TIMEOUT_MS,
+  PROCESSING_MESSAGES,
+  SAVING_MESSAGES,
+  normalizeSupplierMeta,
+  supplierMetaHasContent,
+  friendlyCatalogScanApiError as friendlyApiError,
+  parseCatalogScanErrorDetail as parseErrorDetail,
+} from '@/components/catalogScan/catalogScanHelpers';
+import { CATALOG_SCAN_C as C } from '@/components/catalogScan/catalogScanColors';
+import { catalogScanStyles as styles } from '@/components/catalogScan/catalogScanStyles';
 
-const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
-
-/** Client abort — Railway/proxy often dies ~100s; fail with clear message sooner. */
-const PROCESS_TIMEOUT_MS = 720_000; // do ~12 min — katalogi 30–40 stron (batch Vision)
-
-const C = {
-  bg: '#0A120E',
-  card: DS.color.surfaceCard,
-  elevated: DS.color.surfaceElevated,
-  border: DS.color.borderSubtle,
-  text: DS.color.heading,
-  body: DS.color.body,
-  muted: DS.color.muted,
-  green: DS.color.greenEnd,
-  greenSoft: 'rgba(0,255,120,0.12)',
-  danger: DS.color.danger,
-  dangerSoft: DS.color.dangerSoft,
-  warning: DS.color.warning,
-  warningSoft: DS.color.warningSoft,
-  warningBorder: DS.color.warningBorder,
-  blackOnGreen: '#0A0A0A',
-  inputBg: DS.color.bgTertiary,
-};
-
-export const DOC_CATEGORIES = DOC_WAREHOUSE_CATEGORIES;
-
-type Stage = 'choose' | 'processing' | 'invoice_preview' | 'expiry_review' | 'result';
-
-interface InvoiceProduct {
-  product_name: string;
-  quantity: number;
-  price_netto: number;
-  unit: string;
-  category: string;
-  matched_inventory_name?: string | null;
-  will_update_existing?: boolean;
-}
-
-/** Pola panelu Dostawcy wyodrębnione ze skanu (podgląd + zapis). */
-export interface SupplierScanMeta {
-  nip?: string | null;
-  phone?: string | null;
-  email?: string | null;
-  contact_person?: string | null;
-  address?: string | null;
-  bank_account?: string | null;
-  payment_terms?: string | null;
-  shipping_cost?: number | null;
-  min_order_value?: number | null;
-  free_shipping_threshold?: number | null;
-  lead_time_days?: number | null;
-}
-
-interface DocResult {
-  document_type: 'FAKTURA_ZAKUPOWA' | 'OFERTA_HANDLOWA' | 'MENU_RESTAURACYJNE';
-  supplier_name?: string | null;
-  supplier?: SupplierScanMeta | null;
-  supplier_fields_updated?: string[];
-  items_updated?: number;
-  items_created?: number;
-  products_on_invoice?: number;
-  updated?: Array<{ name?: string; merged_from?: string | null; added?: number; unit?: string }>;
-  created?: Array<{ name?: string; quantity?: number; unit?: string; category?: string }>;
-  total_amount?: number;
-  products_total?: number;
-  visible_count?: number;
-  hidden_count?: number;
-  warnings?: string[];
-  pages_total?: number | null;
-  pages_processed?: number | null;
-  pages_truncated?: boolean;
-}
+export { DOC_CATEGORIES } from '@/components/catalogScan/catalogScanTypes';
+export type { SupplierScanMeta } from '@/components/catalogScan/catalogScanTypes';
 
 interface Props {
   supplierId?: string | null;
@@ -132,86 +71,6 @@ interface Props {
   scanContext?: 'warehouse' | 'supplier';
   /** Gdy AI rozpozna kartę dań — przekieruj do skanera menu. */
   onMenuDetected?: () => void;
-}
-
-const PROCESSING_MESSAGES = [
-  'Agent AI analizuje wgrany dokument…',
-  'Czytam kolejne strony PDF (katalogi mogą mieć ich wiele)…',
-  'Rozpoznaję typ dokumentu i pozycje…',
-  'Segreguję produkty do właściwych zakładek…',
-  'Szukam danych dostawcy (NIP, telefon, dostawa)…',
-  'Duży plik = więcej tokenów OpenAI (rozliczenie 1:1 z usage)…',
-  'Po zakończeniu zapiszę dane i Cię powiadomię.',
-];
-
-const SAVING_MESSAGES = [
-  'Zapisywanie produktów…',
-  'Aktualizuję profil dostawcy…',
-  'Aktualizuję stany magazynowe…',
-  'Odświeżam listy w Magazynie…',
-];
-
-function normalizeSupplierMeta(raw: any): SupplierScanMeta | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const out: SupplierScanMeta = {};
-  const strKeys = ['nip', 'phone', 'email', 'contact_person', 'address', 'bank_account', 'payment_terms'] as const;
-  for (const k of strKeys) {
-    const v = raw[k];
-    if (v != null && String(v).trim()) out[k] = String(v).trim();
-  }
-  const numKeys = [
-    'shipping_cost',
-    'min_order_value',
-    'free_shipping_threshold',
-    'lead_time_days',
-  ] as const;
-  for (const k of numKeys) {
-    const v = raw[k];
-    if (v == null || v === '') continue;
-    const n = Number(v);
-    if (Number.isFinite(n)) out[k] = n;
-  }
-  return Object.keys(out).length ? out : null;
-}
-
-function supplierMetaHasContent(m: SupplierScanMeta | null | undefined): boolean {
-  return !!m && Object.keys(m).length > 0;
-}
-
-function friendlyApiError(status: number, detail: string): string {
-  const raw = `${detail || ''}`.toLowerCase();
-  if (
-    status === 502 ||
-    status === 503 ||
-    status === 504 ||
-    raw.includes('application failed to respond') ||
-    raw.includes('failed to respond') ||
-    raw.includes('timeout') ||
-    raw.includes('timed out') ||
-    raw.includes('aborted')
-  ) {
-    return (
-      'Serwer AI nie zdążył odpowiedzieć (timeout). '
-      + 'Przy bardzo dużym PDF spróbuj ponownie albo podziel katalog na części '
-      + '(limit ok. 40 stron na jeden skan).'
-    );
-  }
-  if (!BACKEND_URL) return 'Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).';
-  if (typeof detail === 'string' && detail.trim() && !raw.startsWith('<!')) {
-    return detail.trim();
-  }
-  return `Błąd serwera (${status || '?'}). Spróbuj ponownie.`;
-}
-
-async function parseErrorDetail(res: Response): Promise<string> {
-  const txt = await res.text();
-  try {
-    const j = JSON.parse(txt);
-    const d = j?.detail ?? j?.message ?? j?.error ?? txt;
-    return typeof d === 'string' ? d : JSON.stringify(d);
-  } catch {
-    return txt || `HTTP ${res.status}`;
-  }
 }
 
 export function CatalogScanModal({
@@ -230,7 +89,7 @@ export function CatalogScanModal({
   const { tier, credits } = useSubscription();
   const { alert: premiumAlert } = usePremiumAlert();
   const [showCreditsGate, setShowCreditsGate] = useState(false);
-  const [stage, setStage] = useState<Stage>('choose');
+  const [stage, setStage] = useState<CatalogScanStage>('choose');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DocResult | null>(null);
   const [invSupplierId, setInvSupplierId] = useState<string | null>(null);
@@ -639,100 +498,20 @@ export function CatalogScanModal({
         )}
 
         {stage === 'choose' && (
-          <ScrollView contentContainerStyle={styles.chooseWrap}>
-            <View style={[styles.hintCard, { backgroundColor: C.warningSoft, borderColor: C.warningBorder }]}>
-              <Sparkles size={16} color={C.warning} strokeWidth={2} />
-              <Text style={[styles.hintText, { color: C.body }]}>
-                {scanContext === 'warehouse' ? (
-                  <>
-                    <Text style={[styles.b, { color: C.text }]}>Wgraj fakturę zakupową lub ofertę handlową.</Text>
-                    {' '}System rozpoznaje typ dokumentu: faktura trafi do magazynu/kosztów, oferta — do katalogu dostawcy.
-                    Po analizie AI zapisze dane we właściwych zakładkach i Cię powiadomi.
-                  </>
-                ) : (
-                  <>
-                    <Text style={[styles.b, { color: C.text }]}>Wgraj ofertę dostawcy, lub fakturę</Text>
-                    {' '}na produkty, które od niego kupiłeś. System automatycznie stworzy profil
-                    tego dostawcy, uzupełni jego dane, i doda produkty z dokumentu do jego katalogu.
-                    Gdy będziesz chciał złożyć zamówienie produktowe, skorzysta z podanych danych,
-                    by przygotować dla Ciebie najkorzystniejszą ofertę.
-                  </>
-                )}
-              </Text>
-            </View>
-            <TouchableOpacity
-              style={[styles.sourceBtn, { backgroundColor: C.card, borderColor: C.border }]}
-              onPress={handleCamera}
-              testID="doc-scan-camera"
-              activeOpacity={0.85}
-            >
-              <View style={[styles.sourceIcon, { backgroundColor: C.greenSoft }]}>
-                <Camera size={22} color={C.green} strokeWidth={2} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.sourceTitle, { color: C.text }]}>Zrób zdjęcie</Text>
-                <Text style={[styles.sourceSub, { color: C.muted }]}>
-                  {scanContext === 'warehouse'
-                    ? 'Sfotografuj fakturę lub ofertę'
-                    : 'Sfotografuj fakturę lub ofertę'}
-                </Text>
-              </View>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.sourceBtn, { backgroundColor: C.card, borderColor: C.border }]}
-              onPress={handlePickFile}
-              testID="doc-scan-file"
-              activeOpacity={0.85}
-            >
-              <View style={[styles.sourceIcon, { backgroundColor: C.greenSoft }]}>
-                <FileText size={22} color={C.green} strokeWidth={2} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.sourceTitle, { color: C.text }]}>Wgraj plik</Text>
-                <Text style={[styles.sourceSub, { color: C.muted }]}>
-                  PDF (także wielostronicowy, do ~40 stron), JPG lub PNG
-                </Text>
-              </View>
-            </TouchableOpacity>
-          </ScrollView>
+          <CatalogScanChooseStage
+            scanContext={scanContext}
+            onCamera={() => void handleCamera()}
+            onPickFile={() => void handlePickFile()}
+          />
         )}
 
         {stage === 'processing' && (
-          <View style={styles.center} testID="doc-scan-processing">
-            <View style={[styles.processingOrb, { backgroundColor: C.greenSoft, borderColor: C.green }]}>
-              <ActivityIndicator size="large" color={C.green} />
-            </View>
-            <Text style={[styles.analyzingTitle, { color: C.text }]}>
-              {isSavingProducts ? 'Zapisywanie produktów…' : 'Skan dokumentu AI'}
-            </Text>
-            <Text style={[styles.analyzingSub, { color: C.body }]}>
-              {(isSavingProducts ? SAVING_MESSAGES : PROCESSING_MESSAGES)[
-                processingMsgIdx % (isSavingProducts ? SAVING_MESSAGES.length : PROCESSING_MESSAGES.length)
-              ]}
-            </Text>
-            <View style={[styles.processingCard, { backgroundColor: C.card, borderColor: C.border }]}>
-              <Text style={[styles.processingCardText, { color: C.muted }]}>
-                {isSavingProducts
-                  ? 'Zapisuję produkty w magazynie i koszt zmienny. Listy odświeżą się automatycznie.'
-                  : 'Wielostronicowe katalogi PDF są czytane partiami — kredyty = realny koszt tokenów OpenAI. Możesz zostawić ekran otwarty albo wrócić — po fakturze otworzymy zatwierdzenie automatycznie.'}
-              </Text>
-              <Text style={[styles.elapsed, { color: C.green }]}>
-                {elapsedSec < 60
-                  ? `${elapsedSec} s`
-                  : `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')}`}
-              </Text>
-            </View>
-            {!isSavingProducts ? (
-              <TouchableOpacity
-                style={[styles.bgBtn, { borderColor: C.border }]}
-                onPress={handleClose}
-                activeOpacity={0.85}
-                testID="doc-scan-background"
-              >
-                <Text style={[styles.bgBtnText, { color: C.body }]}>Kontynuuj w tle</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
+          <CatalogScanProcessingStage
+            isSavingProducts={isSavingProducts}
+            processingMsgIdx={processingMsgIdx}
+            elapsedSec={elapsedSec}
+            onBackground={handleClose}
+          />
         )}
 
         {stage === 'invoice_preview' && (
@@ -944,132 +723,12 @@ export function CatalogScanModal({
         )}
 
         {stage === 'result' && result && (
-          <ScrollView contentContainerStyle={[styles.resultWrap, { paddingBottom: footerPad + 24 }]} testID="doc-result">
-            <View style={[styles.successCircle, { backgroundColor: C.greenSoft }]}>
-              <Check size={38} color={C.green} strokeWidth={2.5} />
-            </View>
-            {isInvoice ? (
-              <>
-                <View style={[styles.typeBadge, { backgroundColor: C.greenSoft }]}>
-                  <ReceiptText size={13} color={C.green} strokeWidth={2} />
-                  <Text style={[styles.typeBadgeText, { color: C.green }]}>Faktura zaksięgowana</Text>
-                </View>
-                <Text style={[styles.resultTitle, { color: C.text }]}>Faktura zaksięgowana</Text>
-                <Text style={[styles.resultSub, { color: C.body }]}>
-                  {result.supplier_name || 'Dostawca'} · zaktualizowano magazyn, koszt zmienny
-                  {result.supplier_fields_updated?.length
-                    ? ` i profil dostawcy (${result.supplier_fields_updated.length} pól)`
-                    : supplierMetaHasContent(result.supplier)
-                      ? ' i dane dostawcy'
-                      : ''}
-                  .
-                </Text>
-                <View style={styles.statsRow}>
-                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
-                    <Text style={[styles.statNum, { color: C.text }]}>
-                      {(result.items_updated ?? 0) + (result.items_created ?? 0)}
-                    </Text>
-                    <Text style={[styles.statLabel, { color: C.muted }]}>pozycji do magazynu</Text>
-                  </View>
-                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <TrendingUp size={16} color={C.danger} strokeWidth={2.5} />
-                      <Text style={[styles.statNum, { color: C.danger }]}>
-                        {formatPlnNumber(result.total_amount ?? 0)}
-                      </Text>
-                    </View>
-                    <Text style={[styles.statLabel, { color: C.muted }]}>PLN kosztu</Text>
-                  </View>
-                </View>
-                <Text style={[styles.resultNote, { color: C.body }]}>
-                  {result.items_created ?? 0} nowych · {result.items_updated ?? 0} zwiększonych
-                  {result.products_on_invoice != null
-                    ? ` · z faktury: ${result.products_on_invoice}`
-                    : ''}
-                </Text>
-                {(result.created?.length ?? 0) > 0 && (
-                  <Text style={[styles.resultNote, { color: C.muted, marginTop: 6 }]}>
-                    Nowe: {(result.created ?? []).map((c) => c.name).filter(Boolean).join(', ')}
-                  </Text>
-                )}
-                {(result.updated ?? []).some((u) => u.merged_from) && (
-                  <Text style={[styles.resultNote, { color: C.muted, marginTop: 4 }]}>
-                    Scalono:{' '}
-                    {(result.updated ?? [])
-                      .filter((u) => u.merged_from)
-                      .map((u) => `„${u.merged_from}” → „${u.name}”`)
-                      .join('; ')}
-                  </Text>
-                )}
-                {(result.warnings?.length ?? 0) > 0 && (
-                  <Text style={[styles.resultNote, { color: C.danger, marginTop: 6 }]}>
-                    {result.warnings!.slice(0, 4).join('\n')}
-                  </Text>
-                )}
-              </>
-            ) : (
-              <>
-                <View style={[styles.typeBadge, { backgroundColor: C.greenSoft }]}>
-                  <Tags size={13} color={C.green} strokeWidth={2} />
-                  <Text style={[styles.typeBadgeText, { color: C.green }]}>Oferta handlowa</Text>
-                </View>
-                <Text style={[styles.resultTitle, { color: C.text }]}>Oferta przeanalizowana</Text>
-                <Text style={[styles.resultSub, { color: C.body }]}>
-                  {result.supplier_name || 'Dostawca'} · produkty w katalogu
-                  {result.supplier_fields_updated?.length
-                    ? ` · uzupełniono profil (${result.supplier_fields_updated.length} pól)`
-                    : ''}
-                  .
-                </Text>
-                <View style={styles.statsRow}>
-                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <Eye size={15} color={C.green} strokeWidth={2.5} />
-                      <Text style={[styles.statNum, { color: C.green }]}>{result.visible_count ?? 0}</Text>
-                    </View>
-                    <Text style={[styles.statLabel, { color: C.muted }]}>występujące w menu</Text>
-                  </View>
-                  <View style={[styles.statCard, { backgroundColor: C.card, borderColor: C.border }]}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <EyeOff size={15} color={C.muted} strokeWidth={2.5} />
-                      <Text style={[styles.statNum, { color: C.muted }]}>{result.hidden_count ?? 0}</Text>
-                    </View>
-                    <Text style={[styles.statLabel, { color: C.muted }]}>dodatkowe (też w katalogu)</Text>
-                  </View>
-                </View>
-                <Text style={[styles.resultNote, { color: C.body }]}>
-                  Znaleziono {result.products_total ?? 0} produktów — wszystkie w katalogu, posegregowane.
-                </Text>
-              </>
-            )}
-            {(() => {
-              const visibleWarnings = (result.warnings ?? []).filter((w) => {
-                const t = String(w || '').toLowerCase();
-                if (/klasyfikacja ai|przekroczyła limit czasu|przekroczyla limit czasu|niedostępna — użyto|niedostepna - uzyto|użyto dopasowania|uzyto dopasowania|użyto ścisłego|uzyto scislego/.test(t)) {
-                  return false;
-                }
-                if (/było usunięte|bylo usuniete|przywrócono w magazynie|przywrocono w magazynie/.test(t)) {
-                  return false;
-                }
-                return true;
-              });
-              if (!visibleWarnings.length) return null;
-              return (
-                <View style={[styles.warnBox, { backgroundColor: C.warningSoft, borderColor: C.warningBorder }]}>
-                  {visibleWarnings.map((w, i) => (
-                    <Text key={i} style={[styles.warnText, { color: C.warning }]}>• {w}</Text>
-                  ))}
-                </View>
-              );
-            })()}
-            <TouchableOpacity
-              style={[styles.primaryBtn, { backgroundColor: C.green }]}
-              onPress={() => void handleDoneClose()}
-              testID="doc-result-done"
-            >
-              <Text style={[styles.primaryBtnText, { color: C.blackOnGreen }]}>Zamknij i powróć do pulpitu</Text>
-            </TouchableOpacity>
-          </ScrollView>
+          <CatalogScanResultStage
+            result={result}
+            isInvoice={isInvoice}
+            footerPad={footerPad}
+            onDone={() => void handleDoneClose()}
+          />
         )}
 
         <Modal visible={pickerIndex !== null} transparent animationType="fade" onRequestClose={() => setPickerIndex(null)}>
@@ -1105,252 +764,3 @@ export function CatalogScanModal({
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
-  b: { fontWeight: '700' },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-  },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  headerIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  title: { fontSize: 16, fontWeight: '700' },
-  subtitle: { fontSize: 12, marginTop: 1 },
-  errorBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    borderWidth: 1,
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderRadius: 10,
-    padding: 12,
-  },
-  errorText: { flex: 1, fontSize: 12, lineHeight: 17 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 28 },
-  processingOrb: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-    marginBottom: 4,
-  },
-  processingCard: {
-    alignSelf: 'stretch',
-    borderRadius: 14,
-    borderWidth: 1,
-    padding: 16,
-    gap: 10,
-    marginTop: 8,
-  },
-  processingCardText: { fontSize: 13, lineHeight: 19, textAlign: 'center' },
-  elapsed: { fontSize: 13, fontWeight: '700', textAlign: 'center' },
-  bgBtn: {
-    marginTop: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    borderWidth: 1,
-  },
-  bgBtnText: { fontSize: 14, fontWeight: '600' },
-  chooseWrap: { padding: 16, gap: 12 },
-  hintCard: {
-    flexDirection: 'row',
-    gap: 10,
-    alignItems: 'flex-start',
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-  },
-  hintText: { flex: 1, fontSize: 13, lineHeight: 19 },
-  sourceBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1.5,
-  },
-  sourceIcon: { width: 48, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  sourceTitle: { fontSize: 15, fontWeight: '700' },
-  sourceSub: { fontSize: 12, marginTop: 2 },
-  analyzingTitle: { fontSize: 17, fontWeight: '700', marginTop: 6, textAlign: 'center' },
-  analyzingSub: { fontSize: 14, textAlign: 'center', lineHeight: 20 },
-  invHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 6,
-  },
-  invTotal: { fontSize: 15, fontWeight: '800' },
-  invHint: { fontSize: 12, paddingHorizontal: 16, paddingBottom: 8, lineHeight: 16 },
-  previewContent: { paddingHorizontal: 12, paddingTop: 4 },
-  supplierMetaCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    padding: 14,
-    marginBottom: 12,
-    gap: 8,
-  },
-  supplierMetaTitle: { fontSize: 14, fontWeight: '800' },
-  supplierMetaSub: { fontSize: 11, lineHeight: 15 },
-  supplierMetaGrid: { gap: 6, marginTop: 2 },
-  supplierMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-  },
-  supplierMetaLabel: {
-    width: 108,
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.3,
-    paddingTop: 1,
-  },
-  supplierMetaValue: { flex: 1, fontSize: 13, fontWeight: '600', lineHeight: 18 },
-  bankInput: {
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-  },
-  rowName: { fontSize: 14, fontWeight: '600' },
-  editFieldsRow: { flexDirection: 'row', gap: 8 },
-  editField: { flex: 1, gap: 3 },
-  editLabel: { fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
-  editInputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 8,
-    borderWidth: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-  },
-  editInput: { flex: 1, fontSize: 13, fontWeight: '600', paddingVertical: 0 },
-  editSuffix: { fontSize: 11, fontWeight: '600', marginLeft: 4 },
-  catChip: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderWidth: 1,
-  },
-  catChipText: { fontSize: 12, fontWeight: '700' },
-  footer: { padding: 16, borderTopWidth: 1 },
-  destLabel: { fontSize: 12, fontWeight: '700', marginBottom: 8 },
-  destRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  destChip: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 10,
-    borderWidth: 1,
-    alignItems: 'center',
-  },
-  destChipText: { fontSize: 11, fontWeight: '700' },
-  confirmBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    borderRadius: 12,
-    paddingVertical: 15,
-  },
-  confirmBtnText: { fontSize: 15, fontWeight: '700' },
-  resultWrap: { padding: 20, alignItems: 'center', gap: 8 },
-  successCircle: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 4,
-  },
-  typeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
-  },
-  typeBadgeText: { fontSize: 12, fontWeight: '700' },
-  resultTitle: { fontSize: 19, fontWeight: '800', marginTop: 4 },
-  resultSub: { fontSize: 13, textAlign: 'center' },
-  statsRow: { flexDirection: 'row', gap: 12, marginTop: 14, alignSelf: 'stretch' },
-  statCard: {
-    flex: 1,
-    borderRadius: 14,
-    borderWidth: 1,
-    padding: 14,
-    alignItems: 'center',
-    gap: 4,
-  },
-  statNum: { fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
-  statLabel: { fontSize: 11, textAlign: 'center', lineHeight: 15 },
-  resultNote: { fontSize: 12, marginTop: 10 },
-  warnBox: {
-    alignSelf: 'stretch',
-    borderRadius: 10,
-    padding: 12,
-    marginTop: 12,
-    borderWidth: 1,
-    gap: 4,
-  },
-  warnText: { fontSize: 11, lineHeight: 16 },
-  primaryBtn: {
-    alignSelf: 'stretch',
-    borderRadius: 12,
-    paddingVertical: 15,
-    alignItems: 'center',
-    marginTop: 20,
-    marginBottom: Platform.OS === 'ios' ? 20 : 8,
-  },
-  primaryBtnText: { fontSize: 15, fontWeight: '700' },
-  pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
-  pickerSheet: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 16,
-    paddingBottom: Platform.OS === 'ios' ? 32 : 20,
-  },
-  pickerTitle: { fontSize: 15, fontWeight: '800', marginBottom: 10 },
-  pickerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 13,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-  },
-  pickerRowText: { fontSize: 14, fontWeight: '500' },
-});

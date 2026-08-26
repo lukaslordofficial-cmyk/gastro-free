@@ -2,7 +2,6 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   TouchableOpacity,
   TextInput,
   Modal,
@@ -11,26 +10,17 @@ import {
   Switch,
 } from 'react-native';
 import {
-  ChevronDown,
-  ChevronRight,
-  Link,
-  Link2Off,
   Barcode,
   Check,
   Save,
   X,
-  Plus,
-  Trash2,
 } from 'lucide-react-native';
-import { secureId } from '@/lib/secureId';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { emitRecipeIngredientsChanged } from '@/lib/recipeSync';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { bestProductMatch, ingredientDedupeKey } from '@/lib/fuzzyProductMatch';
+import { bestProductMatch } from '@/lib/fuzzyProductMatch';
 import { normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
-import { claimLegacyStorageKey, tenantStorageKey } from '@/lib/tenantStorage';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
   deleteRecipeIngredientIds,
@@ -42,131 +32,30 @@ import {
   setMenuItemAvailable,
   updateRecipeIngredientRow,
 } from '@/services/menuRecipeService';
+import {
+  loadSoftMap,
+  saveSoftMap,
+  normName,
+  toEditable,
+  newEditable,
+} from '@/components/menu/menuRecipeHelpers';
+import type {
+  MenuItemForMapping,
+  RecipeIngredientRow,
+  InventoryItemForRecipe,
+  EditableIngredient,
+} from '@/components/menu/menuRecipeTypes';
+import { MenuRecipeRowHeader } from '@/components/menu/MenuRecipeRowHeader';
+import { MenuRecipeIngredientEditor } from '@/components/menu/MenuRecipeIngredientEditor';
+import { menuRecipeRowStyles as styles } from '@/components/menu/menuRecipeRowStyles';
 
-const RECIPE_WH_MAP_LEGACY = '@gm/recipe_wh_map';
-const RECIPE_WH_MAP_PREFIX = '@gm/recipe_wh_map_v2:';
-const UNIT_OPTIONS = ['g', 'ml', 'szt', 'kg', 'L'] as const;
-const PIECE_WEIGHT_HINT =
-  'Pole nieobowiązkowe — wpisz, jeśli ten produkt kupujesz u dostawcy na wagę. Dzięki temu możliwe będzie monitorowanie stanu tego produktu na magazynie.';
-
-function recipeWhMapKey(): string {
-  return tenantStorageKey(RECIPE_WH_MAP_PREFIX);
-}
-
-async function loadSoftMap(): Promise<Record<string, string>> {
-  try {
-    const key = recipeWhMapKey();
-    let raw = await AsyncStorage.getItem(key);
-    if (raw == null) {
-      raw = await claimLegacyStorageKey(
-        (k) => AsyncStorage.getItem(k),
-        (k, v) => AsyncStorage.setItem(k, v),
-        (k) => AsyncStorage.removeItem(k),
-        RECIPE_WH_MAP_LEGACY,
-        key,
-      );
-    }
-    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
-  } catch {
-    return {};
-  }
-}
-
-async function saveSoftMap(map: Record<string, string>) {
-  await AsyncStorage.setItem(recipeWhMapKey(), JSON.stringify(map));
-}
-
-function normName(s: string) {
-  return ingredientDedupeKey(s) || (s || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface MenuItemForMapping {
-  id: string;
-  name: string;
-  category: string | null;
-  price_pln: number | null;
-  pos_id: string | null;
-  is_available?: boolean;
-  /** Składniki z receptury (zagnieżdżone z menu_items) — podgląd gramatur */
-  recipeIngredients?: RecipeIngredientRow[];
-}
-
-export interface RecipeIngredientRow {
-  id: string;
-  ingredient_name: string;
-  quantity: number;
-  unit: string;
-  piece_weight_g?: number | null;
-  warehouse_product_id: string | null;
-  warehouse_product_name?: string | null;
-  in_stock?: boolean;
-  stock_qty?: number;
-}
-
-export interface InventoryItemForRecipe {
-  id: string;
-  name: string;
-  unit: string;
-  quantity?: number;
-  min_quantity?: number;
-  category_name?: string | null;
-}
-
-type EditableIngredient = {
-  key: string;
-  id: string | null;
-  name: string;
-  quantity: string;
-  unit: string;
-  pieceWeightG: string;
-  warehouse_product_id: string | null;
-  warehouse_product_name?: string | null;
-  in_stock?: boolean;
-  stock_qty?: number;
-};
+export type { MenuItemForMapping, RecipeIngredientRow, InventoryItemForRecipe } from '@/components/menu/menuRecipeTypes';
 
 interface Props {
   menuItem: MenuItemForMapping;
   inventoryItems: InventoryItemForRecipe[];
   onChanged: () => void;
 }
-
-function toEditable(rows: RecipeIngredientRow[]): EditableIngredient[] {
-  return rows.map((r) => ({
-    key: r.id,
-    id: r.id,
-    name: r.ingredient_name,
-    quantity: String(r.quantity ?? 0),
-    unit: r.unit || 'g',
-    pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
-    warehouse_product_id: r.warehouse_product_id,
-    warehouse_product_name: r.warehouse_product_name,
-    in_stock: r.in_stock,
-    stock_qty: r.stock_qty,
-  }));
-}
-
-function newEditable(): EditableIngredient {
-  return {
-    key: secureId('new'),
-    id: null,
-    name: '',
-    quantity: '',
-    unit: 'g',
-    pieceWeightG: '',
-    warehouse_product_id: null,
-  };
-}
-
-// ─── Component ───────────────────────────────────────────────────────────────
 
 export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: Props) {
   const theme = useAppTheme();
@@ -548,36 +437,18 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
 
   return (
     <View style={[styles.card, { backgroundColor: cardBg, borderColor: cardBorder }, prem && DS.shadow.card]}>
-      <TouchableOpacity style={styles.header} onPress={handleToggle} activeOpacity={0.7}>
-        <View style={styles.headerLeft}>
-          {expanded ? (
-            <ChevronDown size={18} color={textSecondary} />
-          ) : (
-            <ChevronRight size={18} color={textSecondary} />
-          )}
-          <View style={styles.headerText}>
-            <Text style={[styles.itemName, { color: textPrimary }]}>{menuItem.name}</Text>
-            {menuItem.category ? (
-              <Text style={[styles.itemCategory, { color: textSecondary }]}>{menuItem.category}</Text>
-            ) : null}
-          </View>
-        </View>
-        <View style={styles.headerRight}>
-          {menuItem.pos_id ? (
-            <View style={[styles.posLinkedBadge, prem && styles.posLinkedBadgePrem]}>
-              <Barcode size={11} color={prem ? DS.color.greenEnd : '#16A34A'} />
-              <Text style={[styles.posLinkedText, prem && { color: DS.color.greenEnd }]}>POS</Text>
-            </View>
-          ) : null}
-          {totalCount > 0 && (
-            <View style={[styles.badge, badgeStyle]}>
-              <Text style={[styles.badgeText, prem && { color: DS.color.heading }]}>
-                {inStockCount}/{totalCount} na stanie
-              </Text>
-            </View>
-          )}
-        </View>
-      </TouchableOpacity>
+      <MenuRecipeRowHeader
+        menuItem={menuItem}
+        expanded={expanded}
+        prem={prem}
+        textPrimary={textPrimary}
+        textSecondary={textSecondary}
+        inStockCount={inStockCount}
+        totalCount={totalCount}
+        badgeStyle={badgeStyle}
+        onToggle={handleToggle}
+      />
+
 
       {expanded && (
         <View style={[styles.body, { borderTopColor: divider }]}>
@@ -654,269 +525,31 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
             />
           </View>
 
-          <View style={styles.recipeHeaderRow}>
-            <Text style={[styles.ingredientsTitle, { color: textSecondary, marginBottom: 0 }]}>
-              Składniki receptury (1:1 z Menu)
-            </Text>
-            {recipeDirty ? (
-              <TouchableOpacity
-                style={[styles.saveRecipeBtn, { backgroundColor: accent }]}
-                onPress={() => void handleSaveRecipe()}
-                disabled={recipeSaving}
-                activeOpacity={0.75}
-              >
-                {recipeSaving ? (
-                  <ActivityIndicator size="small" color={accentFg} />
-                ) : (
-                  <>
-                    <Save size={12} color={accentFg} />
-                    <Text style={[styles.saveRecipeBtnText, { color: accentFg }]}>Zapisz</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            ) : null}
-          </View>
-          <Text style={[styles.posHint, { color: textMuted, marginBottom: 10 }]}>
-            Edycja tutaj zmienia też recepturę w Menu — i odwrotnie. Przy sprzedaży POS odejmie te
-            ilości z magazynu ({mappedCount}/{totalCount} zmapowanych).
-          </Text>
+          <MenuRecipeIngredientEditor
+            prem={prem}
+            accent={accent}
+            accentFg={accentFg}
+            textPrimary={textPrimary}
+            textSecondary={textSecondary}
+            textMuted={textMuted}
+            inputBg={inputBg}
+            inputBorder={inputBorder}
+            drafts={drafts}
+            loadingIngredients={loadingIngredients}
+            recipeDirty={recipeDirty}
+            recipeSaving={recipeSaving}
+            suggesting={suggesting}
+            mappedCount={mappedCount}
+            totalCount={totalCount}
+            onSaveRecipe={() => void handleSaveRecipe()}
+            onSuggestRecipe={() => void handleSuggestRecipe()}
+            onUpdateDraft={updateDraft}
+            onRemoveIngredient={handleRemoveIngredient}
+            onAddIngredient={handleAddIngredient}
+            onOpenPicker={openPicker}
+            onUnmap={(key) => void handleUnmap(key)}
+          />
 
-          {loadingIngredients ? (
-            <ActivityIndicator size="small" color={accent} style={styles.loader} />
-          ) : drafts.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={[styles.emptyText, { color: textMuted }]}>
-                Brak składników w recepturze. Dodaj je poniżej albo pozwól AI zaproponować wzorcową
-                recepturę z gramaturami.
-              </Text>
-              <TouchableOpacity
-                style={[styles.suggestBtn, { backgroundColor: accent }]}
-                onPress={() => void handleSuggestRecipe()}
-                disabled={suggesting}
-                activeOpacity={0.75}
-              >
-                {suggesting ? (
-                  <ActivityIndicator size="small" color={accentFg} />
-                ) : (
-                  <Text style={[styles.suggestBtnText, { color: accentFg }]}>
-                    Zaproponuj recepturę AI
-                  </Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          ) : (
-            drafts.map((ing, index) => (
-              <View
-                key={ing.key}
-                style={[
-                  styles.ingredientCard,
-                  {
-                    backgroundColor: prem ? DS.color.bgTertiary : '#F8FAFC',
-                    borderColor: prem ? DS.color.borderSubtle : '#E2E8F0',
-                  },
-                ]}
-              >
-                <View style={styles.ingredientTop}>
-                  <View
-                    style={[
-                      styles.indexBadge,
-                      prem && { backgroundColor: 'rgba(0,255,120,0.14)' },
-                    ]}
-                  >
-                    <Text style={[styles.indexText, prem && { color: DS.color.greenEnd }]}>
-                      {index + 1}
-                    </Text>
-                  </View>
-                  <TextInput
-                    style={[
-                      styles.nameInput,
-                      { backgroundColor: inputBg, borderColor: inputBorder, color: textPrimary },
-                    ]}
-                    value={ing.name}
-                    onChangeText={(v) => updateDraft(ing.key, { name: v })}
-                    placeholder="Nazwa składnika"
-                    placeholderTextColor={textMuted}
-                    autoCorrect={false}
-                  />
-                  <TouchableOpacity
-                    style={styles.deleteBtn}
-                    onPress={() => handleRemoveIngredient(ing.key)}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <Trash2 size={15} color={prem ? DS.color.danger : '#DC2626'} />
-                  </TouchableOpacity>
-                </View>
-
-                <View style={styles.qtyRow}>
-                  <TextInput
-                    style={[
-                      styles.qtyInput,
-                      { backgroundColor: inputBg, borderColor: inputBorder, color: textPrimary },
-                    ]}
-                    value={ing.quantity}
-                    onChangeText={(v) => updateDraft(ing.key, { quantity: v })}
-                    placeholder="Ilość"
-                    placeholderTextColor={textMuted}
-                    keyboardType="decimal-pad"
-                  />
-                  <View style={styles.unitWrap}>
-                    {UNIT_OPTIONS.map((u) => {
-                      const active = ing.unit === u;
-                      return (
-                        <TouchableOpacity
-                          key={u}
-                          style={[
-                            styles.unitBtn,
-                            {
-                              backgroundColor: prem ? DS.color.bgSecondary : '#fff',
-                              borderColor: prem ? DS.color.borderSubtle : '#E2E8F0',
-                            },
-                            active && {
-                              backgroundColor: accent,
-                              borderColor: accent,
-                            },
-                          ]}
-                          onPress={() => updateDraft(ing.key, { unit: u })}
-                          activeOpacity={0.7}
-                        >
-                          <Text
-                            style={[
-                              styles.unitBtnText,
-                              { color: textSecondary },
-                              active && { color: accentFg, fontWeight: '700' },
-                            ]}
-                          >
-                            {u}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-
-                {(ing.unit === 'szt' || ing.unit === 'sztuka') && (
-                  <View
-                    style={[
-                      styles.pieceWeightBox,
-                      {
-                        backgroundColor: prem ? 'rgba(0,255,120,0.06)' : '#F8FAFC',
-                        borderColor: prem ? DS.color.borderSubtle : '#E2E8F0',
-                      },
-                    ]}
-                  >
-                    <Text style={[styles.pieceWeightLabel, { color: textMuted }]}>
-                      Wzorcowa waga 1 sztuki (g)
-                    </Text>
-                    <TextInput
-                      style={[
-                        styles.pieceWeightInput,
-                        { backgroundColor: inputBg, borderColor: inputBorder, color: textPrimary },
-                      ]}
-                      value={ing.pieceWeightG ?? ''}
-                      onChangeText={(v) => updateDraft(ing.key, { pieceWeightG: v })}
-                      placeholder="opcjonalnie, np. 180"
-                      placeholderTextColor={textMuted}
-                      keyboardType="decimal-pad"
-                    />
-                    <Text style={[styles.pieceWeightHint, { color: textMuted }]}>
-                      {PIECE_WEIGHT_HINT}
-                    </Text>
-                  </View>
-                )}
-
-                <View style={styles.mapRow}>
-                  <Text
-                    style={[
-                      styles.stockHint,
-                      { color: ing.in_stock ? (prem ? DS.color.greenEnd : '#16A34A') : (prem ? DS.color.danger : '#DC2626') },
-                    ]}
-                  >
-                    {ing.warehouse_product_id
-                      ? ing.in_stock
-                        ? `Na stanie (${ing.stock_qty ?? 0})`
-                        : 'Zmapowano — brak na magazynie'
-                      : 'Nie zmapowano do magazynu'}
-                  </Text>
-                  <View style={styles.ingredientAction}>
-                    {ing.warehouse_product_id ? (
-                      <>
-                        <View style={[styles.linkedBadge, prem && styles.linkedBadgePrem]}>
-                          <Link size={11} color={prem ? DS.color.greenEnd : '#16A34A'} />
-                          <Text
-                            style={[styles.linkedBadgeText, prem && { color: DS.color.greenEnd }]}
-                            numberOfLines={1}
-                          >
-                            {ing.warehouse_product_name || 'magazyn'}
-                          </Text>
-                        </View>
-                        <TouchableOpacity
-                          style={[styles.changeBtn, prem && styles.changeBtnPrem]}
-                          onPress={() => openPicker(ing.key)}
-                          activeOpacity={0.7}
-                        >
-                          <Text style={[styles.changeBtnText, prem && { color: DS.color.greenEnd }]}>
-                            Zmień
-                          </Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.unlinkBtn}
-                          onPress={() => void handleUnmap(ing.key)}
-                          activeOpacity={0.7}
-                        >
-                          <Link2Off size={14} color={textSecondary} />
-                        </TouchableOpacity>
-                      </>
-                    ) : (
-                      <TouchableOpacity
-                        style={[
-                          styles.mapBtn,
-                          prem && {
-                            backgroundColor: DS.color.bgSecondary,
-                            borderColor: DS.color.borderSubtle,
-                          },
-                        ]}
-                        onPress={() => openPicker(ing.key)}
-                        activeOpacity={0.7}
-                      >
-                        <Text style={[styles.mapBtnText, { color: textSecondary }]}>Mapuj</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                </View>
-              </View>
-            ))
-          )}
-
-          <View style={styles.footerActions}>
-            <TouchableOpacity
-              style={[
-                styles.addIngBtn,
-                prem && {
-                  backgroundColor: DS.color.bgTertiary,
-                  borderColor: DS.color.borderSubtle,
-                },
-              ]}
-              onPress={handleAddIngredient}
-              activeOpacity={0.75}
-            >
-              <Plus size={14} color={accent} />
-              <Text style={[styles.addIngBtnText, { color: accent }]}>Dodaj składnik</Text>
-            </TouchableOpacity>
-            {drafts.length === 0 ? null : (
-              <TouchableOpacity
-                style={[styles.suggestBtnSmall, { borderColor: accent }]}
-                onPress={() => void handleSuggestRecipe()}
-                disabled={suggesting}
-                activeOpacity={0.75}
-              >
-                {suggesting ? (
-                  <ActivityIndicator size="small" color={accent} />
-                ) : (
-                  <Text style={[styles.suggestBtnSmallText, { color: accent }]}>AI receptura</Text>
-                )}
-              </TouchableOpacity>
-            )}
-          </View>
         </View>
       )}
 
@@ -974,429 +607,3 @@ export default function MenuRecipeRow({ menuItem, inventoryItems, onChanged }: P
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
-
-const styles = StyleSheet.create({
-  card: {
-    borderRadius: 14,
-    marginBottom: 10,
-    overflow: 'hidden',
-    borderWidth: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 8,
-  },
-  headerText: { flex: 1 },
-  itemName: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  itemCategory: {
-    fontSize: 12,
-    marginTop: 1,
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  posLinkedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: '#DCFCE7',
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  posLinkedBadgePrem: {
-    backgroundColor: 'rgba(0,255,120,0.12)',
-  },
-  posLinkedText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#16A34A',
-  },
-  badge: {
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  badgeGray: { backgroundColor: '#F1F5F9' },
-  badgeGreen: { backgroundColor: '#DCFCE7' },
-  badgeOrange: { backgroundColor: '#FEF3C7' },
-  badgeRed: { backgroundColor: '#FEE2E2' },
-  badgeGrayPrem: { backgroundColor: 'rgba(255,255,255,0.06)' },
-  badgeGreenPrem: { backgroundColor: 'rgba(0,255,120,0.14)' },
-  badgeOrangePrem: { backgroundColor: 'rgba(245,197,66,0.14)' },
-  badgeRedPrem: { backgroundColor: 'rgba(255,90,90,0.14)' },
-  badgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E293B',
-  },
-  body: {
-    paddingHorizontal: 16,
-    paddingBottom: 14,
-    borderTopWidth: 1,
-  },
-  posSection: {
-    paddingTop: 14,
-    paddingBottom: 4,
-  },
-  posLabelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    marginBottom: 6,
-  },
-  posLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  posInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  posInput: {
-    flex: 1,
-    height: 40,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    fontSize: 14,
-  },
-  posInputDirty: {
-    borderColor: '#3B82F6',
-    backgroundColor: '#EFF6FF',
-  },
-  posInputDirtyPrem: {
-    borderColor: DS.color.greenEnd,
-  },
-  posSaveBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  posSavedIndicator: {
-    width: 40,
-    height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  posHint: {
-    fontSize: 11,
-    marginTop: 6,
-    lineHeight: 16,
-  },
-  ingredientsDivider: {
-    height: 1,
-    marginVertical: 12,
-  },
-  ingredientsTitle: {
-    fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  recipeHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-    gap: 8,
-  },
-  saveRecipeBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  saveRecipeBtnText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  availRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 12,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-  },
-  stockHint: {
-    fontSize: 11,
-    fontWeight: '600',
-    flex: 1,
-  },
-  loader: { marginVertical: 16 },
-  emptyBox: {
-    paddingVertical: 8,
-    gap: 10,
-  },
-  emptyText: {
-    fontSize: 13,
-    textAlign: 'center',
-    paddingVertical: 4,
-    lineHeight: 18,
-  },
-  suggestBtn: {
-    alignSelf: 'center',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    minWidth: 200,
-    alignItems: 'center',
-  },
-  suggestBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  ingredientCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    padding: 10,
-    marginBottom: 8,
-    gap: 8,
-  },
-  ingredientTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  indexBadge: {
-    width: 24,
-    height: 24,
-    borderRadius: 8,
-    backgroundColor: '#E2E8F0',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  indexText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#475569',
-  },
-  nameInput: {
-    flex: 1,
-    height: 36,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    fontSize: 13,
-  },
-  deleteBtn: {
-    padding: 4,
-  },
-  qtyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  qtyInput: {
-    minWidth: 78,
-    width: 86,
-    height: 44,
-    minHeight: 44,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 10,
-    fontSize: 15,
-    fontWeight: '600',
-    textAlign: 'center',
-    textAlignVertical: 'center',
-    includeFontPadding: false,
-  },
-  pieceWeightBox: {
-    marginTop: 2,
-    padding: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    gap: 6,
-  },
-  pieceWeightLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  pieceWeightInput: {
-    width: 100,
-    height: 40,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  pieceWeightHint: {
-    fontSize: 10,
-    lineHeight: 14,
-  },
-  unitWrap: {
-    flex: 1,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 4,
-  },
-  unitBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  unitBtnText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  mapRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  ingredientAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flexShrink: 0,
-  },
-  linkedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#DCFCE7',
-    borderRadius: 6,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    maxWidth: 100,
-  },
-  linkedBadgePrem: {
-    backgroundColor: 'rgba(0,255,120,0.12)',
-  },
-  linkedBadgeText: {
-    fontSize: 11,
-    color: '#15803D',
-    fontWeight: '500',
-    flexShrink: 1,
-  },
-  changeBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    backgroundColor: '#EFF6FF',
-  },
-  changeBtnPrem: {
-    backgroundColor: 'rgba(0,255,120,0.1)',
-  },
-  changeBtnText: {
-    fontSize: 11,
-    color: '#3B82F6',
-    fontWeight: '600',
-  },
-  unlinkBtn: {
-    padding: 4,
-  },
-  mapBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 7,
-    backgroundColor: '#F1F5F9',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-  },
-  mapBtnText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  footerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 6,
-  },
-  addIngBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    backgroundColor: '#F8FAFC',
-  },
-  addIngBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  suggestBtnSmall: {
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 10,
-    borderWidth: 1,
-  },
-  suggestBtnSmallText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  modal: {
-    flex: 1,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-  },
-  modalTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-  },
-  searchBar: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-  },
-  searchInput: {
-    height: 40,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    fontSize: 14,
-    borderWidth: 1,
-  },
-  pickerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-  },
-  pickerName: {
-    fontSize: 15,
-    fontWeight: '500',
-  },
-  pickerUnit: {
-    fontSize: 13,
-  },
-  separator: {
-    height: 1,
-    marginLeft: 20,
-  },
-});

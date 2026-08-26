@@ -109,8 +109,13 @@ export async function deleteCost(table: FinanceTable, id: string): Promise<void>
  */
 export async function fetchFinanceRows(accountKey: string, currentMonth: string): Promise<FinanceRows> {
   const ak = accountKey;
+  if (!isRealKey(ak)) {
+    throw new Error(
+      'Brak aktywnego konta (account_key). Zaloguj się ponownie i spróbuj jeszcze raz.',
+    );
+  }
   const scoped = <T,>(q: T & { eq: (col: string, val: string) => T }, col = 'account_key'): T =>
-    isRealKey(ak) ? q.eq(col, ak) : q;
+    q.eq(col, ak);
 
   const invSelects = [
     'id, name, quantity, min_quantity, optimal_quantity, unit, is_combo_polprodukt',
@@ -164,25 +169,10 @@ export async function fetchFinanceRows(accountKey: string, currentMonth: string)
     (r) => r.error && /account_key/i.test(r.error.message ?? ''),
   );
   if (missingAk) {
-    [
-      revRes,
-      fixedRes,
-      varRes,
-      revHistRes,
-      varHistRes,
-      revAllRes,
-      fixedAllRes,
-      varAllRes,
-    ] = await Promise.all([
-      supabase.from('revenue_entries').select('*').eq('year_month', currentMonth).order('created_at'),
-      supabase.from('fixed_costs').select('*').eq('year_month', currentMonth).order('type'),
-      supabase.from('variable_cost_entries').select('*').eq('year_month', currentMonth).order('created_at'),
-      supabase.from('revenue_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-      supabase.from('variable_cost_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-      supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-      supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
-      supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-    ]);
+    // NIGDY nie odczytuj wszystkich wierszy bez account_key — to wyciek między tenantami.
+    throw new Error(
+      'Brak izolacji account_key w tabelach finansowych. Uruchom migrację FIX_FINANCE_TENANT_RLS.sql.',
+    );
   }
   if (revRes.error) throw revRes.error;
   if (fixedRes.error) throw fixedRes.error;

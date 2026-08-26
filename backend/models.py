@@ -380,6 +380,10 @@ class CompareItem(BaseModel):
     product_name_or_id: str
     quantity: float
     unit: str
+    # Odmiana / wariant produktu (opcjonalnie) — np. "Irys", "Jonagold", "BIO".
+    # Gdy podana, Łowca najpierw szuka DOKŁADNIE tej odmiany (exact), a inne
+    # odmiany tego samego produktu traktuje jako zamiennik (za zgodą użytkownika).
+    variant: Optional[str] = None
     # Pasmo ±10% wokół deficytu do progu optymalnego — tańsze opakowanie w paśmie wygrywa
     quantity_min: Optional[float] = None
     quantity_max: Optional[float] = None

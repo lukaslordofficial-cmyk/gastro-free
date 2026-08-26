@@ -248,6 +248,7 @@ export type VariableCostEntry = {
 export type InventoryItem = {
   id: string;
   name: string;
+  variant?: string | null;
   category_id: string | null;
   quantity: number;
   unit: string;

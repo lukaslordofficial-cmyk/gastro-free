@@ -21,6 +21,72 @@ from matching_utils import _food_names_compatible, _local_catalog_match_score, _
 from models import CompareOffersRequest
 from subscription_core import _check_ai_access
 from supplier_meta import _has_inventory_synonyms
+from variant_matching import (
+    base_matches_offer,
+    classify_offer,
+    offer_variant_label,
+)
+
+
+def _build_variant_report(
+    product_name: str,
+    requested_variant: str,
+    base_name: str,
+    base_offers: list[dict],
+    exact_found: bool,
+    sup_by_id: dict,
+) -> dict:
+    """Raport odmiany: exact vs zamienniki (inne odmiany tego samego produktu)."""
+    subs: dict[str, dict] = {}
+    for c in base_offers:
+        row = c["row"]
+        name = row.get("name") or ""
+        if classify_offer(requested_variant, base_name, name) != "substitute":
+            continue
+        sid = row.get("supplier_id")
+        if not sid:
+            continue
+        label = offer_variant_label(base_name, name) or "inna odmiana"
+        sup = sup_by_id.get(str(sid)) or sup_by_id.get(sid) or {}
+        entry = {
+            "supplier_id": str(sid),
+            "supplier_name": (sup.get("name") or "").strip() or "Dostawca",
+            "supplier_email": sup.get("email"),
+            "unit_price_base": round(float(c["price_base"]), 2),
+            "base_dim": c["base_dim"],
+            "unit": (row.get("unit") or c["base_dim"]),
+            "matched_name": name,
+            "matched_variant": row.get("variant"),
+            "catalog_product_id": str(row.get("producer_product_id") or row.get("id") or ""),
+            "order_base_qty": round(float(c.get("order_base") or 0), 4),
+        }
+        if row.get("is_local_producer") or row.get("source") == "local_producer":
+            entry["is_local_producer"] = True
+        group = subs.setdefault(label, {})
+        prev = group.get(str(sid))
+        if prev is None or entry["unit_price_base"] < prev["unit_price_base"]:
+            group[str(sid)] = entry
+
+    substitutes: list[dict] = []
+    for label, by_sid in subs.items():
+        offers = sorted(by_sid.values(), key=lambda e: e["unit_price_base"])
+        substitutes.append({
+            "variant_label": label,
+            "offer_count": len(offers),
+            "min_unit_price_base": offers[0]["unit_price_base"] if offers else 0.0,
+            "base_dim": offers[0]["base_dim"] if offers else "",
+            "offers": offers,
+        })
+    substitutes.sort(key=lambda s: s["min_unit_price_base"])
+
+    return {
+        "product_name": product_name,
+        "base_name": base_name,
+        "requested_variant": requested_variant,
+        "exact_found": bool(exact_found),
+        "substitute_variant_count": len(substitutes),
+        "substitutes": substitutes,
+    }
 
 
 
@@ -117,11 +183,27 @@ async def compare_offers(req: CompareOffersRequest):
                 raise
         inv_rows = [r for r in inv_rows if r.get("is_active") is not False]
 
+        # Odmiana/wariant produktu z magazynu (opcjonalne, fail-soft gdy brak kolumny).
+        # Pozwala honorować preferencję odmiany także w ścieżkach bez `variant`
+        # w requeście (voice / krytyczne braki).
+        inv_variant_by_id: dict = {}
+        try:
+            vrows = await sb_get(client, "inventory_items", params={
+                "select": "id,variant", "limit": "2000",
+            }) or []
+            inv_variant_by_id = {
+                str(r["id"]): (r.get("variant") or "").strip()
+                for r in vrows if r.get("id") and (r.get("variant") or "").strip()
+            }
+        except Exception:
+            inv_variant_by_id = {}
+
         ai_item_budget = AI_CATALOG_MAX_ITEM_CALLS  # agent katalogowy (1 call / pozycja)
         ai_budget = AI_MAX_CHECKS  # legacy pairwise fallback
         synonym_additions: dict = {}   # inv_id -> {"existing": [...], "new": set()}
         billing_events: list[dict] = []
         pack_notes: list[str] = []
+        variant_reports: list[dict] = []
 
         def _consider(bbs: dict, row: dict, price_base: float, base_dim: str,
                       order_base_qty: float, target_base_qty: float, via: str,
@@ -230,6 +312,14 @@ async def compare_offers(req: CompareOffersRequest):
             known_norm = [_norm_pl(n) for n in known_names]
             warehouse_name = (inv_row.get("name") if inv_row else None) or it.product_name_or_id
 
+            # Odmiana/wariant preferowany przez restauratora (opcjonalny).
+            # Priorytet: request → magazyn. Gdy pusty, zachowanie jak dotychczas.
+            it_variant = (getattr(it, "variant", None) or "").strip()
+            if not it_variant and inv_id:
+                it_variant = inv_variant_by_id.get(str(inv_id), "")
+            variant_base_name = warehouse_name
+            base_offers: list[dict] = []  # tylko dla pozycji z odmianą
+
             best_by_supplier: dict[str, dict] = {}
             # Pula do agenta AI: realne wiersze katalogu (nie wymyślone)
             ai_pool: list[tuple] = []  # (score, row, base_dim, price_base, order_base, pack, target, hi)
@@ -286,6 +376,22 @@ async def compare_offers(req: CompareOffersRequest):
                     item_pack_adjusted = True
                     match_dim_used = base_dim
                     match_target_base = target_in_dim
+                # ── Ścieżka ODMIANY: nie zaśmiecaj koszyka innymi odmianami. ──
+                # Zbieramy WSZYSTKIE oferty tego samego produktu podstawowego,
+                # a exact vs zamiennik rozstrzygamy po pętli.
+                if it_variant:
+                    if base_matches_offer(variant_base_name, row_name):
+                        base_offers.append({
+                            "row": row,
+                            "price_base": price_base,
+                            "base_dim": base_dim,
+                            "order_base": order_base,
+                            "target_in_dim": target_in_dim,
+                            "pack": pack,
+                            "hi": hi_in_dim,
+                            "stock_capped": stock_capped,
+                        })
+                    continue
                 score = max(
                     (_local_catalog_match_score(n, row_name) for n in known_names),
                     default=0.0,
@@ -391,7 +497,7 @@ async def compare_offers(req: CompareOffersRequest):
 
             # II pass: gdy nadal brak oferty — szersza pula z całego katalogu tenanta
             # (token_sort + stem), żeby AI zobaczył bataty / kurczak filet mimo luźnego fuzzy.
-            if not best_by_supplier and ai_item_budget > 0:
+            if not it_variant and not best_by_supplier and ai_item_budget > 0:
                 wide: list[tuple] = []
                 for row in catalog:
                     cid = str(row.get("id") or "")
@@ -474,6 +580,26 @@ async def compare_offers(req: CompareOffersRequest):
                             syn_slot = synonym_additions.setdefault(
                                 inv_id, {"existing": existing_syn, "new": set()})
                             syn_slot["new"].add(row.get("name") or "")
+
+            # ── Rozstrzygnięcie ODMIANY: exact ma bezwzględne pierwszeństwo. ──
+            # Do koszyka trafiają WYŁĄCZNIE oferty z żądaną odmianą. Inne odmiany
+            # tego samego produktu prezentujemy jako zamiennik (za zgodą usera).
+            if it_variant:
+                exact = [
+                    c for c in base_offers
+                    if classify_offer(it_variant, variant_base_name, c["row"].get("name") or "") == "exact"
+                ]
+                for c in exact:
+                    _consider(
+                        best_by_supplier, c["row"], c["price_base"], c["base_dim"],
+                        c["order_base"], c["target_in_dim"], "variant_exact",
+                        pack_base_qty=c["pack"], band_hi_base=c["hi"],
+                        stock_capped=c["stock_capped"],
+                    )
+                variant_reports.append(_build_variant_report(
+                    it.product_name_or_id, it_variant, variant_base_name,
+                    base_offers, bool(exact), sup_by_id,
+                ))
 
             # Ilość zamówienia: mediana order_base z dopasowań (albo target)
             ordered_bases = [
@@ -608,6 +734,23 @@ async def compare_offers(req: CompareOffersRequest):
             speech = (result.get("assistant_speech") or "").strip()
             extra = " ".join(pack_notes)
             result["assistant_speech"] = f"{speech} {extra}".strip() if speech else extra
+        # Raporty odmian (exact vs zamienniki) — FE prezentuje sekcję "Szukasz: …".
+        if variant_reports:
+            result["variant_reports"] = variant_reports
+            speech = (result.get("assistant_speech") or "").strip()
+            miss = [
+                r for r in variant_reports
+                if not r.get("exact_found") and r.get("substitute_variant_count")
+            ]
+            if miss:
+                r0 = miss[0]
+                note = (
+                    f"Nie znaleźliśmy odmiany „{r0['requested_variant']}” "
+                    f"dla: {r0['base_name']}. Znaleźliśmy jednak "
+                    f"{r0['substitute_variant_count']} inn(ą/e) odmian(ę/y) — "
+                    "możesz dodać zamiennik do koszyka."
+                )
+                result["assistant_speech"] = f"{speech} {note}".strip() if speech else note
         # Warstwa AI: tylko interpretacja tipów (koszyki już policzone matematycznie)
         try:
             result = await _enrich_deal_hunter_ai_tips(client, result, per_item)

@@ -387,6 +387,63 @@ export function DealHunterModal({
     setCatalogPicker(null);
   }, [catalogPicker, baseSelectedSuppliers]);
 
+  const addSubstituteToCart = useCallback((offer: {
+    supplier_id: string;
+    supplier_name: string;
+    supplier_email?: string | null;
+    unit_price_base: number;
+    base_dim: string;
+    unit?: string;
+    matched_name?: string;
+    catalog_product_id?: string;
+    is_local_producer?: boolean;
+  }, variantLabel: string) => {
+    const unit = offer.unit || offer.base_dim || 'szt';
+    const qty = 1;
+    const displayName = offer.matched_name || variantLabel;
+    const newItem: OfferItem = {
+      product_name: displayName,
+      quantity: qty,
+      unit,
+      base_dim: offer.base_dim || unit,
+      unit_price_base: offer.unit_price_base,
+      matched_name: displayName,
+      line_total: recalcLineTotal(offer.unit_price_base, qty, offer.base_dim || unit),
+      ...(offer.catalog_product_id ? { catalog_product_id: offer.catalog_product_id } : {}),
+      ...(offer.is_local_producer ? { is_local_producer: true } : {}),
+    };
+    setManualCart((prev) => {
+      const cart = prev ?? baseSelectedSuppliers().map((g) => recalcGroup({
+        ...g,
+        items: g.items.map((it) => ({ ...it })),
+      }));
+      const existing = cart.find((g) => g.supplier_id === offer.supplier_id);
+      if (existing) {
+        return cart.map((g) => {
+          if (g.supplier_id !== offer.supplier_id) return g;
+          const without = g.items.filter((it) => it.product_name !== displayName);
+          return recalcGroup({
+            ...g,
+            supplier_name: offer.supplier_name || g.supplier_name,
+            supplier_email: offer.supplier_email ?? g.supplier_email,
+            items: [...without, newItem],
+          });
+        });
+      }
+      const newGroup: SupplierGroup = recalcGroup({
+        supplier_id: offer.supplier_id,
+        supplier_name: offer.supplier_name || 'Dostawca',
+        supplier_email: offer.supplier_email ?? null,
+        items: [newItem],
+        subtotal_pln: 0,
+        ...(offer.is_local_producer ? { is_local_producer: true } : {}),
+      });
+      return [...cart, newGroup];
+    });
+    setQuantities((prev) => ({ ...prev, [displayName]: 1 }));
+    setDraftSavedInfo(`Dodano „${displayName}” do koszyka (${offer.supplier_name || 'dostawca'}).`);
+  }, [baseSelectedSuppliers]);
+
   const resolveSupplierInCart = useCallback((info: {
     id: string;
     name: string;
@@ -615,13 +672,21 @@ export function DealHunterModal({
         body: JSON.stringify({
           restaurant_name: restaurantName ?? 'Nasza restauracja',
           search_scope: searchScope,
-          items: [{ product_name_or_id: product.product_name, quantity: q, unit: product.unit }],
+          items: [{
+            product_name_or_id: product.product_name,
+            quantity: q,
+            unit: product.unit,
+            ...(product.variant ? { variant: product.variant } : {}),
+          }],
         }),
       });
       if (!res.ok) throw new Error(`Błąd serwera (${res.status})`);
       const data = await res.json();
       const normalized = applyCompareResult(data);
-      if (!normalized.best_option && !normalized.option_optimized?.suppliers?.length) {
+      const hasVariantSubs = (normalized.variant_reports ?? []).some(
+        (v) => (v.substitute_variant_count ?? 0) > 0,
+      );
+      if (!normalized.best_option && !normalized.option_optimized?.suppliers?.length && !hasVariantSubs) {
         setError(
           searchScope === 'local_producers_only'
             ? 'Nie znaleziono tego produktu u lokalnych dostawców.'
@@ -1135,6 +1200,73 @@ export function DealHunterModal({
               ? 'Zamówienie · Wygoda (mało dostaw)'
               : 'Zamówienia u dostawców'}
         </Text>
+        {(result?.variant_reports ?? []).length > 0 ? (
+          <View style={{ gap: 10, marginBottom: 12 }} testID="deal-hunter-variant-reports">
+            {(result?.variant_reports ?? []).map((vr, vi) => {
+              const searchLabel = `${vr.base_name}${vr.requested_variant ? ' ' + vr.requested_variant : ''}`;
+              return (
+                <View
+                  key={`vr-${vi}`}
+                  style={{
+                    borderWidth: 1,
+                    borderColor: vr.exact_found ? C.accent : C.warning,
+                    backgroundColor: C.isPremium ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)',
+                    borderRadius: 12,
+                    padding: 12,
+                    gap: 6,
+                  }}
+                  testID={`variant-report-${vi}`}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Search size={14} color={C.accent} strokeWidth={2.4} />
+                    <Text style={{ fontWeight: '800', color: C.accentDark }}>Szukasz: {searchLabel}</Text>
+                  </View>
+                  {vr.exact_found ? (
+                    <Text style={{ color: C.accent, fontWeight: '700', fontSize: 12 }}>
+                      Znaleziono dokładnie tę odmianę — jest w koszyku poniżej.
+                    </Text>
+                  ) : (
+                    <Text style={{ color: C.warning, fontWeight: '700', fontSize: 12 }} testID={`variant-not-found-${vi}`}>
+                      Nie znaleźliśmy odmiany „{vr.requested_variant}”.
+                      {vr.substitute_variant_count > 0
+                        ? ` Znaleźliśmy jednak ${vr.substitute_variant_count} inn${vr.substitute_variant_count === 1 ? 'ą odmianę' : 'e odmiany'} tego produktu — możesz dodać zamiennik do koszyka.`
+                        : ' Brak zamienników w katalogu dostawców.'}
+                    </Text>
+                  )}
+                  {vr.substitutes.map((sub, si) => (
+                    <View key={`sub-${vi}-${si}`} style={{ gap: 4, marginTop: 4 }}>
+                      <Text style={{ fontWeight: '700', color: C.accentDark, fontSize: 13 }}>
+                        {vr.base_name} {sub.variant_label}
+                      </Text>
+                      {sub.offers.map((off, oi) => (
+                        <View
+                          key={`off-${vi}-${si}-${oi}`}
+                          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+                        >
+                          <Text style={{ color: C.textSecondary, fontSize: 12, flex: 1 }} numberOfLines={2}>
+                            {formatPln(off.unit_price_base)}/{off.base_dim} · {off.supplier_name}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={() => addSubstituteToCart(off, sub.variant_label)}
+                            style={{
+                              width: 30, height: 30, borderRadius: 15,
+                              alignItems: 'center', justifyContent: 'center',
+                              backgroundColor: C.accent,
+                            }}
+                            activeOpacity={0.85}
+                            testID={`add-substitute-${vi}-${si}-${oi}`}
+                          >
+                            <Plus size={16} color={C.isPremium ? '#0A0A0A' : '#FFFFFF'} strokeWidth={2.6} />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
         {groups.length > 0 ? (
           <Text style={[styles.speechText, { fontWeight: '700', marginBottom: 4 }]} testID="deal-hunter-suppliers-summary">
             Od: {groups.map((g) => {
@@ -1408,6 +1540,7 @@ export function DealHunterModal({
     return (
       <>
         {renderEditableCart()}
+        {best?.supplier_name ? (
         <View style={styles.singleCard} testID="deal-hunter-single-option">
           <View style={styles.optHeader}>
             <View style={styles.optBadge}>
@@ -1455,6 +1588,7 @@ export function DealHunterModal({
             <Text style={styles.optTotalValue}>{formatPln(best?.total_pln ?? 0)}</Text>
           </View>
         </View>
+        ) : null}
       </>
     );
   };

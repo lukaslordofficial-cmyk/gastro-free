@@ -93,6 +93,7 @@ export const CAT_AUTO_COLORS = [
  */
 export const BLANK_FORM = {
   name: '',
+  variant: '',
   category: '',
   currentQty: '',
   criticalThreshold: '',

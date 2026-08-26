@@ -79,6 +79,7 @@ import {
 export interface ProductLike {
   id: string;
   product_name: string;
+  variant?: string | null;
   current_qty: number;
   critical_threshold: number;
   unit: string;

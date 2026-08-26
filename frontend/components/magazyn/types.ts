@@ -83,6 +83,8 @@ export interface CategoryRow {
 export interface MockInventoryItem {
   id: string;
   product_name: string;
+  /** Odmiana / wariant (opcjonalnie) — np. Irys, Jonagold, BIO. */
+  variant?: string | null;
   category: string;
   category_id: string | null;
   current_qty: number;

@@ -10,7 +10,7 @@ import {
 import { namesMatch } from '@/lib/fuzzyProductMatch';
 
 const ITEM_COLS_FULL =
-  'id, name, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)';
+  'id, name, variant, category_id, quantity, unit, min_quantity, optimal_quantity, portion_size, is_combo_polprodukt, safety_buffer_percent, shelf_life_days, inventory_categories(name), suppliers(name)';
 const ITEM_COLS_SLIM =
   'id, name, category_id, quantity, unit, min_quantity, portion_size, is_combo_polprodukt, inventory_categories(name), suppliers(name)';
 
@@ -60,7 +60,7 @@ export async function fetchWarehouseData(ak: string): Promise<WarehouseData> {
   let itemsData = itemsRes.data;
   let itemsErr = itemsRes.error;
   // Jedna szybka ścieżka awaryjna — zachowaj filtr is_active, gdy kolumna istnieje.
-  if (itemsErr && /optimal_quantity|safety_buffer_percent|shelf_life_days/.test(itemsErr.message ?? '')) {
+  if (itemsErr && /optimal_quantity|safety_buffer_percent|shelf_life_days|variant/.test(itemsErr.message ?? '')) {
     const slimActive = await supabase
       .from('inventory_items')
       .select(ITEM_COLS_SLIM)
@@ -164,20 +164,21 @@ export async function saveInventoryItem(input: {
   let saveError: Row = null;
 
   if (editingId) {
-    const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, shelf_life_days, account_key: _ak, ...core } = payload;
+    const { optimal_quantity, unit_weight_volume, weight_volume_unit, safety_buffer_percent, shelf_life_days, variant, account_key: _ak, ...core } = payload;
     let upd = await supabase.from('inventory_items').update(payload).eq('id', editingId).eq('account_key', ak).select(selectCols).single();
-    if (upd.error && /optimal_quantity|shelf_life_days/.test(upd.error.message ?? '')) {
+    if (upd.error && /optimal_quantity|shelf_life_days|variant/.test(upd.error.message ?? '')) {
       const soft: Row = { ...core, safety_buffer_percent, unit_weight_volume, weight_volume_unit };
       if (!/shelf_life/.test(upd.error.message ?? '')) soft.shelf_life_days = shelf_life_days;
       if (!/optimal_quantity/.test(upd.error.message ?? '')) soft.optimal_quantity = optimal_quantity;
+      if (!/variant/.test(upd.error.message ?? '')) soft.variant = variant;
       upd = await supabase.from('inventory_items').update(soft).eq('id', editingId).eq('account_key', ak).select(ITEM_COLS_SLIM).single();
     }
     row = upd.data;
     saveError = upd.error;
   } else {
     let insertRes = await supabase.from('inventory_items').insert(payload).select(selectCols).single();
-    if (insertRes.error && /optimal_quantity|safety_buffer_percent|unit_weight_volume|weight_volume_unit|shelf_life_days/.test(insertRes.error.message ?? '')) {
-      const { optimal_quantity, safety_buffer_percent, unit_weight_volume, weight_volume_unit, shelf_life_days, ...fallback } = payload;
+    if (insertRes.error && /optimal_quantity|safety_buffer_percent|unit_weight_volume|weight_volume_unit|shelf_life_days|variant/.test(insertRes.error.message ?? '')) {
+      const { optimal_quantity, safety_buffer_percent, unit_weight_volume, weight_volume_unit, shelf_life_days, variant, ...fallback } = payload;
       insertRes = await supabase.from('inventory_items').insert(fallback).select(ITEM_COLS_SLIM).single();
     }
     row = insertRes.data;

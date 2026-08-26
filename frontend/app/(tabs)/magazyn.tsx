@@ -746,6 +746,7 @@ export default function MagazynScreen() {
       const ak = getAccountKey();
       const payload: any = {
         name: nameTrim,
+        variant: form.variant.trim() || null,
         category_id: categoryIdMap[form.category] ?? null,
         quantity: currentQty,
         unit: form.unit,
@@ -827,6 +828,7 @@ export default function MagazynScreen() {
     setForm({
       ...BLANK_FORM,
       name: item.product_name,
+      variant: item.variant ?? '',
       category: item.category || (formCategories[0] ?? ''),
       currentQty: String(item.current_qty),
       criticalThreshold: String(item.critical_threshold),
@@ -1126,6 +1128,28 @@ export default function MagazynScreen() {
                   onChangeText={(v) => setForm((f) => ({ ...f, name: v }))}
                   returnKeyType="next"
                 />
+              </View>
+              <View style={styles.fieldWrap}>
+                <FieldLabel text="Odmiana / wariant (opcjonalnie)" />
+                <TextInput
+                  style={[
+                    formStyles.input,
+                    theme.isPremium && {
+                      backgroundColor: DS.color.bgTertiary,
+                      borderColor: DS.color.borderSubtle,
+                      color: DS.color.heading,
+                    },
+                  ]}
+                  placeholder="np. Irys, Jonagold, Premium, BIO, bezglutenowy"
+                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
+                  value={form.variant}
+                  onChangeText={(v) => setForm((f) => ({ ...f, variant: v }))}
+                  returnKeyType="next"
+                  testID="add-product-variant"
+                />
+                <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
+                  Doprecyzuj produkt — Łowca Okazji najpierw poszuka dokładnie tej odmiany, a inne odmiany zaproponuje jako zamiennik.
+                </Text>
               </View>
               <View style={styles.fieldWrap}>
                 <FieldLabel text="Kategoria" required />

@@ -129,6 +129,12 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
                   tone={status === 'critical' ? 'critical' : status === 'warning' ? 'warn' : 'ok'}
                 />
               </View>
+              {item.variant ? (
+                <View style={itemStyles.variantChip} testID={`inv-variant-${item.id}`}>
+                  <Tag size={9} color={DS.color.greenEnd} strokeWidth={2.4} />
+                  <Text style={itemStyles.variantChipText} numberOfLines={1}>Odmiana: {item.variant}</Text>
+                </View>
+              ) : null}
               <View style={itemStyles.qtyRow}>
                 <Text style={[itemStyles.premQty, { color: qtyColor }]} allowFontScaling={false}>
                   {formatQty(item.current_qty, item.unit)}
@@ -226,6 +232,9 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
               </View>
             )}
             <Text style={itemStyles.name} numberOfLines={1}>{item.product_name}</Text>
+            {item.variant ? (
+              <Text style={itemStyles.variantLine} numberOfLines={1} testID={`inv-variant-${item.id}`}>Odmiana: {item.variant}</Text>
+            ) : null}
           </View>
           <View style={itemStyles.topRight}>
             <View style={[itemStyles.badge, { backgroundColor: palette.badge }]}>
@@ -292,6 +301,9 @@ export const itemStyles = StyleSheet.create({
   },
   nameRow: { flex: 1, gap: 3 },
   name: { fontSize: 13, fontWeight: '600', color: Colors.textPrimary, lineHeight: 18 },
+  variantLine: { fontSize: 10, fontWeight: '600', color: Colors.accent, marginTop: 1 },
+  variantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' },
+  variantChipText: { fontSize: 10, fontWeight: '600', color: DS.color.greenEnd },
   comboTag: { flexDirection: 'row', alignItems: 'center', gap: 3, alignSelf: 'flex-start', backgroundColor: Colors.accentLight, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 },
   comboText: { fontSize: 9, fontWeight: '700', color: Colors.accent, letterSpacing: 0.3 },
   topRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },

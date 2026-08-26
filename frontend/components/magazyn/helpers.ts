@@ -114,6 +114,7 @@ export function mapDbRow(row: any): MockInventoryItem {
   return {
     id: row.id,
     product_name: row.name,
+    variant: row.variant ?? null,
     category: row.inventory_categories?.name ?? 'Inne',
     category_id: row.category_id ?? null,
     current_qty: Number(row.quantity),

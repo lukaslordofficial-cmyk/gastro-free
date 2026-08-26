@@ -203,6 +203,39 @@ export interface OptimizeResult {
   scenario_monolith?: BasketScenario;
   scenario_smart_hybrid?: BasketScenario;
   recommended_scenario_id?: string | null;
+  /** Łowca Okazji — raport odmian (exact vs zamienniki). */
+  variant_reports?: VariantReport[];
+}
+
+export interface VariantSubstituteOffer {
+  supplier_id: string;
+  supplier_name: string;
+  supplier_email?: string | null;
+  unit_price_base: number;
+  base_dim: string;
+  unit?: string;
+  matched_name?: string;
+  matched_variant?: string | null;
+  catalog_product_id?: string;
+  order_base_qty?: number;
+  is_local_producer?: boolean;
+}
+
+export interface VariantSubstitute {
+  variant_label: string;
+  offer_count: number;
+  min_unit_price_base: number;
+  base_dim: string;
+  offers: VariantSubstituteOffer[];
+}
+
+export interface VariantReport {
+  product_name: string;
+  base_name: string;
+  requested_variant: string;
+  exact_found: boolean;
+  substitute_variant_count: number;
+  substitutes: VariantSubstitute[];
 }
 
 const PRICE_TOLERANCE = 0.01;
@@ -850,6 +883,10 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
   const packNotes = Array.isArray(data.pack_adjustment_notes)
     ? (data.pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
     : undefined;
+  const variantReports = Array.isArray(data.variant_reports)
+    ? (data.variant_reports as VariantReport[])
+    : undefined;
+  const variantFields = variantReports?.length ? { variant_reports: variantReports } : {};
   const scopeFields = {
     ...(Array.isArray(data.scope_categories) ? { scope_categories: data.scope_categories as string[] } : {}),
     ...(Array.isArray(data.scope_products) ? { scope_products: data.scope_products as OptimizeResult['scope_products'] } : {}),
@@ -886,6 +923,7 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
     option_optimized: split,
     ...(packNotes?.length ? { pack_adjustment_notes: packNotes } : {}),
     ...scopeFields,
+    ...variantFields,
   };
   if (matrix.length) {
     const meta = suppliersMetaFromMatrix(matrix);
@@ -897,7 +935,7 @@ export function normalizeOptimizeResult(data: Partial<OptimizeResult> & Record<s
       assistant_speech: stub.assistant_speech,
     });
     if (packNotes?.length) built.pack_adjustment_notes = packNotes;
-    return { ...built, ...scopeFields };
+    return { ...built, ...scopeFields, ...variantFields };
   }
   const unique = itemsReq.length;
   const totalA = mono && !mono.missing?.length ? mono.total_pln : null;

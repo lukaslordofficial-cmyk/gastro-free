@@ -154,17 +154,16 @@ export default function ProductSuppliersScreen() {
     try {
       const ak = accountKey && accountKey !== 'default' ? accountKey : null;
 
-      // Tenant: tylko dostawcy tego konta (zapobiega wyciekowi ofert z innych account_key)
-      let tenantSupplierIds: Set<string> | null = null;
+      const tenantSupplierIds = new Set<string>();
       if (ak) {
         const { data: mySuppliers } = await supabase
           .from('suppliers')
           .select('id')
           .eq('account_key', ak);
-        tenantSupplierIds = new Set((mySuppliers ?? []).map((s: any) => s.id as string));
+        for (const s of mySuppliers ?? []) tenantSupplierIds.add((s as { id: string }).id);
       }
       const isTenantSupplier = (sid: string | null | undefined) =>
-        !tenantSupplierIds || (!!sid && tenantSupplierIds.has(sid));
+        !!sid && tenantSupplierIds.has(sid);
 
       // 1) Oferty już zlinkowane do produktu magazynowego
       const { data: linked } = await supabase

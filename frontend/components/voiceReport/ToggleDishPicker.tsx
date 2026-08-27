@@ -9,6 +9,7 @@ import { useRouter } from 'expo-router';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import {
   getJarvisWakeWord,
   setJarvisWakeWord,
@@ -85,6 +86,7 @@ export function ToggleDishPicker({
         let { data, error } = await supabase
           .from('menu_items')
           .select('id, name, is_available')
+          .eq('account_key', requireTenantAccountKey())
           .ilike('name', `%${q}%`)
           .eq('is_active', true)
           .order('name')
@@ -93,6 +95,7 @@ export function ToggleDishPicker({
           const retry = await supabase
             .from('menu_items')
             .select('id, name')
+            .eq('account_key', requireTenantAccountKey())
             .ilike('name', `%${q}%`)
             .order('name')
             .limit(10);

@@ -82,3 +82,23 @@ def test_webhook_skips_without_tenant_metadata():
     ))
     assert result["action"] == "skipped_missing_tenant"
     assert sb.patched == []
+
+
+def test_checkout_completed_skips_without_tenant():
+    sb = _FakeSB("sub_CUR")
+    event = {
+        "id": "evt_cs_no_meta",
+        "type": "checkout.session.completed",
+        "data": {"object": {"id": "cs_x", "mode": "payment", "metadata": {}}},
+    }
+    result = asyncio.run(handle_stripe_event(
+        event,
+        client=None,
+        sb_get=sb.get,
+        sb_post=sb.post,
+        sb_patch=sb.patch,
+        account_key_default="default",
+        tier_config={},
+    ))
+    assert result["action"] == "skipped_missing_tenant"
+    assert sb.patched == []

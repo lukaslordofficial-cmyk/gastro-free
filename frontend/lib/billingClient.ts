@@ -6,7 +6,7 @@ import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import type { TopupKey } from '@/lib/subscriptionCatalog';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { supabase } from '@/lib/supabase';
 import { secureIdempotencyKey } from '@/lib/secureId';
 
@@ -22,7 +22,7 @@ function makeIdempotencyKey(prefix: string): string | undefined {
 async function authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Account-Key': getAccountKey(),
+    'X-Account-Key': requireTenantAccountKey(),
     ...extra,
   };
   try {

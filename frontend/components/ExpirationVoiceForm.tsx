@@ -16,6 +16,7 @@ import {
 import { Plus, Trash2, Bell, Package } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { supabase } from '@/lib/supabase';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { secureId } from '@/lib/secureId';
@@ -104,6 +105,7 @@ export function ExpirationVoiceForm({
         const { data } = await supabase
           .from('inventory_items')
           .select('id, name, quantity, unit')
+          .eq('account_key', requireTenantAccountKey())
           .order('name')
           .limit(2000);
         if (!alive) return;

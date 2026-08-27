@@ -36,7 +36,7 @@ import {
 } from '@/lib/bargainHunter';
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
-import { withAccountKey } from '@/lib/tenantScope';
+import { requireTenantAccountKey, withAccountKey } from '@/lib/tenantScope';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import {
   type DealHunterSearchScope,
@@ -974,17 +974,17 @@ export function DealHunterModal({
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
         if (m.supplier_id) {
           try {
-            const ak = getAccountKey();
-            let q = supabase
+            const ak = requireTenantAccountKey();
+            const q = supabase
               .from('supplier_orders')
               .select('id')
               .eq('supplier_id', m.supplier_id)
-              .eq('status', 'draft');
-            if (ak && ak !== 'default') q = q.eq('account_key', ak);
+              .eq('status', 'draft')
+              .eq('account_key', ak);
             const { data } = await q;
             const ids = (data || []).map((r: { id: string }) => r.id);
             if (ids.length) {
-              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids).eq('account_key', ak);
               try {
                 DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
               } catch { /* ignore */ }
@@ -1019,17 +1019,17 @@ export function DealHunterModal({
       setSendStatus((s) => ({ ...s, [key]: 'sent' }));
       if (m.supplier_id) {
         try {
-          const ak = getAccountKey();
-          let q = supabase
+          const ak = requireTenantAccountKey();
+          const q = supabase
             .from('supplier_orders')
             .select('id')
             .eq('supplier_id', m.supplier_id)
-            .eq('status', 'draft');
-          if (ak && ak !== 'default') q = q.eq('account_key', ak);
+            .eq('status', 'draft')
+            .eq('account_key', ak);
           const { data } = await q;
           const ids = (data || []).map((r: { id: string }) => r.id);
-          if (ids.length) {
-            await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids);
+            if (ids.length) {
+              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids).eq('account_key', ak);
             try {
               DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
             } catch { /* ignore */ }

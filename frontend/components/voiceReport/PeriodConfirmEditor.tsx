@@ -9,6 +9,7 @@ import { useRouter } from 'expo-router';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import {
   getJarvisWakeWord,
   setJarvisWakeWord,
@@ -87,6 +88,7 @@ export function PeriodConfirmEditor({
         const { data } = await supabase
           .from('suppliers')
           .select('name')
+          .eq('account_key', requireTenantAccountKey())
           .eq('is_active', true)
           .order('name')
           .limit(200);

@@ -8,15 +8,19 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { confirmPendingCheckout } from '@/lib/billingClient';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import { useAuth } from '@/contexts/AuthContext';
+import { isRealAccountKey } from '@/lib/tenantScope';
 
 export default function BillingSuccessScreen() {
   const router = useRouter();
   const { refresh } = useSubscription();
   const { alert } = usePremiumAlert();
+  const { accountKey } = useAuth();
   const params = useLocalSearchParams<{ session_id?: string }>();
   const ran = useRef(false);
 
   useEffect(() => {
+    if (!isRealAccountKey(accountKey)) return;
     if (ran.current) return;
     ran.current = true;
     const sid = typeof params.session_id === 'string' ? params.session_id : undefined;
@@ -36,7 +40,7 @@ export default function BillingSuccessScreen() {
       }
       router.replace('/(tabs)/ustawienia');
     })();
-  }, [alert, params.session_id, refresh, router]);
+  }, [accountKey, alert, params.session_id, refresh, router]);
 
   return (
     <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0A120E' }}>

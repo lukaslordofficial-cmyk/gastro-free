@@ -4,6 +4,7 @@
  */
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import {
   FEATURE_CATALOG, TOPUP_PACKAGES, TIER_PLANS, tierName, type TopupKey,
 } from '@/lib/subscriptionCatalog';
@@ -300,7 +301,7 @@ export async function resignToFreeTier(): Promise<SubscriptionState> {
   }
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Account-Key': accountKey(),
+    'X-Account-Key': requireTenantAccountKey(),
   };
   const { data: sess } = await supabase.auth.getSession();
   const token = sess.session?.access_token;
@@ -353,7 +354,7 @@ export async function grantRewardCredit(): Promise<{ ok: boolean; credits_balanc
 export async function syncBackendSubscription(): Promise<void> {
   if (!BACKEND_URL) return;
   try {
-    const key = accountKey();
+    const key = requireTenantAccountKey();
     const { data: sess } = await supabase.auth.getSession();
     const token = sess.session?.access_token;
     await fetch(`${BACKEND_URL}/api/subscription`, {

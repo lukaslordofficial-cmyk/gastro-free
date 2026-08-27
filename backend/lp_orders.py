@@ -419,6 +419,19 @@ async def local_producers_confirm_payment(req: LpConfirmRequest):
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)[:300])
 
+    from server import require_tenant_account_key
+    account_key = require_tenant_account_key()
+    meta = dict(session.get("metadata") or {})
+    session_owner = (
+        (meta.get("account_key") or "").strip()
+        or (session.get("client_reference_id") or "").strip()
+    )
+    if not session_owner or session_owner != account_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Ta sesja płatności nie należy do Twojego konta.",
+        )
+
     async with httpx.AsyncClient(timeout=60.0, verify=_httpx_verify()) as client:
         result = await apply_paid_producer_checkout_session(
             session,

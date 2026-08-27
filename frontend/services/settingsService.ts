@@ -118,6 +118,9 @@ function mapInventory(rows: unknown[]): InventoryItemForRecipe[] {
 
 /** Pełny odczyt ustawień: POS + menu (z recepturami) + magazyn. */
 export async function fetchSettingsBundle(accountKey?: string | null): Promise<SettingsBundle> {
+  if (!isRealKey(accountKey)) {
+    return { pos: null, menuItems: [], inventoryItems: [] };
+  }
   try {
     let menuQ = supabase
       .from('menu_items')

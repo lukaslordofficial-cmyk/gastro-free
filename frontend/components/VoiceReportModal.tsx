@@ -592,9 +592,12 @@ export function VoiceReportModal({
   }
 
   async function fetchInventoryRows() {
+    const ak = accountKeyRef.current;
+    if (!ak || ak === 'default') return [];
     const { data } = await supabase
       .from('inventory_items')
       .select('id, name, quantity, min_quantity, unit')
+      .eq('account_key', ak)
       .order('name');
     return (data ?? []).map((i: any) => ({
       id: String(i.id),

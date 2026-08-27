@@ -5,7 +5,7 @@
 import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState, Platform } from 'react-native';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { supabase } from '@/lib/supabase';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
@@ -20,7 +20,7 @@ export const LP_PAID_MESSAGE =
 async function authHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Account-Key': getAccountKey(),
+    'X-Account-Key': requireTenantAccountKey(),
   };
   try {
     const { data } = await supabase.auth.getSession();

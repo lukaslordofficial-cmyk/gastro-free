@@ -34,6 +34,27 @@ def _norm(text: str) -> str:
     return _norm_pl(text)
 
 
+async def _tenant_catalog(client, *, supplier_id: str | None = None) -> list:
+    """Katalog tylko dostawców bieżącego tenanta (supplier_catalog nie jest w _TENANT_TABLES)."""
+    suppliers = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "500"}) or []
+    allowed = {str(s["id"]): s for s in suppliers if s.get("id")}
+    if supplier_id:
+        sid = str(supplier_id)
+        if sid not in allowed:
+            raise HTTPException(status_code=404, detail="Nie znaleziono dostawcy.")
+        id_csv = sid
+    else:
+        if not allowed:
+            return []
+        id_csv = ",".join(allowed)
+    rows = await sb_get(client, "supplier_catalog", params={
+        "select": "id,supplier_id,name,price_pln,unit,volume_label,is_visible",
+        "supplier_id": f"in.({id_csv})",
+        "limit": "10000",
+    }) or []
+    return [c for c in rows if c.get("is_visible") is not False]
+
+
 def _fuzzy_str(query: str, choices: list[str], threshold: int = 70):
     from server import _fuzzy_match
 
@@ -164,11 +185,7 @@ async def supplier_budget_cap_order(req: BudgetCapOrderRequest):
         prioritized.sort(key=lambda x: x["urgency"])
 
         # 2) Ceny — bierzemy najtańszą pozycję z supplier_catalog per produkt (fuzzy match).
-        cat_params = {"select": "id,supplier_id,name,price_pln,unit,volume_label,is_visible", "limit": "10000"}
-        if req.supplier_id:
-            cat_params["supplier_id"] = f"eq.{req.supplier_id}"
-        catalog = await sb_get(client, "supplier_catalog", params=cat_params) or []
-        catalog = [c for c in catalog if c.get("is_visible") is not False]
+        catalog = await _tenant_catalog(client, supplier_id=req.supplier_id)
 
         # 3) Wybieramy od najpilniejszych, aż wyczerpiemy budżet.
         cart = []
@@ -218,10 +235,7 @@ async def supplier_top_savings(limit: int = 5):
     async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as _probe:
         await _ai_access(_probe, needs_credits=False, needs_deal_hunter=True)
     async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
-        catalog = await sb_get(client, "supplier_catalog", params={
-            "select": "id,supplier_id,name,price_pln,is_visible", "limit": "10000"
-        }) or []
-        catalog = [c for c in catalog if c.get("is_visible") is not False]
+        catalog = await _tenant_catalog(client)
         suppliers = await sb_get(client, "suppliers", params={"select": "id,name", "limit": "500"}) or []
         sup_by_id = {s["id"]: s["name"] for s in suppliers}
 

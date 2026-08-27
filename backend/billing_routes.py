@@ -482,13 +482,31 @@ async def billing_webhook(request: Request):
 @router.get("/api/billing/status")
 async def billing_status():
     from billing_stripe import stripe_configured
+    from url_safety import checkout_redirect_public_base
+
+    sk = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if sk.startswith("sk_live_"):
+        key_mode = "live"
+    elif sk.startswith("sk_test_"):
+        key_mode = "test"
+    else:
+        key_mode = "missing"
+
+    public_ok = False
+    try:
+        base = checkout_redirect_public_base()
+        public_ok = bool(base) and "localhost" not in base and "127.0.0.1" not in base
+    except Exception:
+        public_ok = False
 
     return {
         "ok": True,
         "stripe_configured": stripe_configured(),
+        "stripe_key_mode": key_mode,
         "webhook_secret_set": bool(
             (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip().startswith("whsec_")
         ),
+        "public_api_url_ok": public_ok,
         "confirm_session_available": True,
         "mock_billing": os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower()
         in ("1", "true", "yes"),

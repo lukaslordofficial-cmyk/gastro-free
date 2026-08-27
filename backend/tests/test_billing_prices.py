@@ -1,7 +1,7 @@
 """Stripe Price IDs must come from env in production."""
 import pytest
 
-from billing_stripe import resolve_price_id
+from billing_stripe import DEFAULT_PRICES, resolve_price_id
 
 
 def test_resolve_price_requires_env(monkeypatch):
@@ -14,4 +14,18 @@ def test_resolve_price_requires_env(monkeypatch):
 def test_resolve_price_test_fallback(monkeypatch):
     monkeypatch.delenv("STRIPE_PRICE_TIER1", raising=False)
     monkeypatch.setenv("ALLOW_STRIPE_TEST_PRICE_FALLBACK", "true")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
     assert resolve_price_id(tier_level=1).startswith("price_")
+
+
+def test_live_key_rejects_bundled_test_price_ids(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_dummy")
+    monkeypatch.setenv("STRIPE_PRICE_TIER1", DEFAULT_PRICES["tier1"])
+    with pytest.raises(RuntimeError, match="sk_live_"):
+        resolve_price_id(tier_level=1)
+
+
+def test_live_key_accepts_custom_price_id(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_dummy")
+    monkeypatch.setenv("STRIPE_PRICE_TIER1", "price_live_custom_abc")
+    assert resolve_price_id(tier_level=1) == "price_live_custom_abc"

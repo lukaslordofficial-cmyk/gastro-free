@@ -65,17 +65,38 @@ def _env_price(name: str, fallback: str) -> str:
     )
 
 
+def _assert_price_matches_key_mode(price_id: str, env_name: str) -> str:
+    """Live secret + testowe Price ID z DEFAULT_PRICES = prawie na pewno pomyłka przy go-live."""
+    sk = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if sk.startswith("sk_live_") and price_id in DEFAULT_PRICES.values():
+        raise RuntimeError(
+            f"{env_name} to nadal testowe Price ID, a STRIPE_SECRET_KEY jest sk_live_. "
+            "W Stripe Dashboard (tryb Live) utwórz produkty i wklej nowe price_… na Railway."
+        )
+    return price_id
+
+
 def resolve_price_id(*, tier_level: Optional[int] = None, package: Optional[str] = None) -> str:
     if tier_level == 1:
-        return _env_price("STRIPE_PRICE_TIER1", DEFAULT_PRICES["tier1"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TIER1", DEFAULT_PRICES["tier1"]), "STRIPE_PRICE_TIER1"
+        )
     if tier_level == 2:
-        return _env_price("STRIPE_PRICE_TIER2", DEFAULT_PRICES["tier2"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TIER2", DEFAULT_PRICES["tier2"]), "STRIPE_PRICE_TIER2"
+        )
     if package == "small":
-        return _env_price("STRIPE_PRICE_TOPUP_100", DEFAULT_PRICES["topup_100"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TOPUP_100", DEFAULT_PRICES["topup_100"]), "STRIPE_PRICE_TOPUP_100"
+        )
     if package == "medium":
-        return _env_price("STRIPE_PRICE_TOPUP_500", DEFAULT_PRICES["topup_500"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TOPUP_500", DEFAULT_PRICES["topup_500"]), "STRIPE_PRICE_TOPUP_500"
+        )
     if package == "large":
-        return _env_price("STRIPE_PRICE_TOPUP_1000", DEFAULT_PRICES["topup_1000"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TOPUP_1000", DEFAULT_PRICES["topup_1000"]), "STRIPE_PRICE_TOPUP_1000"
+        )
     raise ValueError("Nieznany produkt billingowy")
 
 

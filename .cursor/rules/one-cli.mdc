@@ -1,0 +1,28 @@
+---
+description: Use One CLI for third-party apps (Gmail, Slack, Notion, Stripe, GitHub, etc.)
+alwaysApply: true
+---
+
+# One CLI (`one`)
+
+The One CLI is installed and authenticated on this machine. Use it whenever you need to interact with a third-party platform or external service (Gmail, Slack, Shopify, HubSpot, Stripe, GitHub, Notion, Salesforce, WordPress, Supabase via One, Google Docs, etc.).
+
+## Always use `--agent`
+
+Put `--agent` right after `one` for structured JSON:
+
+- `one --agent list` — connected platforms and connection keys
+- `one --agent actions search <platform> "<query>"` — find actions
+- `one --agent actions knowledge <platform> <actionId>` — read docs (**required** before execute)
+- `one --agent actions execute <platform> <actionId> <connectionKey>` — run the action
+- `one --agent flow create` — multi-step workflows
+- `one --agent relay create` — webhook relay
+- `one --agent guide` — full docs
+- `one add <platform>` — connect a new platform (interactive, no `--agent`)
+
+## Workflow
+
+1. Search → 2. Read knowledge → 3. Execute.
+Never guess parameters. Confirm with the user before anything destructive (delete, send, pay, drop, force-push).
+
+Local install: `npm i -g @withone/cli`. Auth: `one init --auth browser` or `one init --auth manual --api-key <key>`.

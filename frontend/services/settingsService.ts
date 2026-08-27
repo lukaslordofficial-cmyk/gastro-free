@@ -136,8 +136,12 @@ export async function fetchSettingsBundle(accountKey?: string | null): Promise<S
       invQ = invQ.eq('account_key', accountKey);
     }
 
+    let posQ = supabase.from('pos_settings').select('*').limit(1);
+    if (isRealKey(accountKey)) posQ = posQ.eq('account_key', accountKey);
+    else posQ = posQ.eq('account_key', '__none__');
+
     const [posRes, menuRes, invRes] = await Promise.all([
-      supabase.from('pos_settings').select('*').maybeSingle(),
+      posQ.maybeSingle(),
       menuQ,
       invQ,
     ]);
@@ -188,16 +192,23 @@ export type PosSettingsPayload = {
 export async function savePosSettings(
   payload: PosSettingsPayload,
   existingId?: string | null,
+  accountKey?: string | null,
 ): Promise<{ error: { message: string } | null }> {
   try {
+    const ak = isRealKey(accountKey) ? accountKey : null;
+    if (!ak) {
+      return { error: { message: 'Zaloguj się, żeby zapisać ustawienia POS tej restauracji.' } };
+    }
+    const row = { ...payload, account_key: ak };
     if (existingId) {
       const { error } = await supabase
         .from('pos_settings')
-        .update(payload)
-        .eq('id', existingId);
+        .update(row)
+        .eq('id', existingId)
+        .eq('account_key', ak);
       return { error: error ? { message: error.message } : null };
     }
-    const { error } = await supabase.from('pos_settings').insert(payload);
+    const { error } = await supabase.from('pos_settings').insert(row);
     return { error: error ? { message: error.message } : null };
   } catch (e) {
     if (__DEV__) console.warn('[settingsService] savePosSettings', e);

@@ -24,9 +24,13 @@ export function SubscriptionPanel() {
   const [toast, setToast] = useState<string | null>(null);
   const [toastIsError, setToastIsError] = useState(false);
   const [mockBilling, setMockBilling] = useState(false);
+  const [stripeLive, setStripeLive] = useState(false);
 
   useEffect(() => {
-    void fetchBillingStatus().then((s) => setMockBilling(s.mock_billing));
+    void fetchBillingStatus().then((s) => {
+      setMockBilling(s.mock_billing);
+      setStripeLive(s.stripe_key_mode === 'live');
+    });
   }, []);
 
   const run = useCallback(async (key: string, fn: () => Promise<{ message?: string | null }>) => {
@@ -232,9 +236,9 @@ export function SubscriptionPanel() {
           </TouchableOpacity>
         ))}
       </View>
-      {mockBilling ? (
+      {mockBilling || !stripeLive ? (
         <Text style={styles.mockNote}>
-          Tryb testowy Stripe. Po zapłacie wróć tu i odśwież portfel albo potwierdź sesję poniżej.
+          Stripe w trybie testowym. Po zapłacie wróć tu — portfel potwierdzi się sam, albo kliknij poniżej.
         </Text>
       ) : (
         <Text style={styles.mockNote}>

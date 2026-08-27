@@ -16,7 +16,7 @@ from fastapi import HTTPException
 
 from url_safety import assert_safe_rest_path, assert_supabase_origin
 
-# Tabele z kolumną account_key (ADD_TENANT_ISOLATION / FIX_FINANCE_TENANT_RLS).
+# Tabele z kolumną account_key (tenant isolation — service_role filtruje tu, RLS na kliencie).
 _TENANT_TABLES = frozenset({
     "inventory_items",
     "inventory_categories",
@@ -33,12 +33,16 @@ _TENANT_TABLES = frozenset({
     "sales_log",
     "pos_sales_log",
     "pos_sync_events",
+    "pos_products",
+    "pos_settings",
+    "recipes",
     "financial_records",
     "subscriptions",
     "restaurant_profile",
     "kitchen_utensils",
     "supplier_orders",
     "invoices",
+    "warehouse_expiry_alerts",
 })
 
 _GetAccountKey = Callable[[], str]

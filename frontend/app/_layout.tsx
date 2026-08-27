@@ -50,7 +50,8 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (!ready) return;
     const root = String(segments[0] || '');
     const inAuth = root === '(auth)';
-    const paymentReturn = root === 'lp' || root === 'success' || root === 'cancel';
+    const paymentReturn =
+      root === 'lp' || root === 'success' || root === 'cancel' || root === 'billing';
     if (!isAuthenticated && !inAuth && !paymentReturn) {
       router.replace('/(auth)/login');
     } else if (isAuthenticated && inAuth) {
@@ -91,6 +92,7 @@ function RootLayoutNav() {
                 <Stack.Screen name="(auth)" options={{ headerShown: false }} />
                 <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
                 <Stack.Screen name="lp" options={{ headerShown: false }} />
+                <Stack.Screen name="billing" options={{ headerShown: false }} />
                 <Stack.Screen name="success" options={{ headerShown: false }} />
                 <Stack.Screen name="cancel" options={{ headerShown: false }} />
                 <Stack.Screen name="+not-found" />

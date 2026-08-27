@@ -149,17 +149,23 @@ export async function createCheckoutAndOpen(opts: {
 }
 
 /** Backend pyta Stripe, czy sesja jest opłacona — i dopiero wtedy dolicza kredyty. */
-export async function confirmPendingCheckout(): Promise<{
+export async function confirmPendingCheckout(sessionIdFromUrl?: string | null): Promise<{
   ok: boolean;
   paid?: boolean;
   message: string;
 }> {
   if (!BACKEND_URL) return { ok: false, message: 'Brak backendu' };
-  let sessionId: string | null = null;
-  try {
-    sessionId = await AsyncStorage.getItem(PENDING_SESSION_KEY);
-  } catch {
-    return { ok: false, message: 'Brak zapisanej sesji płatności.' };
+  let sessionId = (sessionIdFromUrl || '').trim();
+  if (sessionId.startsWith('cs_')) {
+    try {
+      await AsyncStorage.setItem(PENDING_SESSION_KEY, sessionId);
+    } catch { /* ignore */ }
+  } else {
+    try {
+      sessionId = (await AsyncStorage.getItem(PENDING_SESSION_KEY)) || '';
+    } catch {
+      return { ok: false, message: 'Brak zapisanej sesji płatności.' };
+    }
   }
   if (!sessionId) {
     return { ok: false, message: 'Brak oczekującej płatności do potwierdzenia.' };
@@ -207,19 +213,38 @@ export async function fetchBillingStatus(): Promise<{
   stripe_configured: boolean;
   webhook_secret_set: boolean;
   mock_billing: boolean;
+  stripe_key_mode: 'live' | 'test' | 'missing';
+  public_api_url_ok: boolean;
 }> {
   if (!BACKEND_URL) {
-    return { stripe_configured: false, webhook_secret_set: false, mock_billing: false };
+    return {
+      stripe_configured: false,
+      webhook_secret_set: false,
+      mock_billing: false,
+      stripe_key_mode: 'missing',
+      public_api_url_ok: false,
+    };
   }
   try {
     const r = await fetch(`${BACKEND_URL}/api/billing/status`);
     const d = await r.json();
+    const mode = d.stripe_key_mode === 'live' || d.stripe_key_mode === 'test'
+      ? d.stripe_key_mode
+      : 'missing';
     return {
       stripe_configured: !!d.stripe_configured,
       webhook_secret_set: !!d.webhook_secret_set,
       mock_billing: !!d.mock_billing,
+      stripe_key_mode: mode,
+      public_api_url_ok: !!d.public_api_url_ok,
     };
   } catch {
-    return { stripe_configured: false, webhook_secret_set: false, mock_billing: false };
+    return {
+      stripe_configured: false,
+      webhook_secret_set: false,
+      mock_billing: false,
+      stripe_key_mode: 'missing',
+      public_api_url_ok: false,
+    };
   }
 }

@@ -194,7 +194,7 @@ export default function UstawieniaScreen() {
       is_connected: posSettings.is_connected,
     };
     const existingId = (posSettings as PosSettings & { id?: string }).id;
-    const result = await savePosSettings(payload, existingId);
+    const result = await savePosSettings(payload, existingId, accountKey);
     setPosSaving(false);
     if (result.error) {
       premiumAlert('Błąd', result.error.message);

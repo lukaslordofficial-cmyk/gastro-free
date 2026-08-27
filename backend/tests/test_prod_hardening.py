@@ -84,6 +84,18 @@ def test_supplier_orders_tenant_inject(monkeypatch):
     assert payload["account_key"] == "ak_test"
 
 
+def test_pos_and_warehouse_tenant_inject(monkeypatch):
+    import supabase_rest as sr
+
+    monkeypatch.setenv("ACCOUNT_KEY", "ak_test")
+    sr.configure(get_account_key=lambda: "ak_test")
+    for table in ("pos_products", "pos_settings", "recipes", "warehouse_expiry_alerts"):
+        out = sr._with_tenant_params(table, {"select": "id"})
+        assert out["account_key"] == "eq.ak_test"
+        payload = sr._with_tenant_payload(table, {"name": "x"})
+        assert payload["account_key"] == "ak_test"
+
+
 def test_deduct_credits_retries_empty_patch(monkeypatch):
     import billing_credits as bc
 

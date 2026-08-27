@@ -4,8 +4,6 @@ Wydzielone z server.py.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import httpx
 from fastapi import APIRouter, Request
 
@@ -16,47 +14,48 @@ from supabase_rest import sb_get
 router = APIRouter(tags=["admin"])
 
 
+def _probe(checks: dict[str, bool], name: str, ok: bool) -> None:
+    checks[name] = ok
+
+
 @router.get("/api/admin/migration-status")
 async def admin_migration_status(request: Request):
-    """Sprawdza czy migracja ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql jest w DB."""
+    """Sondy kolumn/tabel krytycznych dla izolacji tenant + POS + billing."""
     require_cron_secret(request)
+    checks: dict[str, bool] = {}
+    missing_sql: list[str] = []
+
     async with httpx.AsyncClient(timeout=15.0, verify=httpx_verify()) as client:
-        checks: dict[str, bool] = {}
-        try:
-            await sb_get(client, "menu_items", params={"select": "is_available", "limit": "1"})
-            checks["menu_items.is_available"] = True
-        except Exception:
-            checks["menu_items.is_available"] = False
-        try:
-            await sb_get(client, "inventory_items", params={"select": "synonyms", "limit": "1"})
-            checks["inventory_items.synonyms"] = True
-        except Exception:
-            checks["inventory_items.synonyms"] = False
-        try:
-            await sb_get(client, "token_usage", params={"select": "id", "limit": "1"})
-            checks["token_usage table"] = True
-        except Exception:
-            checks["token_usage table"] = False
-        try:
-            await sb_get(client, "suppliers", params={"select": "min_order_value", "limit": "1"})
-            checks["suppliers.min_order_value"] = True
-        except Exception:
-            checks["suppliers.min_order_value"] = False
+        probes: list[tuple[str, str, dict, str]] = [
+            ("menu_items.is_available", "menu_items", {"select": "is_available", "limit": "1"}, "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"),
+            ("inventory_items.synonyms", "inventory_items", {"select": "synonyms", "limit": "1"}, "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"),
+            ("token_usage table", "token_usage", {"select": "id", "limit": "1"}, "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"),
+            ("suppliers.min_order_value", "suppliers", {"select": "min_order_value", "limit": "1"}, "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"),
+            ("pos_sync_events", "pos_sync_events", {"select": "id,account_key,event_id", "limit": "1"}, "ADD_POS_SYNC_EVENTS.sql"),
+            ("invoices.account_key", "invoices", {"select": "account_key", "limit": "1"}, "FIX_INVOICES_TENANT_RLS.sql"),
+            ("pos_products.account_key", "pos_products", {"select": "account_key", "limit": "1"}, "FIX_POS_TENANT_RLS.sql"),
+            ("pos_settings.account_key", "pos_settings", {"select": "account_key", "limit": "1"}, "FIX_POS_TENANT_RLS.sql"),
+            ("recipes.account_key", "recipes", {"select": "account_key", "limit": "1"}, "FIX_POS_TENANT_RLS.sql"),
+            ("warehouse_expiry_alerts.account_key", "warehouse_expiry_alerts", {"select": "account_key", "limit": "1"}, "FIX_WAREHOUSE_EXPIRY_TENANT_RLS.sql"),
+            ("subscriptions.account_key", "subscriptions", {"select": "account_key", "limit": "1"}, "FIX_SUBSCRIPTIONS_TENANT_RLS.sql"),
+        ]
+        for name, table, params, sql_file in probes:
+            try:
+                await sb_get(client, table, params=params)
+                _probe(checks, name, True)
+            except Exception:
+                _probe(checks, name, False)
+                if sql_file not in missing_sql:
+                    missing_sql.append(sql_file)
 
     all_ok = all(checks.values())
-    sql_path = (
-        Path(__file__).resolve().parent.parent
-        / "supabase_migrations"
-        / "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"
-    )
-    sql_content = sql_path.read_text(encoding="utf-8") if sql_path.exists() else ""
     return {
         "ok": all_ok,
         "checks": checks,
+        "missing_sql": missing_sql,
         "instructions": (
-            "Otwórz Supabase Dashboard → SQL Editor → New query → wklej poniższy SQL → Run."
+            "Supabase → SQL Editor → kolejno wklej pliki z missing_sql (katalog supabase_migrations/)."
             if not all_ok
-            else "Wszystkie migracje uruchomione."
+            else "Wszystkie sondy migracji OK."
         ),
-        "sql": sql_content if not all_ok else "",
     }

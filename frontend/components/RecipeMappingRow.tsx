@@ -24,6 +24,7 @@ import {
 import { Colors } from '@/constants/colors';
 import { supabase } from '@/lib/supabase';
 import type { PosProduct } from '@/lib/types';
+import { requireTenantAccountKey, withAccountKey } from '@/lib/tenantScope';
 
 const UNITS = ['kg', 'l', 'szt', 'g', 'ml', 'opak'];
 
@@ -66,14 +67,20 @@ export function RecipeMappingRow({ posProduct, inventoryItems }: Props) {
 
   const fetchRecipes = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('recipes')
-      .select(
-        'id, pos_product_id, warehouse_product_id, quantity_per_portion, unit, inventory_items(id, name, unit)'
-      )
-      .eq('pos_product_id', posProduct.id);
-    if (data) setRecipes(data as RecipeWithInventory[]);
-    setLoading(false);
+    try {
+      const { data } = await supabase
+        .from('recipes')
+        .select(
+          'id, pos_product_id, warehouse_product_id, quantity_per_portion, unit, inventory_items(id, name, unit)'
+        )
+        .eq('pos_product_id', posProduct.id)
+        .eq('account_key', requireTenantAccountKey());
+      if (data) setRecipes(data as RecipeWithInventory[]);
+    } catch {
+      setRecipes([]);
+    } finally {
+      setLoading(false);
+    }
   }, [posProduct.id]);
 
   useEffect(() => {
@@ -90,7 +97,11 @@ export function RecipeMappingRow({ posProduct, inventoryItems }: Props) {
           text: 'Usuń',
           style: 'destructive',
           onPress: async () => {
-            await supabase.from('recipes').delete().eq('id', recipeId);
+            await supabase
+              .from('recipes')
+              .delete()
+              .eq('id', recipeId)
+              .eq('account_key', requireTenantAccountKey());
             setRecipes((prev) => prev.filter((r) => r.id !== recipeId));
           },
         },
@@ -111,12 +122,12 @@ export function RecipeMappingRow({ posProduct, inventoryItems }: Props) {
     const qty = parseFloat(quantityInput.replace(',', '.'));
     if (isNaN(qty) || qty <= 0) { Alert.alert('Błąd', 'Podaj prawidłową ilość na porcję (np. 0.15).'); return; }
     setSaving(true);
-    const { error } = await supabase.from('recipes').insert({
+    const { error } = await supabase.from('recipes').insert(withAccountKey({
       pos_product_id: posProduct.id,
       warehouse_product_id: selectedItem.id,
       quantity_per_portion: qty,
       unit: selectedUnit,
-    });
+    }));
     setSaving(false);
     if (error) {
       Alert.alert(

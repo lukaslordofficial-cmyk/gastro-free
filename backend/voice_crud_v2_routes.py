@@ -86,12 +86,18 @@ async def _exec_restore_menu(client):
 async def _exec_bulk_delete_suppliers(client):
     rows = await sb_get(client, "suppliers", params={"select": "id"}) or []
     n = len(rows)
-    if n:
-        # Usuń najpierw powiązane katalogi (na wypadek FK), potem dostawców — twarde usunięcie.
+    ids = [str(r["id"]) for r in rows if r.get("id")]
+    if ids:
+        # Katalog nie jest w _TENANT_TABLES — NIGDY nie kasuj _ALL_ROWS.
+        id_csv = ",".join(ids)
         try:
-            await sb_delete(client, "supplier_catalog", _ALL_ROWS)
+            await sb_delete(client, "supplier_catalog", {"supplier_id": f"in.({id_csv})"})
         except httpx.HTTPStatusError:
-            pass
+            for sid in ids:
+                try:
+                    await sb_delete(client, "supplier_catalog", {"supplier_id": f"eq.{sid}"})
+                except httpx.HTTPStatusError:
+                    pass
         await sb_delete(client, "suppliers", _ALL_ROWS)
     return {"ok": True, "action": "bulk_delete_suppliers", "affected": n,
             "message": f"Usunięto {n} dostawców."}

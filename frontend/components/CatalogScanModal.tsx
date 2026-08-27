@@ -25,6 +25,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { getAccountKey } from '@/lib/accountKey';
 import {
   InvoiceExpiryReviewForm,
   buildExpiryDrafts,
@@ -148,6 +149,7 @@ export function CatalogScanModal({
         const { data } = await supabase
           .from('inventory_categories')
           .select('name')
+          .eq('account_key', getAccountKey())
           .order('sort_order')
           .limit(200);
         if (cancelled) return;

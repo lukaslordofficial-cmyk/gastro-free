@@ -115,12 +115,14 @@ async def stripe_connect_callback(
 
     async with httpx.AsyncClient(timeout=60.0, verify=httpx_verify()) as client:
         try:
+            # Query account_id jest ignorowane — atakujący mógłby podpiąć cudze acct_.
+            # ID pochodzi z local_producers (zapisane przy starcie onboardingu).
             synced = await sync_connect_account_to_producer(
                 client=client,
                 sb_get=sb_get,
                 sb_patch=sb_patch,
                 producer_id=pid,
-                account_id=(account_id or "").strip() or None,
+                account_id=None,
             )
         except Exception as e:
             logger.exception("stripe connect callback failed")

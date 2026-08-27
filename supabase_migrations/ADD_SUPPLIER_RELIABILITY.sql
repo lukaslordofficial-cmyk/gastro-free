@@ -36,23 +36,6 @@ CREATE INDEX IF NOT EXISTS idx_supplier_delivery_reviews_supplier
   ON public.supplier_delivery_reviews (supplier_id, created_at DESC);
 
 ALTER TABLE public.supplier_delivery_reviews ENABLE ROW LEVEL SECURITY;
-
--- Podstawowe polityki (jak inne tabele app — authenticated full access)
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public'
-      AND tablename = 'supplier_delivery_reviews'
-      AND policyname = 'supplier_delivery_reviews_authenticated_all'
-  ) THEN
-    CREATE POLICY supplier_delivery_reviews_authenticated_all
-      ON public.supplier_delivery_reviews
-      FOR ALL
-      TO authenticated
-      USING (true)
-      WITH CHECK (true);
-  END IF;
-END $$;
+-- Izolację tenant daje FIX_PROD_SECURITY_RLS.sql — nie twórz USING(true).
 
 NOTIFY pgrst, 'reload schema';

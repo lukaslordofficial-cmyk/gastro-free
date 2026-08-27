@@ -56,10 +56,16 @@ async def _load_supplier_reliability_scores(client: httpx.AsyncClient) -> dict[s
         logger.debug(f"reliability from supplier_orders skipped: {e}")
 
     try:
-        revs = await sb_get(client, "supplier_delivery_reviews", params={
-            "select": "supplier_id,received_ok,missing_count",
-            "limit": "2000",
-        }) or []
+        suppliers = await sb_get(client, "suppliers", params={"select": "id", "limit": "2000"}) or []
+        sid_csv = ",".join(str(s["id"]) for s in suppliers if s.get("id"))
+        if sid_csv:
+            revs = await sb_get(client, "supplier_delivery_reviews", params={
+                "select": "supplier_id,received_ok,missing_count",
+                "supplier_id": f"in.({sid_csv})",
+                "limit": "2000",
+            }) or []
+        else:
+            revs = []
         for r in revs:
             sid = r.get("supplier_id")
             if not sid:

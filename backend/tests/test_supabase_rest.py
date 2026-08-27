@@ -42,3 +42,18 @@ def test_tenant_params_injected(monkeypatch):
     assert sr._with_tenant_params("profiles", {"select": "id"}) == {"select": "id"}
     orders = sr._with_tenant_params("supplier_orders", {"select": "id,status"})
     assert orders["account_key"] == "eq.ak_test"
+
+
+def test_tenant_params_overwrite_spoofed_key(monkeypatch):
+    monkeypatch.setenv("ACCOUNT_KEY", "ak_real")
+    sr.configure(get_account_key=lambda: "ak_real")
+    out = sr._with_tenant_params("inventory_items", {"select": "id", "account_key": "eq.ak_attacker"})
+    assert out["account_key"] == "eq.ak_real"
+    body = sr._with_tenant_payload("inventory_items", {"name": "x", "account_key": "ak_attacker"})
+    assert body["account_key"] == "ak_real"
+
+
+def test_production_does_not_strip_missing_account_key(monkeypatch):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    resp = httpx.Response(400, text='column account_key does not exist')
+    assert sr._retry_without_tenant_column(resp) is False

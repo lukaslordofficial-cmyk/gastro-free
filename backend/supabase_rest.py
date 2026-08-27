@@ -15,6 +15,7 @@ import httpx
 from fastapi import HTTPException
 
 from url_safety import assert_safe_rest_path, assert_supabase_origin
+from http_ssl import is_production_runtime
 
 # Tabele z kolumną account_key (tenant isolation — service_role filtruje tu, RLS na kliencie).
 _TENANT_TABLES = frozenset({
@@ -117,19 +118,18 @@ def _with_tenant_params(path: str, params: dict | list | None) -> dict | list | 
         return params
     ak_filter = f"eq.{_account_key()}"
     if isinstance(params, dict):
-        if "account_key" in params:
-            return params
         out = dict(params)
         out["account_key"] = ak_filter
         return out
     if isinstance(params, list):
-        if any(
-            (isinstance(p, (list, tuple)) and len(p) >= 1 and p[0] == "account_key")
-            or (isinstance(p, str) and p.startswith("account_key"))
-            for p in params
-        ):
-            return params
-        return list(params) + [("account_key", ak_filter)]
+        kept = [
+            p for p in params
+            if not (
+                (isinstance(p, (list, tuple)) and len(p) >= 1 and p[0] == "account_key")
+                or (isinstance(p, str) and p.startswith("account_key"))
+            )
+        ]
+        return kept + [("account_key", ak_filter)]
     return params
 
 
@@ -138,10 +138,8 @@ def _with_tenant_payload(path: str, payload: Any) -> Any:
         return payload
     ak = _account_key()
     if isinstance(payload, list):
-        return [{**row, "account_key": (row.get("account_key") or ak)} for row in payload if isinstance(row, dict)]
+        return [{**row, "account_key": ak} for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
-        if payload.get("account_key"):
-            return payload
         return {**payload, "account_key": ak}
     return payload
 
@@ -151,6 +149,13 @@ def _missing_account_key_error(resp: httpx.Response) -> bool:
     return "account_key" in body and (
         "does not exist" in body or "schema cache" in body or "pgrst204" in body or "42703" in body
     )
+
+
+def _retry_without_tenant_column(resp: httpx.Response) -> bool:
+    """Dev-only: kolumna account_key jeszcze nie istnieje. Produkcja fail-closed."""
+    if is_production_runtime():
+        return False
+    return _missing_account_key_error(resp)
 
 
 def _strip_account_key_payload(payload: Any) -> Any:
@@ -197,7 +202,7 @@ async def sb_get(
     tenant_params = _with_tenant_params(path, params)
     url = _rest_url(path)
     r = await client.get(url, headers=sb_headers(), params=tenant_params or {})
-    if r.status_code >= 400 and _missing_account_key_error(r):
+    if r.status_code >= 400 and _retry_without_tenant_column(r):
         r = await client.get(
             url,
             headers=sb_headers(),
@@ -212,7 +217,7 @@ async def sb_post(client: httpx.AsyncClient, path: str, payload: Any):
     body = _with_tenant_payload(path, payload)
     url = _rest_url(path)
     r = await client.post(url, headers=sb_headers(), json=body)
-    if r.status_code >= 400 and _missing_account_key_error(r):
+    if r.status_code >= 400 and _retry_without_tenant_column(r):
         r = await client.post(url, headers=sb_headers(), json=_strip_account_key_payload(body))
     r.raise_for_status()
     return r.json() if r.text else None
@@ -225,7 +230,7 @@ async def sb_patch(client: httpx.AsyncClient, path: str, params: dict, payload: 
     r = await client.patch(
         url, headers=sb_headers(), params=tenant_params or {}, json=payload,
     )
-    if r.status_code >= 400 and _missing_account_key_error(r):
+    if r.status_code >= 400 and _retry_without_tenant_column(r):
         r = await client.patch(
             url,
             headers=sb_headers(),
@@ -241,7 +246,7 @@ async def sb_delete(client: httpx.AsyncClient, path: str, params: dict):
     tenant_params = _with_tenant_params(path, params)
     url = _rest_url(path)
     r = await client.delete(url, headers=sb_headers(), params=tenant_params or {})
-    if r.status_code >= 400 and _missing_account_key_error(r):
+    if r.status_code >= 400 and _retry_without_tenant_column(r):
         r = await client.delete(
             url,
             headers=sb_headers(),

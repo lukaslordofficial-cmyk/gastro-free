@@ -41,7 +41,6 @@ import { SettingsTopTabs, type SettingsPaneId } from '@/components/settings/Sett
 import { settingsScreenStyles as styles } from '@/components/settings/settingsScreenStyles';
 import { groupMenuItemsByCategory } from '@/lib/settingsMenuGroups';
 import {
-  buildPosWebhookUrl,
   getPosProvider,
   POS_PROVIDERS,
   type PosProviderId,
@@ -107,12 +106,6 @@ export default function UstawieniaScreen() {
       },
     ]);
   };
-
-  const fallbackWebhookUrl = buildPosWebhookUrl(
-    BACKEND_URL || 'http://127.0.0.1:8001',
-    posProvider,
-  );
-  const webhookUrl = signedWebhookUrl || fallbackWebhookUrl;
 
   useEffect(() => {
     let cancelled = false;
@@ -189,7 +182,7 @@ export default function UstawieniaScreen() {
   const handleSavePosSettings = async () => {
     setPosSaving(true);
     const payload = {
-      webhook_url: webhookUrl,
+      webhook_url: signedWebhookUrl || '',
       api_key: posSettings.api_key,
       is_connected: posSettings.is_connected,
     };
@@ -331,7 +324,13 @@ export default function UstawieniaScreen() {
 
               <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
 
-              <WebhookUrlRow url={webhookUrl} />
+              {signedWebhookUrl ? (
+                <WebhookUrlRow url={signedWebhookUrl} />
+              ) : (
+                <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginVertical: 8 }]}>
+                  Link webhooka pojawi się po zalogowaniu i połączeniu z serwerem. Nie kopiuj adresu lokalnego.
+                </Text>
+              )}
 
               <View style={[styles.divider, theme.isPremium && { backgroundColor: theme.border }]} />
 

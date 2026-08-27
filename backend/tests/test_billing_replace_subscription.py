@@ -62,3 +62,23 @@ def test_deleted_current_subscription_goes_free():
     ))
     assert result["action"] == "subscription_deleted_to_free"
     assert sb.patched and sb.patched[0]["tier_level"] == 0
+
+
+def test_webhook_skips_without_tenant_metadata():
+    sb = _FakeSB("sub_CUR")
+    event = {
+        "id": "evt_no_meta",
+        "type": "customer.subscription.deleted",
+        "data": {"object": {"id": "sub_CUR", "metadata": {}}},
+    }
+    result = asyncio.run(handle_stripe_event(
+        event,
+        client=None,
+        sb_get=sb.get,
+        sb_post=sb.post,
+        sb_patch=sb.patch,
+        account_key_default="default",
+        tier_config={},
+    ))
+    assert result["action"] == "skipped_missing_tenant"
+    assert sb.patched == []

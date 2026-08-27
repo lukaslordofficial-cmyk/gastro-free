@@ -181,6 +181,7 @@ export function VoiceReportModal({
         const { data } = await supabase
           .from('inventory_categories')
           .select('id, name, color')
+          .eq('account_key', accountKey)
           .order('sort_order');
         if (data) setCategories(data as any);
       } catch { /* non-critical */ }
@@ -188,6 +189,7 @@ export function VoiceReportModal({
         const { data } = await supabase
           .from('menu_items')
           .select('category')
+          .eq('account_key', accountKey)
           .eq('is_active', true)
           .limit(2000);
         const set = new Set<string>();
@@ -198,7 +200,7 @@ export function VoiceReportModal({
         setMenuCategories(Array.from(set).sort((a, b) => a.localeCompare(b, 'pl')));
       } catch { /* non-critical */ }
     })();
-  }, [visible]);
+  }, [visible, accountKey]);
 
   function cleanup() {
     wakeListeningRef.current = false;

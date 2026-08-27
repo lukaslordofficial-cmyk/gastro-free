@@ -461,7 +461,7 @@ async def billing_webhook(request: Request):
         event = construct_event(payload, sig)
     except Exception as e:
         logger.warning("Stripe webhook signature failed: %s", e)
-        raise HTTPException(status_code=400, detail=f"Webhook signature: {e}") from e
+        raise HTTPException(status_code=400, detail="Invalid signature") from e
     if hasattr(event, "to_dict"):
         event_dict = event.to_dict()
     else:

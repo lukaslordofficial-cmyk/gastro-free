@@ -142,6 +142,8 @@ export function NewOrderBrowser({
           .limit(5000);
         cats = retry.data ?? [];
       }
+      const allowedSuppliers = new Set((supRes.data ?? []).map((s: { id: string }) => s.id));
+      cats = (cats as { supplier_id?: string }[]).filter((c) => c.supplier_id && allowedSuppliers.has(c.supplier_id));
       const bySup: Record<string, CatalogBrowseRow[]> = {};
       for (const c of cats as any[]) {
         if (!(Number(c.price_pln) > 0)) continue;

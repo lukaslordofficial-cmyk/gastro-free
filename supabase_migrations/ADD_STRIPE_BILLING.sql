@@ -31,17 +31,10 @@ CREATE TABLE IF NOT EXISTS public.stripe_webhook_events (
   processed_at  timestamptz NOT NULL DEFAULT now()
 );
 
-GRANT ALL ON public.stripe_webhook_events TO anon, authenticated, service_role;
+-- Tylko service_role (backend). Nie dawaj GRANT/polityk anon — wyciek eventów.
 ALTER TABLE public.stripe_webhook_events ENABLE ROW LEVEL SECURITY;
-DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE tablename = 'stripe_webhook_events' AND policyname = 'anon_all_stripe_webhook_events'
-  ) THEN
-    CREATE POLICY "anon_all_stripe_webhook_events" ON public.stripe_webhook_events
-      FOR ALL TO anon, authenticated, service_role
-      USING (true) WITH CHECK (true);
-  END IF;
-END $$;
+REVOKE ALL ON TABLE public.stripe_webhook_events FROM anon, authenticated, PUBLIC;
+GRANT ALL ON TABLE public.stripe_webhook_events TO service_role;
+DROP POLICY IF EXISTS "anon_all_stripe_webhook_events" ON public.stripe_webhook_events;
 
 NOTIFY pgrst, 'reload schema';

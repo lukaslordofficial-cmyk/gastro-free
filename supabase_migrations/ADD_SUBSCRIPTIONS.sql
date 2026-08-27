@@ -32,17 +32,10 @@ CREATE TRIGGER trg_subscriptions_updated_at
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 -- Uprawnienia REST API (PostgREST) — bez tego anon/service_role mogą nie widzieć tabeli
-GRANT ALL ON public.subscriptions TO anon, authenticated, service_role;
+GRANT ALL ON public.subscriptions TO service_role;
 
--- RLS — polityki otwarte (aplikacja bez logowania, jedno konto)
+-- RLS tenant: FIX_SUBSCRIPTIONS_TENANT_RLS.sql (nie USING(true))
 ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'subscriptions' AND policyname = 'anon_all_subscriptions') THEN
-    CREATE POLICY "anon_all_subscriptions" ON public.subscriptions
-      FOR ALL TO anon, authenticated, service_role
-      USING (true) WITH CHECK (true);
-  END IF;
-END $$;
 
 -- Odśwież cache schematu PostgREST (ważne po CREATE TABLE)
 NOTIFY pgrst, 'reload schema';

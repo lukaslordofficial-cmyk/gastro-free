@@ -25,6 +25,18 @@ def test_live_key_rejects_bundled_test_price_ids(monkeypatch):
         resolve_price_id(tier_level=1)
 
 
+def test_live_alias_secret_stripe_key_is_preferred(monkeypatch):
+    from billing_stripe import stripe_publishable_key, stripe_secret_key
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
+    monkeypatch.setenv("SECRET_STRIPE_KEY", "sk_live_dummy")
+    assert stripe_secret_key() == "sk_live_dummy"
+
+    monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_test_dummy")
+    monkeypatch.setenv("PUBLISHABLE_STRIPE_KEY", "pk_live_dummy")
+    assert stripe_publishable_key() == "pk_live_dummy"
+
+
 def test_live_key_accepts_custom_price_id(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_dummy")
     monkeypatch.setenv("STRIPE_PRICE_TIER1", "price_live_custom_abc")

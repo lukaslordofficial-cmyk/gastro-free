@@ -87,25 +87,7 @@ CREATE TABLE IF NOT EXISTS warehouse_expiry_alerts (
 
 ALTER TABLE warehouse_inventory ENABLE ROW LEVEL SECURITY;
 ALTER TABLE warehouse_expiry_alerts ENABLE ROW LEVEL SECURITY;
-
-DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE tablename = 'warehouse_inventory' AND policyname = 'anon_all_warehouse_inventory'
-  ) THEN
-    CREATE POLICY "anon_all_warehouse_inventory"
-      ON warehouse_inventory FOR ALL TO anon, authenticated
-      USING (true) WITH CHECK (true);
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE tablename = 'warehouse_expiry_alerts' AND policyname = 'anon_all_warehouse_expiry_alerts'
-  ) THEN
-    CREATE POLICY "anon_all_warehouse_expiry_alerts"
-      ON warehouse_expiry_alerts FOR ALL TO anon, authenticated
-      USING (true) WITH CHECK (true);
-  END IF;
-END $$;
+-- Izolację tenant daje FIX_WAREHOUSE_EXPIRY_TENANT_RLS.sql — nie twórz USING(true).
 
 -- =============================================================================
 -- CRON (opcjonalnie — wymaga rozszerzenia pg_cron + Edge Function URL)

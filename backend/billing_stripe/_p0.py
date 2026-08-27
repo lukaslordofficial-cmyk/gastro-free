@@ -23,11 +23,18 @@ logger = logging.getLogger("billing.stripe")
 STRIPE_API = "https://api.stripe.com/v1"
 
 STRIPE_PRODUCT_MAP = {
+    # Test mode (Dashboard toggle Test)
     "prod_UtaaLCsLbKaNKb": {"kind": "subscription", "tier_level": 1},
     "prod_UtaoGsCcAG9iTM": {"kind": "subscription", "tier_level": 2},
     "prod_Utav6FfYa4xRm5": {"kind": "topup", "package": "small", "credits": 100},
     "prod_Utb0Nd2J1MBYHE": {"kind": "topup", "package": "medium", "credits": 500},
     "prod_Utb3fRH0CMX3Nn": {"kind": "topup", "package": "large", "credits": 1000},
+    # Live catalog (konto QseiDVSEc)
+    "prod_V9KEE5ePei5dOP": {"kind": "subscription", "tier_level": 1},
+    "prod_V9KE6xgA2QKob8": {"kind": "subscription", "tier_level": 2},
+    "prod_V9KES9g92WOvnr": {"kind": "topup", "package": "small", "credits": 100},
+    "prod_V9KEZY8PBVhQjj": {"kind": "topup", "package": "medium", "credits": 500},
+    "prod_V9KEHXlb41jkam": {"kind": "topup", "package": "large", "credits": 1000},
 }
 
 # Domyślne Price ID z konta testowego (nadpisywane env)
@@ -40,12 +47,31 @@ DEFAULT_PRICES = {
 }
 
 
+def stripe_secret_key() -> str:
+    """Prefer sk_live_ when both test and live aliases exist (SECRET_STRIPE_KEY)."""
+    primary = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    alias = (os.getenv("SECRET_STRIPE_KEY") or "").strip()
+    for key in (primary, alias):
+        if key.startswith("sk_live_"):
+            return key
+    return primary or alias
+
+
+def stripe_publishable_key() -> str:
+    primary = (os.getenv("STRIPE_PUBLISHABLE_KEY") or "").strip()
+    alias = (os.getenv("PUBLISHABLE_STRIPE_KEY") or "").strip()
+    for key in (primary, alias):
+        if key.startswith("pk_live_"):
+            return key
+    return primary or alias
+
+
 def stripe_configured() -> bool:
-    return bool((os.getenv("STRIPE_SECRET_KEY") or "").strip())
+    return bool(stripe_secret_key())
 
 
 def _secret() -> str:
-    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    key = stripe_secret_key()
     if not key:
         raise RuntimeError("Brak STRIPE_SECRET_KEY w backend/.env")
     return key
@@ -67,7 +93,7 @@ def _env_price(name: str, fallback: str) -> str:
 
 def _assert_price_matches_key_mode(price_id: str, env_name: str) -> str:
     """Live secret + testowe Price ID z DEFAULT_PRICES = prawie na pewno pomyłka przy go-live."""
-    sk = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    sk = stripe_secret_key()
     if sk.startswith("sk_live_") and price_id in DEFAULT_PRICES.values():
         raise RuntimeError(
             f"{env_name} to nadal testowe Price ID, a STRIPE_SECRET_KEY jest sk_live_. "
@@ -737,4 +763,4 @@ async def handle_stripe_event(
         await _mark_processed(client, sb_post, event_id, event_type)
     return result
 
-__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'find_customer_active_subscription_id', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'upgrade_existing_subscription']
+__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'find_customer_active_subscription_id', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'stripe_publishable_key', 'stripe_secret_key', 'upgrade_existing_subscription']

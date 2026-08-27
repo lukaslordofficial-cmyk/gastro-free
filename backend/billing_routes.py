@@ -481,10 +481,10 @@ async def billing_webhook(request: Request):
 
 @router.get("/api/billing/status")
 async def billing_status():
-    from billing_stripe import stripe_configured
+    from billing_stripe import resolve_price_id, stripe_configured, stripe_secret_key
     from url_safety import checkout_redirect_public_base
 
-    sk = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    sk = stripe_secret_key()
     if sk.startswith("sk_live_"):
         key_mode = "live"
     elif sk.startswith("sk_test_"):
@@ -499,10 +499,22 @@ async def billing_status():
     except Exception:
         public_ok = False
 
+    prices_ok = False
+    try:
+        resolve_price_id(tier_level=1)
+        resolve_price_id(tier_level=2)
+        resolve_price_id(package="small")
+        resolve_price_id(package="medium")
+        resolve_price_id(package="large")
+        prices_ok = True
+    except Exception:
+        prices_ok = False
+
     return {
         "ok": True,
         "stripe_configured": stripe_configured(),
         "stripe_key_mode": key_mode,
+        "stripe_prices_ok": prices_ok,
         "webhook_secret_set": bool(
             (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip().startswith("whsec_")
         ),

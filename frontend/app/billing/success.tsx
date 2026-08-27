@@ -1,5 +1,5 @@
 /**
- * Deep link po Stripe Checkout: myapp:///billing/success?session_id=cs_…
+ * Deep link po Stripe Checkout: gastromanager:///billing/success?session_id=cs_…
  * Auto-potwierdza sesję (backend pyta Stripe) i odświeża portfel.
  */
 import { useEffect, useRef } from 'react';

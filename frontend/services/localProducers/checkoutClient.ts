@@ -1,6 +1,6 @@
 /**
  * Stripe Checkout + InPost dla zamówień Lokalnych Przetwórców.
- * Po Stripe: deep link myapp://lp/success (przez HTML na API) → szybki komunikat + confirm.
+ * Po Stripe: deep link gastromanager://lp/success (przez HTML na API) → szybki komunikat + confirm.
  */
 import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -147,7 +147,7 @@ export async function confirmProducerOrderPayment(sessionId?: string): Promise<{
   };
 }
 
-/** Parsuje myapp://lp/success?session_id=cs_… */
+/** Parsuje gastromanager://lp/success?session_id=cs_… */
 export function parseLpBillingDeepLink(url: string | null | undefined): {
   kind: 'success' | 'cancel' | null;
   sessionId?: string;

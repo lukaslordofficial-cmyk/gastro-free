@@ -2,10 +2,10 @@
   "expo": {
     "name": "Gastro Manager",
     "slug": "gastro-manager",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "myapp",
+    "scheme": "gastromanager",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
@@ -15,18 +15,17 @@
     },
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "3",
+      "buildNumber": "4",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
         "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
         "NSPhotoLibraryUsageDescription": "Wgraj zdjęcie cennika dostawcy z galerii.",
-        "NSLocationWhenInUseUsageDescription": "Lokalizacja restauracji służy do wyliczania odległości od lokalnych producentów żywności.",
-        "NSUserTrackingUsageDescription": "Identyfikator służy do wyświetlania spersonalizowanych reklam w planie darmowym."
+        "NSUserTrackingUsageDescription": "Identyfikator reklamy służy do wyświetlania reklam w planie darmowym (AdMob), tylko gdy nie masz płatnego planu."
       },
       "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
     },
     "android": {
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A120E"
@@ -35,8 +34,6 @@
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.VIBRATE",
@@ -48,9 +45,9 @@
           "action": "VIEW",
           "category": ["BROWSABLE", "DEFAULT"],
           "data": [
-            { "scheme": "myapp" },
-            { "scheme": "myapp", "host": "lp" },
-            { "scheme": "myapp", "host": "billing" }
+            { "scheme": "gastromanager" },
+            { "scheme": "gastromanager", "host": "lp" },
+            { "scheme": "gastromanager", "host": "billing" }
           ]
         }
       ]
@@ -63,6 +60,16 @@
       "expo-router",
       "expo-font",
       "expo-web-browser",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": false,
+            "targetSdkVersion": 35,
+            "compileSdkVersion": 35
+          }
+        }
+      ],
       [
         "expo-notifications",
         {

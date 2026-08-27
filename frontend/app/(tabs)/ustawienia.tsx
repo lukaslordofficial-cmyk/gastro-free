@@ -9,6 +9,7 @@ import {
   RefreshControl,
   ActivityIndicator,
   DeviceEventEmitter,
+  Linking,
 } from 'react-native';
 import { RECIPE_INGREDIENTS_CHANGED } from '@/lib/recipeSync';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -19,6 +20,8 @@ import {
   Info,
   Key,
   LogOut,
+  FileText,
+  Trash2,
 } from 'lucide-react-native';
 import {
   fetchActiveMenuPosList,
@@ -52,6 +55,8 @@ import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useAuth } from '@/contexts/AuthContext';
 import { router } from 'expo-router';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
+import { privacyPolicyUrl, termsUrl } from '@/lib/legalUrls';
+import { deleteOwnAccount } from '@/lib/accountClient';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 const POS_PROVIDER_KEY = '@gm/pos_provider';
@@ -84,7 +89,46 @@ export default function UstawieniaScreen() {
   const { alert: premiumAlert } = usePremiumAlert();
   const { user, profile, accountKey, signOut } = useAuth();
   const [signingOut, setSigningOut] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
   const [settingsPane, setSettingsPane] = useState<SettingsPaneId>('lokal');
+
+  const handleDeleteAccount = () => {
+    premiumAlert(
+      'Usuń konto',
+      'To trwale skasuje login, profil i dane restauracji oraz anuluje subskrypcję Stripe. Tej operacji nie da się cofnąć.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Usuń na zawsze',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setDeletingAccount(true);
+              try {
+                const res = await deleteOwnAccount();
+                if (!res.ok) {
+                  premiumAlert('Nie usunięto konta', res.message);
+                  return;
+                }
+                await signOut();
+                router.replace('/(auth)/login');
+              } finally {
+                setDeletingAccount(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
+  const openLegal = (url: string | null) => {
+    if (!url) {
+      premiumAlert('Brak adresu', 'Ustaw EXPO_PUBLIC_BACKEND_URL, żeby otworzyć dokumenty prawne.');
+      return;
+    }
+    void Linking.openURL(url);
+  };
 
   const handleSignOut = () => {
     premiumAlert('Wylogowanie', 'Na pewno chcesz się wylogować?', [
@@ -293,6 +337,63 @@ export default function UstawieniaScreen() {
                 <>
                   <LogOut size={16} color={theme.danger} strokeWidth={2.4} />
                   <Text style={[styles.saveBtnText, { color: theme.danger }]}>Wyloguj się</Text>
+                </>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saveBtn,
+                {
+                  marginTop: 10,
+                  backgroundColor: 'transparent',
+                  borderWidth: 1,
+                  borderColor: theme.isPremium ? theme.border : '#CBD5E1',
+                },
+              ]}
+              onPress={() => openLegal(privacyPolicyUrl())}
+              activeOpacity={0.85}
+            >
+              <FileText size={16} color={theme.textSecondary} strokeWidth={2.4} />
+              <Text style={[styles.saveBtnText, { color: theme.text }]}>Polityka prywatności</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saveBtn,
+                {
+                  marginTop: 10,
+                  backgroundColor: 'transparent',
+                  borderWidth: 1,
+                  borderColor: theme.isPremium ? theme.border : '#CBD5E1',
+                },
+              ]}
+              onPress={() => openLegal(termsUrl())}
+              activeOpacity={0.85}
+            >
+              <FileText size={16} color={theme.textSecondary} strokeWidth={2.4} />
+              <Text style={[styles.saveBtnText, { color: theme.text }]}>Regulamin</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saveBtn,
+                {
+                  marginTop: 10,
+                  backgroundColor: theme.isPremium ? 'rgba(255,90,90,0.08)' : Colors.dangerLight,
+                  borderWidth: 1,
+                  borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : Colors.danger,
+                },
+                deletingAccount && styles.saveBtnDisabled,
+              ]}
+              onPress={handleDeleteAccount}
+              disabled={deletingAccount || signingOut}
+              activeOpacity={0.85}
+              testID="settings-delete-account"
+            >
+              {deletingAccount ? (
+                <ActivityIndicator color={theme.danger} />
+              ) : (
+                <>
+                  <Trash2 size={16} color={theme.danger} strokeWidth={2.4} />
+                  <Text style={[styles.saveBtnText, { color: theme.danger }]}>Usuń konto</Text>
                 </>
               )}
             </TouchableOpacity>

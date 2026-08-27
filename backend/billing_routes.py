@@ -12,7 +12,13 @@ from pydantic import BaseModel
 
 from http_ssl import httpx_verify
 from supabase_rest import sb_get, sb_patch, sb_post
-from url_safety import assert_safe_redirect_url, checkout_redirect_public_base, is_safe_app_return_url
+from url_safety import (
+    app_deep_link,
+    assert_safe_redirect_url,
+    checkout_redirect_public_base,
+    is_app_or_dev_deep_link,
+    is_safe_app_return_url,
+)
 
 logger = logging.getLogger("billing.routes")
 
@@ -100,21 +106,9 @@ async def billing_create_checkout(req: CheckoutSessionRequest):
 
     success = (req.success_url or os.getenv("BILLING_SUCCESS_URL") or billing_ok).strip()
     cancel = (req.cancel_url or os.getenv("BILLING_CANCEL_URL") or billing_cancel).strip()
-    if (
-        success.startswith("myapp://")
-        or success.startswith("exp://")
-        or success.startswith("exp+")
-        or "localhost" in success
-        or "127.0.0.1" in success
-    ):
+    if is_app_or_dev_deep_link(success) or "localhost" in success or "127.0.0.1" in success:
         success = billing_ok
-    if (
-        cancel.startswith("myapp://")
-        or cancel.startswith("exp://")
-        or cancel.startswith("exp+")
-        or "localhost" in cancel
-        or "127.0.0.1" in cancel
-    ):
+    if is_app_or_dev_deep_link(cancel) or "localhost" in cancel or "127.0.0.1" in cancel:
         cancel = billing_cancel
     success = assert_safe_redirect_url(success)
     cancel = assert_safe_redirect_url(cancel)
@@ -385,15 +379,15 @@ async def billing_return(
     sid = (session_id or "").strip()
     suffix = f"?session_id={quote(sid, safe='')}" if sid.startswith("cs_") else ""
     if st == "portal":
-        deep = "myapp:///billing/portal-return"
+        deep = app_deep_link("billing/portal-return")
         title = "Panel subskrypcji"
         hint = "Wracamy do Gastro-Managera."
     elif ok:
-        deep = f"myapp:///billing/success{suffix}"
+        deep = app_deep_link(f"billing/success{suffix}")
         title = "Płatność zrealizowana"
         hint = "Wracamy do aplikacji. Jeśli kredyty się nie doliczyły — kliknij „Potwierdź płatność”."
     else:
-        deep = "myapp:///billing/cancel"
+        deep = app_deep_link("billing/cancel")
         title = "Płatność anulowana"
         hint = "Możesz wrócić do aplikacji i spróbować ponownie."
 

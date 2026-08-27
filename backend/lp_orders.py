@@ -8,9 +8,11 @@ from supabase_rest import sb_get
 from supabase_rest import sb_patch
 from supabase_rest import sb_post
 from typing import Optional
+from url_safety import app_deep_link
 from url_safety import assert_safe_redirect_url
 from url_safety import build_supabase_auth_user_url
 from url_safety import checkout_redirect_public_base
+from url_safety import is_app_or_dev_deep_link
 from url_safety import is_safe_app_return_url
 import httpx
 import json
@@ -231,9 +233,9 @@ async def local_producers_checkout(req: LpCheckoutRequest):
         f"?status=success&session_id={{CHECKOUT_SESSION_ID}}{app_q}"
     )
     billing_cancel = f"{public}/api/local-producers/billing-return?status=cancel{app_q}"
-    if success.startswith("myapp://") or success.startswith("exp://") or success.startswith("exp+"):
+    if is_app_or_dev_deep_link(success):
         success = billing_ok
-    if cancel.startswith("myapp://") or cancel.startswith("exp://") or cancel.startswith("exp+"):
+    if is_app_or_dev_deep_link(cancel):
         cancel = billing_cancel
     # Env czasem ma PUBLIC_APP_URL=http://localhost:8081 — na telefonie pada.
     if "localhost" in success or "127.0.0.1" in success:
@@ -330,7 +332,7 @@ async def local_producers_billing_return(
 ):
     """
     Stripe success/cancel (http/https) → HTML z deep linkiem.
-    Expo Go nie obsługuje myapp:// — wtedy używamy `app` z Linking.createURL.
+    Expo Go nie obsługuje gastromanager:// — wtedy używamy `app` z Linking.createURL.
     """
     from html import escape
     from urllib.parse import quote, unquote
@@ -339,13 +341,13 @@ async def local_producers_billing_return(
     ok = (status or "").strip().lower() in ("success", "ok", "paid")
     sid = (session_id or "").strip()
     suffix = f"?session_id={quote(sid, safe='')}" if sid.startswith("cs_") else ""
-    # Trzy slashe: myapp:///lp/success → ścieżka /lp/success (nie host=lp → /success).
+    # Trzy slashe: gastromanager:///lp/success → ścieżka /lp/success (nie host=lp → /success).
     if ok:
-        deep = f"myapp:///lp/success{suffix}"
+        deep = app_deep_link(f"lp/success{suffix}")
         title = "Płatność zrealizowana"
         hint = "Wracamy do Gastro Manager. Jeśli nic się nie dzieje — kliknij przycisk poniżej."
     else:
-        deep = "myapp:///lp/cancel"
+        deep = app_deep_link("lp/cancel")
         title = "Płatność anulowana"
         hint = "Możesz wrócić do aplikacji i spróbować ponownie."
 
@@ -358,7 +360,7 @@ async def local_producers_billing_return(
     else:
         primary = deep
 
-    # Expo Go: NIE skacz automatycznie na myapp:// — to otwiera „This screen doesn't exist”.
+    # Expo Go: NIE skacz automatycznie na custom scheme — to otwiera „This screen doesn't exist”.
     expo_primary = primary.startswith("exp://") or primary.startswith("exp+")
     auto_fallback = "" if expo_primary else deep
 

@@ -1,6 +1,6 @@
 /**
  * Deep link / Expo Go: exp://host/--/lp/success?session_id=cs_…
- * myapp:///lp/success oraz myapp://lp/success (host=lp → /success).
+ * gastromanager:///lp/success oraz gastromanager://lp/success (host=lp → /success).
  */
 import { useEffect, useRef } from 'react';
 import { ActivityIndicator, View } from 'react-native';

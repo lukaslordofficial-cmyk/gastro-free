@@ -90,6 +90,21 @@ export const settingsWebhookStyles = StyleSheet.create({
     color: '#15803D',
     letterSpacing: 0.5,
   },
+  urlBlock: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 10,
+  },
+  urlTextFull: {
+    width: '100%',
+    fontSize: 12,
+    lineHeight: 20,
+    color: '#475569',
+  },
   urlRow: {
     flexDirection: 'row',
     alignItems: 'center',

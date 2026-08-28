@@ -123,7 +123,6 @@ export default function MagazynScreen() {
       setInventory(items.map(mapDbRow));
       setDbCategories(categories as CategoryRow[]);
       setWasteLogs(wasteLogs as WasteLogRow[]);
-      setExpandedCategories(new Set((categories as CategoryRow[]).map((c) => c.name)));
       setError(null);
     } catch (e: any) {
       setError(e.message ?? 'Nieznany błąd');

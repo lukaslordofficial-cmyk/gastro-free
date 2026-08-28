@@ -28,8 +28,8 @@ export function AdBannerFooter({ testID = 'ad-banner-footer' }: Props) {
         unitId={pickAdUnit('banner')}
         size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
         requestOptions={{ requestNonPersonalizedAdsOnly: true }}
-        onAdFailedToLoad={() => {
-          /* cicho — brak miejsca na spam błędów */
+        onAdFailedToLoad={(err) => {
+          if (__DEV__) console.warn('[ads] banner failed', err);
         }}
       />
     </View>

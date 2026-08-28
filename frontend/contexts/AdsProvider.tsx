@@ -1,7 +1,6 @@
 /**
  * AdMob — inicjalizacja, zgoda RODO (UMP), banery + interstitiale.
- * Reklamy tylko gdy hasAds = Free po zakończonym trialu 30 dni
- * (albo EXPO_PUBLIC_FORCE_ADS=1 na preview).
+ * Reklamy tylko gdy hasAds = Free po zakończonym trialu 30 dni.
  * Brak rewarded / wymiany wideo za kredyty.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';

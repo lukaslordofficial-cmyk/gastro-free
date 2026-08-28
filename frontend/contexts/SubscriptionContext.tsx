@@ -104,8 +104,12 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
       loading,
       tier,
       credits: state?.credits_balance ?? 0,
-      // Reklamy dopiero po trialu, na Free (tier 0). Trial / płatny plan = bez reklam.
-      hasAds: !!isAuthenticated && shouldShowAds(tier, trialEnds),
+      // Reklamy tylko Free po trialu — nie zgadujemy przy błędzie/ładowaniu portfela.
+      hasAds:
+        !!isAuthenticated &&
+        !loading &&
+        !!state?.ok &&
+        shouldShowAds(tier, trialEnds),
       // Dark premium chrome: trial Premium, płatny plan, albo zalogowany (closed beta).
       premiumUi: isAuthenticated ? true : !!state?.premium_ui,
       dealHunterUnlocked: !!state?.deal_hunter_unlocked,

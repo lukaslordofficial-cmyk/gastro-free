@@ -176,9 +176,11 @@ export async function upsertProfile(
  */
 export async function seedSubscription(accountKey: string): Promise<void> {
   try {
+    const key = (accountKey || '').trim();
+    if (!key || key === 'default') return;
     const trialEnds = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const { error } = await supabase.from('subscriptions').insert({
-      account_key: accountKey,
+      account_key: key,
       tier_level: 0,
       credits_balance: 100,
       status: 'active',

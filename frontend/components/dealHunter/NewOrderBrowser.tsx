@@ -120,6 +120,12 @@ export function NewOrderBrowser({
       setExpandedId(null);
       setSelectedProduct(null);
       const ak = getAccountKey();
+      if (!ak || ak === 'default') {
+        setInventory([]);
+        setSuppliers([]);
+        setLoading(false);
+        return;
+      }
       const [invRes, supRes] = await Promise.all([
         supabase.from('inventory_items').select('id,name,quantity,unit,min_quantity').eq('account_key', ak).limit(3000),
         supabase.from('suppliers').select('id,name,email,min_order_value').eq('account_key', ak).order('name').limit(500),

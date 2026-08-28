@@ -24,8 +24,6 @@
         "EXPO_PUBLIC_SUPABASE_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
         "EXPO_PUBLIC_SUPABASE_ANON_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
         "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
-        "EXPO_PUBLIC_ADMOB_USE_TEST_IDS": "1",
-        "EXPO_PUBLIC_FORCE_ADS": "1",
         "ORG_GRADLE_PROJECT_reactNativeArchitectures": "arm64-v8a"
       }
     },

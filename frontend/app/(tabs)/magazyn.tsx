@@ -24,7 +24,7 @@ import {
 } from 'lucide-react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { FlashList } from '@shopify/flash-list';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import * as inventoryService from '@/services/inventoryService';
 import { INVENTORY_CHANGED } from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
@@ -601,7 +601,7 @@ export default function MagazynScreen() {
         const row = await inventoryService.saveInventoryItem({
           payload: { quantity: mergedQty },
           editingId: dup.id,
-          ak: getAccountKey(),
+          ak: requireTenantAccountKey(),
         });
         const mapped = mapDbRow(row);
         setInventory((prev) => prev.map((i) => (i.id === dup.id ? mapped : i)));
@@ -624,7 +624,7 @@ export default function MagazynScreen() {
         const d = parseInt(form.shelfLifeDays, 10);
         if (!isNaN(d) && d > 0) shelfLifeDays = d;
       }
-      const ak = getAccountKey();
+      const ak = requireTenantAccountKey();
       const payload: any = {
         name: normalizeIngredientName(nameTrim) || nameTrim,
         variant: form.variant.trim() || null,

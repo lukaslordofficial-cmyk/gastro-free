@@ -21,6 +21,7 @@ venv/
 # Node / Expo
 node_modules/
 .expo/
+.expo-and-test/
 .metro-cache/
 dist/
 web-build/

@@ -15,17 +15,17 @@
     },
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "5",
+      "buildNumber": "1",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Gastro Manager używa mikrofonu do głosowego raportowania strat, kosztów, produktów i dań.",
         "NSCameraUsageDescription": "Skanuj cenniki i oferty dostawców aparatem.",
         "NSPhotoLibraryUsageDescription": "Wgraj zdjęcie cennika dostawcy z galerii.",
         "NSUserTrackingUsageDescription": "Identyfikator reklamy służy do wyświetlania reklam w planie darmowym (AdMob), tylko gdy nie masz płatnego planu."
       },
-      "bundleIdentifier": "com.emergent.gastrovision.pkqz88"
+      "bundleIdentifier": "pl.gastromanager.app"
     },
     "android": {
-      "versionCode": 5,
+      "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A120E"
@@ -39,7 +39,7 @@
         "android.permission.VIBRATE",
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
-      "package": "com.emergent.gastrovision.pkqz88",
+      "package": "pl.gastromanager.app",
       "intentFilters": [
         {
           "action": "VIEW",

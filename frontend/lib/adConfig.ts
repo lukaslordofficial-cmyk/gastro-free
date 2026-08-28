@@ -1,3 +1,8 @@
+/**
+ * AdMob units. Native App ID siedzi w app.json (plugin react-native-google-mobile-ads).
+ * Package: pl.gastromanager.app — w AdMob musi być aplikacja z TYM package,
+ * inaczej baner na APK nie wypełni się (stary com.emergent… nie pasuje).
+ */
 import { Platform } from 'react-native';
 
 const APP_ID = 'ca-app-pub-7415277897076822~9839286987';

@@ -36,6 +36,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { supabase } from '@/lib/supabase';
 import { apiMultipartHeaders } from '@/lib/apiHeaders';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 
@@ -218,6 +219,7 @@ export function ExpirationScanModal({ visible, onClose, onConfirmed, restaurantI
         inventory_matched_name: data.inventory_matched_name,
       });
       setStage('done');
+      emitAppDataChanged('inventory');
       onConfirmed();
     } catch (e: any) {
       setError(e?.message ?? 'Nie udało się zeskanować daty ważności.');

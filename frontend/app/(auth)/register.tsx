@@ -42,9 +42,8 @@ export default function RegisterScreen() {
       }
       if (res.needsEmailConfirm) {
         setInfo(
-          'Konto utworzone, ale brak aktywnej sesji. Zaloguj się tym samym e-mailem i hasłem. ' +
-            'Na closed beta wyłącz w Supabase „Confirm email” ' +
-            '(Authentication → Providers → Email → Confirm email OFF).',
+          'Konto utworzone. Wysłaliśmy e-mail powitalny z linkiem weryfikacyjnym ' +
+            '(kontakt@gastromanager.org). Otwórz skrzynkę, potwierdź adres, a potem zaloguj się.',
         );
         return;
       }
@@ -74,8 +73,9 @@ export default function RegisterScreen() {
             <Text style={styles.brand}>GASTRO MANAGER</Text>
             <Text style={styles.title}>Nowe konto</Text>
             <Text style={styles.sub}>
-              Rejestracja e-mail + hasło — bez potwierdzenia maila (beta). Po założeniu konta
-              otrzymujesz 100 kredytów AI, 30 dni trialu Premium i własny magazyn / menu.
+              Po rejestracji dostaniesz e-mail powitalny z linkiem weryfikacyjnym
+              (kontakt@gastromanager.org). Na start: 100 kredytów AI, 30 dni trialu Premium
+              i własny magazyn / menu.
             </Text>
 
             {!isSupabaseConfigured && (

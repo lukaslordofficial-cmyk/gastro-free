@@ -6,6 +6,7 @@
  * tu zostaje zachowanie 1:1 (te same kolumny, fallbacki schematu, limity).
  */
 import { supabase } from '@/lib/supabase';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import { mapDbToDish, mapInvDbRow } from '@/lib/menuScreenHelpers';
 import type { Dish, InventoryItem, KitchenUtensil, RecipeIngredient } from '@/types/menu';
 
@@ -339,6 +340,7 @@ export async function updateMenuItem(
   }
   const { error } = await q;
   if (error) throw error;
+  emitAppDataChanged('menu');
 }
 
 /**
@@ -349,15 +351,22 @@ export async function replaceRecipeIngredients(
   rows: RecipeIngredientInsert[],
 ): Promise<void> {
   await supabase.from('recipe_ingredients').delete().eq('menu_item_id', menuItemId);
-  if (rows.length === 0) return;
+  if (rows.length === 0) {
+    emitAppDataChanged('menu');
+    return;
+  }
 
   const { error: ingError } = await supabase.from('recipe_ingredients').insert(rows as never);
-  if (!ingError) return;
+  if (!ingError) {
+    emitAppDataChanged('menu');
+    return;
+  }
 
   if (/piece_weight_g|warehouse_product_id|schema cache/i.test(ingError.message ?? '')) {
     const fallback = rows.map(({ piece_weight_g: _pw, warehouse_product_id: _w, ...rest }) => rest);
     const { error: e2 } = await supabase.from('recipe_ingredients').insert(fallback as never);
     if (e2) throw e2;
+    emitAppDataChanged('menu');
     return;
   }
   throw ingError;
@@ -394,6 +403,7 @@ export async function insertMenuItem(input: InsertMenuItemInput): Promise<{ id: 
     }
     throw itemError;
   }
+  emitAppDataChanged('menu');
   return { id: newItem.id as string };
 }
 

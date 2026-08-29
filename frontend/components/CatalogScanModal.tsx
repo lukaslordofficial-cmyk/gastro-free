@@ -26,6 +26,7 @@ import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import {
   InvoiceExpiryReviewForm,
   buildExpiryDrafts,

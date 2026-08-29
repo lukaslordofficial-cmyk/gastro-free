@@ -8,6 +8,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
 
 export type FinanceTable = 'revenue_entries' | 'fixed_costs' | 'variable_cost_entries';
@@ -55,6 +56,7 @@ async function insertWithAccountKeyFallback(
     ({ error } = await supabase.from(table).insert(payload as never));
   }
   if (error) throw error;
+  emitAppDataChanged('finance');
 }
 
 export function insertRevenue(payload: { year_month: string; description: string | null; amount_pln: number }): Promise<void> {
@@ -125,7 +127,9 @@ export async function copyFixedCostsFromPreviousMonth(
     .insert(payload as never)
     .select('*');
   if (insErr) throw insErr;
-  return (inserted ?? []) as FixedCost[];
+  const out = (inserted ?? []) as FixedCost[];
+  if (out.length) emitAppDataChanged('finance');
+  return out;
 }
 
 export function insertVariableCost(payload: {
@@ -149,6 +153,7 @@ export async function updateCost(
   if (isRealKey(ak)) q = q.eq('account_key', ak);
   const { error } = await q;
   if (error) throw error;
+  emitAppDataChanged('finance');
 }
 
 /** Zapis notatki. */
@@ -163,6 +168,7 @@ export async function deleteCost(table: FinanceTable, id: string): Promise<void>
   if (isRealKey(ak)) q = q.eq('account_key', ak);
   const { error } = await q;
   if (error) throw error;
+  emitAppDataChanged('finance');
 }
 
 /**

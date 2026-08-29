@@ -74,6 +74,7 @@ from cors_config import cors_allow_origins
 from billing_routes import router as billing_router
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
+from auth_welcome_routes import router as auth_welcome_router
 from legal_routes import router as legal_router
 from account_routes import router as account_router
 from pos_config_routes import router as pos_config_router
@@ -145,6 +146,7 @@ app.add_middleware(
 )
 app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
+app.include_router(auth_welcome_router)
 app.include_router(legal_router)
 app.include_router(account_router)
 app.include_router(pos_config_router)

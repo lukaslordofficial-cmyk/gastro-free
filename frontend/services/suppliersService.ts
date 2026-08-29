@@ -4,6 +4,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import { requireTenantAccountKey } from '@/lib/tenantScope';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
 import { secureRandomIndex } from '@/lib/secureId';
 import { fetchSupplierOrderTotals } from '@/services/supplierSpendService';
@@ -167,6 +168,7 @@ export async function saveSupplier(input: {
     if (!err) partials.push('shipping');
   }
   if (err) throw err;
+  emitAppDataChanged('orders');
   return { partials };
 }
 
@@ -175,6 +177,7 @@ export async function deleteSupplier(id: string): Promise<void> {
   const ak = requireTenantAccountKey();
   const { error } = await supabase.from('suppliers').delete().eq('id', id).eq('account_key', ak);
   if (error) throw error;
+  emitAppDataChanged('orders');
 }
 
 /** Insert produktu do katalogu z fallbackiem bez kg_total. Zwraca surowy błąd. */

@@ -27,6 +27,7 @@ import { useAds } from '@/contexts/AdsProvider';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 import { extractDishContextTags } from '@/lib/dishImageMatch';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import { MenuScanAskSuggest } from '@/components/menuScan/MenuScanAskSuggest';
 import { MenuScanChooseStage } from '@/components/menuScan/MenuScanChooseStage';
 import { MenuScanDishCard } from '@/components/menuScan/MenuScanDishCard';

@@ -3,6 +3,7 @@
  * Zachowanie 1:1 z poprzednią wersją ekranu (te same kolumny, fallbacki, seedy).
  */
 import { supabase } from '@/lib/supabase';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import {
   dedupeWarehouseCategories,
   ensureDefaultWarehouseCategories,
@@ -144,12 +145,16 @@ export async function softDeleteItem(id: string, accountKey?: string): Promise<v
   let hardQ = supabase.from('inventory_items').delete().eq('id', id);
   if (accountKey && accountKey !== 'default') hardQ = hardQ.eq('account_key', accountKey);
   const hard = await hardQ;
-  if (!hard.error) return;
+  if (!hard.error) {
+    emitAppDataChanged('inventory');
+    return;
+  }
   // Fallback: stare bazy / FK — soft-delete gdy hard nie przejdzie.
   let softQ = supabase.from('inventory_items').update({ is_active: false }).eq('id', id);
   if (accountKey && accountKey !== 'default') softQ = softQ.eq('account_key', accountKey);
   const { error } = await softQ;
   if (error) throw hard.error ?? error;
+  emitAppDataChanged('inventory');
 }
 
 /** Zapis produktu (insert/update) z fallbackiem na starsze schematy. Zwraca zapisany wiersz. */
@@ -185,6 +190,7 @@ export async function saveInventoryItem(input: {
     saveError = insertRes.error;
   }
   if (saveError) throw saveError;
+  emitAppDataChanged('inventory');
   return row;
 }
 
@@ -287,7 +293,9 @@ export async function replaceExpiryBatches(
   }
   const { error: delErr } = await del;
   if (delErr) throw delErr;
-  if (!rows.length) return;
-  const { error } = await supabase.from('warehouse_inventory').insert(rows as never);
-  if (error) throw error;
+  if (rows.length) {
+    const { error } = await supabase.from('warehouse_inventory').insert(rows as never);
+    if (error) throw error;
+  }
+  emitAppDataChanged('inventory');
 }

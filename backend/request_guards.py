@@ -9,6 +9,7 @@ _PUBLIC_MUTATE = (
     "/w/",
     "/api/furgonetka",
     "/api/auth/auto-confirm",
+    "/api/auth/welcome-email",
     "/api/local-producers/confirm-payment",
     "/api/stripe/connect/callback",
 )

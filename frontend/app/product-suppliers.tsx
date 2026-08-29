@@ -28,6 +28,7 @@ import {
   RefreshCw,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { OrderModal } from '@/components/OrderModal';
@@ -386,6 +387,7 @@ export default function ProductSuppliersScreen() {
         }
       }
       if (res.error) throw res.error;
+      emitAppDataChanged('inventory');
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1800);
       await loadProduct();

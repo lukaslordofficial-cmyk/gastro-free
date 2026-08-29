@@ -69,6 +69,12 @@ def build_supabase_auth_user_url(base_url: str) -> str:
     return f"{origin}/auth/v1/user"
 
 
+def build_supabase_auth_generate_link_url(base_url: str) -> str:
+    """Admin ``/auth/v1/admin/generate_link`` (env origin only)."""
+    origin = assert_supabase_origin(base_url)
+    return f"{origin}/auth/v1/admin/generate_link"
+
+
 def assert_safe_rest_path(path: str) -> str:
     """Zapobiega path traversal / SSRF przez path w `{SUPABASE_URL}/rest/v1/{path}`."""
     raw = (path or "").strip().lstrip("/")

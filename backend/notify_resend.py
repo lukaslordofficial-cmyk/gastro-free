@@ -40,6 +40,8 @@ async def send_email(
     subject: str,
     html: str,
     text: Optional[str] = None,
+    from_email: Optional[str] = None,
+    from_name: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> dict[str, Any]:
     key = (os.getenv("RESEND_API_KEY") or "").strip()
@@ -47,8 +49,15 @@ async def send_email(
         logger.warning("[email] RESEND_API_KEY brak — pomijam: %s | %s", to, subject)
         return {"ok": False, "error": "Brak RESEND_API_KEY", "skipped": True}
 
+    if from_email and from_email.strip():
+        name = (from_name or os.getenv("RESEND_FROM_NAME") or "Gastro Manager").strip()
+        raw = from_email.strip()
+        from_hdr = raw if "<" in raw else f"{name} <{raw}>"
+    else:
+        from_hdr = resend_from_header()
+
     payload: dict[str, Any] = {
-        "from": resend_from_header(),
+        "from": from_hdr,
         "to": [to],
         "subject": subject,
         "html": html,

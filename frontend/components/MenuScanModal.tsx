@@ -511,6 +511,7 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
       });
       // Odśwież listy zaraz po zapisie — użytkownik nie musi wracać do zakładki.
       setStage('syncing');
+      emitAppDataChanged('all');
       try {
         await Promise.resolve(onConfirmed());
       } catch {

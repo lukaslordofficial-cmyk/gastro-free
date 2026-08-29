@@ -212,7 +212,7 @@ export function CatalogScanModal({
       setScanBusy(false);
       setResult(data);
       setStage('result');
-      // Zawsze odśwież Magazyn / Menu / Dostawców (także po „Kontynuuj w tle”).
+      emitAppDataChanged('all');
       onConfirmed();
       if (backgroundRef.current) {
         backgroundRef.current = false;

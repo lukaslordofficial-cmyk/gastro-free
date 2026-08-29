@@ -22,4 +22,4 @@ def test_welcome_html_without_link():
     html, text = build_welcome_email_html(restaurant_name=None, verify_link=None)
     assert "Witaj w gronie" in html
     assert "Zaloguj się" in html
-    assert "kontakt@gastromanager.org" in text
+    assert "asystent.dostaw@gastromanager.org" in text

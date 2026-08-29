@@ -24,6 +24,7 @@ import * as authService from '@/services/authService';
 import type { UserProfile } from '@/services/authService';
 import { resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
 import { resetDishCustomImagesMemory } from '@/lib/dishCustomImages';
+import { resetProductCustomImagesMemory } from '@/lib/productCustomImages';
 
 export type { UserProfile };
 
@@ -88,6 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setAccountKey('default');
         resetMenuThumbCacheMemory();
         resetDishCustomImagesMemory();
+        resetProductCustomImagesMemory();
         return;
       }
       // Synchronicznie — zanim await — żeby SubscriptionContext / skany nie czytały „default".
@@ -95,6 +97,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (getAccountKey() !== immediateKey) {
         resetMenuThumbCacheMemory();
         resetDishCustomImagesMemory();
+        resetProductCustomImagesMemory();
       }
       setAccountKey(immediateKey);
       try {
@@ -227,6 +230,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccountKey('default');
     resetMenuThumbCacheMemory();
     resetDishCustomImagesMemory();
+    resetProductCustomImagesMemory();
   }, []);
 
   const refreshProfile = useCallback(async () => {

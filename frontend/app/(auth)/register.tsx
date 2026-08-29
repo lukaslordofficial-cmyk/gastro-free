@@ -43,7 +43,7 @@ export default function RegisterScreen() {
       if (res.needsEmailConfirm) {
         setInfo(
           'Konto utworzone. Wysłaliśmy e-mail powitalny z linkiem weryfikacyjnym ' +
-            '(kontakt@gastromanager.org). Otwórz skrzynkę, potwierdź adres, a potem zaloguj się.',
+            '(asystent.dostaw@gastromanager.org). Otwórz skrzynkę, potwierdź adres, a potem zaloguj się.',
         );
         return;
       }
@@ -74,7 +74,7 @@ export default function RegisterScreen() {
             <Text style={styles.title}>Nowe konto</Text>
             <Text style={styles.sub}>
               Po rejestracji dostaniesz e-mail powitalny z linkiem weryfikacyjnym
-              (kontakt@gastromanager.org). Na start: 100 kredytów AI, 30 dni trialu Premium
+              (asystent.dostaw@gastromanager.org). Na start: 100 kredytów AI, 30 dni trialu Premium
               i własny magazyn / menu.
             </Text>
 

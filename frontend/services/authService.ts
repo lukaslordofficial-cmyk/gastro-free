@@ -126,7 +126,7 @@ export async function autoConfirmUser(userId: string, email?: string): Promise<b
 }
 
 /**
- * Powitanie + link weryfikacyjny (Resend → kontakt@gastromanager.org).
+ * Powitanie + link weryfikacyjny (Resend → asystent.dostaw@gastromanager.org).
  * Fire-and-forget — rejestracja nie powinna padać, gdy mail chwilowo nie wyjdzie.
  */
 export async function sendWelcomeEmail(input: {

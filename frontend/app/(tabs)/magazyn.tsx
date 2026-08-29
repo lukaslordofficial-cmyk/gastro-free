@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as ImagePicker from 'expo-image-picker';
 import {
   Search,
   Trash2,
@@ -45,6 +46,14 @@ import { DS } from '@/constants/premiumTheme';
 import { convertProduceQty } from '@/lib/produceSizeConverter';
 import { normalizeIngredientName } from '@/lib/fuzzyProductMatch';
 import { normCategoryName } from '@/lib/warehouseCategories';
+import { assignUniqueDishImageSources } from '@/lib/productImages';
+import {
+  clearProductCustomImage,
+  getProductCustomImageSync,
+  loadProductCustomImages,
+  setProductCustomImage,
+  subscribeProductCustomImages,
+} from '@/lib/productCustomImages';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -102,6 +111,94 @@ export default function MagazynScreen() {
   }, [showVoiceModal, setVoiceOverlay]);
 
   const [orderProduct, setOrderProduct] = useState<MockInventoryItem | null>(null);
+  const [customImageTick, setCustomImageTick] = useState(0);
+  const [photoSaving, setPhotoSaving] = useState(false);
+
+  useEffect(() => {
+    void loadProductCustomImages().then(() => setCustomImageTick((t) => t + 1));
+    return subscribeProductCustomImages(() => setCustomImageTick((t) => t + 1));
+  }, [accountKey]);
+
+  /** Unikalne miniatury katalogu — bez powtórzeń tej samej ikony w liście. */
+  const libraryThumbByName = useMemo(() => {
+    const items = inventory.map((i) => ({ name: i.product_name, category: i.category }));
+    const assigned = assignUniqueDishImageSources(items);
+    const map = new Map<string, number | { uri: string }>();
+    for (const [name, a] of assigned) {
+      if (a.source) map.set(name, a.source);
+    }
+    return map;
+  }, [inventory]);
+
+  const saveProductPhotoWebP = useCallback(
+    async (itemId: string, sourceUri: string) => {
+      setPhotoSaving(true);
+      try {
+        await setProductCustomImage(itemId, sourceUri);
+      } catch (e: any) {
+        premiumAlert('Nie udało się zapisać', e?.message || 'Kompresja WebP nie powiodła się.');
+      } finally {
+        setPhotoSaving(false);
+      }
+    },
+    [premiumAlert],
+  );
+
+  const handleChangeProductPhoto = useCallback(
+    (item: MockInventoryItem) => {
+      const hasCustom = !!getProductCustomImageSync(item.id);
+      premiumAlert('Zmień zdjęcie', item.product_name, [
+        {
+          text: 'Wybierz z galerii',
+          onPress: async () => {
+            const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            if (!perm.granted) {
+              premiumAlert('Brak dostępu', 'Pozwól na dostęp do galerii, aby zmienić zdjęcie.');
+              return;
+            }
+            const r = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ['images'],
+              quality: 0.85,
+            });
+            if (r.canceled || !r.assets?.[0]?.uri) return;
+            await saveProductPhotoWebP(item.id, r.assets[0].uri);
+          },
+        },
+        {
+          text: 'Zrób zdjęcie',
+          onPress: async () => {
+            let perm = await ImagePicker.getCameraPermissionsAsync();
+            if (!perm.granted && perm.canAskAgain) {
+              perm = await ImagePicker.requestCameraPermissionsAsync();
+            }
+            if (!perm.granted) {
+              premiumAlert('Brak dostępu', 'Pozwól na dostęp do aparatu, aby zmienić zdjęcie.');
+              return;
+            }
+            const r = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 0.85,
+            });
+            if (r.canceled || !r.assets?.[0]?.uri) return;
+            await saveProductPhotoWebP(item.id, r.assets[0].uri);
+          },
+        },
+        ...(hasCustom
+          ? [
+              {
+                text: 'Przywróć z biblioteki',
+                style: 'destructive' as const,
+                onPress: () => {
+                  void clearProductCustomImage(item.id);
+                },
+              },
+            ]
+          : []),
+        { text: 'Anuluj', style: 'cancel' as const },
+      ]);
+    },
+    [premiumAlert, saveProductPhotoWebP],
+  );
 
   // ── Data fetching ────────────────────────────────────────────────────────────────────────
 
@@ -410,6 +507,9 @@ export default function MagazynScreen() {
             <ItemCard
               item={item.item}
               catColor={categoryColorMap[item.item.category] ?? FALLBACK_COLOR}
+              libraryThumb={libraryThumbByName.get(item.item.product_name)}
+              photoTick={customImageTick}
+              onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
               onOrder={() => handleOrderItem(item.item)}
@@ -484,6 +584,9 @@ export default function MagazynScreen() {
             <ItemCard
               item={item.item}
               catColor={item.catColor}
+              libraryThumb={libraryThumbByName.get(item.item.product_name)}
+              photoTick={customImageTick}
+              onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
               onOrder={() => handleOrderItem(item.item)}
@@ -526,6 +629,9 @@ export default function MagazynScreen() {
             <ItemCard
               item={item.item}
               catColor={FALLBACK_COLOR}
+              libraryThumb={libraryThumbByName.get(item.item.product_name)}
+              photoTick={customImageTick}
+              onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
               onOrder={() => handleOrderItem(item.item)}
@@ -536,7 +642,14 @@ export default function MagazynScreen() {
           return null;
       }
     },
-    [theme, categoryColorMap, expandedCategories],
+    [
+      theme,
+      categoryColorMap,
+      expandedCategories,
+      libraryThumbByName,
+      customImageTick,
+      handleChangeProductPhoto,
+    ],
   );
 
   // ── Auto-unlock offer items ────────────────────────────────────────────────────────────
@@ -870,7 +983,7 @@ export default function MagazynScreen() {
       {/* Main content — FlashList recycles rows + images stay on disk cache */}
       <FlashList
         data={magRows}
-        extraData={expandedCategories}
+        extraData={`${expandedCategories.size}:${customImageTick}:${libraryThumbByName.size}`}
         keyExtractor={(row, index) => {
           switch (row.type) {
             case 'search_item': return `si-${row.item.id}`;
@@ -993,6 +1106,15 @@ export default function MagazynScreen() {
       ) : (
         body
       )}
+      {photoSaving ? (
+        <View style={styles.scanSyncOverlay} pointerEvents="auto" testID="product-photo-webp-loader">
+          <View style={styles.scanSyncCard}>
+            <ActivityIndicator size="large" color={DS.color.greenEnd} />
+            <Text style={styles.scanSyncTitle}>Kompresuję zdjęcie do WebP…</Text>
+            <Text style={styles.scanSyncSub}>Zapisuję miniaturę produktu</Text>
+          </View>
+        </View>
+      ) : null}
       {scanSyncing ? (
         <View style={styles.scanSyncOverlay} pointerEvents="auto">
           <View style={styles.scanSyncCard}>

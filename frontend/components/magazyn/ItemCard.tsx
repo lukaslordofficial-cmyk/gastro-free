@@ -1,96 +1,105 @@
-import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TextInput,
-  TouchableOpacity,
-  Modal,
-  ScrollView,
-  Alert,
-  Animated,
-  KeyboardAvoidingView,
-  Platform,
-  Switch,
-  RefreshControl,
-  ActivityIndicator,
-  DeviceEventEmitter,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import React, { useMemo, useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  Search,
   Trash2,
-  X,
   Plus,
-  Mic,
-  Camera,
-  Package,
   FlaskConical,
-  Check,
-  ChevronDown,
   PenLine,
-  ChevronRight,
   Tag,
   ShoppingCart,
-  FileUp,
 } from 'lucide-react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
-import { FlashList } from '@shopify/flash-list';
-import { getAccountKey } from '@/lib/accountKey';
-import * as inventoryService from '@/services/inventoryService';
-import { INVENTORY_CHANGED } from '@/services/supplierOrdersService';
-import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
-import { VoiceReportModal } from '@/components/VoiceReportModal';
-import { ReportInfoButton } from '@/components/ReportInfoButton';
-import { WasteReportModal } from '@/components/WasteReportModal';
-import { DealHunterModal } from '@/components/DealHunterModal';
-import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
-import { useUiOverlay } from '@/contexts/UiOverlayContext';
-import { PremiumTabChrome, premiumSurface } from '@/components/premium/PremiumTabChrome';
-import {
-  PremiumBadge,
-  PremiumGlowCta,
-  PremiumOutlineBtn,
-} from '@/components/premium/PremiumUI';
+import { PremiumBadge } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
 import { imageSourceForProduct } from '@/lib/productImages';
-import { namesMatch } from '@/lib/fuzzyProductMatch';
-import {
-  dedupeWarehouseCategories,
-  ensureDefaultWarehouseCategories,
-  normCategoryName,
-} from '@/lib/warehouseCategories';
-import { useAuth } from '@/contexts/AuthContext';
-import { usePremiumAlert } from '@/components/PremiumAlert';
-import { useSubscription } from '@/contexts/SubscriptionContext';
-import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
-import { secureId } from '@/lib/secureId';
-
-// ─── Types ───────────────────────────────────────────────────────────────────────────────
-
+import { getProductCustomImageSync } from '@/lib/productCustomImages';
 import type { MockInventoryItem } from './types';
 import { formatQty, getStatus } from './helpers';
-import { CategorySection } from './CategorySection';
 
-export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }: { item: MockInventoryItem; catColor: string; onDelete?: () => void; onPress?: () => void; onOrder?: () => void; onEdit?: () => void }) {
+type Props = {
+  item: MockInventoryItem;
+  catColor: string;
+  onDelete?: () => void;
+  onPress?: () => void;
+  onOrder?: () => void;
+  onEdit?: () => void;
+  /** Unikalny thumb z listy magazynu (jak menu). */
+  libraryThumb?: number | { uri: string };
+  onChangePhoto?: (item: MockInventoryItem) => void;
+  /** Wymusza re-render po zmianie custom zdjęcia. */
+  photoTick?: number;
+};
+
+export function ItemCard({
+  item,
+  catColor,
+  onDelete,
+  onPress,
+  onOrder,
+  onEdit,
+  libraryThumb,
+  onChangePhoto,
+  photoTick = 0,
+}: Props) {
   const theme = useAppTheme();
   const status = getStatus(item);
   const ratio = item.current_qty / Math.max(item.critical_threshold, 0.001);
   const fillPercent = Math.min(100, Math.round(ratio * 100));
-  const thumbSrc = useMemo(() => imageSourceForProduct(item.product_name), [item.product_name]);
+  const customUri = getProductCustomImageSync(item.id);
+  const librarySrc = useMemo(
+    () => libraryThumb ?? imageSourceForProduct(item.product_name),
+    [libraryThumb, item.product_name, photoTick],
+  );
+  const thumbSrc = customUri ? { uri: customUri } : librarySrc;
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => {
+    setImgFailed(false);
+  }, [item.id, customUri, photoTick, typeof librarySrc === 'number' ? librarySrc : (librarySrc as { uri?: string })?.uri]);
+
   const isComboLow = item.is_combo_półprodukt && status !== 'ok';
-  const lowStockActionLabel = isComboLow
-    ? 'Dorób półprodukt'
-    : 'Zamów u dostawcy';
+  const lowStockActionLabel = isComboLow ? 'Dorób półprodukt' : 'Zamów u dostawcy';
   const lowStockHint = isComboLow
-    ? (status === 'critical'
+    ? status === 'critical'
       ? 'Ilość półproduktu spadła poniżej poziomu krytycznego — trzeba dorobić'
-      : 'Niski stan półproduktu — zaplanuj doróbkę')
-    : (status === 'critical' ? 'Stan krytyczny — uzupełnij zapas' : 'Niski stan magazynowy');
+      : 'Niski stan półproduktu — zaplanuj doróbkę'
+    : status === 'critical'
+      ? 'Stan krytyczny — uzupełnij zapas'
+      : 'Niski stan magazynowy';
+
+  const Thumb = (
+    <TouchableOpacity
+      activeOpacity={onChangePhoto ? 0.85 : 1}
+      onPress={(e) => {
+        e?.stopPropagation?.();
+        onChangePhoto?.(item);
+      }}
+      disabled={!onChangePhoto}
+      hitSlop={6}
+      testID={`inv-photo-${item.id}`}
+    >
+      {!imgFailed ? (
+        <Image
+          source={thumbSrc}
+          style={theme.isPremium ? itemStyles.premThumb : itemStyles.thumb}
+          contentFit="contain"
+          cachePolicy="disk"
+          transition={200}
+          recyclingKey={`${item.id}:${customUri || 'lib'}:${photoTick}`}
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <View
+          style={[
+            theme.isPremium ? itemStyles.premThumb : itemStyles.thumb,
+            { backgroundColor: catColor, opacity: 0.35 },
+          ]}
+        />
+      )}
+    </TouchableOpacity>
+  );
 
   if (theme.isPremium) {
     const edge =
@@ -111,14 +120,7 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
         <View style={[itemStyles.premEdge, { backgroundColor: edge }]} />
         <View style={itemStyles.premBody}>
           <View style={itemStyles.premTop}>
-            <Image
-              source={thumbSrc}
-              style={itemStyles.premThumb}
-              contentFit="contain"
-              cachePolicy="disk"
-              transition={200}
-              recyclingKey={item.id}
-            />
+            {Thumb}
             <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <Text style={itemStyles.premName} numberOfLines={1} allowFontScaling={false}>
@@ -132,7 +134,9 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
               {item.variant ? (
                 <View style={itemStyles.variantChip} testID={`inv-variant-${item.id}`}>
                   <Tag size={9} color={DS.color.greenEnd} strokeWidth={2.4} />
-                  <Text style={itemStyles.variantChipText} numberOfLines={1}>Odmiana: {item.variant}</Text>
+                  <Text style={itemStyles.variantChipText} numberOfLines={1}>
+                    Odmiana: {item.variant}
+                  </Text>
                 </View>
               ) : null}
               <View style={itemStyles.qtyRow}>
@@ -140,7 +144,8 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
                   {formatQty(item.current_qty, item.unit)}
                 </Text>
                 <Text style={itemStyles.premMin} allowFontScaling={false}>
-                  {' '}akt.
+                  {' '}
+                  akt.
                   {item.optimal_threshold > 0
                     ? ` · opt ${formatQty(item.optimal_threshold, item.unit)}`
                     : ''}
@@ -149,7 +154,12 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
                 </Text>
               </View>
               <View style={itemStyles.premProgressBg}>
-                <View style={[itemStyles.premProgressFill, { width: `${fillPercent}%` as any, backgroundColor: edge }]} />
+                <View
+                  style={[
+                    itemStyles.premProgressFill,
+                    { width: `${fillPercent}%` as `${number}%`, backgroundColor: edge },
+                  ]}
+                />
               </View>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, marginLeft: 4 }}>
@@ -176,7 +186,11 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
                   hitSlop={8}
                 >
                   <LinearGradient
-                    colors={status === 'critical' || status === 'warning' ? [...DS.gradient.red] : [...DS.gradient.green]}
+                    colors={
+                      status === 'critical' || status === 'warning'
+                        ? [...DS.gradient.red]
+                        : [...DS.gradient.green]
+                    }
                     start={{ x: 0, y: 0.2 }}
                     end={{ x: 1, y: 0.8 }}
                     style={itemStyles.premOrderFab}
@@ -197,75 +211,79 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
   }
 
   const palette = {
-    critical: {
-      bg: '#FEF2F2', border: '#FECACA', accentText: '#DC2626',
-      badge: '#FEE2E2', badgeText: '#DC2626', badgeLabel: 'Krytyczny', bar: '#DC2626',
-    },
-    warning: {
-      bg: '#FFFBEB', border: '#FDE68A', accentText: '#D97706',
-      badge: '#FEF3C7', badgeText: '#D97706', badgeLabel: 'Niski stan', bar: '#D97706',
-    },
-    ok: {
-      bg: Colors.card, border: Colors.border, accentText: Colors.textPrimary,
-      badge: Colors.successLight, badgeText: Colors.success, badgeLabel: 'OK', bar: Colors.success,
-    },
-  }[status];
+    border:
+      status === 'critical' ? Colors.danger : status === 'warning' ? Colors.warning : Colors.border,
+    accent:
+      status === 'critical' ? Colors.danger : status === 'warning' ? Colors.warning : catColor,
+    qty: status === 'critical' ? Colors.danger : status === 'warning' ? Colors.warning : Colors.textPrimary,
+    badgeBg:
+      status === 'critical' ? Colors.dangerLight : status === 'warning' ? Colors.warningLight : Colors.accentLight,
+    badgeText:
+      status === 'critical' ? Colors.danger : status === 'warning' ? Colors.warning : Colors.accent,
+  };
 
   return (
-    <TouchableOpacity activeOpacity={onPress ? 0.75 : 1} onPress={onPress} style={[itemStyles.card, { backgroundColor: palette.bg, borderColor: palette.border }]}>
-      <View style={[itemStyles.accentBar, { backgroundColor: catColor }]} />
+    <TouchableOpacity
+      activeOpacity={onPress ? 0.85 : 1}
+      onPress={onPress}
+      onLongPress={onEdit}
+      style={[itemStyles.card, { borderColor: palette.border, backgroundColor: Colors.card }]}
+    >
+      <View style={[itemStyles.accentBar, { backgroundColor: palette.accent }]} />
       <View style={itemStyles.body}>
         <View style={itemStyles.topRow}>
-          <Image
-            source={thumbSrc}
-            style={itemStyles.thumb}
-            contentFit="contain"
-            cachePolicy="disk"
-            transition={200}
-            recyclingKey={item.id}
-          />
+          {Thumb}
           <View style={itemStyles.nameRow}>
-            {item.is_combo_półprodukt && (
-              <View style={itemStyles.comboTag}>
-                <FlaskConical size={10} color={Colors.accent} strokeWidth={2.5} />
-                <Text style={itemStyles.comboText}>Polprodukt</Text>
-              </View>
-            )}
-            <Text style={itemStyles.name} numberOfLines={1}>{item.product_name}</Text>
+            <Text style={itemStyles.name} numberOfLines={2}>
+              {item.product_name}
+            </Text>
             {item.variant ? (
-              <Text style={itemStyles.variantLine} numberOfLines={1} testID={`inv-variant-${item.id}`}>Odmiana: {item.variant}</Text>
+              <Text style={itemStyles.variantLine} numberOfLines={1}>
+                {item.variant}
+              </Text>
+            ) : null}
+            {item.is_combo_półprodukt ? (
+              <View style={itemStyles.comboTag}>
+                <FlaskConical size={9} color={Colors.accent} strokeWidth={2.4} />
+                <Text style={itemStyles.comboText}>PÓŁPRODUKT</Text>
+              </View>
             ) : null}
           </View>
           <View style={itemStyles.topRight}>
-            <View style={[itemStyles.badge, { backgroundColor: palette.badge }]}>
-              <Text style={[itemStyles.badgeText, { color: palette.badgeText }]}>{palette.badgeLabel}</Text>
+            <View style={[itemStyles.badge, { backgroundColor: palette.badgeBg }]}>
+              <Text style={[itemStyles.badgeText, { color: palette.badgeText }]}>
+                {status === 'critical' ? 'KRYTYCZNY' : status === 'warning' ? 'NISKI' : 'OK'}
+              </Text>
             </View>
-            {onDelete && (
-              <TouchableOpacity
-                onPress={onDelete}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                style={itemStyles.deleteBtn}
-                testID={`delete-inv-${item.id}`}
-              >
-                <Trash2 size={13} color={Colors.danger} strokeWidth={2.2} />
+            {onDelete ? (
+              <TouchableOpacity onPress={onDelete} hitSlop={8} style={itemStyles.deleteBtn}>
+                <Trash2 size={14} color={Colors.danger} strokeWidth={2} />
               </TouchableOpacity>
-            )}
+            ) : null}
           </View>
         </View>
 
         <View style={itemStyles.qtyRow}>
-          <Text style={[itemStyles.qty, { color: palette.accentText }]}>{formatQty(item.current_qty, item.unit)}</Text>
-          <Text style={itemStyles.threshold}>{' '}/ min {formatQty(item.critical_threshold, item.unit)}</Text>
-        </View>
-
-        {status !== 'ok' && (
-          <Text style={[itemStyles.portionAlert, { color: palette.badgeText }]}>
-            {lowStockHint}
+          <Text style={[itemStyles.qty, { color: palette.qty }]}>
+            {formatQty(item.current_qty, item.unit)}
           </Text>
+          <Text style={itemStyles.threshold}>
+            {' / kryt '}
+            {formatQty(item.critical_threshold, item.unit)}
+          </Text>
+        </View>
+        {status !== 'ok' ? (
+          <Text style={[itemStyles.portionAlert, { color: palette.badgeText }]}>{lowStockHint}</Text>
+        ) : (
+          <Text style={itemStyles.portionOk}>Stan w normie</Text>
         )}
-
         <View style={itemStyles.progressBg}>
-          <View style={[itemStyles.progressFill, { width: `${fillPercent}%` as any, backgroundColor: palette.bar }]} />
+          <View
+            style={[
+              itemStyles.progressFill,
+              { width: `${fillPercent}%` as `${number}%`, backgroundColor: palette.accent },
+            ]}
+          />
         </View>
 
         {status !== 'ok' && (isComboLow ? onEdit : onOrder) && (
@@ -275,9 +293,11 @@ export function ItemCard({ item, catColor, onDelete, onPress, onOrder, onEdit }:
             activeOpacity={0.85}
             testID={`order-btn-${item.id}`}
           >
-            {isComboLow
-              ? <FlaskConical size={13} color={Colors.white} strokeWidth={2.5} />
-              : <ShoppingCart size={13} color={Colors.white} strokeWidth={2.5} />}
+            {isComboLow ? (
+              <FlaskConical size={13} color={Colors.white} strokeWidth={2.5} />
+            ) : (
+              <ShoppingCart size={13} color={Colors.white} strokeWidth={2.5} />
+            )}
             <Text style={itemStyles.orderBtnText}>{lowStockActionLabel}</Text>
           </TouchableOpacity>
         )}
@@ -304,7 +324,16 @@ export const itemStyles = StyleSheet.create({
   variantLine: { fontSize: 10, fontWeight: '600', color: Colors.accent, marginTop: 1 },
   variantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' },
   variantChipText: { fontSize: 10, fontWeight: '600', color: DS.color.greenEnd },
-  comboTag: { flexDirection: 'row', alignItems: 'center', gap: 3, alignSelf: 'flex-start', backgroundColor: Colors.accentLight, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 },
+  comboTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    alignSelf: 'flex-start',
+    backgroundColor: Colors.accentLight,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
   comboText: { fontSize: 9, fontWeight: '700', color: Colors.accent, letterSpacing: 0.3 },
   topRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   badge: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: 7 },
@@ -317,9 +346,16 @@ export const itemStyles = StyleSheet.create({
   portionOk: { fontSize: 10, color: Colors.textSecondary },
   progressBg: { height: 3, backgroundColor: Colors.borderLight, borderRadius: 2, marginTop: 4, overflow: 'hidden' },
   progressFill: { height: 3, borderRadius: 2, minWidth: 4 },
-  orderBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 8, paddingVertical: 8, marginTop: 8 },
+  orderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 8,
+    paddingVertical: 8,
+    marginTop: 8,
+  },
   orderBtnText: { fontSize: 12, fontWeight: '700', color: Colors.white, letterSpacing: 0.2 },
-  /* Premium glass cards */
   premCard: {
     flexDirection: 'row',
     backgroundColor: DS.color.surfaceCard,
@@ -334,8 +370,8 @@ export const itemStyles = StyleSheet.create({
   premBody: { flex: 1, padding: 12 },
   premTop: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
   premThumb: {
-    width: 40,
-    height: 40,
+    width: 48,
+    height: 48,
     borderRadius: DS.radius.image,
     backgroundColor: DS.color.bgTertiary,
   },
@@ -347,25 +383,20 @@ export const itemStyles = StyleSheet.create({
   },
   premQty: { fontSize: 18, fontWeight: '700', letterSpacing: -0.4 },
   premMin: { fontSize: 11, color: DS.color.muted, fontWeight: '500' },
-  premOrderFabWrap: {
-    marginTop: 4,
-    borderRadius: 18,
-  },
-  premOrderFab: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   premProgressBg: {
     height: 3,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: DS.color.bgTertiary,
     borderRadius: 2,
-    marginTop: 6,
+    marginTop: 4,
     overflow: 'hidden',
   },
   premProgressFill: { height: 3, borderRadius: 2, minWidth: 4 },
+  premOrderFabWrap: { borderRadius: 999 },
+  premOrderFab: {
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 });
-
-// ─── CategorySection ─────────────────────────────────────────────────────────────────────────

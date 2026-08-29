@@ -1,5 +1,5 @@
 """
-Welcome + verification e-mail po rejestracji (Resend → kontakt@gastromanager.org).
+Welcome + verification e-mail po rejestracji (Resend → asystent.dostaw@gastromanager.org).
 """
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ logger = logging.getLogger("auth.welcome")
 
 router = APIRouter(tags=["auth-welcome"])
 
-_WELCOME_FROM_DEFAULT = "kontakt@gastromanager.org"
+# Resend nie przyjmuje From z Gmail/Outlook — używamy domeny gastromanager.org.
+_WELCOME_FROM_DEFAULT = "asystent.dostaw@gastromanager.org"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -39,7 +40,7 @@ class WelcomeEmailBody(BaseModel):
 
 
 def _welcome_from() -> str:
-    raw = (os.environ.get("WELCOME_FROM_EMAIL") or _WELCOME_FROM_DEFAULT).strip()
+    raw = (os.environ.get("WELCOME_FROM_EMAIL") or os.environ.get("RESEND_FROM_EMAIL") or _WELCOME_FROM_DEFAULT).strip()
     if not raw or "@" not in raw:
         return _WELCOME_FROM_DEFAULT
     host = raw.rsplit("@", 1)[-1].lower()
@@ -154,7 +155,7 @@ def build_welcome_email_html(
   <p>Dziękujemy, że dołączyłeś/aś do Gastro Manager — narzędzia stworzonego dla restauracji, które chcą mieć magazyn, menu, finanse i dostawy w jednym miejscu.</p>
   <p>Na start masz dostęp do kredytu AI i okresu próbnego Premium. Wystarczy potwierdzić adres e-mail i zalogować się w aplikacji.</p>
   {btn}
-  <p style="margin-top:28px;font-size:13px;color:#5a6b62">Pozdrawiamy,<br/>Zespół Gastro Manager<br/>kontakt@gastromanager.org</p>
+  <p style="margin-top:28px;font-size:13px;color:#5a6b62">Pozdrawiamy,<br/>Zespół Gastro Manager<br/>asystent.dostaw@gastromanager.org</p>
 </body></html>"""
 
     text = (
@@ -162,7 +163,7 @@ def build_welcome_email_html(
         "Dziękujemy, że dołączyłeś/aś do Gastro Manager.\n"
         "Na start masz dostęp do kredytu AI i okresu próbnego Premium."
         f"{text_link}\n"
-        "Pozdrawiamy,\nZespół Gastro Manager\nkontakt@gastromanager.org\n"
+        "Pozdrawiamy,\nZespół Gastro Manager\nasystent.dostaw@gastromanager.org\n"
     )
     return html, text
 

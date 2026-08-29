@@ -72,11 +72,16 @@ export function isPremiumEntitled(
 /**
  * Reklamy AdMob (baner + interstitial) — wyłącznie Free (tier 0) po zakończonym trialu 30 dni.
  * Bez reklam: brak sesji, ładowanie portfela, płatny plan, aktywny trial.
+ *
+ * EXPO_PUBLIC_FORCE_ADS=1 — tylko na APK preview (EAS), żeby przetestować AdMob
+ * przed końcem trialu / przed publikacją w Play (najlepiej z test unit IDs).
  */
 export function shouldShowAds(
   tierLevel: number,
   trialEndsAt: string | null | undefined,
 ): boolean {
+  const force = (process.env.EXPO_PUBLIC_FORCE_ADS ?? '').trim().toLowerCase();
+  if (force === '1' || force === 'true' || force === 'yes') return true;
   const tier = Number(tierLevel ?? 0);
   if (tier >= 1) return false;
   if (isPremiumTrialActive(trialEndsAt)) return false;

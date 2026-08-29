@@ -30,7 +30,7 @@ import {
   parseInvoiceCostNote,
 } from '@/lib/invoiceCostNote';
 import { InvoiceCostPreviewModal } from '@/components/InvoiceCostPreviewModal';
-import { CURRENT_MONTH } from '@/components/finanse/constants';
+import { currentYearMonth } from '@/components/finanse/constants';
 import {
   formatPLN,
   getFixedColor,
@@ -138,7 +138,7 @@ export function ClassicFinanceScreen({
           <View style={{ marginTop: 8, marginBottom: 16, alignItems: 'center' }}>
             <AppScreenHeader
               title="Gastro Manager"
-              subtitle={`Panel finansowy Â· ${CURRENT_MONTH}`}
+              subtitle={`Panel finansowy · ${currentYearMonth()}`}
               showDevToggle
               centered
             />
@@ -155,7 +155,7 @@ export function ClassicFinanceScreen({
           <>
             <AppScreenHeader
               title="Gastro Manager"
-              subtitle={`Panel finansowy Â· ${CURRENT_MONTH}`}
+              subtitle={`Panel finansowy · ${currentYearMonth()}`}
               showDevToggle
             />
             <View style={{ marginTop: 4, marginBottom: 16 }}>
@@ -391,7 +391,7 @@ export function ClassicFinanceScreen({
 
             <View style={styles.sectionHeaderRow}>
               <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-                {'Koszty staĹ‚e â€” ' + CURRENT_MONTH}
+                {'Koszty stałe — ' + currentYearMonth()}
               </Text>
               <TouchableOpacity
                 style={[
@@ -507,7 +507,7 @@ export function ClassicFinanceScreen({
 
             <View style={styles.sectionHeaderRow}>
               <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-                {'Koszty zmienne â€” ' + CURRENT_MONTH}
+                {'Koszty zmienne — ' + currentYearMonth()}
               </Text>
               <TouchableOpacity
                 style={[styles.sectionAddBtn, { backgroundColor: Colors.dangerLight, borderColor: '#FECACA' }]}
@@ -686,7 +686,7 @@ export function ClassicFinanceScreen({
       <FinancePdfExportModal
         visible={pdfOpen}
         onClose={onPdfClose}
-        defaultMonth={CURRENT_MONTH}
+        defaultMonth={currentYearMonth()}
       />
       <InvoiceCostPreviewModal
         visible={!!invoicePreview}

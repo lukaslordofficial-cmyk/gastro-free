@@ -196,6 +196,7 @@ async def account_key_middleware(request: Request, call_next):
         or path.startswith("/orders/")
         or path.startswith("/api/furgonetka")
         or path.split("?")[0].rstrip("/") == "/api/pos/webhook"
+        or path.startswith("/w/")
     )
     raw = (request.headers.get("x-account-key") or "").strip()
     header_key = raw if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw) else ""

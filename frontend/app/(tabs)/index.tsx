@@ -14,7 +14,11 @@ import { useThemeMode } from '@/contexts/ThemeModeContext';
 import { PremiumFinanceScreen } from '@/components/premium/PremiumFinanceScreen';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
-import { CURRENT_MONTH } from '@/components/finanse/constants';
+import {
+  currentYearMonth,
+  previousYearMonth,
+  yearMonthLabelPl,
+} from '@/components/finanse/constants';
 import type { EditableCostKind, EditableCostRow, InvoicePreviewState } from '@/components/finanse/types';
 import { AddRevenueModal } from '@/components/finanse/AddRevenueModal';
 import { AddFixedCostModal } from '@/components/finanse/AddFixedCostModal';
@@ -85,10 +89,13 @@ export default function FinanseScreen() {
   const hasFinanceDataRef = useRef(false);
   const scanRetryRef = useRef(0);
   const varCountBeforeScanRef = useRef(0);
+  const fixedRolloverBusyRef = useRef(false);
+  const fixedRolloverAskedYmRef = useRef<string | null>(null);
 
   const fetchData = useCallback(async (): Promise<{ variableCount: number } | null> => {
     try {
-      const rows = await financeService.fetchFinanceRows(accountKey, CURRENT_MONTH);
+      const month = currentYearMonth();
+      const rows = await financeService.fetchFinanceRows(accountKey, month);
 
       const safeRows = <T extends { year_month?: string | null; created_at?: string | null }>(list: T[] | null | undefined): T[] =>
         (list ?? []).filter((r) => {
@@ -97,13 +104,65 @@ export default function FinanseScreen() {
         });
 
       const revMerged = safeRows(rows.revenueAll);
-      const fixedMerged = safeRows(rows.fixedAll);
+      let fixedMerged = safeRows(rows.fixedAll);
       const varMerged = safeRows(rows.variableAll);
+      let fixedMonth = safeRows(rows.fixed);
+
+      // Nowy miesiąc bez kosztów stałych → skopiuj z poprzedniego i zapytaj o edycję.
+      const prevYm = previousYearMonth(month);
+      if (
+        prevYm &&
+        fixedMonth.length === 0 &&
+        !fixedRolloverBusyRef.current &&
+        fixedRolloverAskedYmRef.current !== month &&
+        accountKey &&
+        accountKey !== 'default'
+      ) {
+        fixedRolloverBusyRef.current = true;
+        try {
+          const copied = await financeService.copyFixedCostsFromPreviousMonth(
+            accountKey,
+            month,
+            prevYm,
+          );
+          if (copied.length > 0) {
+            fixedMonth = copied;
+            fixedMerged = [...copied, ...fixedMerged.filter((c) => c.year_month !== month)];
+            fixedRolloverAskedYmRef.current = month;
+            const first = copied[0];
+            premiumAlert(
+              'Koszty stałe',
+              `Przepisano ${copied.length} kosztów stałych z ${yearMonthLabelPl(prevYm)}. Chcesz coś edytować?`,
+              [
+                { text: 'Nie', style: 'cancel' },
+                {
+                  text: 'Tak',
+                  style: 'primary',
+                  onPress: () => {
+                    setView('panel');
+                    setEditCost({
+                      id: first.id,
+                      name: first.name,
+                      amount_pln: Number(first.amount_pln),
+                      year_month: first.year_month || month,
+                      kind: 'fixed',
+                    });
+                  },
+                },
+              ],
+            );
+          }
+        } catch (e) {
+          if (__DEV__) console.warn('[Finanse] fixed rollover', e);
+        } finally {
+          fixedRolloverBusyRef.current = false;
+        }
+      }
 
       setRevenueEntries(safeRows(rows.revenue));
       setRevenueJournal(revMerged.length ? revMerged : safeRows(rows.revenue));
-      setFixedCosts(safeRows(rows.fixed));
-      setFixedCostsJournal(fixedMerged.length ? fixedMerged : safeRows(rows.fixed));
+      setFixedCosts(fixedMonth);
+      setFixedCostsJournal(fixedMerged.length ? fixedMerged : fixedMonth);
       const varMonth = safeRows(rows.variableMonth);
       setVariableEntries(varMonth);
       setVariableCostsJournal(varMerged.length ? varMerged : varMonth);
@@ -121,25 +180,25 @@ export default function FinanseScreen() {
         ...toMonths(fixedMerged),
         ...toMonths(revH),
         ...toMonths(varH),
-        CURRENT_MONTH,
+        month,
       ]);
       const sortedMonths = Array.from(allMonths).filter((m) => /^\d{4}-\d{2}$/.test(m)).sort();
       setChartRecords(
-        sortedMonths.map((month) => ({
-          id: month,
-          year_month: month,
+        sortedMonths.map((ym) => ({
+          id: ym,
+          year_month: ym,
           revenue_pln: revMerged
-            .filter((r) => r.year_month === month)
+            .filter((r) => r.year_month === ym)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || revH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
+            || revH.filter((r) => r.year_month === ym).reduce((s, r) => s + Number(r.amount_pln), 0),
           variable_costs_pln: varMerged
-            .filter((r) => r.year_month === month)
+            .filter((r) => r.year_month === ym)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || varH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
+            || varH.filter((r) => r.year_month === ym).reduce((s, r) => s + Number(r.amount_pln), 0),
           fixed_costs_pln: fixedMerged
-            .filter((r) => r.year_month === month)
+            .filter((r) => r.year_month === ym)
             .reduce((s, r) => s + Number(r.amount_pln), 0),
-          created_at: `${month}-01T12:00:00`,
+          created_at: `${ym}-01T12:00:00`,
         }))
       );
 
@@ -269,7 +328,7 @@ export default function FinanseScreen() {
       id: row.id,
       name: row.name,
       amount_pln: Number(row.amount_pln),
-      year_month: row.year_month || CURRENT_MONTH,
+      year_month: row.year_month || currentYearMonth(),
       kind,
     });
   }
@@ -355,7 +414,7 @@ export default function FinanseScreen() {
     return (
       <>
         <PremiumFinanceScreen
-          currentMonth={CURRENT_MONTH}
+          currentMonth={currentYearMonth()}
           revenueEntries={revenueEntries}
           revenueJournal={revenueJournal}
           fixedCosts={fixedCosts}

@@ -480,27 +480,72 @@ export async function fetchComprehensiveReport(
   }
   // Bearer JWT + X-Account-Key — inaczej middleware traktuje POST jako zapis na „default”.
   const headers = await apiJsonHeaders();
-  const res = await fetch(`${BACKEND_URL}/api/reports/comprehensive`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      from_date: range.from,
-      to_date: range.to,
-      top_n: topN,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BACKEND_URL}/api/reports/comprehensive`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        from_date: range.from,
+        to_date: range.to,
+        top_n: topN,
+      }),
+    });
+  } catch {
+    throw new Error(
+      'Brak połączenia z serwerem raportów. Sprawdź internet i spróbuj ponownie.',
+    );
+  }
   const data = (await res.json().catch(() => ({}))) as ComprehensiveApiPayload & {
-    detail?: string;
+    detail?: unknown;
     message?: string;
   };
   if (!res.ok) {
-    throw new Error(
-      (typeof data.detail === 'string' && data.detail) ||
-        data.message ||
-        `Błąd raportu zbiorczego (${res.status}).`,
-    );
+    const detail = data.detail;
+    let msg = '';
+    if (typeof detail === 'string') msg = detail;
+    else if (Array.isArray(detail) && detail[0]?.msg) msg = String(detail[0].msg);
+    else if (data.message) msg = data.message;
+    throw new Error(msg || `Błąd raportu zbiorczego (${res.status}).`);
   }
   return data;
+}
+
+/** Lokalny fallback P&L gdy API zbiorcze nie odpowiada — PDF/Excel i tak wyjdą. */
+export function buildLocalComprehensiveFallback(
+  range: FinancePdfRange,
+  revenue: RevenueEntry[],
+  fixed: FixedCost[],
+  variable: VariableCostEntry[],
+): ComprehensiveApiPayload {
+  const sumRev = revenue.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  const sumFix = fixed.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  const sumVar = variable.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  const sumWaste = variable
+    .filter((v) => v.type === 'waste')
+    .reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  return {
+    ok: true,
+    from_date: range.from,
+    to_date: range.to,
+    period_label: `${range.from} – ${range.to}`,
+    pnl: {
+      total_revenue: sumRev,
+      fixed_costs_allocated: sumFix,
+      variable_costs_gross: sumVar,
+      variable_costs_allocated: sumVar,
+      total_waste_cost: sumWaste,
+      net_profit: sumRev - sumFix - sumVar,
+      revenue_source: 'local_fallback',
+    },
+    top_dishes: [],
+    worst_dishes: [],
+    inventory_usage_top: [],
+    waste: { items: [], total_cost_pln: sumWaste },
+    best_days: [],
+    worst_days: [],
+    daily_profits: [],
+  };
 }
 
 function buildComprehensiveHtml(
@@ -719,11 +764,21 @@ export async function generateAndShareFinancePdf(
     html = buildPurchasesHtml(range, materials, orders);
     fileName = `gastro-raport-zakupy_${range.from}_${range.to}.pdf`;
   } else {
-    const [comp, finance, orders] = await Promise.all([
-      fetchComprehensiveReport(range, 10),
+    const [finance, orders] = await Promise.all([
       fetchFinanceForRange(range.from, range.to),
       fetchOrdersForRange(range.from, range.to),
     ]);
+    let comp: ComprehensiveApiPayload;
+    try {
+      comp = await fetchComprehensiveReport(range, 10);
+    } catch {
+      comp = buildLocalComprehensiveFallback(
+        range,
+        finance.revenue,
+        finance.fixed,
+        finance.variable,
+      );
+    }
     html = buildComprehensiveHtml(
       range,
       comp,

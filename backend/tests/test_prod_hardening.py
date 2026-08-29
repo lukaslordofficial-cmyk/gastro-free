@@ -20,6 +20,11 @@ def test_ai_paths_include_get_style_routes():
     assert is_ai_path("/api/voice/transcribe")
     assert is_ai_path("/api/inspirations/recipe")
     assert is_ai_path("/api/orders/compare-offers")
+    assert is_ai_path("/api/reports/analyze-period")
+    assert is_ai_path("/api/reports/compare-periods")
+    # PDF/Excel zbiorczy + archiwum dobowe — bez limitu AI / circuit breakera.
+    assert not is_ai_path("/api/reports/comprehensive")
+    assert not is_ai_path("/api/reports/daily")
     assert is_upload_path("/api/documents/scan")
     assert is_upload_path("/api/voice/transcribe")
     assert not is_upload_path("/api/actions/apply")

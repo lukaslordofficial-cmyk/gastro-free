@@ -61,8 +61,71 @@ export function insertRevenue(payload: { year_month: string; description: string
   return insertWithAccountKeyFallback('revenue_entries', payload);
 }
 
-export function insertFixedCost(payload: { year_month: string; type: string; name: string; amount_pln: number }): Promise<void> {
+export function insertFixedCost(payload: {
+  year_month: string;
+  type: string;
+  name: string;
+  amount_pln: number;
+  note?: string | null;
+}): Promise<void> {
   return insertWithAccountKeyFallback('fixed_costs', payload);
+}
+
+/**
+ * Kopiuje koszty stałe z poprzedniego miesiąca do targetYm (nowe ID).
+ * Zwraca wstawione wiersze. No-op gdy target już ma pozycje albo źródło jest puste.
+ */
+export async function copyFixedCostsFromPreviousMonth(
+  accountKey: string,
+  targetYm: string,
+  sourceYm: string,
+): Promise<FixedCost[]> {
+  if (!isRealKey(accountKey)) {
+    throw new Error('Brak aktywnego konta (account_key). Zaloguj się ponownie.');
+  }
+  if (!/^\d{4}-\d{2}$/.test(targetYm) || !/^\d{4}-\d{2}$/.test(sourceYm)) {
+    return [];
+  }
+
+  const { data: existing, error: exErr } = await supabase
+    .from('fixed_costs')
+    .select('id')
+    .eq('account_key', accountKey)
+    .eq('year_month', targetYm)
+    .limit(1);
+  if (exErr) throw exErr;
+  if ((existing ?? []).length > 0) return [];
+
+  const { data: source, error: srcErr } = await supabase
+    .from('fixed_costs')
+    .select('type, name, amount_pln, note')
+    .eq('account_key', accountKey)
+    .eq('year_month', sourceYm)
+    .order('type');
+  if (srcErr) throw srcErr;
+  const rows = (source ?? []) as Array<{
+    type: string;
+    name: string;
+    amount_pln: number;
+    note?: string | null;
+  }>;
+  if (!rows.length) return [];
+
+  const payload = rows.map((r) => ({
+    account_key: accountKey,
+    year_month: targetYm,
+    type: r.type || 'other',
+    name: r.name || 'Koszt stały',
+    amount_pln: Number(r.amount_pln) || 0,
+    note: r.note ?? null,
+  }));
+
+  const { data: inserted, error: insErr } = await supabase
+    .from('fixed_costs')
+    .insert(payload as never)
+    .select('*');
+  if (insErr) throw insErr;
+  return (inserted ?? []) as FixedCost[];
 }
 
 export function insertVariableCost(payload: {

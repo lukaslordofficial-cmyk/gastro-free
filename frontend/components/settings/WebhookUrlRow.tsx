@@ -71,7 +71,7 @@ export function WebhookUrlRow({ url }: { url: string }) {
         </TouchableOpacity>
       </View>
       <Text style={[whStyles.hint, { color: theme.textMuted }]}>
-        Cały adres powyżej, znak po znaku (łącznie z tokenem). Przepisujesz ręcznie do POS
+        Cały adres powyżej, znak po znaku. Przepisujesz ręcznie do POS
         albo tapnij Kopiuj — nie obcinaj linku.
       </Text>
     </View>

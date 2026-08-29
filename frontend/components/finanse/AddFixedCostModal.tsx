@@ -18,7 +18,7 @@ import * as financeService from '@/services/financeService';
 import { Colors } from '@/constants/colors';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { DS } from '@/constants/premiumTheme';
-import { BASE_FIXED_TYPES, CURRENT_MONTH } from '@/components/finanse/constants';
+import { BASE_FIXED_TYPES, currentYearMonth } from '@/components/finanse/constants';
 import { ms } from '@/components/finanse/finanseScreenStyles';
 
 export function AddFixedCostModal({
@@ -83,7 +83,7 @@ export function AddFixedCostModal({
 
     setSaving(true);
     try {
-      await financeService.insertFixedCost({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
+      await financeService.insertFixedCost({ year_month: currentYearMonth(), type, name, amount_pln: val });
       setAmount('');
       setNewCatName('');
       newCatValueRef.current = '';

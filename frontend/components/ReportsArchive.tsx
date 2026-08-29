@@ -61,13 +61,28 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
   const fetchReports = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true);
     try {
+      const base = (BACKEND_URL || '').trim().replace(/\/$/, '');
+      if (!base) {
+        if (!opts?.silent) {
+          setReports([]);
+          setMsg('Brak adresu serwera (EXPO_PUBLIC_BACKEND_URL). Zainstaluj aktualną wersję aplikacji.');
+        }
+        return;
+      }
       const headers = await apiJsonHeaders();
-      const r = await fetch(`${BACKEND_URL}/api/reports/daily`, { headers });
+      const r = await fetch(`${base}/api/reports/daily`, { headers });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         if (!opts?.silent) {
           setReports([]);
-          setMsg(typeof d.detail === 'string' ? d.detail : 'Nie udało się pobrać raportów (zaloguj się).');
+          const detail = d.detail;
+          const msg =
+            typeof detail === 'string'
+              ? detail
+              : Array.isArray(detail) && detail[0]?.msg
+                ? String(detail[0].msg)
+                : 'Nie udało się pobrać raportów (zaloguj się).';
+          setMsg(msg);
         }
         return;
       }
@@ -78,9 +93,18 @@ export function ReportsArchive({ onClosedDay }: { onClosedDay?: () => void }) {
       if (Array.isArray(d.auto_closed_dates) && d.auto_closed_dates.length) {
         setMsg(`Auto-zamknięto raporty: ${d.auto_closed_dates.join(', ')}`);
         onClosedDay?.();
+      } else if (!opts?.silent) {
+        setMsg(null);
       }
-    } catch {
-      if (!opts?.silent) setReports([]);
+    } catch (e) {
+      if (!opts?.silent) {
+        setReports([]);
+        setMsg(
+          e instanceof Error && e.message
+            ? e.message
+            : 'Nie udało się pobrać raportów. Sprawdź internet i spróbuj ponownie.',
+        );
+      }
     } finally {
       if (!opts?.silent) setLoading(false);
     }

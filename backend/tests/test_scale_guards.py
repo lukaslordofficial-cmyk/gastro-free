@@ -16,6 +16,8 @@ def test_jwt_cache_roundtrip():
 def test_public_mutate_webhooks():
     assert is_public_mutate("/api/billing/webhook")
     assert is_public_mutate("/api/pos/webhook")
+    assert is_public_mutate("/w/oAbCdEf")
+    assert not is_public_mutate("/whatever")
     assert is_public_mutate("/orders")
     assert not is_public_mutate("/api/actions/apply")
     assert not is_public_mutate("/api/voice/transcribe")

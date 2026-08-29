@@ -61,6 +61,25 @@ export function foodHeadToken(normalizedQuery: string): string | null {
 }
 
 /**
+ * Czy dwa stemmy to ten sam rdzeń (nie: rice→ric ⊂ ricotta, sos ⊂ espresso).
+ * Wymaga sensownej długości i proporcji — unikamy krótkich fałszywych prefixów.
+ */
+export function stemsCompatiblyMatch(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  if (shorter.length < 4) return false;
+  if (!longer.startsWith(shorter) && !longer.includes(shorter)) return false;
+  // Prefix: dopuszczaj tylko małą różnicę długości (ryby↔ryba), nie ric⊂ricotta
+  if (longer.startsWith(shorter)) {
+    return longer.length - shorter.length <= 2;
+  }
+  // Substring w środku tylko dla dłuższych rdzeni (np. „łosoś” w „filet łosoś”)
+  return shorter.length >= 6;
+}
+
+/**
  * Czy kandydat jest zakotwiczony w głównym słowie zapytania (łosoś⊂łosoś płat).
  */
 export function candidateAnchoredToQuery(
@@ -68,7 +87,7 @@ export function candidateAnchoredToQuery(
   candidateLabels: string[],
 ): boolean {
   const head = foodHeadToken(normalizedQuery);
-  if (!head || head.length < 3) return false;
+  if (!head || head.length < 4) return false;
   const qToks = new Set(
     normalizedQuery.split(/\s+/).filter(Boolean).map((t) => lightFoodStem(t)),
   );
@@ -76,14 +95,18 @@ export function candidateAnchoredToQuery(
     const n = normalizeFoodName(label);
     if (!n) continue;
     if (n === normalizedQuery) return true;
-    if (normalizedQuery.includes(n) && n.length >= 4) return true;
+    // Cała etykieta w zapytaniu — unikaj krótkich aliasów („ryz”, „ser”, „sos”)
+    if (n.length >= 5 && normalizedQuery.includes(n)) return true;
     const lToks = n
       .split(/\s+/)
       .filter((t) => t.length >= 3 && !FOOD_MODIFIER_TOKENS.has(t))
       .map((t) => lightFoodStem(t));
-    if (lToks.length === 1 && (qToks.has(lToks[0]) || lToks[0] === head)) return true;
-    if (lToks.length >= 1 && lToks.every((t) => qToks.has(t) || normalizedQuery.includes(t))) {
-      if (lToks.some((t) => t === head || head.startsWith(t) || t.startsWith(head))) return true;
+    if (lToks.length === 1 && stemsCompatiblyMatch(lToks[0], head)) return true;
+    if (
+      lToks.length >= 1 &&
+      lToks.every((t) => [...qToks].some((qt) => stemsCompatiblyMatch(t, qt)))
+    ) {
+      if (lToks.some((t) => stemsCompatiblyMatch(t, head))) return true;
     }
   }
   return false;

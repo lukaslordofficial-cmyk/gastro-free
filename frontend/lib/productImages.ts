@@ -725,9 +725,9 @@ export const DAIRY_CATALOG: ProductImageEntry[] = [
   { slug: 'twarog_twarozek_miska', category: 'nabial', labelPl: 'Twaróg', aliases: ['twaróg', 'twarog', 'twarożek', 'cottage cheese'], storagePath: 'nabial/twarog_twarozek_miska.png', localAsset: require('@/assets/premium/dairy/twarog_twarozek_miska.webp') },
   { slug: 'grana_padano_trojkat', category: 'nabial', labelPl: 'Grana Padano', aliases: ['grana', 'pecorino'], storagePath: 'nabial/grana_padano_trojkat.png', localAsset: require('@/assets/premium/dairy/grana_padano_trojkat.webp') },
   { slug: 'ser_tarty_mozzarella', category: 'nabial', labelPl: 'Ser tarty', aliases: ['ser tarty', 'tarta mozzarella', 'starty ser'], storagePath: 'nabial/ser_tarty_mozzarella.png', localAsset: require('@/assets/premium/dairy/ser_tarty_mozzarella.webp') },
-  { slug: 'ser_ricotta_oscypek', category: 'nabial', labelPl: 'Ricotta / bundz', aliases: ['ricotta', 'bundz', 'oscypek'], storagePath: 'nabial/ser_ricotta_oscypek.png', localAsset: require('@/assets/premium/dairy/ser_ricotta_oscypek.webp') },
+  { slug: 'ser_ricotta_oscypek', category: 'nabial', labelPl: 'Ricotta / mascarpone', aliases: ['ricotta', 'bundz', 'oscypek', 'mascarpone', 'maskarpone', 'ser mascarpone', 'cream cheese', 'philadelphia', 'ser philadelphia', 'ser kremowy', 'serki kremowe'], storagePath: 'nabial/ser_ricotta_oscypek.png', localAsset: require('@/assets/premium/dairy/ser_ricotta_oscypek.webp') },
   { slug: 'ser_camembert_kawalek', category: 'nabial', labelPl: 'Camembert', aliases: ['camembert'], storagePath: 'nabial/ser_camembert_kawalek.png', localAsset: require('@/assets/premium/dairy/ser_camembert_kawalek.webp') },
-  { slug: 'smietanka_plynna_miseczka', category: 'nabial', labelPl: 'Śmietanka', aliases: ['śmietanka', 'smietanka', 'cream 30%', 'cream 36%'], storagePath: 'nabial/smietanka_plynna_miseczka.png', localAsset: require('@/assets/premium/dairy/smietanka_plynna_miseczka.webp') },
+  { slug: 'smietanka_plynna_miseczka', category: 'nabial', labelPl: 'Śmietanka', aliases: ['śmietanka', 'smietanka', 'cream 30%', 'cream 36%', 'śmietana kremówka', 'kremowka'], storagePath: 'nabial/smietanka_plynna_miseczka.png', localAsset: require('@/assets/premium/dairy/smietanka_plynna_miseczka.webp') },
   { slug: 'ser_feta_blok', category: 'nabial', labelPl: 'Feta', aliases: ['feta', 'ser sałatkowy'], storagePath: 'nabial/ser_feta_blok.png', localAsset: require('@/assets/premium/dairy/ser_feta_blok.webp') },
   { slug: 'ser_burrata_sakiewka', category: 'nabial', labelPl: 'Burrata', aliases: ['burrata'], storagePath: 'nabial/ser_burrata_sakiewka.png', localAsset: require('@/assets/premium/dairy/ser_burrata_sakiewka.webp') },
   { slug: 'ser_guda_kawalek', category: 'nabial', labelPl: 'Gouda', aliases: ['gouda', 'guda', 'edamski', 'edam'], storagePath: 'nabial/ser_guda_kawalek.png', localAsset: require('@/assets/premium/dairy/ser_guda_kawalek.webp') },
@@ -740,7 +740,7 @@ export const DAIRY_CATALOG: ProductImageEntry[] = [
 /** Sucha spiżarnia — siatka 5×5. */
 export const DRY_PANTRY_CATALOG: ProductImageEntry[] = [
   { slug: 'maka_pszenna_kopiec', category: 'sucha_spizarnia', labelPl: 'Mąka pszenna', aliases: ['mąka', 'maka', 'mąka pszenna', 'flour'], storagePath: 'sucha/maka_pszenna_kopiec.png', localAsset: require('@/assets/premium/dry/maka_pszenna_kopiec.webp') },
-  { slug: 'ryz_bialy_jasminowy', category: 'sucha_spizarnia', labelPl: 'Ryż biały', aliases: ['ryż', 'ryz', 'jasminowy', 'rice'], storagePath: 'sucha/ryz_bialy_jasminowy.png', localAsset: require('@/assets/premium/dry/ryz_bialy_jasminowy.webp') },
+  { slug: 'ryz_bialy_jasminowy', category: 'sucha_spizarnia', labelPl: 'Ryż biały', aliases: ['ryż', 'ryz', 'ryż jaśminowy', 'ryz jasminowy', 'jasmin rice'], storagePath: 'sucha/ryz_bialy_jasminowy.png', localAsset: require('@/assets/premium/dry/ryz_bialy_jasminowy.webp') },
   { slug: 'platki_owsiane', category: 'sucha_spizarnia', labelPl: 'Płatki owsiane', aliases: ['płatki owsiane', 'platki', 'owies', 'oats'], storagePath: 'sucha/platki_owsiane.png', localAsset: require('@/assets/premium/dry/platki_owsiane.webp') },
   { slug: 'sol_morska_gruba', category: 'sucha_spizarnia', labelPl: 'Sól', aliases: ['sól', 'sol', 'sól morska', 'salt'], storagePath: 'sucha/sol_morska_gruba.png', localAsset: require('@/assets/premium/dry/sol_morska_gruba.webp') },
   { slug: 'pieprz_czarny_ziarna', category: 'sucha_spizarnia', labelPl: 'Pieprz czarny', aliases: ['pieprz', 'pieprz czarny', 'pepper'], storagePath: 'sucha/pieprz_czarny_ziarna.png', localAsset: require('@/assets/premium/dry/pieprz_czarny_ziarna.webp') },
@@ -1216,7 +1216,14 @@ function resolveDishCategoryPlaceholder(
     { keys: ['dania glowne', 'danie glowne'], slug: 'kotlet_schabowy' },
   ];
   for (const r of rules) {
-    if (r.keys.some((k) => hay.includes(normalizeName(k)))) {
+    if (r.keys.some((k) => {
+      const nk = normalizeName(k);
+      if (!nk) return false;
+      if (nk.length <= 3) {
+        return new RegExp(`(?:^|\\s)${nk}(?:\\s|$)`).test(hay);
+      }
+      return hay.includes(nk);
+    })) {
       const hit = pick(r.slug);
       if (hit) return hit;
     }
@@ -1286,7 +1293,15 @@ import {
   foodHeadToken,
   FOOD_MODIFIER_TOKENS,
   normalizeFoodName,
+  stemsCompatiblyMatch,
 } from '@/lib/foodNameNormalize';
+import {
+  detectIngredientImageFamily,
+  familyFromProductCategory,
+  ingredientFamiliesCompatible,
+  placeholderSlugForIngredientFamily,
+  catalogCategoriesForFamily,
+} from '@/lib/ingredientImageFamily';
 
 function normalizeName(raw: string): string {
   return normalizeFoodName(raw);
@@ -1403,20 +1418,12 @@ function isCookedDishPath(entry: ProductImageEntry): boolean {
 /** Tokeny mylące: boczek ≠ boczniak, borowik ≠ boczek (bez słabego substring). */
 function tokensConflictSafe(qTok: string, cTok: string): boolean {
   if (qTok === cTok) return true;
-  // boczek / boczniak / borowik — wymagaj exact (prefix zbyt krótki)
+  // boczek / boczniak / borowik — wymagaj exact
   const MEAT_MUSHROOM = new Set(['boczek', 'bacon', 'bekon', 'boczniak', 'borowik', 'borowiki']);
   if (MEAT_MUSHROOM.has(qTok) || MEAT_MUSHROOM.has(cTok)) {
     return qTok === cTok;
   }
-  if (qTok.length >= 5 && cTok.length >= 5 && (cTok.includes(qTok) || qTok.includes(cTok))) {
-    // Unikaj: boczek ⊆ boczniak (false includes), ale też krótkich kolizji
-    const shorter = qTok.length <= cTok.length ? qTok : cTok;
-    const longer = qTok.length <= cTok.length ? cTok : qTok;
-    if (longer.startsWith(shorter) && longer.length - shorter.length <= 2) return true;
-    if (longer.includes(shorter) && shorter.length >= 6) return true;
-    return false;
-  }
-  return false;
+  return stemsCompatiblyMatch(qTok, cTok);
 }
 
 /**
@@ -1444,12 +1451,13 @@ export function resolveProductImage(
       : new Set(excludeSlugs)
     : null;
   const hasExclude = !!(excluded && excluded.size > 0);
-  // v4: PL normalize + head-token anchors (łosoś płat ≠ butelka)
-  const cacheKey = `${preferDishes ? 'd4' : 'i4'}|${q}|${normalizeName(menuCategory ?? '')}`;
+  // v5: family-gated ingredient match + safer anchors (mascarpone ≠ bazylia / rice ≠ ricotta)
+  const cacheKey = `${preferDishes ? 'd5' : 'i5'}|${q}|${normalizeName(menuCategory ?? '')}`;
   if (!hasExclude) {
     const hit = RESOLVE_CACHE.get(cacheKey);
     if (hit !== undefined) return hit;
   }
+  const wantIngFamily = preferDishes ? 'other' : detectIngredientImageFamily(productName);
 
   // Menu: tylko dania (+ ewentualnie non-packaging ingredients jako ostatnia deska)
   // Magazyn: składniki bez pool dań
@@ -1597,6 +1605,17 @@ export function resolveProductImage(
           score = Math.max(0, score - 40);
         }
       }
+      // Magazyn: twarda bramka kategorii (mascarpone ≠ bazylia / zioła)
+      if (!preferDishes && wantIngFamily !== 'other' && score > 0) {
+        const entryFam = familyFromProductCategory(entry.category);
+        if (!ingredientFamiliesCompatible(wantIngFamily, entryFam)) {
+          // Exact name/alias (≥95) może przejść; miękkie trafienia w obcej kategorii — kasuj
+          if (score < 95) score = 0;
+          else score = Math.min(score, 60);
+        } else if (entryFam === wantIngFamily) {
+          score = Math.min(100, score + 8);
+        }
+      }
       if (score > 0) ranked.push({ entry, score });
     }
     // Mocne trafienie w katalogu dań — nie mieszaj ze składnikami
@@ -1668,30 +1687,42 @@ export function resolveProductImage(
   }
 
   // Poziom 3 — uniwersalny placeholder (magazyn / składniki)
-  const ph = resolvePlaceholderByKeywords(q);
-  if (ph) {
+  const familyPhSlug = placeholderSlugForIngredientFamily(wantIngFamily);
+  const familyPh = catalogAll().find((e) => e.slug === familyPhSlug);
+  if (wantIngFamily !== 'other' && familyPh && (!excluded || !excluded.has(familyPh.slug))) {
     const resolved = {
-      slug: ph.slug,
-      labelPl: ph.labelPl,
-      uri: publicIconUrl(ph.storagePath),
-      localAsset: ph.localAsset,
-      score: best?.score ?? 40,
+      slug: familyPh.slug,
+      labelPl: familyPh.labelPl,
+      uri: publicIconUrl(familyPh.storagePath),
+      localAsset: familyPh.localAsset,
+      score: best?.score ?? 42,
     };
     return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
   }
+  const ph = resolvePlaceholderByKeywords(q);
+  if (ph && (!excluded || !excluded.has(ph.slug))) {
+    const phOk =
+      wantIngFamily === 'other' ||
+      ph.slug === familyPhSlug ||
+      ingredientFamiliesCompatible(wantIngFamily, familyFromProductCategory(ph.category));
+    if (phOk) {
+      const resolved = {
+        slug: ph.slug,
+        labelPl: ph.labelPl,
+        uri: publicIconUrl(ph.storagePath),
+        localAsset: ph.localAsset,
+        score: best?.score ?? 40,
+      };
+      return hasExclude ? resolved : rememberResolve(cacheKey, resolved);
+    }
+  }
 
-  // Magazyn: mądrzejszy fallback (nie zawsze skrzynka warzyw)
-  const fallbackSlug =
-    /\b(mies|mięso|boczek|bacon|bekon|kurczak|wolow|wieprz|stek|wedlin)\b/.test(q)
-      ? 'ph_mieso_surowe_stek'
-      : /\b(wod|napoj|sok|cola|piwo|wino|kawa|herbat)\b/.test(q)
-        ? 'fiji_woda_butelka'
-        : /\b(grzyb|borowik|boczniak|pieczark)\b/.test(q)
-          ? 'ph_ziola_doniczki'
-          : 'ph_skrzynka_warzywa';
+  // Magazyn: fallback wg rodziny składnika (nie zawsze skrzynka warzyw / zioła)
+  const fallbackSlug = placeholderSlugForIngredientFamily(wantIngFamily);
   const fallback =
+    catalogAll().find((e) => e.slug === fallbackSlug && (!excluded || !excluded.has(e.slug))) ||
     catalogAll().find((e) => e.slug === fallbackSlug) ||
-    catalogAll().find((e) => e.slug === 'ph_mieso_surowe_stek') ||
+    catalogAll().find((e) => e.slug === 'ph_skrzynka_warzywa') ||
     catalogAll()[0];
   if (!fallback) return hasExclude ? null : rememberResolve(cacheKey, null);
   const resolved = {
@@ -1719,6 +1750,8 @@ function resolvePlaceholderByKeywords(q: string): ProductImageEntry | null {
     { keys: ['trufel', 'trufl'], slug: 'ph_ziola_doniczki' },
     { keys: ['tunczyk', 'tuńczyk', 'tuna'], slug: 'ph_ryby_swieze' },
     { keys: ['malz', 'małż', 'omul', 'ostry'], slug: 'ph_ryby_swieze' },
+    // Nabiał / sery miękkie PRZED ziołami (mascarpone, philadelphia)
+    { keys: ['mascarpone', 'maskarpone', 'philadelphia', 'cream cheese', 'ser krem', 'ricotta', 'burrata', 'mozzarella', 'mozarella'], slug: 'ph_sery_kregi' },
     { keys: ['sos', 'ketchup', 'majonez', 'dressing', 'musztarda', 'cytrynowy', 'malinowy'], slug: 'ph_butelki_dozujace_sosy' },
     { keys: ['zupa', 'krem', 'bulion', 'gulasz', 'rosol', 'rosoł'], slug: 'ph_garnki_metalowe' },
     { keys: ['oliwa', 'ocet', 'olej'], slug: 'ph_karafki_oliwa_ocet' },
@@ -1729,7 +1762,7 @@ function resolvePlaceholderByKeywords(q: string): ProductImageEntry | null {
     { keys: ['napoj', 'sok ', 'cola', 'lemoniad', 'smoothie', 'drink'], slug: 'fiji_woda_butelka' },
     { keys: ['warzyw', 'nowalijk', 'ziemniak', 'korzen'], slug: 'ph_skrzynka_warzywa' },
     { keys: ['ser ', 'sery', 'twarog', 'twaróg'], slug: 'ph_sery_kregi' },
-    { keys: ['mleko', 'smietan', 'śmietan', 'jogurt', 'nabial', 'nabiał'], slug: 'ph_mleko_karton_nabial' },
+    { keys: ['mleko', 'smietan', 'śmietan', 'jogurt', 'nabial', 'nabiał', 'maslo', 'masło'], slug: 'ph_mleko_karton_nabial' },
     { keys: ['jajk', 'jaj ', 'melanz'], slug: 'ph_jajka_wytlaczanka' },
     { keys: ['mies', 'mięso', 'stek', 'wedlin', 'kurczak', 'wolow', 'wieprz', 'kaczka', 'indyk'], slug: 'ph_mieso_surowe_stek' },
     { keys: ['ryb', 'krewet', 'owoc morza'], slug: 'ph_ryby_swieze' },
@@ -1745,7 +1778,15 @@ function resolvePlaceholderByKeywords(q: string): ProductImageEntry | null {
     { keys: ['czapka', 'kucharz'], slug: 'ph_czapka_kucharska' },
   ];
   for (const r of rules) {
-    if (r.keys.some((k) => q.includes(normalizeName(k)))) {
+    if (r.keys.some((k) => {
+      const nk = normalizeName(k);
+      if (!nk) return false;
+      // Krótkie klucze (≤3) tylko na granicach słów — „sos” ≠ fragment w „mascarpone”
+      if (nk.length <= 3) {
+        return new RegExp(`(?:^|\\s)${nk}(?:\\s|$)`).test(q);
+      }
+      return q.includes(nk);
+    })) {
       const hit = catalogAll().find((e) => e.slug === r.slug);
       if (hit) return hit;
     }
@@ -1759,7 +1800,7 @@ export function imageSourceForProduct(
   excludeSlugs?: Set<string> | string[],
 ): number | { uri: string } {
   const hasExclude = !!(excludeSlugs && (excludeSlugs instanceof Set ? excludeSlugs.size : excludeSlugs.length));
-  const srcKey = `i4|${normalizeName(productName)}`;
+  const srcKey = `i5|${normalizeName(productName)}`;
   if (!hasExclude) {
     const cached = SOURCE_CACHE.get(srcKey);
     if (cached !== undefined) return cached;
@@ -1805,6 +1846,74 @@ export function assignUniqueDishImageSources(
       placeholderLabel: r.placeholderLabel,
       score: r.score,
     });
+  }
+  return out;
+}
+
+/**
+ * Unikalne miniatury MAGAZYNU — zawsze preferDishes=false (składniki, nie dania).
+ * Dzięki temu mascarpone → nabiał, a nie lemoniada z bazylią z katalogu dań.
+ */
+export function assignUniqueProductImageSources(
+  items: ReadonlyArray<{ name: string; category?: string }>,
+): Map<string, DishThumbAssignment> {
+  const used = new Set<string>();
+  const out = new Map<string, DishThumbAssignment>();
+  for (const item of items) {
+    if (out.has(item.name)) continue;
+    const r = resolveProductImage(item.name, used, false, item.category);
+    const source = dishImageSource(r);
+    if (!source || !r) continue;
+    // Placeholder rodzinny (score niski) — nadal OK, byle w tej samej rodzinie
+    if (r.slug) used.add(r.slug);
+    out.set(item.name, {
+      source,
+      slug: r.slug,
+      matchTier: r.matchTier,
+      placeholderLabel: r.placeholderLabel,
+      score: r.score,
+    });
+  }
+  return out;
+}
+
+/** Podpowiedzi z katalogu składników (ta sama rodzina) — modal „Zmień zdjęcie”. */
+export function listSimilarProductCatalogEntries(
+  productName: string,
+  limit = 24,
+): Array<{ slug: string; labelPl: string; source: number | { uri: string }; category: string }> {
+  const fam = detectIngredientImageFamily(productName);
+  const cats = new Set(catalogCategoriesForFamily(fam));
+  const q = normalizeName(productName);
+  const best = resolveProductImage(productName, undefined, false);
+  const ranked: { entry: ProductImageEntry; score: number }[] = [];
+  for (const entry of catalogAll()) {
+    if (entry.category === 'placeholdery') continue;
+    if (isPackagingEntry(entry)) continue;
+    if (cats.size && !cats.has(entry.category) && fam !== 'other') continue;
+    let score = 20;
+    if (best?.slug === entry.slug) score = 100;
+    else {
+      const labels = [entry.labelPl, ...entry.aliases].map(normalizeName);
+      if (labels.some((l) => l === q)) score = 95;
+      else if (q.length >= 5 && labels.some((l) => l.includes(q) || (q.includes(l) && l.length >= 5))) score = 70;
+      else score = 25;
+    }
+    ranked.push({ entry, score });
+  }
+  ranked.sort((a, b) => b.score - a.score || a.entry.labelPl.localeCompare(b.entry.labelPl));
+  const out: Array<{ slug: string; labelPl: string; source: number | { uri: string }; category: string }> = [];
+  for (const { entry } of ranked) {
+    const source = dishImageSource({
+      slug: entry.slug,
+      labelPl: entry.labelPl,
+      uri: publicIconUrl(entry.storagePath),
+      localAsset: entry.localAsset,
+      score: 1,
+    });
+    if (!source) continue;
+    out.push({ slug: entry.slug, labelPl: entry.labelPl, source, category: entry.category });
+    if (out.length >= limit) break;
   }
   return out;
 }

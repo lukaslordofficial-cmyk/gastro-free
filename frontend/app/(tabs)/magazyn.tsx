@@ -46,7 +46,7 @@ import { DS } from '@/constants/premiumTheme';
 import { convertProduceQty } from '@/lib/produceSizeConverter';
 import { normalizeIngredientName } from '@/lib/fuzzyProductMatch';
 import { normCategoryName } from '@/lib/warehouseCategories';
-import { assignUniqueDishImageSources } from '@/lib/productImages';
+import { assignUniqueProductImageSources } from '@/lib/productImages';
 import {
   clearProductCustomImage,
   getProductCustomImageSync,
@@ -69,6 +69,7 @@ import { buildMagRows } from '@/components/magazyn/buildMagRows';
 import { AddCategoryModal } from '@/components/magazyn/AddCategoryModal';
 import { MagFab } from '@/components/magazyn/MagFab';
 import { ProductFormModal } from '@/components/magazyn/ProductFormModal';
+import { CatalogThumbPickerModal } from '@/components/CatalogThumbPickerModal';
 
 export default function MagazynScreen() {
   const router = useRouter();
@@ -113,6 +114,7 @@ export default function MagazynScreen() {
   const [orderProduct, setOrderProduct] = useState<MockInventoryItem | null>(null);
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
+  const [catalogPicker, setCatalogPicker] = useState<MockInventoryItem | null>(null);
 
   useEffect(() => {
     void loadProductCustomImages().then(() => setCustomImageTick((t) => t + 1));
@@ -122,7 +124,7 @@ export default function MagazynScreen() {
   /** Unikalne miniatury katalogu — bez powtórzeń tej samej ikony w liście. */
   const libraryThumbByName = useMemo(() => {
     const items = inventory.map((i) => ({ name: i.product_name, category: i.category }));
-    const assigned = assignUniqueDishImageSources(items);
+    const assigned = assignUniqueProductImageSources(items);
     const map = new Map<string, number | { uri: string }>();
     for (const [name, a] of assigned) {
       if (a.source) map.set(name, a.source);
@@ -148,6 +150,10 @@ export default function MagazynScreen() {
     (item: MockInventoryItem) => {
       const hasCustom = !!getProductCustomImageSync(item.id);
       premiumAlert('Zmień zdjęcie', item.product_name, [
+        {
+          text: 'Podobne z katalogu',
+          onPress: () => setCatalogPicker(item),
+        },
         {
           text: 'Wybierz z galerii',
           onPress: async () => {
@@ -1124,6 +1130,17 @@ export default function MagazynScreen() {
           </View>
         </View>
       ) : null}
+      <CatalogThumbPickerModal
+        visible={!!catalogPicker}
+        title="Zmień zdjęcie produktu"
+        queryName={catalogPicker?.product_name || ''}
+        mode="product"
+        onClose={() => setCatalogPicker(null)}
+        onPick={(pick) => {
+          if (!catalogPicker) return;
+          void saveProductPhotoWebP(catalogPicker.id, pick.uri);
+        }}
+      />
     </SafeAreaView>
   );
 }

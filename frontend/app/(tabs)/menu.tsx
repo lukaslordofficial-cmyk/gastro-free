@@ -103,6 +103,7 @@ import { namesMatch } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
+import { CatalogThumbPickerModal } from '@/components/CatalogThumbPickerModal';
 
 /** Ciężki modal receptur — osobny chunk Metro, nie przy cold start Menu. */
 const RecipesModal = lazy(() =>
@@ -302,6 +303,7 @@ export default function MenuScreen() {
   const [thumbTick, setThumbTick] = useState(0);
   const [customImageTick, setCustomImageTick] = useState(0);
   const [photoSaving, setPhotoSaving] = useState(false);
+  const [catalogPicker, setCatalogPicker] = useState<Dish | null>(null);
   const dishNamesKey = useMemo(
     () => dishes.map((d) => `${d.name}\u0001${d.category}`).join('|'),
     [dishes],
@@ -403,6 +405,10 @@ export default function MenuScreen() {
     (dish: Dish) => {
       const hasCustom = !!getDishCustomImageSync(dish.id);
       premiumAlert('Zmień zdjęcie', dish.name, [
+        {
+          text: 'Podobne z katalogu',
+          onPress: () => setCatalogPicker(dish),
+        },
         {
           text: 'Wybierz z galerii',
           onPress: async () => {
@@ -1200,6 +1206,18 @@ export default function MenuScreen() {
           />
         ) : null}
       </Suspense>
+      <CatalogThumbPickerModal
+        visible={!!catalogPicker}
+        title="Zmień zdjęcie dania"
+        queryName={catalogPicker?.name || ''}
+        mode="dish"
+        menuCategory={catalogPicker?.category}
+        onClose={() => setCatalogPicker(null)}
+        onPick={(pick) => {
+          if (!catalogPicker) return;
+          void saveDishPhotoWebP(catalogPicker.id, pick.uri);
+        }}
+      />
     </SafeAreaView>
   );
 }

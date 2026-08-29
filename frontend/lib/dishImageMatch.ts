@@ -402,7 +402,7 @@ function applyFamilyAdjustments(
     } else if (wantFamily === 'meat' && (fam === 'dessert' || fam === 'drink')) {
       s = Math.max(0, s - 50);
     } else {
-      s = Math.max(0, s - 28);
+      s = Math.max(0, s - 40);
     }
   }
   // Extra: mięso/roast nie może wygrać frytkami / ziemniakami nawet przy tagach pieczeń
@@ -413,6 +413,15 @@ function applyFamilyAdjustments(
     s = Math.max(0, s - 50);
   }
   if (wantFamily === 'sides' && lib && isSoupLikeImage(lib, entry)) {
+    s = Math.max(0, s - 45);
+  }
+  if (wantFamily === 'dessert' && fam !== 'dessert' && fam !== 'other') {
+    s = Math.max(0, s - 50);
+  }
+  if (wantFamily === 'drink' && fam !== 'drink' && fam !== 'other') {
+    s = Math.max(0, s - 50);
+  }
+  if (wantFamily === 'salad' && (fam === 'drink' || fam === 'dessert' || fam === 'meat')) {
     s = Math.max(0, s - 45);
   }
   if (isRedTomatoFamily(name)) {

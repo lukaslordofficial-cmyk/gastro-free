@@ -22,6 +22,7 @@ const CAT_KEYWORDS: Array<{ category: string; words: string[] }> = [
     words: [
       'mleko', 'ser', 'smietan', 'jogurt', 'maslo', 'twarog', 'mozarella', 'mozzarella',
       'parmezan', 'jajk', 'jajec', 'kefir', 'maslank', 'ricotta', 'feta', 'goud', 'cheddar',
+      'mascarpone', 'maskarpone', 'burrata', 'philadelphia', 'camembert', 'gorgonzola',
     ],
   },
   {

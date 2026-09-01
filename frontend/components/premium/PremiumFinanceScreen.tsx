@@ -43,7 +43,7 @@ import { DS } from '@/constants/premiumTheme';
 import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
 import { AlertBanner } from '@/components/AlertBanner';
-import { ReportInfoButton } from '@/components/ReportInfoButton';
+import { FinanceHeaderActions } from '@/components/FinanceHeaderActions';
 import { ReportsArchive } from '@/components/ReportsArchive';
 import { SubscriptionPanel } from '@/components/SubscriptionPanel';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
@@ -585,10 +585,10 @@ export function PremiumFinanceScreen(props: Props) {
         </View>
 
         <View style={styles.reportBtnWrap}>
-          <ReportInfoButton
-            contextHint="Finanse"
+          <FinanceHeaderActions
             onApplied={props.onFetchApplied}
-            testID="finanse-report-info-premium"
+            reportTestID="finanse-report-info-premium"
+            notificationsTestID="finanse-notifications-premium"
             centered
             darkText
           />

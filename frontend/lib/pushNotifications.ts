@@ -7,6 +7,7 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { supabase } from '@/lib/supabase';
+import { appendInboxNotification } from '@/lib/notificationsInbox';
 
 let Notifications: typeof import('expo-notifications') | null = null;
 try {
@@ -213,8 +214,10 @@ export async function showDesktopOrLocalNow(
   body: string,
   data?: Record<string, unknown>,
 ): Promise<void> {
+  void appendInboxNotification({ title, body, data });
   const ok = await ensureNotificationPermissions();
   if (!ok) return;
+  const payload = { ...(data || {}), _inboxRecorded: true };
   if (Platform.OS === 'web' && typeof Notification !== 'undefined') {
     try {
       new Notification(title, { body });
@@ -226,7 +229,7 @@ export async function showDesktopOrLocalNow(
   if (!Notifications) return;
   try {
     await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: true, data: data || {} },
+      content: { title, body, sound: true, data: payload },
       trigger: null,
     });
   } catch {

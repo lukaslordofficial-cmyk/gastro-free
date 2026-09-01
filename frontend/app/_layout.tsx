@@ -9,6 +9,7 @@ import { useFrameworkReady } from '@/hooks/useFrameworkReady';
 import { useIconFonts } from '@/src/hooks/use-icon-fonts';
 import { AuthProvider, useAuth } from '@/contexts/AuthContext';
 import { SubscriptionProvider } from '@/contexts/SubscriptionContext';
+import { NotificationsProvider } from '@/contexts/NotificationsContext';
 import { UiOverlayProvider } from '@/contexts/UiOverlayContext';
 import { AdsProvider } from '@/contexts/AdsProvider';
 import { ThemeModeProvider, useThemeMode } from '@/contexts/ThemeModeContext';
@@ -80,6 +81,7 @@ function RootLayoutNav() {
   return (
     <AuthGate>
       <SubscriptionProvider>
+        <NotificationsProvider>
         <PremiumAlertProvider>
               <PushConsentBootstrap />
               <LpPaymentReturnHost />
@@ -102,6 +104,7 @@ function RootLayoutNav() {
             </AdsProvider>
           </UiOverlayProvider>
         </PremiumAlertProvider>
+        </NotificationsProvider>
       </SubscriptionProvider>
     </AuthGate>
   );

@@ -40,7 +40,7 @@ import { AlertBanner } from '@/components/AlertBanner';
 import { RevenueChart } from '@/components/RevenueChart';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { Colors } from '@/constants/colors';
-import { ReportInfoButton } from '@/components/ReportInfoButton';
+import { FinanceHeaderActions } from '@/components/FinanceHeaderActions';
 import { ReportsArchive } from '@/components/ReportsArchive';
 import { SubscriptionPanel } from '@/components/SubscriptionPanel';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
@@ -1228,12 +1228,7 @@ export default function FinanseScreen() {
               centered
             />
             <View style={{ marginTop: 12, alignItems: 'center', alignSelf: 'stretch' }}>
-              <ReportInfoButton
-                contextHint="Finanse"
-                onApplied={fetchData}
-                centered
-                testID="finanse-report-info"
-              />
+              <FinanceHeaderActions onApplied={fetchData} centered />
             </View>
           </View>
         ) : (
@@ -1244,7 +1239,7 @@ export default function FinanseScreen() {
               showDevToggle
             />
             <View style={{ marginTop: 4, marginBottom: 16 }}>
-              <ReportInfoButton contextHint="Finanse" onApplied={fetchData} testID="finanse-report-info" />
+              <FinanceHeaderActions onApplied={fetchData} />
             </View>
           </>
         )}

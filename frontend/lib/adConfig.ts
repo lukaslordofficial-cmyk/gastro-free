@@ -25,7 +25,7 @@ export const AD_UNITS = {
   })!,
 };
 
-/** Google test IDs — używane w __DEV__ gdy EXPO_PUBLIC_ADMOB_USE_TEST_IDS=1 */
+/** Google test IDs — tylko gdy jawnie EXPO_PUBLIC_ADMOB_USE_TEST_IDS=1 (dev/debug). */
 export const TEST_AD_UNITS = {
   banner: 'ca-app-pub-3940256099942544/6300978111',
   interstitial: 'ca-app-pub-3940256099942544/1033173712',
@@ -36,8 +36,13 @@ export const INTERSTITIAL_MIN_INTERVAL_MS = 7 * 60 * 1000;
 /** @deprecated — rewarded za kredyty wyłączone */
 export const REWARDED_DAILY_LIMIT = 0;
 
+/** Domyślnie produkcyjne jednostki AdMob (release + preview). Testy tylko z flagą env. */
+export function useTestAdUnits(): boolean {
+  return process.env.EXPO_PUBLIC_ADMOB_USE_TEST_IDS === '1';
+}
+
 export function pickAdUnit(kind: keyof typeof AD_UNITS): string {
-  if (__DEV__ && process.env.EXPO_PUBLIC_ADMOB_USE_TEST_IDS === '1') {
+  if (useTestAdUnits()) {
     return TEST_AD_UNITS[kind];
   }
   return AD_UNITS[kind];

@@ -10,6 +10,7 @@ from pos_webhook_routes import PosSaleItem, PosWebhookRequest
 def test_pos_webhook_router_wired():
     paths = {getattr(r, "path", None) for r in pos_webhook_routes.router.routes}
     assert "/api/pos/webhook" in paths
+    assert "/w/{code}" in paths
 
 
 def test_pos_webhook_models():

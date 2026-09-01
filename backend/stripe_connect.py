@@ -393,7 +393,14 @@ async def sync_connect_account_to_producer(
         producer = (rows or [None])[0]
         if not producer:
             raise ValueError("Nie znaleziono dystrybutora")
-        account_id = account_id or producer_connect_id(producer)
+        stored = producer_connect_id(producer)
+        if stored:
+            account_id = stored
+        elif account_id and str(account_id).startswith("acct_"):
+            # Webhook account.updated — konto jeszcze nie zapisane lokalnie.
+            pass
+        else:
+            account_id = None
 
     if not account_id or not str(account_id).startswith("acct_"):
         raise ValueError("Brak stripe_connect_id / acct_...")

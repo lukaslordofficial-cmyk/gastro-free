@@ -83,9 +83,9 @@ async function shareOrDownload(fileName: string, xml: string): Promise<void> {
   const base = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
   if (!base) throw new Error('Brak katalogu plików do zapisu.');
   const path = `${base}${fileName}`;
-  await FileSystem.writeAsStringAsync(path, xml, {
-    encoding: FileSystem.EncodingType.UTF8,
-  });
+  const encoding =
+    (FileSystem as { EncodingType?: { UTF8: string } }).EncodingType?.UTF8 ?? 'utf8';
+  await FileSystem.writeAsStringAsync(path, xml, { encoding: encoding as 'utf8' });
 
   const canShare = await Sharing.isAvailableAsync();
   if (!canShare) {

@@ -105,17 +105,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_warehouse_expiry_alert_batch_day
   WHERE batch_id IS NOT NULL AND alert_day IS NOT NULL;
 
 ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
-
-DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE tablename = 'invoices' AND policyname = 'anon_all_invoices'
-  ) THEN
-    CREATE POLICY "anon_all_invoices"
-      ON invoices FOR ALL TO anon, authenticated
-      USING (true) WITH CHECK (true);
-  END IF;
-END $$;
+-- Izolację tenant daje FIX_INVOICES_TENANT_RLS.sql — nie twórz USING(true).
 
 -- Widok pomocniczy (nazwa jak w specyfikacji)
 CREATE OR REPLACE VIEW inventory_batches AS

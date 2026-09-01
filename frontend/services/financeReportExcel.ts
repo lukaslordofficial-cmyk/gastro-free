@@ -6,6 +6,7 @@ import {
   fetchComprehensiveReport,
   fetchFinanceForRange,
   fetchOrdersForRange,
+  buildLocalComprehensiveFallback,
   type FinancePdfRange,
   type FinancePdfReportKind,
 } from '@/services/financeReportPdf';
@@ -181,11 +182,21 @@ export async function generateAndShareFinanceExcel(
   }
 
   // comprehensive
-  const [comp, finance, orders] = await Promise.all([
-    fetchComprehensiveReport(range, 10),
+  const [finance, orders] = await Promise.all([
     fetchFinanceForRange(range.from, range.to),
     fetchOrdersForRange(range.from, range.to),
   ]);
+  let comp: Awaited<ReturnType<typeof fetchComprehensiveReport>>;
+  try {
+    comp = await fetchComprehensiveReport(range, 10);
+  } catch {
+    comp = buildLocalComprehensiveFallback(
+      range,
+      finance.revenue,
+      finance.fixed,
+      finance.variable,
+    );
+  }
   const pnl = comp.pnl || {};
   const sheets: ExcelSheet[] = [
     {

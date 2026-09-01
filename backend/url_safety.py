@@ -69,6 +69,12 @@ def build_supabase_auth_user_url(base_url: str) -> str:
     return f"{origin}/auth/v1/user"
 
 
+def build_supabase_auth_generate_link_url(base_url: str) -> str:
+    """Admin ``/auth/v1/admin/generate_link`` (env origin only)."""
+    origin = assert_supabase_origin(base_url)
+    return f"{origin}/auth/v1/admin/generate_link"
+
+
 def assert_safe_rest_path(path: str) -> str:
     """Zapobiega path traversal / SSRF przez path w `{SUPABASE_URL}/rest/v1/{path}`."""
     raw = (path or "").strip().lstrip("/")
@@ -170,9 +176,32 @@ def assert_supabase_fetch_url(url: str, supabase_url: str) -> str:
     return cleaned
 
 
+# Unikalny scheme Play/standalone. Legacy „myapp” zostaje w allowliście (stare APK).
+APP_DEEP_LINK_SCHEME = (os.getenv("APP_DEEP_LINK_SCHEME") or "gastromanager").strip().lower() or "gastromanager"
+APP_DEEP_LINK_SCHEMES = frozenset({APP_DEEP_LINK_SCHEME, "myapp", "gastro-manager", "gastromanager"})
+
+
+def app_deep_link(path: str) -> str:
+    """Deep link standalone: gastromanager:///billing/success?..."""
+    p = (path or "").strip()
+    if not p.startswith("/"):
+        p = f"/{p}"
+    return f"{APP_DEEP_LINK_SCHEME}:///{p.lstrip('/')}"
+
+
+def is_app_or_dev_deep_link(url: str) -> bool:
+    """Stripe nie akceptuje custom scheme — takie URL-e zamieniamy na HTTPS return."""
+    u = (url or "").strip().lower()
+    if not u:
+        return False
+    if u.startswith("exp://") or u.startswith("exp+"):
+        return True
+    return any(u.startswith(f"{s}://") for s in APP_DEEP_LINK_SCHEMES)
+
+
 def checkout_redirect_public_base() -> str:
     """
-    Bazowy URL pod Stripe success/cancel (strona HTML → deep link myapp://).
+    Bazowy URL pod Stripe success/cancel (strona HTML → deep link gastromanager://).
     NIE używaj PUBLIC_APP_URL=localhost:8081 (Expo) — telefon dostaje „witryna nieosiągalna”.
     """
     for key in (
@@ -242,16 +271,18 @@ def is_safe_app_return_url(url: str) -> bool:
         return False
     parsed = urlparse(cleaned)
     scheme = (parsed.scheme or "").lower()
-    if scheme == "myapp":
+    if scheme in APP_DEEP_LINK_SCHEMES:
         return True
     if scheme == "exp" or scheme.startswith("exp+"):
-        return True
-    if scheme in ("gastro-manager", "gastromanager"):
         return True
     return False
 
 
-def assert_safe_redirect_url(url: str, *, allow_deep_link_schemes: tuple[str, ...] = ("myapp", "exp")) -> str:
+def assert_safe_redirect_url(
+    url: str,
+    *,
+    allow_deep_link_schemes: tuple[str, ...] = ("gastromanager", "gastro-manager", "myapp", "exp"),
+) -> str:
     """
     Allowlist dla Stripe success/cancel/return.
     Akceptuje deep linki aplikacji oraz http(s) na znanych hostach.
@@ -261,7 +292,11 @@ def assert_safe_redirect_url(url: str, *, allow_deep_link_schemes: tuple[str, ..
         raise HTTPException(status_code=400, detail="Nieprawidłowy URL przekierowania.")
     parsed = urlparse(cleaned)
     scheme = (parsed.scheme or "").lower()
-    if scheme in allow_deep_link_schemes:
+    if (
+        scheme in allow_deep_link_schemes
+        or scheme in APP_DEEP_LINK_SCHEMES
+        or scheme.startswith("exp+")
+    ):
         return cleaned
     if scheme not in ("https", "http"):
         raise HTTPException(status_code=400, detail="Schemat URL niedozwolony.")

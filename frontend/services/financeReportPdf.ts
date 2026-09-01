@@ -6,7 +6,7 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { parseInvoiceCostNote } from '@/lib/invoiceCostNote';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
@@ -77,8 +77,9 @@ type OrderRow = {
   }> | null;
 };
 
-function isRealKey(ak: string): boolean {
-  return !!ak && ak !== 'default';
+/** Zawsze filtruj po tenancie — bez fallbacku na „wszystkie wiersze”. */
+function requireAccountKeyForReports(): string {
+  return requireTenantAccountKey();
 }
 
 function escapeHtml(s: string): string {
@@ -191,34 +192,30 @@ export async function fetchFinanceForRange(from: string, to: string): Promise<{
   fixed: FixedCost[];
   variable: VariableCostEntry[];
 }> {
-  const ak = getAccountKey();
+  const ak = requireAccountKeyForReports();
   const months = yearMonthsInRange(from, to);
   if (!months.length) return { revenue: [], fixed: [], variable: [] };
 
-  const scoped = <T,>(q: T & { eq: (col: string, val: string) => T }): T =>
-    isRealKey(ak) ? q.eq('account_key', ak) : q;
-
-  let revQ = scoped(supabase.from('revenue_entries').select('*')).in('year_month', months).order('created_at');
-  let fixQ = scoped(supabase.from('fixed_costs').select('*')).in('year_month', months).order('year_month');
-  let varQ = scoped(
-    supabase.from('variable_cost_entries').select('*'),
-  )
-    .in('year_month', months)
-    .order('created_at');
-
-  let [revRes, fixRes, varRes] = await Promise.all([revQ, fixQ, varQ]);
-
-  if (
-    (revRes.error && /account_key/i.test(revRes.error.message ?? '')) ||
-    (fixRes.error && /account_key/i.test(fixRes.error.message ?? '')) ||
-    (varRes.error && /account_key/i.test(varRes.error.message ?? ''))
-  ) {
-    [revRes, fixRes, varRes] = await Promise.all([
-      supabase.from('revenue_entries').select('*').in('year_month', months).order('created_at'),
-      supabase.from('fixed_costs').select('*').in('year_month', months).order('year_month'),
-      supabase.from('variable_cost_entries').select('*').in('year_month', months).order('created_at'),
-    ]);
-  }
+  const [revRes, fixRes, varRes] = await Promise.all([
+    supabase
+      .from('revenue_entries')
+      .select('*')
+      .eq('account_key', ak)
+      .in('year_month', months)
+      .order('created_at'),
+    supabase
+      .from('fixed_costs')
+      .select('*')
+      .eq('account_key', ak)
+      .in('year_month', months)
+      .order('year_month'),
+    supabase
+      .from('variable_cost_entries')
+      .select('*')
+      .eq('account_key', ak)
+      .in('year_month', months)
+      .order('created_at'),
+  ]);
 
   if (revRes.error) throw revRes.error;
   if (fixRes.error) throw fixRes.error;
@@ -237,31 +234,18 @@ export async function fetchFinanceForRange(from: string, to: string): Promise<{
 }
 
 export async function fetchOrdersForRange(from: string, to: string): Promise<OrderRow[]> {
-  const ak = getAccountKey();
-  let q = supabase
+  const ak = requireAccountKeyForReports();
+  const { data, error } = await supabase
     .from('supplier_orders')
     .select(
       'id, status, notes, created_at, suppliers(name), supplier_order_items(raw_product_name, quantity_ordered, unit, price_net)',
     )
+    .eq('account_key', ak)
     .gte('created_at', dayStartIso(from))
     .lte('created_at', dayEndIso(to))
     .neq('status', 'draft')
     .order('created_at', { ascending: true });
 
-  if (isRealKey(ak)) q = q.eq('account_key', ak);
-
-  let { data, error } = await q;
-  if (error && /account_key/i.test(error.message ?? '')) {
-    ({ data, error } = await supabase
-      .from('supplier_orders')
-      .select(
-        'id, status, notes, created_at, suppliers(name), supplier_order_items(raw_product_name, quantity_ordered, unit, price_net)',
-      )
-      .gte('created_at', dayStartIso(from))
-      .lte('created_at', dayEndIso(to))
-      .neq('status', 'draft')
-      .order('created_at', { ascending: true }));
-  }
   if (error) throw error;
   return (data ?? []) as OrderRow[];
 }
@@ -496,27 +480,72 @@ export async function fetchComprehensiveReport(
   }
   // Bearer JWT + X-Account-Key — inaczej middleware traktuje POST jako zapis na „default”.
   const headers = await apiJsonHeaders();
-  const res = await fetch(`${BACKEND_URL}/api/reports/comprehensive`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      from_date: range.from,
-      to_date: range.to,
-      top_n: topN,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BACKEND_URL}/api/reports/comprehensive`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        from_date: range.from,
+        to_date: range.to,
+        top_n: topN,
+      }),
+    });
+  } catch {
+    throw new Error(
+      'Brak połączenia z serwerem raportów. Sprawdź internet i spróbuj ponownie.',
+    );
+  }
   const data = (await res.json().catch(() => ({}))) as ComprehensiveApiPayload & {
-    detail?: string;
+    detail?: unknown;
     message?: string;
   };
   if (!res.ok) {
-    throw new Error(
-      (typeof data.detail === 'string' && data.detail) ||
-        data.message ||
-        `Błąd raportu zbiorczego (${res.status}).`,
-    );
+    const detail = data.detail;
+    let msg = '';
+    if (typeof detail === 'string') msg = detail;
+    else if (Array.isArray(detail) && detail[0]?.msg) msg = String(detail[0].msg);
+    else if (data.message) msg = data.message;
+    throw new Error(msg || `Błąd raportu zbiorczego (${res.status}).`);
   }
   return data;
+}
+
+/** Lokalny fallback P&L gdy API zbiorcze nie odpowiada — PDF/Excel i tak wyjdą. */
+export function buildLocalComprehensiveFallback(
+  range: FinancePdfRange,
+  revenue: RevenueEntry[],
+  fixed: FixedCost[],
+  variable: VariableCostEntry[],
+): ComprehensiveApiPayload {
+  const sumRev = revenue.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  const sumFix = fixed.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  const sumVar = variable.reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  const sumWaste = variable
+    .filter((v) => v.type === 'waste')
+    .reduce((s, r) => s + Number(r.amount_pln || 0), 0);
+  return {
+    ok: true,
+    from_date: range.from,
+    to_date: range.to,
+    period_label: `${range.from} – ${range.to}`,
+    pnl: {
+      total_revenue: sumRev,
+      fixed_costs_allocated: sumFix,
+      variable_costs_gross: sumVar,
+      variable_costs_allocated: sumVar,
+      total_waste_cost: sumWaste,
+      net_profit: sumRev - sumFix - sumVar,
+      revenue_source: 'local_fallback',
+    },
+    top_dishes: [],
+    worst_dishes: [],
+    inventory_usage_top: [],
+    waste: { items: [], total_cost_pln: sumWaste },
+    best_days: [],
+    worst_days: [],
+    daily_profits: [],
+  };
 }
 
 function buildComprehensiveHtml(
@@ -735,11 +764,21 @@ export async function generateAndShareFinancePdf(
     html = buildPurchasesHtml(range, materials, orders);
     fileName = `gastro-raport-zakupy_${range.from}_${range.to}.pdf`;
   } else {
-    const [comp, finance, orders] = await Promise.all([
-      fetchComprehensiveReport(range, 10),
+    const [finance, orders] = await Promise.all([
       fetchFinanceForRange(range.from, range.to),
       fetchOrdersForRange(range.from, range.to),
     ]);
+    let comp: ComprehensiveApiPayload;
+    try {
+      comp = await fetchComprehensiveReport(range, 10);
+    } catch {
+      comp = buildLocalComprehensiveFallback(
+        range,
+        finance.revenue,
+        finance.fixed,
+        finance.variable,
+      );
+    }
     html = buildComprehensiveHtml(
       range,
       comp,

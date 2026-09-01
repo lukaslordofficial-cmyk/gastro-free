@@ -45,10 +45,13 @@ def test_outbound_blocks_plain_http_public():
 
 def test_redirect_allows_deep_link():
     assert assert_safe_redirect_url("myapp://billing/success").startswith("myapp://")
-    from url_safety import is_safe_app_return_url
+    assert assert_safe_redirect_url("gastromanager:///billing/success").startswith("gastromanager://")
+    from url_safety import is_app_or_dev_deep_link, is_safe_app_return_url
     assert is_safe_app_return_url("exp://10.0.0.1:8081/--/lp/success")
     assert is_safe_app_return_url("myapp://lp/success")
     assert is_safe_app_return_url("myapp:///lp/success")
+    assert is_safe_app_return_url("gastromanager:///lp/success")
+    assert is_app_or_dev_deep_link("gastromanager:///billing/cancel")
     assert not is_safe_app_return_url("https://evil.example/phish")
 
 

@@ -6,6 +6,7 @@ package-lock.json
 
 # Expo
 .expo/
+.expo-and-test/
 .metro-cache/
 dist/
 web-build/

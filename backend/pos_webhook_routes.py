@@ -1,7 +1,9 @@
 """
-POST /api/pos/webhook — sprzedaż POS → magazyn → przychód.
+POST /w/{code} — krótki webhook POS (pokazywany w Ustawieniach).
+POST /api/pos/webhook — legacy (account+token w query) nadal działa.
 
-Wydzielone z server.py. Tenant z HMAC URL (public mutate), nie z JWT.
+Sprzedaż POS → magazyn → przychód.
+Tenant z HMAC w URL (public mutate), nie z JWT.
 Idempotencja: opcjonalny event_id / idempotency_key / external_order_id
 → tabela pos_sync_events (retry bez podwójnego księgowania).
 """
@@ -60,20 +62,12 @@ def _table_missing(exc: Exception) -> bool:
     )
 
 
-@router.post("/api/pos/webhook")
-async def pos_webhook(request: Request, provider: Optional[str] = None):
-    """Odbiera uderzenie POS (JSON kanoniczny lub format providera).
-
-    Query: ?provider=… — normalizacja w pos_adapters.
-    Wymaga tokenu HMAC w URL (account + token z Ustawień).
-
-    Idempotencja (opcjonalna, wstecznie kompatybilna):
-      body.event_id | idempotency_key | external_order_id
-      → ACK duplicate bez ponownego odjęcia magazynu.
-    """
+async def _pos_webhook_impl(request: Request, provider: Optional[str] = None):
+    """Wspólna obsługa krótkiego /w/{slug} i legacy /api/pos/webhook."""
     from server import _account_key_ctx, _recompute_menu_availability
 
     pos_account = require_pos_webhook_tenant(request)
+    provider = getattr(request.state, "pos_provider", None) or provider
     ctx_token = _account_key_ctx.set(pos_account)
     try:
         try:
@@ -309,3 +303,15 @@ async def pos_webhook(request: Request, provider: Optional[str] = None):
         return response
     finally:
         _account_key_ctx.reset(ctx_token)
+
+
+@router.post("/api/pos/webhook")
+async def pos_webhook(request: Request, provider: Optional[str] = None):
+    """Legacy URL z query account/token — nadal działa."""
+    return await _pos_webhook_impl(request, provider)
+
+
+@router.post("/w/{code}")
+async def pos_webhook_short(request: Request, code: str):
+    """Krótki URL z Ustawień: /w/{slug} (account+HMAC+provider w kodzie)."""
+    return await _pos_webhook_impl(request, None)

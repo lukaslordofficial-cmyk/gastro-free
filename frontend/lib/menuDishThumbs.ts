@@ -222,6 +222,14 @@ export function matchDishThumbFast(
   }
 
   if (best) {
+    // Słabe overlap (np. pojedynczy wspólny token) — nie bierz z obcego folderu
+    const folders = folderCandidates(opts?.menuCategory, name);
+    if (best.score < 62 && folders.length && !folders.includes(best.entry.folder)) {
+      best = null;
+    }
+  }
+
+  if (best) {
     const thumb = thumbFromEntry(best.entry, {
       matchTier: best.score >= 72 ? 'exact' : 'tags',
       score: best.score,
@@ -385,6 +393,49 @@ export function warmMenuThumbIndex(): void {
   } catch {
     /* ignore */
   }
+}
+
+/** Podpowiedzi z katalogu dań (folder kategorii) — modal „Zmień zdjęcie”. */
+export function listSimilarDishCatalogEntries(
+  dishName: string,
+  menuCategory?: string,
+  limit = 36,
+): Array<{ slug: string; labelPl: string; source: number | { uri: string } }> {
+  const idx = buildFastIndex();
+  const folders = new Set(folderCandidates(menuCategory, dishName));
+  const q = normalize(dishName);
+  const qTokens = tokensOf(q);
+  const ranked: { entry: IndexedEntry; score: number }[] = [];
+
+  for (const entry of idx.entries) {
+    if (folders.size && !folders.has(entry.folder)) continue;
+    let score = scoreTokenOverlap(qTokens, entry);
+    if (entry.labels.includes(q)) score = 100;
+    else if (score < 20) score = 15; // nadal pokaż w folderze kategorii
+    // Kara za obce foldery napojów gdy danie nie jest napojem
+    if (
+      /lemonad|coffee|tea|juice|cocktail|beer|wine|spirit|energy/.test(entry.folder) &&
+      !/napoj|drink|kawa|herbata|sok|lemoniad|piwo|wino|smoothie|koktajl/.test(
+        normalize(`${menuCategory || ''} ${dishName}`),
+      )
+    ) {
+      score = Math.max(0, score - 40);
+    }
+    ranked.push({ entry, score });
+  }
+
+  ranked.sort((a, b) => b.score - a.score || a.entry.primaryName.localeCompare(b.entry.primaryName));
+  const out: Array<{ slug: string; labelPl: string; source: number | { uri: string } }> = [];
+  const seen = new Set<string>();
+  for (const { entry } of ranked) {
+    if (seen.has(entry.slug)) continue;
+    const thumb = thumbFromEntry(entry, { matchTier: 'tags', score: 50 });
+    if (!thumb) continue;
+    seen.add(entry.slug);
+    out.push({ slug: entry.slug, labelPl: entry.primaryName, source: thumb.source });
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 export type { ImageLibraryEntry };

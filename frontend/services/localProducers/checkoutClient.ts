@@ -1,11 +1,11 @@
 /**
  * Stripe Checkout + InPost dla zamówień Lokalnych Przetwórców.
- * Po Stripe: deep link myapp://lp/success (przez HTML na API) → szybki komunikat + confirm.
+ * Po Stripe: deep link gastromanager://lp/success (przez HTML na API) → szybki komunikat + confirm.
  */
 import * as Linking from 'expo-linking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState, Platform } from 'react-native';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { supabase } from '@/lib/supabase';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
@@ -20,7 +20,7 @@ export const LP_PAID_MESSAGE =
 async function authHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Account-Key': getAccountKey(),
+    'X-Account-Key': requireTenantAccountKey(),
   };
   try {
     const { data } = await supabase.auth.getSession();
@@ -147,7 +147,7 @@ export async function confirmProducerOrderPayment(sessionId?: string): Promise<{
   };
 }
 
-/** Parsuje myapp://lp/success?session_id=cs_… */
+/** Parsuje gastromanager://lp/success?session_id=cs_… */
 export function parseLpBillingDeepLink(url: string | null | undefined): {
   kind: 'success' | 'cancel' | null;
   sessionId?: string;

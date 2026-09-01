@@ -4,6 +4,7 @@
  */
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import {
   FEATURE_CATALOG, TOPUP_PACKAGES, TIER_PLANS, tierName, type TopupKey,
 } from '@/lib/subscriptionCatalog';
@@ -69,13 +70,18 @@ export function isPremiumEntitled(
 }
 
 /**
- * Reklamy AdMob (baner + interstitial) — Free (tier 0) gdy NIE ma aktywnego trialu.
- * Bez reklam: płatny plan (tier ≥ 1) albo trwający trial 30 dni.
+ * Reklamy AdMob (baner + interstitial) — wyłącznie Free (tier 0) po zakończonym trialu 30 dni.
+ * Bez reklam: brak sesji, ładowanie portfela, płatny plan, aktywny trial.
+ *
+ * EXPO_PUBLIC_FORCE_ADS=1 — tylko na APK preview (EAS), żeby przetestować AdMob
+ * przed końcem trialu / przed publikacją w Play (najlepiej z test unit IDs).
  */
 export function shouldShowAds(
   tierLevel: number,
   trialEndsAt: string | null | undefined,
 ): boolean {
+  const force = (process.env.EXPO_PUBLIC_FORCE_ADS ?? '').trim().toLowerCase();
+  if (force === '1' || force === 'true' || force === 'yes') return true;
   const tier = Number(tierLevel ?? 0);
   if (tier >= 1) return false;
   if (isPremiumTrialActive(trialEndsAt)) return false;
@@ -207,17 +213,6 @@ async function ensureRow(): Promise<SubscriptionRow> {
   return data as SubscriptionRow;
 }
 
-async function patchRow(changes: Partial<SubscriptionRow>): Promise<SubscriptionRow> {
-  const { data, error } = await supabase
-    .from('subscriptions')
-    .update(changes)
-    .eq('account_key', accountKey())
-    .select('*')
-    .single();
-  if (error) throw error;
-  return data as SubscriptionRow;
-}
-
 export async function fetchSubscriptionState(): Promise<SubscriptionState> {
   try {
     const row = await ensureRow();
@@ -285,7 +280,6 @@ export async function subscribeTier(tierLevel: 1 | 2): Promise<SubscriptionState
 }
 
 export async function cancelSubscription(): Promise<SubscriptionState> {
-  // Preferuj portal Stripe, gdy jest customer_id — lokalnie oznacz canceled jako fallback
   try {
     const { openBillingPortal } = await import('@/lib/billingClient');
     const portal = await openBillingPortal();
@@ -293,53 +287,47 @@ export async function cancelSubscription(): Promise<SubscriptionState> {
       const row = await ensureRow();
       return buildView(row, portal.message);
     }
-  } catch { /* fall through */ }
-  const row = await ensureRow();
-  const updated = await patchRow({ status: 'canceled' });
-  return buildView(
-    updated,
-    'Subskrypcja oznaczona jako anulowana lokalnie. W Stripe: Zarządzaj subskrypcją.',
-  );
+    throw new Error(portal.message || 'Nie udało się otworzyć portalu Stripe.');
+  } catch (e) {
+    const row = await ensureRow();
+    return buildView(
+      row,
+      e instanceof Error
+        ? e.message
+        : 'Anulowanie tylko przez portal Stripe (Ustawienia → Zarządzaj subskrypcją).',
+    );
+  }
 }
 
-/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu startowego.
- * Preferuje backend (anuluje też Stripe), lokalny patch tylko jako fallback. */
+/** Rezygnacja z subskrypcji — natychmiastowy powrót do Tier 0 bez ponownego pakietu startowego. */
 export async function resignToFreeTier(): Promise<SubscriptionState> {
-  if (BACKEND_URL) {
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'X-Account-Key': accountKey(),
-      };
-      const { data: sess } = await supabase.auth.getSession();
-      const token = sess.session?.access_token;
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(`${BACKEND_URL}/api/subscription/resign`, {
-        method: 'POST',
-        headers,
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (res.ok) {
-        const row = await ensureRow();
-        return buildView(
-          row,
-          payload.message
-            || `Zrezygnowano z planu. Saldo kredytów: ${row.credits_balance}.`,
-        );
-      }
-    } catch {
-      /* fall through to local */
-    }
+  if (!BACKEND_URL) {
+    throw new Error('Brak adresu API — nie można zrezygnować z planu.');
   }
-  const updated = await patchRow({
-    tier_level: 0,
-    status: 'active',
-    current_period_end: null,
-    free_starter_claimed: true,
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Account-Key': requireTenantAccountKey(),
+  };
+  const { data: sess } = await supabase.auth.getSession();
+  const token = sess.session?.access_token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${BACKEND_URL}/api/subscription/resign`, {
+    method: 'POST',
+    headers,
   });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof payload.detail === 'string'
+        ? payload.detail
+        : 'Nie udało się zrezygnować z planu. Spróbuj ponownie.',
+    );
+  }
+  const row = await ensureRow();
   return buildView(
-    updated,
-    `Przełączono na plan Free. Saldo kredytów: ${updated.credits_balance} (bez ponownego pakietu startowego).`,
+    row,
+    payload.message
+      || `Zrezygnowano z planu. Saldo kredytów: ${row.credits_balance}.`,
   );
 }
 
@@ -371,7 +359,7 @@ export async function grantRewardCredit(): Promise<{ ok: boolean; credits_balanc
 export async function syncBackendSubscription(): Promise<void> {
   if (!BACKEND_URL) return;
   try {
-    const key = accountKey();
+    const key = requireTenantAccountKey();
     const { data: sess } = await supabase.auth.getSession();
     const token = sess.session?.access_token;
     await fetch(`${BACKEND_URL}/api/subscription`, {

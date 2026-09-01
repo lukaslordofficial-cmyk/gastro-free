@@ -1,0 +1,11 @@
+# EAS project dir = frontend/ (eas.json). Keep the upload small.
+.expo/
+.expo-and-test/
+dist/
+web-build/
+**/.env
+**/.env.*
+!.env.example
+
+# Source dish boards — not require()'d in the app
+assets/premium/dishes/_board_*.png

@@ -1,818 +1,30 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  RefreshControl,
-  Platform,
-  Modal,
-  TextInput,
-  TouchableOpacity,
-  KeyboardAvoidingView,
-  ActivityIndicator,
   Alert,
   DeviceEventEmitter,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
-import {
-  Building2,
-  Zap,
-  Users,
-  Plus,
-  X,
-  Package,
-  Trash2,
-  Pencil,
-  MoreHorizontal,
-  Check,
-  MessageSquare,
-  Tag,
-  FileDown,
-} from 'lucide-react-native';
-import type { FixedCost, InventoryItem, RevenueEntry, VariableCostEntry } from '@/lib/types';
+import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
 import * as financeService from '@/services/financeService';
 import { FINANCE_CHANGED } from '@/lib/appRefresh';
 import { useAuth } from '@/contexts/AuthContext';
-import { KPICard } from '@/components/KPICard';
-import { AlertBanner } from '@/components/AlertBanner';
-import { RevenueChart } from '@/components/RevenueChart';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
-import { Colors } from '@/constants/colors';
-import { FinanceHeaderActions } from '@/components/FinanceHeaderActions';
-import { ReportsArchive } from '@/components/ReportsArchive';
-import { SubscriptionPanel } from '@/components/SubscriptionPanel';
-import { CreditsWalletCard } from '@/components/CreditsWalletCard';
 import { CreditsUsageHistoryModal } from '@/components/CreditsUsageHistoryModal';
-import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { useThemeMode } from '@/contexts/ThemeModeContext';
-import { useAppTheme } from '@/hooks/useAppTheme';
-import { AppScreenHeader } from '@/components/premium/AppScreenHeader';
-import { ExpandableDateJournal } from '@/components/ExpandableDateJournal';
 import { PremiumFinanceScreen } from '@/components/premium/PremiumFinanceScreen';
-import { FinancePdfExportModal } from '@/components/FinancePdfExportModal';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import {
-  humanizeInvoiceNotePreview,
-  parseInvoiceCostNote,
-} from '@/lib/invoiceCostNote';
-import { InvoiceCostPreviewModal } from '@/components/InvoiceCostPreviewModal';
-import { DS } from '@/constants/premiumTheme';
-
-const _now = new Date();
-const CURRENT_MONTH = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}`;
-
-function formatPLN(value: number): string {
-  return value.toLocaleString('pl-PL', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + ' PLN';
-}
-
-function getFixedIcon(type: string) {
-  switch (type) {
-    case 'rent': return <Building2 size={18} color={Colors.accent} strokeWidth={2} />;
-    case 'media': return <Zap size={18} color={Colors.warning} strokeWidth={2} />;
-    case 'payroll': return <Users size={18} color={Colors.success} strokeWidth={2} />;
-    default: return <Tag size={18} color="#7C3AED" strokeWidth={2} />;
-  }
-}
-
-function getFixedColor(type: string): string {
-  switch (type) {
-    case 'rent': return Colors.accentLight;
-    case 'media': return Colors.warningLight;
-    case 'payroll': return Colors.successLight;
-    default: return '#EDE9FE';
-  }
-}
-
-function getVarIcon(type: string) {
-  switch (type) {
-    case 'materials': return <Package size={18} color={Colors.accent} strokeWidth={2} />;
-    case 'waste': return <Trash2 size={18} color={Colors.danger} strokeWidth={2} />;
-    default: return <Tag size={18} color="#7C3AED" strokeWidth={2} />;
-  }
-}
-
-function getVarColor(type: string): string {
-  switch (type) {
-    case 'materials': return Colors.accentLight;
-    case 'waste': return Colors.dangerLight;
-    default: return '#EDE9FE';
-  }
-}
-
-// --- Add Revenue Modal ---
-
-function AddRevenueModal({ visible, onClose, onSaved }: { visible: boolean; onClose: () => void; onSaved: () => void }) {
-  const theme = useAppTheme();
-  const insets = useSafeAreaInsets();
-  const prem = theme.isPremium;
-  const [desc, setDesc] = useState('');
-  const [amount, setAmount] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  async function handleSave() {
-    const val = parseFloat(amount.replace(',', '.'));
-    if (isNaN(val) || val <= 0) { Alert.alert('Błąd', 'Podaj poprawną kwotę.'); return; }
-    setSaving(true);
-    try {
-      await financeService.insertRevenue({
-        year_month: CURRENT_MONTH,
-        description: desc.trim() || null,
-        amount_pln: val,
-      });
-      setDesc(''); setAmount('');
-      onSaved(); onClose();
-    } catch (e: any) {
-      Alert.alert('Błąd', e.message ?? 'Nie udało się zapisać.');
-    } finally { setSaving(false); }
-  }
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View
-          style={[
-            ms.sheet,
-            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
-            prem && {
-              backgroundColor: DS.color.surfaceCard,
-              borderTopWidth: StyleSheet.hairlineWidth,
-              borderTopColor: DS.color.borderSubtle,
-            },
-          ]}
-        >
-          <View style={ms.header}>
-            <Text style={[ms.title, prem && { color: DS.color.heading }]}>Dodaj przychód</Text>
-            <TouchableOpacity onPress={onClose}>
-              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Opis (opcjonalnie)</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={desc}
-            onChangeText={setDesc}
-            placeholder="np. Utarg dzienny"
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-          />
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={amount}
-            onChangeText={setAmount}
-            keyboardType="decimal-pad"
-            placeholder="0.00"
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-          />
-          <TouchableOpacity
-            style={[
-              ms.saveBtn,
-              prem && { backgroundColor: DS.color.greenEnd },
-              saving && ms.saveBtnDisabled,
-            ]}
-            onPress={handleSave}
-            disabled={saving}
-            activeOpacity={0.85}
-          >
-            {saving
-              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
-              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz przychód</Text>}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
-// --- Add Fixed Cost Modal ---
-
-const BASE_FIXED_TYPES = [
-  { key: 'rent' as const, label: 'Czynsz lokalu' },
-  { key: 'media' as const, label: 'Media' },
-  { key: 'payroll' as const, label: 'Wynagrodzenia' },
-];
-
-function AddFixedCostModal({ visible, onClose, onSaved }: { visible: boolean; onClose: () => void; onSaved: () => void }) {
-  const theme = useAppTheme();
-  const insets = useSafeAreaInsets();
-  const prem = theme.isPremium;
-  const [selectedKey, setSelectedKey] = useState<string>('rent');
-  const selectedKeyRef = useRef('rent');
-  const [customCategories, setCustomCategories] = useState<string[]>([]);
-  const [showNewInput, setShowNewInput] = useState(false);
-  const [newCatName, setNewCatName] = useState('');
-  const newCatValueRef = useRef('');
-  const [amount, setAmount] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  function selectKey(key: string) {
-    setSelectedKey(key);
-    selectedKeyRef.current = key;
-    setShowNewInput(false);
-  }
-
-  function confirmNewCategory() {
-    const trimmed = newCatValueRef.current.trim();
-    if (!trimmed) return;
-    if (!customCategories.includes(trimmed)) {
-      setCustomCategories((prev) => [...prev, trimmed]);
-    }
-    setSelectedKey(trimmed);
-    selectedKeyRef.current = trimmed;
-    newCatValueRef.current = '';
-    setNewCatName('');
-    setShowNewInput(false);
-  }
-
-  async function handleSave() {
-    const val = parseFloat(amount.replace(',', '.'));
-    if (isNaN(val) || val <= 0) { Alert.alert('Błąd', 'Podaj poprawną kwotę.'); return; }
-
-    let type: FixedCost['type'];
-    let name: string;
-
-    if (showNewInput) {
-      const catName = newCatValueRef.current.trim();
-      if (!catName) { Alert.alert('Błąd', 'Wpisz nazwę nowej kategorii.'); return; }
-      type = 'other';
-      name = catName;
-    } else {
-      const key = selectedKeyRef.current;
-      const base = BASE_FIXED_TYPES.find((t) => t.key === key);
-      type = base ? (base.key as FixedCost['type']) : 'other';
-      name = base ? base.label : key;
-      if (!name) { Alert.alert('Błąd', 'Wybierz lub utwórz kategorię.'); return; }
-    }
-
-    setSaving(true);
-    try {
-      await financeService.insertFixedCost({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
-      setAmount('');
-      setNewCatName('');
-      newCatValueRef.current = '';
-      setShowNewInput(false);
-      onSaved(); onClose();
-    } catch (e: any) {
-      Alert.alert('Błąd', e.message ?? 'Nie udało się zapisać.');
-    } finally { setSaving(false); }
-  }
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View
-          style={[
-            ms.sheet,
-            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
-            prem && {
-              backgroundColor: DS.color.surfaceCard,
-              borderTopWidth: StyleSheet.hairlineWidth,
-              borderTopColor: DS.color.borderSubtle,
-            },
-          ]}
-        >
-          <View style={ms.header}>
-            <Text style={[ms.title, prem && { color: DS.color.heading }]}>Dodaj koszt stały</Text>
-            <TouchableOpacity onPress={onClose}>
-              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kategoria</Text>
-          <View style={ms.typeRow}>
-            {BASE_FIXED_TYPES.map((t) => (
-              <TouchableOpacity
-                key={t.key}
-                style={[
-                  ms.pill,
-                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                  selectedKey === t.key && !showNewInput && (prem
-                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
-                    : ms.pillActive),
-                ]}
-                onPress={() => selectKey(t.key)}
-              >
-                <Text
-                  style={[
-                    ms.pillText,
-                    prem && { color: DS.color.muted },
-                    selectedKey === t.key && !showNewInput && (prem
-                      ? { color: DS.color.greenEnd, fontWeight: '800' }
-                      : ms.pillTextActive),
-                  ]}
-                >
-                  {t.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            {customCategories.map((cat) => (
-              <TouchableOpacity
-                key={cat}
-                style={[
-                  ms.pill,
-                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                  selectedKey === cat && !showNewInput && (prem
-                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
-                    : ms.pillActive),
-                ]}
-                onPress={() => selectKey(cat)}
-              >
-                <Text
-                  style={[
-                    ms.pillText,
-                    prem && { color: DS.color.muted },
-                    selectedKey === cat && !showNewInput && (prem
-                      ? { color: DS.color.greenEnd, fontWeight: '800' }
-                      : ms.pillTextActive),
-                  ]}
-                >
-                  {cat}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity
-              style={[
-                ms.pill,
-                prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                showNewInput && (prem
-                  ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
-                  : ms.pillActive),
-              ]}
-              onPress={() => setShowNewInput((v) => !v)}
-            >
-              <Plus size={13} color={showNewInput ? (prem ? DS.color.greenEnd : Colors.accent) : (prem ? DS.color.muted : Colors.textSecondary)} strokeWidth={2.5} />
-            </TouchableOpacity>
-          </View>
-          {showNewInput && (
-            <View style={ms.newCatRow}>
-              <TextInput
-                style={[
-                  ms.input,
-                  { flex: 1, marginBottom: 0 },
-                  prem && {
-                    backgroundColor: DS.color.bgTertiary,
-                    borderColor: DS.color.borderSubtle,
-                    color: DS.color.heading,
-                  },
-                ]}
-                value={newCatName}
-                onChangeText={(text) => { setNewCatName(text); newCatValueRef.current = text; }}
-                placeholder="Nazwa kategorii..."
-                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-                autoFocus
-                onSubmitEditing={confirmNewCategory}
-              />
-              <TouchableOpacity
-                style={[ms.newCatConfirm, prem && { backgroundColor: DS.color.greenEnd }]}
-                onPress={confirmNewCategory}
-              >
-                <Check size={16} color={prem ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
-              </TouchableOpacity>
-            </View>
-          )}
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={amount}
-            onChangeText={setAmount}
-            keyboardType="decimal-pad"
-            placeholder="0.00"
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-          />
-          <TouchableOpacity
-            style={[
-              ms.saveBtn,
-              prem && { backgroundColor: DS.color.greenEnd },
-              saving && ms.saveBtnDisabled,
-            ]}
-            onPress={handleSave}
-            disabled={saving}
-            activeOpacity={0.85}
-          >
-            {saving
-              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
-              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz koszt</Text>}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
-// --- Add Variable Cost Modal ---
-
-const BASE_VAR_TYPES = [
-  { key: 'materials' as const, label: 'Surowce' },
-  { key: 'waste' as const, label: 'Straty' },
-];
-
-function AddVariableCostModal({ visible, onClose, onSaved }: { visible: boolean; onClose: () => void; onSaved: () => void }) {
-  const theme = useAppTheme();
-  const insets = useSafeAreaInsets();
-  const prem = theme.isPremium;
-  const [selectedKey, setSelectedKey] = useState<string>('materials');
-  const selectedKeyRef = useRef('materials');
-  const [customCategories, setCustomCategories] = useState<string[]>([]);
-  const [showNewInput, setShowNewInput] = useState(false);
-  const [newCatName, setNewCatName] = useState('');
-  const newCatValueRef = useRef('');
-  const [amount, setAmount] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  function selectKey(key: string) {
-    setSelectedKey(key);
-    selectedKeyRef.current = key;
-    setShowNewInput(false);
-  }
-
-  function confirmNewCategory() {
-    const trimmed = newCatValueRef.current.trim();
-    if (!trimmed) return;
-    if (!customCategories.includes(trimmed)) {
-      setCustomCategories((prev) => [...prev, trimmed]);
-    }
-    setSelectedKey(trimmed);
-    selectedKeyRef.current = trimmed;
-    newCatValueRef.current = '';
-    setNewCatName('');
-    setShowNewInput(false);
-  }
-
-  async function handleSave() {
-    const val = parseFloat(amount.replace(',', '.'));
-    if (isNaN(val) || val <= 0) { Alert.alert('Błąd', 'Podaj poprawną kwotę.'); return; }
-
-    let type: VariableCostEntry['type'];
-    let name: string;
-
-    if (showNewInput) {
-      const catName = newCatValueRef.current.trim();
-      if (!catName) { Alert.alert('Błąd', 'Wpisz nazwę nowej kategorii.'); return; }
-      type = 'other';
-      name = catName;
-    } else {
-      const key = selectedKeyRef.current;
-      const base = BASE_VAR_TYPES.find((t) => t.key === key);
-      type = base ? (base.key as VariableCostEntry['type']) : 'other';
-      name = base ? base.label : key;
-    }
-
-    setSaving(true);
-    try {
-      await financeService.insertVariableCost({ year_month: CURRENT_MONTH, type, name, amount_pln: val });
-      setAmount('');
-      setNewCatName('');
-      newCatValueRef.current = '';
-      setShowNewInput(false);
-      onSaved(); onClose();
-    } catch (e: any) {
-      Alert.alert('Błąd', e.message ?? 'Nie udało się zapisać.');
-    } finally { setSaving(false); }
-  }
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View
-          style={[
-            ms.sheet,
-            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
-            prem && {
-              backgroundColor: DS.color.surfaceCard,
-              borderTopWidth: StyleSheet.hairlineWidth,
-              borderTopColor: DS.color.borderSubtle,
-            },
-          ]}
-        >
-          <View style={ms.header}>
-            <Text style={[ms.title, prem && { color: DS.color.heading }]}>Dodaj koszt zmienny</Text>
-            <TouchableOpacity onPress={onClose}>
-              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kategoria</Text>
-          <View style={ms.typeRow}>
-            {BASE_VAR_TYPES.map((t) => (
-              <TouchableOpacity
-                key={t.key}
-                style={[
-                  ms.pill,
-                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                  selectedKey === t.key && !showNewInput && (prem
-                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
-                    : ms.pillActive),
-                ]}
-                onPress={() => selectKey(t.key)}
-              >
-                <Text
-                  style={[
-                    ms.pillText,
-                    prem && { color: DS.color.muted },
-                    selectedKey === t.key && !showNewInput && (prem
-                      ? { color: DS.color.greenEnd, fontWeight: '800' }
-                      : ms.pillTextActive),
-                  ]}
-                >
-                  {t.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            {customCategories.map((cat) => (
-              <TouchableOpacity
-                key={cat}
-                style={[
-                  ms.pill,
-                  prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                  selectedKey === cat && !showNewInput && (prem
-                    ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
-                    : ms.pillActive),
-                ]}
-                onPress={() => selectKey(cat)}
-              >
-                <Text
-                  style={[
-                    ms.pillText,
-                    prem && { color: DS.color.muted },
-                    selectedKey === cat && !showNewInput && (prem
-                      ? { color: DS.color.greenEnd, fontWeight: '800' }
-                      : ms.pillTextActive),
-                  ]}
-                >
-                  {cat}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity
-              style={[
-                ms.pill,
-                prem && { backgroundColor: DS.color.bgTertiary, borderColor: DS.color.borderSubtle },
-                showNewInput && (prem
-                  ? { backgroundColor: 'rgba(0,255,120,0.18)', borderColor: DS.color.greenEnd }
-                  : ms.pillActive),
-              ]}
-              onPress={() => setShowNewInput((v) => !v)}
-            >
-              <Plus size={13} color={showNewInput ? (prem ? DS.color.greenEnd : Colors.accent) : (prem ? DS.color.muted : Colors.textSecondary)} strokeWidth={2.5} />
-            </TouchableOpacity>
-          </View>
-          {showNewInput && (
-            <View style={ms.newCatRow}>
-              <TextInput
-                style={[
-                  ms.input,
-                  { flex: 1, marginBottom: 0 },
-                  prem && {
-                    backgroundColor: DS.color.bgTertiary,
-                    borderColor: DS.color.borderSubtle,
-                    color: DS.color.heading,
-                  },
-                ]}
-                value={newCatName}
-                onChangeText={(text) => { setNewCatName(text); newCatValueRef.current = text; }}
-                placeholder="Nazwa kategorii..."
-                placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-                autoFocus
-                onSubmitEditing={confirmNewCategory}
-              />
-              <TouchableOpacity
-                style={[ms.newCatConfirm, prem && { backgroundColor: DS.color.greenEnd }]}
-                onPress={confirmNewCategory}
-              >
-                <Check size={16} color={prem ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
-              </TouchableOpacity>
-            </View>
-          )}
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={amount}
-            onChangeText={setAmount}
-            keyboardType="decimal-pad"
-            placeholder="0.00"
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-          />
-          <TouchableOpacity
-            style={[
-              ms.saveBtn,
-              prem && { backgroundColor: DS.color.greenEnd },
-              saving && ms.saveBtnDisabled,
-            ]}
-            onPress={handleSave}
-            disabled={saving}
-            activeOpacity={0.85}
-          >
-            {saving
-              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
-              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz koszt</Text>}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
-// --- Edit Fixed / Variable Cost Modal (Raporty journals) ---
-
-type EditableCostKind = 'fixed' | 'variable';
-
-type EditableCostRow = {
-  id: string;
-  name: string;
-  amount_pln: number;
-  year_month: string;
-  kind: EditableCostKind;
-};
-
-function EditCostModal({
-  visible,
-  cost,
-  onClose,
-  onSaved,
-}: {
-  visible: boolean;
-  cost: EditableCostRow | null;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const theme = useAppTheme();
-  const insets = useSafeAreaInsets();
-  const prem = theme.isPremium;
-  const { alert: premiumAlert } = usePremiumAlert();
-  const [name, setName] = useState('');
-  const [amount, setAmount] = useState('');
-  const [yearMonth, setYearMonth] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!cost || !visible) return;
-    setName(cost.name);
-    setAmount(String(cost.amount_pln ?? ''));
-    setYearMonth(cost.year_month || CURRENT_MONTH);
-  }, [cost, visible]);
-
-  async function handleSave() {
-    if (!cost) return;
-    const trimmed = name.trim();
-    if (!trimmed) {
-      premiumAlert('Błąd', 'Podaj nazwę kosztu.');
-      return;
-    }
-    const val = parseFloat(amount.replace(',', '.'));
-    if (isNaN(val) || val <= 0) {
-      premiumAlert('Błąd', 'Podaj poprawną kwotę.');
-      return;
-    }
-    const ym = (yearMonth || '').trim();
-    if (!/^\d{4}-\d{2}$/.test(ym)) {
-      premiumAlert('Błąd', 'Miesiąc w formacie RRRR-MM (np. 2026-07).');
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const tableName = cost.kind === 'fixed' ? 'fixed_costs' : 'variable_cost_entries';
-      await financeService.updateCost(tableName, cost.id, { name: trimmed, amount_pln: val, year_month: ym });
-      onSaved();
-      onClose();
-    } catch (e: any) {
-      premiumAlert('Błąd', e.message ?? 'Nie udało się zapisać zmian.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={[ms.overlay, prem && { backgroundColor: 'rgba(0,0,0,0.72)' }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View
-          style={[
-            ms.sheet,
-            { paddingBottom: Math.max(insets.bottom, 20) + 8 },
-            prem && {
-              backgroundColor: DS.color.surfaceCard,
-              borderTopWidth: StyleSheet.hairlineWidth,
-              borderTopColor: DS.color.borderSubtle,
-            },
-          ]}
-        >
-          <View style={ms.header}>
-            <Text style={[ms.title, prem && { color: DS.color.heading }]}>
-              Edytuj koszt {cost?.kind === 'variable' ? 'zmienny' : 'stały'}
-            </Text>
-            <TouchableOpacity onPress={onClose}>
-              <X size={20} color={prem ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Nazwa *</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={name}
-            onChangeText={setName}
-            placeholder="Nazwa kosztu"
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-            autoFocus
-          />
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Kwota (PLN) *</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={amount}
-            onChangeText={setAmount}
-            keyboardType="decimal-pad"
-            placeholder="0.00"
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-          />
-          <Text style={[ms.label, prem && { color: DS.color.muted }]}>Miesiąc (RRRR-MM)</Text>
-          <TextInput
-            style={[
-              ms.input,
-              prem && {
-                backgroundColor: DS.color.bgTertiary,
-                borderColor: DS.color.borderSubtle,
-                color: DS.color.heading,
-              },
-            ]}
-            value={yearMonth}
-            onChangeText={setYearMonth}
-            placeholder={CURRENT_MONTH}
-            placeholderTextColor={prem ? DS.color.muted : Colors.textTertiary}
-            autoCapitalize="none"
-          />
-          <TouchableOpacity
-            style={[
-              ms.saveBtn,
-              prem && { backgroundColor: DS.color.greenEnd },
-              saving && ms.saveBtnDisabled,
-            ]}
-            onPress={handleSave}
-            disabled={saving}
-            activeOpacity={0.85}
-          >
-            {saving
-              ? <ActivityIndicator size="small" color={prem ? '#0A0A0A' : Colors.white} />
-              : <Text style={[ms.saveBtnText, prem && { color: '#0A0A0A' }]}>Zapisz zmiany</Text>}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
-// --- FinanseScreen ---
+  currentYearMonth,
+  previousYearMonth,
+  yearMonthLabelPl,
+} from '@/components/finanse/constants';
+import type { EditableCostKind, EditableCostRow, InvoicePreviewState } from '@/components/finanse/types';
+import { AddRevenueModal } from '@/components/finanse/AddRevenueModal';
+import { AddFixedCostModal } from '@/components/finanse/AddFixedCostModal';
+import { AddVariableCostModal } from '@/components/finanse/AddVariableCostModal';
+import { EditCostModal } from '@/components/finanse/EditCostModal';
+import { ClassicFinanceScreen } from '@/components/finanse/ClassicFinanceScreen';
 
 export default function FinanseScreen() {
   const router = useRouter();
@@ -821,11 +33,7 @@ export default function FinanseScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [view, setView] = useState<'panel' | 'raporty' | 'subskrypcja'>('panel');
   const [pdfOpen, setPdfOpen] = useState(false);
-  const [invoicePreview, setInvoicePreview] = useState<{
-    title: string;
-    amount: number;
-    note?: string | null;
-  } | null>(null);
+  const [invoicePreview, setInvoicePreview] = useState<InvoicePreviewState | null>(null);
   const [showUsageHistory, setShowUsageHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revenueEntries, setRevenueEntries] = useState<RevenueEntry[]>([]);
@@ -866,7 +74,6 @@ export default function FinanseScreen() {
   >([]);
   const { isPremiumUi } = useThemeMode();
   const { openProductCascade, documentScanRevision, lastDocumentScanKind } = useUiOverlay();
-  const theme = useAppTheme();
   const [revenueJournal, setRevenueJournal] = useState<RevenueEntry[]>([]);
   const [fixedCostsJournal, setFixedCostsJournal] = useState<FixedCost[]>([]);
   const [variableCostsJournal, setVariableCostsJournal] = useState<VariableCostEntry[]>([]);
@@ -882,10 +89,13 @@ export default function FinanseScreen() {
   const hasFinanceDataRef = useRef(false);
   const scanRetryRef = useRef(0);
   const varCountBeforeScanRef = useRef(0);
+  const fixedRolloverBusyRef = useRef(false);
+  const fixedRolloverAskedYmRef = useRef<string | null>(null);
 
   const fetchData = useCallback(async (): Promise<{ variableCount: number } | null> => {
     try {
-      const rows = await financeService.fetchFinanceRows(accountKey, CURRENT_MONTH);
+      const month = currentYearMonth();
+      const rows = await financeService.fetchFinanceRows(accountKey, month);
 
       const safeRows = <T extends { year_month?: string | null; created_at?: string | null }>(list: T[] | null | undefined): T[] =>
         (list ?? []).filter((r) => {
@@ -894,13 +104,65 @@ export default function FinanseScreen() {
         });
 
       const revMerged = safeRows(rows.revenueAll);
-      const fixedMerged = safeRows(rows.fixedAll);
+      let fixedMerged = safeRows(rows.fixedAll);
       const varMerged = safeRows(rows.variableAll);
+      let fixedMonth = safeRows(rows.fixed);
+
+      // Nowy miesiąc bez kosztów stałych → skopiuj z poprzedniego i zapytaj o edycję.
+      const prevYm = previousYearMonth(month);
+      if (
+        prevYm &&
+        fixedMonth.length === 0 &&
+        !fixedRolloverBusyRef.current &&
+        fixedRolloverAskedYmRef.current !== month &&
+        accountKey &&
+        accountKey !== 'default'
+      ) {
+        fixedRolloverBusyRef.current = true;
+        try {
+          const copied = await financeService.copyFixedCostsFromPreviousMonth(
+            accountKey,
+            month,
+            prevYm,
+          );
+          if (copied.length > 0) {
+            fixedMonth = copied;
+            fixedMerged = [...copied, ...fixedMerged.filter((c) => c.year_month !== month)];
+            fixedRolloverAskedYmRef.current = month;
+            const first = copied[0];
+            premiumAlert(
+              'Koszty stałe',
+              `Przepisano ${copied.length} kosztów stałych z ${yearMonthLabelPl(prevYm)}. Chcesz coś edytować?`,
+              [
+                { text: 'Nie', style: 'cancel' },
+                {
+                  text: 'Tak',
+                  style: 'primary',
+                  onPress: () => {
+                    setView('panel');
+                    setEditCost({
+                      id: first.id,
+                      name: first.name,
+                      amount_pln: Number(first.amount_pln),
+                      year_month: first.year_month || month,
+                      kind: 'fixed',
+                    });
+                  },
+                },
+              ],
+            );
+          }
+        } catch (e) {
+          if (__DEV__) console.warn('[Finanse] fixed rollover', e);
+        } finally {
+          fixedRolloverBusyRef.current = false;
+        }
+      }
 
       setRevenueEntries(safeRows(rows.revenue));
       setRevenueJournal(revMerged.length ? revMerged : safeRows(rows.revenue));
-      setFixedCosts(safeRows(rows.fixed));
-      setFixedCostsJournal(fixedMerged.length ? fixedMerged : safeRows(rows.fixed));
+      setFixedCosts(fixedMonth);
+      setFixedCostsJournal(fixedMerged.length ? fixedMerged : fixedMonth);
       const varMonth = safeRows(rows.variableMonth);
       setVariableEntries(varMonth);
       setVariableCostsJournal(varMerged.length ? varMerged : varMonth);
@@ -918,25 +180,25 @@ export default function FinanseScreen() {
         ...toMonths(fixedMerged),
         ...toMonths(revH),
         ...toMonths(varH),
-        CURRENT_MONTH,
+        month,
       ]);
       const sortedMonths = Array.from(allMonths).filter((m) => /^\d{4}-\d{2}$/.test(m)).sort();
       setChartRecords(
-        sortedMonths.map((month) => ({
-          id: month,
-          year_month: month,
+        sortedMonths.map((ym) => ({
+          id: ym,
+          year_month: ym,
           revenue_pln: revMerged
-            .filter((r) => r.year_month === month)
+            .filter((r) => r.year_month === ym)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || revH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
+            || revH.filter((r) => r.year_month === ym).reduce((s, r) => s + Number(r.amount_pln), 0),
           variable_costs_pln: varMerged
-            .filter((r) => r.year_month === month)
+            .filter((r) => r.year_month === ym)
             .reduce((s, r) => s + Number(r.amount_pln), 0)
-            || varH.filter((r) => r.year_month === month).reduce((s, r) => s + Number(r.amount_pln), 0),
+            || varH.filter((r) => r.year_month === ym).reduce((s, r) => s + Number(r.amount_pln), 0),
           fixed_costs_pln: fixedMerged
-            .filter((r) => r.year_month === month)
+            .filter((r) => r.year_month === ym)
             .reduce((s, r) => s + Number(r.amount_pln), 0),
-          created_at: `${month}-01T12:00:00`,
+          created_at: `${ym}-01T12:00:00`,
         }))
       );
 
@@ -1066,7 +328,7 @@ export default function FinanseScreen() {
       id: row.id,
       name: row.name,
       amount_pln: Number(row.amount_pln),
-      year_month: row.year_month || CURRENT_MONTH,
+      year_month: row.year_month || currentYearMonth(),
       kind,
     });
   }
@@ -1129,17 +391,30 @@ export default function FinanseScreen() {
   // Tylko przy pierwszym nieudanym loadzie — nie wywalaj UI przy odświeżeniu (wygląda jak crash).
   if (error && !hasFinanceDataRef.current) return <ErrorScreen message={error} />;
 
-  const totalRevenue = revenueEntries.reduce((s, e) => s + Number(e.amount_pln || 0), 0);
-  const totalFixed = fixedCosts.reduce((s, c) => s + Number(c.amount_pln || 0), 0);
-  const totalVariable = variableEntries.reduce((s, e) => s + Number(e.amount_pln || 0), 0);
-  const totalCosts = totalFixed + totalVariable;
-  const netProfit = totalRevenue - totalCosts;
+  const financeModals = (
+    <>
+      <AddRevenueModal visible={showAddRevenue} onClose={() => setShowAddRevenue(false)} onSaved={fetchData} />
+      <AddFixedCostModal visible={showAddFixed} onClose={() => setShowAddFixed(false)} onSaved={fetchData} />
+      <AddVariableCostModal
+        visible={showAddVariable}
+        onClose={() => setShowAddVariable(false)}
+        onSaved={fetchData}
+      />
+      <EditCostModal
+        visible={!!editCost}
+        cost={editCost}
+        onClose={() => setEditCost(null)}
+        onSaved={fetchData}
+      />
+      <CreditsUsageHistoryModal visible={showUsageHistory} onClose={() => setShowUsageHistory(false)} />
+    </>
+  );
 
   if (isPremiumUi) {
     return (
       <>
         <PremiumFinanceScreen
-          currentMonth={CURRENT_MONTH}
+          currentMonth={currentYearMonth()}
           revenueEntries={revenueEntries}
           revenueJournal={revenueJournal}
           fixedCosts={fixedCosts}
@@ -1184,669 +459,47 @@ export default function FinanseScreen() {
           onOpenUsageHistory={() => setShowUsageHistory(true)}
           onFetchApplied={fetchData}
         />
-        <AddRevenueModal visible={showAddRevenue} onClose={() => setShowAddRevenue(false)} onSaved={fetchData} />
-        <AddFixedCostModal visible={showAddFixed} onClose={() => setShowAddFixed(false)} onSaved={fetchData} />
-        <AddVariableCostModal
-          visible={showAddVariable}
-          onClose={() => setShowAddVariable(false)}
-          onSaved={fetchData}
-        />
-        <EditCostModal
-          visible={!!editCost}
-          cost={editCost}
-          onClose={() => setEditCost(null)}
-          onSaved={fetchData}
-        />
-        <CreditsUsageHistoryModal visible={showUsageHistory} onClose={() => setShowUsageHistory(false)} />
+        {financeModals}
       </>
     );
   }
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]} edges={['top']}>
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.content}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={() => {
-              setRefreshing(true);
-              fetchData();
-            }}
-            tintColor={theme.accent}
-          />
-        }
-        showsVerticalScrollIndicator={false}
-      >
-        {!theme.isPremium ? (
-          <View style={{ marginTop: 8, marginBottom: 16, alignItems: 'center' }}>
-            <AppScreenHeader
-              title="Gastro Manager"
-              subtitle={`Panel finansowy · ${CURRENT_MONTH}`}
-              showDevToggle
-              centered
-            />
-            <View style={{ marginTop: 12, alignItems: 'center', alignSelf: 'stretch' }}>
-              <FinanceHeaderActions onApplied={fetchData} centered />
-            </View>
-          </View>
-        ) : (
-          <>
-            <AppScreenHeader
-              title="Gastro Manager"
-              subtitle={`Panel finansowy · ${CURRENT_MONTH}`}
-              showDevToggle
-            />
-            <View style={{ marginTop: 4, marginBottom: 16 }}>
-              <FinanceHeaderActions onApplied={fetchData} />
-            </View>
-          </>
-        )}
-
-        <View style={[styles.segment, { backgroundColor: theme.segmentBg }]} testID="finance-segment">
-          <TouchableOpacity
-            style={[
-              styles.segmentBtn,
-              view === 'panel' && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
-            ]}
-            onPress={() => setView('panel')}
-            testID="segment-panel"
-            activeOpacity={0.85}
-          >
-            <Text
-              style={[
-                styles.segmentText,
-                { color: theme.textMuted },
-                view === 'panel' && { color: theme.text },
-              ]}
-            >
-              Panel
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.segmentBtn,
-              view === 'raporty' && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
-            ]}
-            onPress={() => setView('raporty')}
-            testID="segment-raporty"
-            activeOpacity={0.85}
-          >
-            <Text
-              style={[
-                styles.segmentText,
-                { color: theme.textMuted },
-                view === 'raporty' && { color: theme.text },
-              ]}
-            >
-              Raporty
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.segmentBtn,
-              view === 'subskrypcja' && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
-            ]}
-            onPress={() => setView('subskrypcja')}
-            testID="segment-subskrypcja"
-            activeOpacity={0.85}
-          >
-            <Text
-              style={[
-                styles.segmentText,
-                { color: theme.textMuted },
-                view === 'subskrypcja' && { color: theme.text },
-              ]}
-            >
-              Subskrypcja
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {view === 'raporty' && (
-          <>
-            <TouchableOpacity
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 10,
-                backgroundColor: theme.card,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: theme.border,
-                padding: 14,
-                marginBottom: 12,
-              }}
-              onPress={() => setPdfOpen(true)}
-              activeOpacity={0.85}
-              testID="finance-pdf-export-open-free"
-            >
-              <FileDown size={18} color={Colors.accent} strokeWidth={2.4} />
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: theme.text, fontWeight: '700', fontSize: 14 }}>
-                  Pobierz raport (PDF / Excel)
-                </Text>
-                <Text style={{ color: theme.textMuted, fontSize: 12, marginTop: 2 }}>
-                  Zbiorczy, zyski lub dostawy · zakres dat
-                </Text>
-              </View>
-            </TouchableOpacity>
-            <ReportsArchive onClosedDay={fetchData} />
-          </>
-        )}
-
-        {view === 'subskrypcja' && <SubscriptionPanel />}
-
-        {view === 'panel' && (
-          <>
-            <CreditsWalletCard onPress={() => setShowUsageHistory(true)} testID="panel-wallet-widget" />
-            <AlertBanner count={criticalCount} onPress={() => router.push('/(tabs)/magazyn')} />
-
-            <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-              Wyniki bieżącego miesiąca
-            </Text>
-            <View style={styles.kpiRow}>
-              <KPICard
-                label="Przychód"
-                value={formatPLN(totalRevenue)}
-                subLabel="Ten miesiąc"
-                variant="accent"
-                wide
-                onAdd={() => setShowAddRevenue(true)}
-              />
-              <KPICard
-                label="Koszty łącznie"
-                value={formatPLN(totalCosts)}
-                subLabel="Stałe + zmienne"
-                variant={totalCosts > totalRevenue && totalRevenue > 0 ? 'danger' : 'default'}
-                wide
-                onAdd={() => setShowAddFixed(true)}
-              />
-            </View>
-            <View style={styles.kpiRowSingle}>
-              <KPICard
-                label="Zysk netto"
-                value={(netProfit >= 0 ? '+' : '') + formatPLN(netProfit)}
-                subLabel={
-                  netProfit >= 0 ? 'Rentowność pozytywna' : 'Wynik ujemny — wymaga reakcji'
-                }
-                variant={netProfit >= 0 ? 'success' : 'danger'}
-                wide
-              />
-            </View>
-
-            <View style={styles.sectionHeaderRow}>
-              <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-                Dziennik przychodów
-              </Text>
-            </View>
-            <View
-              style={[
-                styles.card,
-                theme.isPremium && {
-                  backgroundColor: theme.card,
-                  borderColor: theme.border,
-                  borderWidth: 1,
-                },
-              ]}
-            >
-              <ExpandableDateJournal
-                items={revenueJournal.map((e) => ({
-                  id: e.id,
-                  created_at: e.created_at,
-                  title: e.description || 'Przychód',
-                  amount: Number(e.amount_pln),
-                  meta: (e as any).note ?? undefined,
-                }))}
-                emptyText="Brak przychodów — kliknij + na kafelku Przychód"
-                formatAmount={formatPLN}
-                amountPositive
-                renderActions={(item) => (
-                  <View style={{ flexDirection: 'row', gap: 4 }}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        const entry = revenueJournal.find((r) => r.id === item.id);
-                        toggleNote(item.id, (entry as any)?.note);
-                      }}
-                      style={styles.rowIconBtn}
-                    >
-                      <MessageSquare
-                        size={13}
-                        color={expandedNoteId === item.id ? theme.accent : theme.textMuted}
-                        strokeWidth={2}
-                      />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      onPress={() => handleDelete(item.id, 'revenue')}
-                      style={styles.rowIconBtn}
-                    >
-                      <Trash2 size={13} color={theme.danger} strokeWidth={2} />
-                    </TouchableOpacity>
-                  </View>
-                )}
-              />
-              {expandedNoteId && revenueJournal.some((r) => r.id === expandedNoteId) ? (
-                <View style={styles.noteExpanded}>
-                  <TextInput
-                    style={[
-                      styles.noteInput,
-                      theme.isPremium && {
-                        backgroundColor: '#0F0F0F',
-                        color: theme.text,
-                        borderColor: theme.border,
-                      },
-                    ]}
-                    value={noteText}
-                    onChangeText={setNoteText}
-                    placeholder="Dodaj notatkę..."
-                    placeholderTextColor={theme.textMuted}
-                    multiline
-                    numberOfLines={2}
-                  />
-                  <TouchableOpacity
-                    style={[styles.noteSaveBtn, theme.isPremium && { backgroundColor: theme.accent }]}
-                    onPress={() => saveNote(expandedNoteId, 'revenue')}
-                    disabled={noteSaving}
-                  >
-                    {noteSaving ? (
-                      <ActivityIndicator size="small" color="#fff" />
-                    ) : (
-                      <Text style={styles.noteSaveBtnText}>Zapisz</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              ) : null}
-              {revenueEntries.length > 0 && (
-                <View style={[styles.costTotalRow, theme.isPremium && { borderTopColor: theme.border }]}>
-                  <Text style={[styles.costTotalLabel, { color: theme.textSecondary }]}>
-                    Suma przychodów (ten miesiąc)
-                  </Text>
-                  <Text style={[styles.costTotalValue, { color: theme.accent }]}>
-                    {formatPLN(totalRevenue)}
-                  </Text>
-                </View>
-              )}
-            </View>
-
-            <View style={styles.sectionHeaderRow}>
-              <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-                {'Koszty stałe — ' + CURRENT_MONTH}
-              </Text>
-              <TouchableOpacity
-                style={[
-                  styles.sectionAddBtn,
-                  theme.isPremium && { backgroundColor: theme.accentSoft, borderColor: theme.border },
-                ]}
-                onPress={() => setShowAddFixed(true)}
-                activeOpacity={0.75}
-              >
-                <Plus size={15} color={theme.accent} strokeWidth={2.5} />
-              </TouchableOpacity>
-            </View>
-            <View
-              style={[
-                styles.card,
-                theme.isPremium && {
-                  backgroundColor: theme.card,
-                  borderColor: theme.border,
-                  borderWidth: 1,
-                },
-              ]}
-            >
-              {fixedCosts.length === 0 ? (
-                <View style={styles.emptyRow}>
-                  <Text style={[styles.emptyText, { color: theme.textMuted }]}>
-                    Brak kosztów stałych — kliknij + aby dodać
-                  </Text>
-                </View>
-              ) : (
-                fixedCosts.map((cost, idx) => {
-                  const isLast = idx === fixedCosts.length - 1;
-                  const isExpanded = expandedNoteId === cost.id;
-                  return (
-                    <View key={cost.id}>
-                      <View style={[styles.costRow, isLast && !isExpanded && styles.costRowLast]}>
-                        <View style={[styles.costIcon, { backgroundColor: getFixedColor(cost.type) }]}>
-                          {getFixedIcon(cost.type)}
-                        </View>
-                        <View style={styles.costNameCol}>
-                          <Text style={[styles.costName, { color: theme.text }]}>{cost.name}</Text>
-                          {(cost as any).note && !isExpanded ? (
-                            <Text style={styles.notePreview} numberOfLines={1}>
-                              {(cost as any).note}
-                            </Text>
-                          ) : null}
-                        </View>
-                        <TouchableOpacity
-                          onPress={() => toggleNote(cost.id, (cost as any).note)}
-                          style={styles.rowIconBtn}
-                        >
-                          <MessageSquare
-                            size={13}
-                            color={
-                              isExpanded
-                                ? theme.accent
-                                : (cost as any).note
-                                  ? theme.accent
-                                  : theme.textMuted
-                            }
-                            strokeWidth={2}
-                          />
-                        </TouchableOpacity>
-                        <Text style={[styles.costAmount, { color: theme.text }]}>
-                          {formatPLN(Number(cost.amount_pln))}
-                        </Text>
-                        <TouchableOpacity
-                          onPress={() => openEditCost(cost.id, 'fixed')}
-                          style={styles.rowIconBtn}
-                        >
-                          <Pencil size={13} color={theme.textMuted} strokeWidth={2} />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          onPress={() => handleDelete(cost.id, 'fixed')}
-                          style={styles.rowIconBtn}
-                        >
-                          <Trash2 size={13} color={theme.danger} strokeWidth={2} />
-                        </TouchableOpacity>
-                      </View>
-                      {isExpanded && (
-                        <View style={[styles.noteExpanded, isLast && styles.noteExpandedLast]}>
-                          <TextInput
-                            style={styles.noteInput}
-                            value={noteText}
-                            onChangeText={setNoteText}
-                            placeholder="Dodaj notatkę..."
-                            placeholderTextColor={theme.textMuted}
-                            multiline
-                            numberOfLines={2}
-                            autoFocus
-                          />
-                          <TouchableOpacity
-                            style={styles.noteSaveBtn}
-                            onPress={() => saveNote(cost.id, 'fixed')}
-                            disabled={noteSaving}
-                          >
-                            {noteSaving ? (
-                              <ActivityIndicator size="small" color={Colors.white} />
-                            ) : (
-                              <Text style={styles.noteSaveBtnText}>Zapisz</Text>
-                            )}
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </View>
-                  );
-                })
-              )}
-              <View style={styles.costTotalRow}>
-                <Text style={[styles.costTotalLabel, { color: theme.textSecondary }]}>Suma kosztów</Text>
-                <Text style={[styles.costTotalValue, { color: theme.text }]}>{formatPLN(totalFixed)}</Text>
-              </View>
-            </View>
-
-            <View style={styles.sectionHeaderRow}>
-              <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-                {'Koszty zmienne — ' + CURRENT_MONTH}
-              </Text>
-              <TouchableOpacity
-                style={[styles.sectionAddBtn, { backgroundColor: Colors.dangerLight, borderColor: '#FECACA' }]}
-                onPress={() => setShowAddVariable(true)}
-                activeOpacity={0.75}
-              >
-                <Plus size={15} color={theme.danger} strokeWidth={2.5} />
-              </TouchableOpacity>
-            </View>
-            <View
-              style={[
-                styles.card,
-                theme.isPremium && {
-                  backgroundColor: theme.card,
-                  borderColor: theme.border,
-                  borderWidth: 1,
-                },
-              ]}
-            >
-              {variableEntries.length === 0 ? (
-                <View style={styles.emptyRow}>
-                  <Text style={[styles.emptyText, { color: theme.textMuted }]}>
-                    Brak kosztów zmiennych — kliknij + aby dodać
-                  </Text>
-                </View>
-              ) : (
-                variableEntries.map((entry, idx) => {
-                  const isLast = idx === variableEntries.length - 1;
-                  const isExpanded = expandedNoteId === entry.id;
-                  return (
-                    <View key={entry.id}>
-                      <View style={[styles.costRow, isLast && !isExpanded && styles.costRowLast]}>
-                        <View style={[styles.costIcon, { backgroundColor: getVarColor(entry.type) }]}>
-                          {getVarIcon(entry.type)}
-                        </View>
-                        <View style={styles.costNameCol}>
-                          <TouchableOpacity
-                            activeOpacity={0.75}
-                            onPress={() => {
-                              const note = (entry as any).note as string | undefined;
-                              const invoice = parseInvoiceCostNote(note);
-                              if (invoice?.lines?.length) {
-                                setInvoicePreview({
-                                  title: entry.name,
-                                  amount: Number(entry.amount_pln) || 0,
-                                  note,
-                                });
-                              } else {
-                                toggleNote(entry.id, note);
-                              }
-                            }}
-                          >
-                            <Text style={[styles.costName, { color: theme.text }]}>{entry.name}</Text>
-                            {!isExpanded ? (
-                              <Text style={styles.notePreview} numberOfLines={1}>
-                                {humanizeInvoiceNotePreview((entry as any).note)
-                                  ?? ((entry as any).note ? String((entry as any).note) : 'Dotknij → szczegóły / notatka')}
-                              </Text>
-                            ) : null}
-                          </TouchableOpacity>
-                        </View>
-                        <TouchableOpacity
-                          onPress={() => toggleNote(entry.id, (entry as any).note)}
-                          style={styles.rowIconBtn}
-                        >
-                          <MessageSquare
-                            size={13}
-                            color={
-                              isExpanded
-                                ? theme.accent
-                                : (entry as any).note
-                                  ? theme.accent
-                                  : theme.textMuted
-                            }
-                            strokeWidth={2}
-                          />
-                        </TouchableOpacity>
-                        <Text style={[styles.costAmount, { color: theme.text }]}>
-                          {formatPLN(Number(entry.amount_pln))}
-                        </Text>
-                        <TouchableOpacity
-                          onPress={() => openEditCost(entry.id, 'variable')}
-                          style={styles.rowIconBtn}
-                        >
-                          <Pencil size={13} color={theme.textMuted} strokeWidth={2} />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          onPress={() => handleDelete(entry.id, 'variable')}
-                          style={styles.rowIconBtn}
-                        >
-                          <Trash2 size={13} color={theme.danger} strokeWidth={2} />
-                        </TouchableOpacity>
-                      </View>
-                      {isExpanded && (
-                        <View style={[styles.noteExpanded, isLast && styles.noteExpandedLast]}>
-                          {(() => {
-                            const invoice = parseInvoiceCostNote((entry as any).note);
-                            if (!invoice?.lines?.length) return null;
-                            return (
-                              <TouchableOpacity
-                                onPress={() =>
-                                  setInvoicePreview({
-                                    title: entry.name,
-                                    amount: Number(entry.amount_pln) || 0,
-                                    note: (entry as any).note,
-                                  })
-                                }
-                                style={{ marginBottom: 10 }}
-                              >
-                                <Text style={[styles.costName, { color: theme.accent }]}>
-                                  Otwórz podgląd pozycji ({invoice.lines.length})
-                                </Text>
-                              </TouchableOpacity>
-                            );
-                          })()}
-                          <TextInput
-                            style={styles.noteInput}
-                            value={noteText}
-                            onChangeText={setNoteText}
-                            placeholder="Dodaj notatkę..."
-                            placeholderTextColor={theme.textMuted}
-                            multiline
-                            numberOfLines={2}
-                            autoFocus
-                          />
-                          <TouchableOpacity
-                            style={styles.noteSaveBtn}
-                            onPress={() => saveNote(entry.id, 'variable')}
-                            disabled={noteSaving}
-                          >
-                            {noteSaving ? (
-                              <ActivityIndicator size="small" color={Colors.white} />
-                            ) : (
-                              <Text style={styles.noteSaveBtnText}>Zapisz</Text>
-                            )}
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </View>
-                  );
-                })
-              )}
-              <View style={styles.costTotalRow}>
-                <Text style={[styles.costTotalLabel, { color: theme.textSecondary }]}>Suma kosztów</Text>
-                <Text style={[styles.costTotalValue, { color: theme.text }]}>
-                  {formatPLN(totalVariable)}
-                </Text>
-              </View>
-            </View>
-
-            <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-              Analityka przychodów
-            </Text>
-            {(!revenueJournal.length && chartRecords.length === 0) ? (
-              <View
-                style={[
-                  styles.card,
-                  { padding: 16 },
-                  theme.isPremium && { backgroundColor: theme.card, borderColor: theme.border, borderWidth: 1 },
-                ]}
-              >
-                <Text style={[styles.emptyText, { color: theme.textMuted }]}>
-                  Brak danych — dodaj przychody, aby zobaczyć wykres trendu
-                </Text>
-              </View>
-            ) : (
-              <RevenueChart journal={revenueJournal} records={chartRecords} days={14} />
-            )}
-          </>
-        )}
-
-        <View style={{ height: 16 }} />
-        <AdBannerFooter />
-      </ScrollView>
-
-      <AddRevenueModal visible={showAddRevenue} onClose={() => setShowAddRevenue(false)} onSaved={fetchData} />
-      <AddFixedCostModal visible={showAddFixed} onClose={() => setShowAddFixed(false)} onSaved={fetchData} />
-      <AddVariableCostModal
-        visible={showAddVariable}
-        onClose={() => setShowAddVariable(false)}
-        onSaved={fetchData}
+    <>
+      <ClassicFinanceScreen
+        view={view}
+        onViewChange={setView}
+        refreshing={refreshing}
+        onRefresh={() => {
+          setRefreshing(true);
+          fetchData();
+        }}
+        onFetchApplied={fetchData}
+        criticalCount={criticalCount}
+        revenueEntries={revenueEntries}
+        revenueJournal={revenueJournal}
+        fixedCosts={fixedCosts}
+        variableEntries={variableEntries}
+        chartRecords={chartRecords}
+        expandedNoteId={expandedNoteId}
+        noteText={noteText}
+        noteSaving={noteSaving}
+        onToggleNote={toggleNote}
+        onNoteChange={setNoteText}
+        onSaveNote={saveNote}
+        onAddRevenue={() => setShowAddRevenue(true)}
+        onAddFixed={() => setShowAddFixed(true)}
+        onAddVariable={() => setShowAddVariable(true)}
+        onEditCost={openEditCost}
+        onDelete={handleDelete}
+        onOpenUsageHistory={() => setShowUsageHistory(true)}
+        pdfOpen={pdfOpen}
+        onPdfOpen={() => setPdfOpen(true)}
+        onPdfClose={() => setPdfOpen(false)}
+        invoicePreview={invoicePreview}
+        onInvoicePreview={setInvoicePreview}
       />
-      <EditCostModal
-        visible={!!editCost}
-        cost={editCost}
-        onClose={() => setEditCost(null)}
-        onSaved={fetchData}
-      />
-      <CreditsUsageHistoryModal visible={showUsageHistory} onClose={() => setShowUsageHistory(false)} />
-      <FinancePdfExportModal
-        visible={pdfOpen}
-        onClose={() => setPdfOpen(false)}
-        defaultMonth={CURRENT_MONTH}
-      />
-      <InvoiceCostPreviewModal
-        visible={!!invoicePreview}
-        onClose={() => setInvoicePreview(null)}
-        title={invoicePreview?.title || 'Podgląd faktury'}
-        amountPln={invoicePreview?.amount}
-        note={invoicePreview?.note}
-      />
-    </SafeAreaView>
+      {financeModals}
+    </>
   );
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.background },
-  scroll: { flex: 1 },
-  content: { padding: 16, paddingBottom: 32 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, paddingTop: 4 },
-  segment: { flexDirection: 'row', backgroundColor: Colors.borderLight, borderRadius: 12, padding: 4, marginBottom: 18 },
-  segmentBtn: { flex: 1, paddingVertical: 9, borderRadius: 9, alignItems: 'center' },
-  segmentBtnActive: { backgroundColor: Colors.card, shadowColor: Colors.shadow, shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.08, shadowRadius: 3, elevation: 2 },
-  segmentText: { fontSize: 14, fontWeight: '700', color: Colors.textTertiary },
-  segmentTextActive: { color: Colors.textPrimary },
-  restaurantName: { fontSize: 22, fontWeight: '800', color: Colors.textPrimary, letterSpacing: -0.5 },
-  subtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, fontWeight: '500' },
-  headerBadge: { width: 40, height: 40, borderRadius: 20, backgroundColor: Colors.accentLight, alignItems: 'center', justifyContent: 'center' },
-  sectionLabel: { fontSize: 12, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.6, marginBottom: 0 },
-  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, marginTop: 4 },
-  sectionAddBtn: { width: 28, height: 28, borderRadius: 8, backgroundColor: Colors.accentLight, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#BFDBFE' },
-  kpiRow: { flexDirection: 'row', gap: 12, marginBottom: 12, marginTop: 10 },
-  kpiRowSingle: { marginBottom: 20 },
-  card: { backgroundColor: Colors.card, borderRadius: 12, padding: 4, marginBottom: 12, shadowColor: Colors.shadow, shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 4, elevation: 2 },
-  costRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 12, gap: 10, borderBottomWidth: 1, borderBottomColor: Colors.borderLight },
-  costRowLast: { borderBottomWidth: 0 },
-  costIcon: { width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  costNameCol: { flex: 1 },
-  costName: { fontSize: 14, color: Colors.textPrimary, fontWeight: '500' },
-  notePreview: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontStyle: 'italic' },
-  rowIconBtn: { padding: 4 },
-  costAmount: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary },
-  costTotalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, backgroundColor: Colors.borderLight, borderBottomLeftRadius: 12, borderBottomRightRadius: 12, marginTop: 4 },
-  costTotalLabel: { fontSize: 12, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.4 },
-  costTotalValue: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
-  emptyRow: { paddingHorizontal: 14, paddingVertical: 16 },
-  emptyText: { fontSize: 13, color: Colors.textTertiary, textAlign: 'center', lineHeight: 18 },
-  noteExpanded: { backgroundColor: Colors.borderLight, paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.border, gap: 8 },
-  noteExpandedLast: { borderBottomWidth: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8 },
-  noteInput: { backgroundColor: Colors.card, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, fontSize: 13, color: Colors.textPrimary, minHeight: 56, borderWidth: 1, borderColor: Colors.border, textAlignVertical: 'top' },
-  noteSaveBtn: { backgroundColor: Colors.accent, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-end' },
-  noteSaveBtnText: { color: Colors.white, fontSize: 13, fontWeight: '600' },
-});
-
-const ms = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: Colors.overlay, justifyContent: 'flex-end' },
-  sheet: { backgroundColor: Colors.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: Platform.OS === 'ios' ? 36 : 20 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-  title: { fontSize: 17, fontWeight: '700', color: Colors.textPrimary },
-  label: { fontSize: 13, fontWeight: '600', color: Colors.textSecondary, marginBottom: 8, marginTop: 4 },
-  input: { backgroundColor: Colors.borderLight, borderRadius: 10, paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 12 : 10, fontSize: 14, color: Colors.textPrimary, marginBottom: 14, borderWidth: 1, borderColor: Colors.border },
-  typeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
-  pill: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: Colors.borderLight, borderWidth: 1.5, borderColor: 'transparent' },
-  pillActive: { backgroundColor: Colors.accentLight, borderColor: Colors.accent },
-  pillText: { fontSize: 12, fontWeight: '600', color: Colors.textSecondary },
-  pillTextActive: { color: Colors.accent },
-  newCatRow: { flexDirection: 'row', gap: 8, marginBottom: 14, alignItems: 'center' },
-  newCatConfirm: { width: 44, height: 44, borderRadius: 10, backgroundColor: Colors.accent, alignItems: 'center', justifyContent: 'center' },
-  saveBtn: { backgroundColor: Colors.accent, borderRadius: 12, paddingVertical: 13, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
-  saveBtnDisabled: { opacity: 0.6 },
-  saveBtnText: { color: Colors.white, fontSize: 15, fontWeight: '700' },
-});

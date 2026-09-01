@@ -104,8 +104,10 @@ async def subscription_topup(req: TopupRequest):
     """MOCK doładowanie — tylko gdy ALLOW_MOCK_BILLING=true. Produkcyjnie: Stripe Checkout."""
     from server import TOPUP_PACKAGES, _ensure_subscription, _subscription_view
 
+    from http_ssl import is_production_runtime
+
     ak = _ak()
-    if os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
+    if is_production_runtime() or os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
         raise HTTPException(
             status_code=400,
             detail="Płatności MOCK wyłączone. Użyj POST /api/billing/create-checkout-session.",
@@ -136,8 +138,10 @@ async def subscription_subscribe(req: SubscribeRequest):
 
     from server import TIER_CONFIG, _ensure_subscription, _subscription_view
 
+    from http_ssl import is_production_runtime
+
     ak = _ak()
-    if os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
+    if is_production_runtime() or os.getenv("ALLOW_MOCK_BILLING", "false").strip().lower() not in ("1", "true", "yes"):
         raise HTTPException(
             status_code=400,
             detail="Płatności MOCK wyłączone. Użyj POST /api/billing/create-checkout-session.",

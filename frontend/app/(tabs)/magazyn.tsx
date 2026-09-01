@@ -2,43 +2,30 @@ import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import {
   View,
   Text,
-  StyleSheet,
   TextInput,
   TouchableOpacity,
-  Modal,
-  ScrollView,
-  Alert,
-  Animated,
-  KeyboardAvoidingView,
-  Platform,
-  Switch,
   RefreshControl,
   ActivityIndicator,
   DeviceEventEmitter,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as ImagePicker from 'expo-image-picker';
 import {
   Search,
   Trash2,
   X,
   Plus,
   Mic,
-  Camera,
   Package,
-  FlaskConical,
-  Check,
   ChevronDown,
-  PenLine,
   ChevronRight,
   Tag,
-  ShoppingCart,
   FileUp,
 } from 'lucide-react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import * as inventoryService from '@/services/inventoryService';
 import { INVENTORY_CHANGED } from '@/services/supplierOrdersService';
 import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
@@ -52,34 +39,37 @@ import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { PremiumTabChrome, premiumSurface } from '@/components/premium/PremiumTabChrome';
 import {
-  PremiumBadge,
   PremiumGlowCta,
   PremiumOutlineBtn,
 } from '@/components/premium/PremiumUI';
 import { DS } from '@/constants/premiumTheme';
-import { imageSourceForProduct } from '@/lib/productImages';
 import { convertProduceQty } from '@/lib/produceSizeConverter';
 import { normalizeIngredientName } from '@/lib/fuzzyProductMatch';
+import { normCategoryName } from '@/lib/warehouseCategories';
+import { assignUniqueProductImageSources } from '@/lib/productImages';
 import {
-  dedupeWarehouseCategories,
-  ensureDefaultWarehouseCategories,
-  normCategoryName,
-} from '@/lib/warehouseCategories';
+  clearProductCustomImage,
+  getProductCustomImageSync,
+  loadProductCustomImages,
+  setProductCustomImage,
+  subscribeProductCustomImages,
+} from '@/lib/productCustomImages';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
-import { secureId } from '@/lib/secureId';
 
-// ─── Types ───────────────────────────────────────────────────────────────────────────────
-
-import type { CategoryRow, ComboIngredientDraft, MagListRow, MockInventoryItem, WasteLogRow } from '../../components/magazyn/types';
-import { BLANK_FORM, CAT_AUTO_COLORS, FALLBACK_COLOR, UNIT_OPTIONS } from '../../components/magazyn/constants';
-import { getStatus, mapDbRow, newComboIngredient, findExistingWarehouseItem } from '../../components/magazyn/helpers';
-import { ItemCard } from '../../components/magazyn/ItemCard';
-import { CategorySection, catStyles } from '../../components/magazyn/CategorySection';
-import { FieldLabel, NumericInput, formStyles } from '../../components/magazyn/formFields';
-import { ComboIngredientsEditor } from '../../components/magazyn/ComboIngredientsEditor';
+import type { CategoryRow, ComboIngredientDraft, MagListRow, MockInventoryItem, WasteLogRow } from '@/components/magazyn/types';
+import { BLANK_FORM, CAT_AUTO_COLORS, FALLBACK_COLOR } from '@/components/magazyn/constants';
+import { getStatus, mapDbRow, newComboIngredient, findExistingWarehouseItem } from '@/components/magazyn/helpers';
+import { ItemCard } from '@/components/magazyn/ItemCard';
+import { CategorySection, catStyles } from '@/components/magazyn/CategorySection';
+import { magazynScreenStyles as styles } from '@/components/magazyn/magazynScreenStyles';
+import { buildMagRows } from '@/components/magazyn/buildMagRows';
+import { AddCategoryModal } from '@/components/magazyn/AddCategoryModal';
+import { MagFab } from '@/components/magazyn/MagFab';
+import { ProductFormModal } from '@/components/magazyn/ProductFormModal';
+import { CatalogThumbPickerModal } from '@/components/CatalogThumbPickerModal';
 
 export default function MagazynScreen() {
   const router = useRouter();
@@ -105,7 +95,6 @@ export default function MagazynScreen() {
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [showWasteLogs, setShowWasteLogs] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [fabOpen, setFabOpen] = useState(false);
   const [form, setForm] = useState(BLANK_FORM);
   const [comboIngredients, setComboIngredients] = useState<ComboIngredientDraft[]>([newComboIngredient()]);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -123,8 +112,99 @@ export default function MagazynScreen() {
   }, [showVoiceModal, setVoiceOverlay]);
 
   const [orderProduct, setOrderProduct] = useState<MockInventoryItem | null>(null);
+  const [customImageTick, setCustomImageTick] = useState(0);
+  const [photoSaving, setPhotoSaving] = useState(false);
+  const [catalogPicker, setCatalogPicker] = useState<MockInventoryItem | null>(null);
 
-  const fabAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    void loadProductCustomImages().then(() => setCustomImageTick((t) => t + 1));
+    return subscribeProductCustomImages(() => setCustomImageTick((t) => t + 1));
+  }, [accountKey]);
+
+  /** Unikalne miniatury katalogu — bez powtórzeń tej samej ikony w liście. */
+  const libraryThumbByName = useMemo(() => {
+    const items = inventory.map((i) => ({ name: i.product_name, category: i.category }));
+    const assigned = assignUniqueProductImageSources(items);
+    const map = new Map<string, number | { uri: string }>();
+    for (const [name, a] of assigned) {
+      if (a.source) map.set(name, a.source);
+    }
+    return map;
+  }, [inventory]);
+
+  const saveProductPhotoWebP = useCallback(
+    async (itemId: string, sourceUri: string) => {
+      setPhotoSaving(true);
+      try {
+        await setProductCustomImage(itemId, sourceUri);
+      } catch (e: any) {
+        premiumAlert('Nie udało się zapisać', e?.message || 'Kompresja WebP nie powiodła się.');
+      } finally {
+        setPhotoSaving(false);
+      }
+    },
+    [premiumAlert],
+  );
+
+  const handleChangeProductPhoto = useCallback(
+    (item: MockInventoryItem) => {
+      const hasCustom = !!getProductCustomImageSync(item.id);
+      premiumAlert('Zmień zdjęcie', item.product_name, [
+        {
+          text: 'Podobne z katalogu',
+          onPress: () => setCatalogPicker(item),
+        },
+        {
+          text: 'Wybierz z galerii',
+          onPress: async () => {
+            const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            if (!perm.granted) {
+              premiumAlert('Brak dostępu', 'Pozwól na dostęp do galerii, aby zmienić zdjęcie.');
+              return;
+            }
+            const r = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ['images'],
+              quality: 0.85,
+            });
+            if (r.canceled || !r.assets?.[0]?.uri) return;
+            await saveProductPhotoWebP(item.id, r.assets[0].uri);
+          },
+        },
+        {
+          text: 'Zrób zdjęcie',
+          onPress: async () => {
+            let perm = await ImagePicker.getCameraPermissionsAsync();
+            if (!perm.granted && perm.canAskAgain) {
+              perm = await ImagePicker.requestCameraPermissionsAsync();
+            }
+            if (!perm.granted) {
+              premiumAlert('Brak dostępu', 'Pozwól na dostęp do aparatu, aby zmienić zdjęcie.');
+              return;
+            }
+            const r = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 0.85,
+            });
+            if (r.canceled || !r.assets?.[0]?.uri) return;
+            await saveProductPhotoWebP(item.id, r.assets[0].uri);
+          },
+        },
+        ...(hasCustom
+          ? [
+              {
+                text: 'Przywróć z biblioteki',
+                style: 'destructive' as const,
+                onPress: () => {
+                  void clearProductCustomImage(item.id);
+                },
+              },
+            ]
+          : []),
+        { text: 'Anuluj', style: 'cancel' as const },
+      ]);
+    },
+    [premiumAlert, saveProductPhotoWebP],
+  );
 
   // ── Data fetching ────────────────────────────────────────────────────────────────────────
 
@@ -146,7 +226,6 @@ export default function MagazynScreen() {
       setInventory(items.map(mapDbRow));
       setDbCategories(categories as CategoryRow[]);
       setWasteLogs(wasteLogs as WasteLogRow[]);
-      setExpandedCategories(new Set((categories as CategoryRow[]).map((c) => c.name)));
       setError(null);
     } catch (e: any) {
       setError(e.message ?? 'Nieznany błąd');
@@ -224,17 +303,6 @@ export default function MagazynScreen() {
     return counts;
   }, [inventory, uniqueCategories]);
 
-  const categorySections = useMemo(() => {
-    return [...uniqueCategories]
-      .sort((a, b) => (categoryProductCounts[b.name] ?? 0) - (categoryProductCounts[a.name] ?? 0))
-      .map((c) => ({
-        cat: c,
-        items: inventory.filter((item) =>
-          item.category_id ? item.category_id === c.id : item.category === c.name,
-        ),
-      }));
-  }, [uniqueCategories, inventory, categoryProductCounts]);
-
   const formCategories = useMemo<string[]>(() => {
     return [...uniqueCategories]
       .sort((a, b) => {
@@ -250,83 +318,17 @@ export default function MagazynScreen() {
     }
   }, [formCategories]);
 
-  // ── Search filtered data ───────────────────────────────────────────────────────────────
-
-  const searchResults = useMemo<MockInventoryItem[]>(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return [];
-    return inventory
-      .filter((item) => item.product_name.toLowerCase().includes(q) || item.category.toLowerCase().includes(q))
-      .sort((a, b) => {
-        const ORDER = { critical: 0, warning: 1, ok: 2 } as const;
-        return ORDER[getStatus(a)] - ORDER[getStatus(b)];
-      });
-  }, [inventory, search]);
-
-  const uncategorizedItems = useMemo(
+  const magRows = useMemo(
     () =>
-      inventory.filter((item) => {
-        if (item.category_id) {
-          return !uniqueCategories.some((c) => c.id === item.category_id);
-        }
-        return !uniqueCategories.some((c) => c.name === item.category);
+      buildMagRows({
+        inventory,
+        search,
+        uniqueCategories,
+        dbCategoriesLength: dbCategories.length,
+        expandedCategories,
       }),
-    [inventory, uniqueCategories],
+    [inventory, search, uniqueCategories, dbCategories.length, expandedCategories],
   );
-
-  const magRows = useMemo((): MagListRow[] => {
-    const searching = search.trim().length > 0;
-    if (searching) {
-      const q = search.trim();
-      if (searchResults.length === 0) return [{ type: 'search_empty', q }];
-      return [
-        { type: 'search_meta', count: searchResults.length, q },
-        ...searchResults.map((item): MagListRow => ({ type: 'search_item', item })),
-      ];
-    }
-    const rows: MagListRow[] = [{ type: 'cat_toolbar' }];
-    if (dbCategories.length === 0) {
-      rows.push({ type: 'mag_empty' });
-    } else {
-      for (const section of categorySections) {
-        const criticalCount = section.items.filter((i) => getStatus(i) === 'critical').length;
-        const warningCount = section.items.filter((i) => getStatus(i) === 'warning').length;
-        rows.push({
-          type: 'cat_header',
-          cat: section.cat,
-          itemCount: section.items.length,
-          criticalCount,
-          warningCount,
-        });
-        if (expandedCategories.has(section.cat.name)) {
-          if (section.items.length === 0) {
-            rows.push({ type: 'cat_empty', catId: section.cat.id });
-          } else {
-            const sorted = section.items.slice().sort((a, b) => {
-              const ORDER = { critical: 0, warning: 1, ok: 2 } as const;
-              return ORDER[getStatus(a)] - ORDER[getStatus(b)];
-            });
-            for (const inv of sorted) {
-              rows.push({
-                type: 'cat_item',
-                item: inv,
-                catColor: section.cat.color || FALLBACK_COLOR,
-              });
-            }
-          }
-        }
-      }
-    }
-    if (uncategorizedItems.length > 0) {
-      rows.push({ type: 'uncat_header', itemCount: uncategorizedItems.length });
-      if (expandedCategories.has('__uncategorized__')) {
-        for (const inv of uncategorizedItems) {
-          rows.push({ type: 'uncat_item', item: inv });
-        }
-      }
-    }
-    return rows;
-  }, [search, searchResults, dbCategories.length, categorySections, uncategorizedItems, expandedCategories]);
 
   const totalCritical = useMemo(() => inventory.filter((i) => getStatus(i) === 'critical').length, [inventory]);
 
@@ -511,6 +513,9 @@ export default function MagazynScreen() {
             <ItemCard
               item={item.item}
               catColor={categoryColorMap[item.item.category] ?? FALLBACK_COLOR}
+              libraryThumb={libraryThumbByName.get(item.item.product_name)}
+              photoTick={customImageTick}
+              onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
               onOrder={() => handleOrderItem(item.item)}
@@ -585,6 +590,9 @@ export default function MagazynScreen() {
             <ItemCard
               item={item.item}
               catColor={item.catColor}
+              libraryThumb={libraryThumbByName.get(item.item.product_name)}
+              photoTick={customImageTick}
+              onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
               onOrder={() => handleOrderItem(item.item)}
@@ -627,6 +635,9 @@ export default function MagazynScreen() {
             <ItemCard
               item={item.item}
               catColor={FALLBACK_COLOR}
+              libraryThumb={libraryThumbByName.get(item.item.product_name)}
+              photoTick={customImageTick}
+              onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
               onOrder={() => handleOrderItem(item.item)}
@@ -637,38 +648,15 @@ export default function MagazynScreen() {
           return null;
       }
     },
-    [theme, categoryColorMap, expandedCategories],
+    [
+      theme,
+      categoryColorMap,
+      expandedCategories,
+      libraryThumbByName,
+      customImageTick,
+      handleChangeProductPhoto,
+    ],
   );
-
-  // ── FAB ───────────────────────────────────────────────────────────────────────────────
-
-  function toggleFab() {
-    Animated.spring(fabAnim, { toValue: fabOpen ? 0 : 1, useNativeDriver: true, friction: 7, tension: 80 }).start();
-    setFabOpen((prev) => !prev);
-  }
-  function closeFab() {
-    Animated.spring(fabAnim, { toValue: 0, useNativeDriver: true, friction: 7, tension: 80 }).start();
-    setFabOpen(false);
-  }
-  function handleAddProductPress() { closeFab(); setShowAddModal(true); }
-  function handleMicPress() { closeFab(); setShowVoiceModal(true); }
-  function handleCameraPress() {
-    closeFab();
-    Alert.alert(
-      'Daty ważności — bez Vision AI',
-      'Przy dużej dostawie:\n\n'
-      + '1) Dostawcy → skan faktury → formularz partii (daty + ilości + przypomnienia 7/3/1).\n'
-      + '2) Albo głosem: „Dodaj do twarogu datę ważności 20.08.2026, 4 sztuki”.\n\n'
-      + 'To tańsze i szybsze niż skanowanie każdego produktu kamerą.',
-      [{ text: 'OK' }],
-    );
-  }
-
-  const addTranslateY = fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -192] });
-  const micTranslateY = fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -132] });
-  const cameraTranslateY = fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -72] });
-  const miniOpacity = fabAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 0, 1] });
-  const fabRotate = fabAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '45deg'] });
 
   // ── Auto-unlock offer items ────────────────────────────────────────────────────────────
 
@@ -732,7 +720,7 @@ export default function MagazynScreen() {
         const row = await inventoryService.saveInventoryItem({
           payload: { quantity: mergedQty },
           editingId: dup.id,
-          ak: getAccountKey(),
+          ak: requireTenantAccountKey(),
         });
         const mapped = mapDbRow(row);
         setInventory((prev) => prev.map((i) => (i.id === dup.id ? mapped : i)));
@@ -755,7 +743,7 @@ export default function MagazynScreen() {
         const d = parseInt(form.shelfLifeDays, 10);
         if (!isNaN(d) && d > 0) shelfLifeDays = d;
       }
-      const ak = getAccountKey();
+      const ak = requireTenantAccountKey();
       const payload: any = {
         name: normalizeIngredientName(nameTrim) || nameTrim,
         variant: form.variant.trim() || null,
@@ -872,7 +860,6 @@ export default function MagazynScreen() {
     }
   }
 
-  // Portion size hint
   const surf = premiumSurface(theme);
 
   if (loading) return <LoadingScreen />;
@@ -1002,8 +989,7 @@ export default function MagazynScreen() {
       {/* Main content — FlashList recycles rows + images stay on disk cache */}
       <FlashList
         data={magRows}
-        estimatedItemSize={96}
-        extraData={expandedCategories}
+        extraData={`${expandedCategories.size}:${customImageTick}:${libraryThumbByName.size}`}
         keyExtractor={(row, index) => {
           switch (row.type) {
             case 'search_item': return `si-${row.item.id}`;
@@ -1045,470 +1031,30 @@ export default function MagazynScreen() {
 
       {/* FAB stack — ukryty w premium (dodawanie z nagłówka) */}
       {!theme.isPremium && (
-      <View style={styles.fabContainer} pointerEvents="box-none">
-        <Animated.View style={[styles.fabMini, { transform: [{ translateY: addTranslateY }], opacity: miniOpacity }]} pointerEvents={fabOpen ? 'auto' : 'none'}>
-          <View style={styles.fabMiniLabel}>
-            <Text style={styles.fabMiniLabelText}>Dodaj Produkt</Text>
-          </View>
-          <TouchableOpacity style={[styles.fabMiniBtn, { backgroundColor: Colors.accent }]} onPress={handleAddProductPress} activeOpacity={0.85}>
-            <Package size={20} color={Colors.white} strokeWidth={2} />
-          </TouchableOpacity>
-        </Animated.View>
-        <Animated.View style={[styles.fabMini, { transform: [{ translateY: micTranslateY }], opacity: miniOpacity }]} pointerEvents={fabOpen ? 'auto' : 'none'}>
-          <View style={styles.fabMiniLabel}>
-            <Text style={styles.fabMiniLabelText}>AI Głos</Text>
-          </View>
-          <TouchableOpacity style={[styles.fabMiniBtn, { backgroundColor: '#8B5CF6' }]} onPress={handleMicPress} activeOpacity={0.85}>
-            <Mic size={20} color={Colors.white} strokeWidth={2} />
-          </TouchableOpacity>
-        </Animated.View>
-        <Animated.View style={[styles.fabMini, { transform: [{ translateY: cameraTranslateY }], opacity: miniOpacity }]} pointerEvents={fabOpen ? 'auto' : 'none'}>
-          <View style={styles.fabMiniLabel}>
-            <Text style={styles.fabMiniLabelText}>Jak dodać daty?</Text>
-          </View>
-          <TouchableOpacity style={[styles.fabMiniBtn, { backgroundColor: Colors.success }]} onPress={handleCameraPress} activeOpacity={0.85}>
-            <Camera size={20} color={Colors.white} strokeWidth={2} />
-          </TouchableOpacity>
-        </Animated.View>
-        <TouchableOpacity
-          style={styles.fabWrap}
-          onPress={toggleFab}
-          activeOpacity={0.85}
-        >
-          <View style={[styles.fab, { backgroundColor: Colors.accent }]}>
-            <Animated.View style={{ transform: [{ rotate: fabRotate }] }}>
-              <Plus size={26} color={Colors.white} strokeWidth={2.5} />
-            </Animated.View>
-          </View>
-        </TouchableOpacity>
-      </View>
+        <MagFab
+          onAddProduct={() => setShowAddModal(true)}
+          onMic={() => setShowVoiceModal(true)}
+        />
       )}
 
-      {/* Add Product Modal */}
-      <Modal visible={showAddModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleCloseAddModal}>
-        <SafeAreaView
-          style={[
-            styles.modalSafe,
-            theme.isPremium && { backgroundColor: DS.color.bgPrimary },
-          ]}
-          edges={['top']}
-        >
-          <View
-            style={[
-              styles.modalHeader,
-              theme.isPremium && {
-                backgroundColor: DS.color.bgPrimary,
-                borderBottomColor: DS.color.borderSubtle,
-              },
-            ]}
-          >
-            <View>
-              <Text style={[styles.modalTitle, theme.isPremium && { color: DS.color.heading }]}>
-                {editingId ? 'Edytuj produkt' : 'Nowy Produkt'}
-              </Text>
-              <Text style={[styles.modalSubtitle, theme.isPremium && { color: DS.color.muted }]}>
-                {editingId ? 'Zmień progi i stan magazynowy' : 'Uzupełnij dane magazynowe'}
-              </Text>
-            </View>
-            <TouchableOpacity
-              style={[
-                styles.closeBtn,
-                theme.isPremium && { backgroundColor: DS.color.bgTertiary },
-              ]}
-              onPress={handleCloseAddModal}
-            >
-              <X size={20} color={theme.isPremium ? DS.color.muted : Colors.textSecondary} strokeWidth={2} />
-            </TouchableOpacity>
-          </View>
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <ScrollView contentContainerStyle={styles.formScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-              <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>Podstawowe dane</Text>
-              <View style={styles.fieldWrap}>
-                <FieldLabel text="Nazwa produktu" required />
-                <TextInput
-                  style={[
-                    formStyles.input,
-                    theme.isPremium && {
-                      backgroundColor: DS.color.bgTertiary,
-                      borderColor: DS.color.borderSubtle,
-                      color: DS.color.heading,
-                    },
-                  ]}
-                  placeholder="np. Kurczak filet"
-                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                  value={form.name}
-                  onChangeText={(v) => setForm((f) => ({ ...f, name: v }))}
-                  returnKeyType="next"
-                />
-              </View>
-              <View style={styles.fieldWrap}>
-                <FieldLabel text="Odmiana / wariant (opcjonalnie)" />
-                <TextInput
-                  style={[
-                    formStyles.input,
-                    theme.isPremium && {
-                      backgroundColor: DS.color.bgTertiary,
-                      borderColor: DS.color.borderSubtle,
-                      color: DS.color.heading,
-                    },
-                  ]}
-                  placeholder="np. Irys, Jonagold, Premium, BIO, bezglutenowy"
-                  placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                  value={form.variant}
-                  onChangeText={(v) => setForm((f) => ({ ...f, variant: v }))}
-                  returnKeyType="next"
-                  testID="add-product-variant"
-                />
-                <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                  Doprecyzuj produkt — Łowca Okazji najpierw poszuka dokładnie tej odmiany, a inne odmiany zaproponuje jako zamiennik.
-                </Text>
-              </View>
-              <View style={styles.fieldWrap}>
-                <FieldLabel text="Kategoria" required />
-                {formCategories.length === 0 ? (
-                  <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                    Brak kategorii — dodaj je przyciskiem "Dodaj kategorię"
-                  </Text>
-                ) : (
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillRow}>
-                    {formCategories.map((cat) => {
-                      const active = form.category === cat;
-                      const color = categoryColorMap[cat] ?? FALLBACK_COLOR;
-                      const count = categoryProductCounts[cat] ?? 0;
-                      const catRow = uniqueCategories.find((c) => c.name === cat);
-                      return (
-                        <View
-                          key={cat}
-                          style={[
-                            styles.formPill,
-                            theme.isPremium && !active && {
-                              backgroundColor: DS.color.bgTertiary,
-                              borderColor: DS.color.borderSubtle,
-                            },
-                            active && { backgroundColor: color, borderColor: color },
-                          ]}
-                        >
-                          <TouchableOpacity
-                            style={styles.formPillMain}
-                            onPress={() => setForm((f) => ({ ...f, category: cat }))}
-                            activeOpacity={0.7}
-                          >
-                            {active && <Check size={11} color={Colors.white} strokeWidth={3} />}
-                            <Text
-                              style={[
-                                styles.formPillText,
-                                theme.isPremium && !active && { color: DS.color.muted },
-                                active && { color: Colors.white, fontWeight: '700' },
-                              ]}
-                            >
-                              {cat}
-                            </Text>
-                            {count > 0 && (
-                              <Text
-                                style={[
-                                  styles.formPillCount,
-                                  theme.isPremium && !active && { color: DS.color.muted },
-                                  active && { color: Colors.white },
-                                ]}
-                              >
-                                {count}
-                              </Text>
-                            )}
-                          </TouchableOpacity>
-                          {catRow && (
-                            <TouchableOpacity
-                              onPress={() => handleDeleteCategory(catRow)}
-                              hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
-                              style={styles.formPillDelete}
-                            >
-                              <X
-                                size={10}
-                                color={
-                                  active
-                                    ? 'rgba(255,255,255,0.75)'
-                                    : theme.isPremium
-                                      ? DS.color.muted
-                                      : Colors.textTertiary
-                                }
-                                strokeWidth={2.5}
-                              />
-                            </TouchableOpacity>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </ScrollView>
-                )}
-              </View>
-              <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>Stan magazynowy</Text>
-              <View style={styles.fieldRow}>
-                <View style={[styles.fieldWrap, { flex: 1 }]}>
-                  <FieldLabel text="Aktualna ilość" required />
-                  <NumericInput value={form.currentQty} onChange={(v) => setForm((f) => ({ ...f, currentQty: v }))} placeholder="np. 1500" />
-                  <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                    Ile jest teraz w magazynie
-                  </Text>
-                </View>
-                <View style={[styles.fieldWrap, { flex: 1 }]}>
-                  <FieldLabel text="Próg krytyczny" required />
-                  <NumericInput value={form.criticalThreshold} onChange={(v) => setForm((f) => ({ ...f, criticalThreshold: v }))} placeholder="np. 2000" />
-                  <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                    Poniżej → trzeba zamówić
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.fieldWrap}>
-                <FieldLabel text="Próg optymalny" />
-                <NumericInput
-                  value={form.optimalThreshold}
-                  onChange={(v) => setForm((f) => ({ ...f, optimalThreshold: v }))}
-                  placeholder="np. 5000 (docelowy zapas)"
-                />
-                <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                  Docelowa ilość, do której Łowca okazji będzie robił zakupy, gdy produkt spadnie poniżej stanu krytycznego.
-                </Text>
-              </View>
-              <View style={styles.fieldWrap}>
-                <FieldLabel text="Jednostka" required />
-                <View style={styles.unitRow}>
-                  {UNIT_OPTIONS.map((u) => {
-                    const active = form.unit === u;
-                    return (
-                      <TouchableOpacity
-                        key={u}
-                        style={[
-                          styles.unitBtn,
-                          theme.isPremium && {
-                            backgroundColor: DS.color.bgTertiary,
-                            borderColor: DS.color.borderSubtle,
-                          },
-                          active && (theme.isPremium
-                            ? { backgroundColor: DS.color.greenEnd, borderColor: DS.color.greenEnd }
-                            : styles.unitBtnActive),
-                        ]}
-                        onPress={() => setForm((f) => ({ ...f, unit: u }))}
-                        activeOpacity={0.7}
-                      >
-                        <Text
-                          style={[
-                            styles.unitBtnText,
-                            theme.isPremium && { color: DS.color.muted },
-                            active && (theme.isPremium
-                              ? { color: '#0A0A0A', fontWeight: '800' }
-                              : styles.unitBtnTextActive),
-                          ]}
-                        >
-                          {u}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </View>
-              {(form.unit === 'szt' || form.unit === 'opak') && (
-                <View style={styles.fieldWrap}>
-                  <FieldLabel text={`Waga/objętość jednej ${form.unit === 'opak' ? 'op.' : 'szt.'}`} />
-                  <View style={styles.wvRow}>
-                    <TextInput
-                      style={[
-                        formStyles.input,
-                        { flex: 1 },
-                        theme.isPremium && {
-                          backgroundColor: DS.color.bgTertiary,
-                          borderColor: DS.color.borderSubtle,
-                          color: DS.color.heading,
-                        },
-                      ]}
-                      value={form.unitWeightVolume}
-                      onChangeText={(v) => setForm((f) => ({ ...f, unitWeightVolume: v.replace(',', '.') }))}
-                      placeholder="np. 400"
-                      placeholderTextColor={theme.isPremium ? DS.color.muted : Colors.textTertiary}
-                      keyboardType="decimal-pad"
-                      testID="add-product-unit-weight"
-                    />
-                    <View
-                      style={[
-                        styles.wvToggle,
-                        theme.isPremium && {
-                          backgroundColor: DS.color.bgSecondary,
-                          borderColor: DS.color.borderSubtle,
-                        },
-                      ]}
-                    >
-                      {(['g', 'ml'] as const).map((u) => {
-                        const active = form.weightVolumeUnit === u;
-                        return (
-                          <TouchableOpacity
-                            key={u}
-                            style={[
-                              styles.wvToggleBtn,
-                              active && (theme.isPremium
-                                ? { backgroundColor: DS.color.greenEnd }
-                                : styles.wvToggleBtnActive),
-                            ]}
-                            onPress={() => setForm((f) => ({ ...f, weightVolumeUnit: u }))}
-                            activeOpacity={0.7}
-                            testID={`add-product-wv-unit-${u}`}
-                          >
-                            <Text
-                              style={[
-                                styles.wvToggleText,
-                                theme.isPremium && !active && { color: DS.color.muted },
-                                active && (theme.isPremium
-                                  ? { color: '#0A0A0A', fontWeight: '800' }
-                                  : styles.wvToggleTextActive),
-                              ]}
-                            >
-                              {u}
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </View>
-                  </View>
-                  <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                    Pozwala przeliczać zapas na porcje potraw liczonych w {form.weightVolumeUnit} (np. 1 szt. = 400 g).
-                  </Text>
-                </View>
-              )}
-              <View
-                style={[
-                  styles.portionInfoBox,
-                  theme.isPremium && {
-                    backgroundColor: 'rgba(0,230,118,0.08)',
-                    borderLeftColor: DS.color.greenEnd,
-                  },
-                ]}
-              >
-                <Text style={[styles.portionInfoText, theme.isPremium && { color: DS.color.body }]}>
-                  Porcje wyliczane są{' '}
-                  <Text style={{ fontWeight: '700', color: theme.isPremium ? DS.color.heading : Colors.textPrimary }}>
-                    automatycznie
-                  </Text>{' '}
-                  na podstawie receptur z Menu. Otwórz produkt → „Dostępność w menu", aby zobaczyć na ile porcji każdej potrawy wystarczy zapas.
-                </Text>
-              </View>
-              <Text style={[styles.formSection, theme.isPremium && { color: DS.color.heading }]}>Typ produktu</Text>
-              <View
-                style={[
-                  styles.switchRow,
-                  theme.isPremium && {
-                    backgroundColor: DS.color.bgTertiary,
-                    borderColor: DS.color.borderSubtle,
-                  },
-                ]}
-              >
-                <View style={styles.switchInfo}>
-                  <FlaskConical size={16} color={theme.isPremium ? DS.color.greenEnd : Colors.accent} strokeWidth={2} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.switchLabel, theme.isPremium && { color: DS.color.heading }]}>
-                      Półprodukt / Combo
-                    </Text>
-                    <Text style={[styles.switchHint, theme.isPremium && { color: DS.color.muted }]}>
-                      Przygotowywany wewnętrznie z innych produktów z magazynu np. Sos kurkowy do Penne z kurkami i kozim serem.
-                    </Text>
-                  </View>
-                </View>
-                <Switch
-                  value={form.isCombo}
-                  onValueChange={(v) => {
-                    setForm((f) => ({
-                      ...f,
-                      isCombo: v,
-                      unit: v ? 'porcja' : (f.unit === 'porcja' ? 'szt' : f.unit),
-                      category: v && (!f.category || f.category === 'Inne')
-                        ? 'Półprodukty'
-                        : f.category,
-                    }));
-                    if (v && comboIngredients.length === 0) {
-                      setComboIngredients([newComboIngredient()]);
-                    }
-                  }}
-                  trackColor={{
-                    false: theme.isPremium ? DS.color.borderSubtle : Colors.borderLight,
-                    true: theme.isPremium ? 'rgba(0,230,118,0.45)' : Colors.accentLight,
-                  }}
-                  thumbColor={
-                    form.isCombo
-                      ? theme.isPremium
-                        ? DS.color.greenEnd
-                        : Colors.accent
-                      : theme.isPremium
-                        ? DS.color.muted
-                        : Colors.textTertiary
-                  }
-                />
-              </View>
-
-              {form.isCombo && (
-                <ComboIngredientsEditor
-                  theme={theme}
-                  inventory={inventory}
-                  editingId={editingId}
-                  comboIngredients={comboIngredients}
-                  setComboIngredients={setComboIngredients}
-                  shelfLifeDays={form.shelfLifeDays}
-                  onShelfLifeChange={(v) => setForm((f) => ({ ...f, shelfLifeDays: v }))}
-                />
-              )}
-
-
-              <View style={styles.fieldWrap}>
-                <FieldLabel text={`Bufor bezpieczeństwa (%) — min 10, domyślnie 20`} />
-                <NumericInput
-                  value={form.safetyBuffer}
-                  onChange={(v) => setForm((f) => ({ ...f, safetyBuffer: v }))}
-                  placeholder="20"
-                />
-                <Text style={[styles.fieldHint, theme.isPremium && { color: DS.color.muted }]}>
-                  Ostrzeżenie o niskim stanie włączone wcześniej o {form.safetyBuffer || 20}% jako
-                  bufor na ubytki naturalne i straty (min. 10%).
-                </Text>
-              </View>
-              {form.name.trim() !== '' && form.currentQty !== '' && form.criticalThreshold !== '' && (
-                <View style={styles.previewWrap}>
-                  <Text style={[styles.previewLabel, theme.isPremium && { color: DS.color.muted }]}>
-                    Pogląd karty produktu
-                  </Text>
-                  <ItemCard
-                    item={{
-                      id: '__preview__',
-                      product_name: form.name.trim(),
-                      category: form.category,
-                      category_id: categoryIdMap[form.category] ?? null,
-                      current_qty: parseFloat(form.currentQty) || 0,
-                      critical_threshold: parseFloat(form.criticalThreshold) || 1,
-                      optimal_threshold: parseFloat(form.optimalThreshold) || 0,
-                      unit: form.unit,
-                      is_combo_półprodukt: form.isCombo,
-                      portion_size: null,
-                      safety_buffer_percent: parseFloat(form.safetyBuffer) || 20,
-                      shelf_life_days: form.shelfLifeDays ? parseInt(form.shelfLifeDays, 10) : null,
-                    }}
-                    catColor={categoryColorMap[form.category] ?? FALLBACK_COLOR}
-                  />
-                </View>
-              )}
-              <TouchableOpacity
-                style={[
-                  styles.saveBtn,
-                  theme.isPremium && { backgroundColor: DS.color.greenEnd, shadowColor: DS.color.greenEnd },
-                  saving && { opacity: 0.6 },
-                ]}
-                onPress={handleSave}
-                disabled={saving}
-                activeOpacity={0.85}
-              >
-                <Check size={18} color={theme.isPremium ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
-                <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
-                  {saving ? 'Zapisywanie...' : (editingId ? 'Zapisz zmiany' : 'Zapisz Produkt')}
-                </Text>
-              </TouchableOpacity>
-              <View style={{ height: 32 }} />
-            </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      </Modal>
+      <ProductFormModal
+        visible={showAddModal}
+        editingId={editingId}
+        form={form}
+        setForm={setForm}
+        comboIngredients={comboIngredients}
+        setComboIngredients={setComboIngredients}
+        formCategories={formCategories}
+        categoryColorMap={categoryColorMap}
+        categoryProductCounts={categoryProductCounts}
+        uniqueCategories={uniqueCategories}
+        categoryIdMap={categoryIdMap}
+        inventory={inventory}
+        saving={saving}
+        onSave={handleSave}
+        onClose={handleCloseAddModal}
+        onDeleteCategory={handleDeleteCategory}
+      />
 
       {/* Waste Report Modal — ręczne zgłaszanie + logi okresowe */}
       <WasteReportModal
@@ -1522,7 +1068,9 @@ export default function MagazynScreen() {
         <VoiceReportModal
           visible={showVoiceModal}
           onClose={() => setShowVoiceModal(false)}
-          onApplied={fetchData}
+          onApplied={() => {
+            void fetchData();
+          }}
           contextHint="Magazyn"
         />
       ) : null}
@@ -1535,44 +1083,14 @@ export default function MagazynScreen() {
         onClose={() => setOrderProduct(null)}
       />
 
-      {/* Add Category Modal */}
-      <Modal visible={addingCat} transparent animationType="fade" onRequestClose={() => setAddingCat(false)}>
-        <View style={styles.catOverlay}>
-          <View style={styles.catModal}>
-            <View style={styles.catModalHeader}>
-              <Text style={styles.catModalTitle}>Nowa kategoria</Text>
-              <TouchableOpacity onPress={() => { setAddingCat(false); setNewCatName(''); }}>
-                <X size={20} color={Colors.textSecondary} strokeWidth={2} />
-              </TouchableOpacity>
-            </View>
-            <TextInput
-              style={styles.catInput}
-              value={newCatName}
-              onChangeText={setNewCatName}
-              placeholder="np. Owoce morza"
-              placeholderTextColor={Colors.textTertiary}
-              autoFocus
-              onSubmitEditing={handleAddCategory}
-              returnKeyType="done"
-            />
-            <View style={styles.catModalBtns}>
-              <TouchableOpacity style={styles.catCancelBtn} onPress={() => { setAddingCat(false); setNewCatName(''); }}>
-                <Text style={styles.catCancelText}>Anuluj</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.catSaveBtn, (!newCatName.trim() || savingCat) && { opacity: 0.5 }]}
-                onPress={handleAddCategory}
-                disabled={!newCatName.trim() || savingCat}
-                activeOpacity={0.85}
-              >
-                {savingCat
-                  ? <ActivityIndicator size="small" color={Colors.white} />
-                  : <Text style={styles.catSaveText}>Dodaj kategorię</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <AddCategoryModal
+        visible={addingCat}
+        newCatName={newCatName}
+        onChangeName={setNewCatName}
+        savingCat={savingCat}
+        onSave={handleAddCategory}
+        onClose={() => { setAddingCat(false); setNewCatName(''); }}
+      />
     </>
   );
 
@@ -1594,6 +1112,15 @@ export default function MagazynScreen() {
       ) : (
         body
       )}
+      {photoSaving ? (
+        <View style={styles.scanSyncOverlay} pointerEvents="auto" testID="product-photo-webp-loader">
+          <View style={styles.scanSyncCard}>
+            <ActivityIndicator size="large" color={DS.color.greenEnd} />
+            <Text style={styles.scanSyncTitle}>Kompresuję zdjęcie do WebP…</Text>
+            <Text style={styles.scanSyncSub}>Zapisuję miniaturę produktu</Text>
+          </View>
+        </View>
+      ) : null}
       {scanSyncing ? (
         <View style={styles.scanSyncOverlay} pointerEvents="auto">
           <View style={styles.scanSyncCard}>
@@ -1603,165 +1130,17 @@ export default function MagazynScreen() {
           </View>
         </View>
       ) : null}
+      <CatalogThumbPickerModal
+        visible={!!catalogPicker}
+        title="Zmień zdjęcie produktu"
+        queryName={catalogPicker?.product_name || ''}
+        mode="product"
+        onClose={() => setCatalogPicker(null)}
+        onPick={(pick) => {
+          if (!catalogPicker) return;
+          void saveProductPhotoWebP(catalogPicker.id, pick.uri);
+        }}
+      />
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.background },
-  scanSyncOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(6, 12, 10, 0.82)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 80,
-    paddingHorizontal: 28,
-  },
-  scanSyncCard: {
-    backgroundColor: DS.color.surfaceCard,
-    borderWidth: 1,
-    borderColor: DS.color.borderSubtle,
-    borderRadius: 18,
-    paddingVertical: 28,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-    gap: 10,
-    maxWidth: 320,
-    width: '100%',
-  },
-  scanSyncTitle: {
-    color: DS.color.heading,
-    fontSize: 17,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  scanSyncSub: {
-    color: DS.color.muted,
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 18,
-  },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10 },
-  title: { fontSize: 24, fontWeight: '800', color: Colors.textPrimary, letterSpacing: -0.5 },
-  subtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, fontWeight: '500' },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'flex-end' },
-  actionBtnsWrap: {
-    paddingHorizontal: DS.space.screen,
-    marginBottom: 14,
-    alignItems: 'stretch',
-  },
-  actionBtnsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  magPillBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingLeft: 6,
-    paddingRight: 14,
-    paddingVertical: 8,
-    borderRadius: 22,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  magPillIcon: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.22)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  magPillText: {
-    color: '#0F172A',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  addHeaderBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: Colors.accentLight, borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE' },
-  addHeaderBtnText: { fontSize: 12, fontWeight: '600', color: Colors.accent },
-  wasteBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: Colors.dangerLight, borderRadius: 8, borderWidth: 1, borderColor: '#FECACA' },
-  wasteBtnText: { fontSize: 12, fontWeight: '600', color: Colors.danger },
-  searchWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.card, borderRadius: 10, marginHorizontal: 16, marginBottom: 10, paddingHorizontal: 12, paddingVertical: 10, gap: 8, borderWidth: 1, borderColor: Colors.border },
-  searchInput: { flex: 1, fontSize: 13, color: Colors.textPrimary, padding: 0 },
-  scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: 16 },
-  catSectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10, paddingHorizontal: 2 },
-  catSectionTitle: { fontSize: 12, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.5 },
-  addCatBtnWrap: { borderRadius: 8 },
-  addCatBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
-  addCatBtnText: { fontSize: 11, fontWeight: '600', color: Colors.accent },
-  addCatBtnTextPrem: { fontSize: 11, fontWeight: '800', color: '#0A0A0A' },
-  searchResultLabel: { fontSize: 11, fontWeight: '600', color: Colors.textTertiary, letterSpacing: 0.4, marginBottom: 10, paddingHorizontal: 2 },
-  emptyWrap: { alignItems: 'center', paddingVertical: 56, gap: 10 },
-  emptyTitle: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
-  emptyText: { fontSize: 13, color: Colors.textSecondary, textAlign: 'center', maxWidth: 280 },
-  fabContainer: { position: 'absolute', bottom: 24, right: 20, alignItems: 'flex-end' },
-  fabWrap: { borderRadius: 28 },
-  fab: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
-  fabMini: { position: 'absolute', bottom: 0, right: 0, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  fabMiniBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', shadowColor: Colors.shadow, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 5, elevation: 5 },
-  fabMiniLabel: { backgroundColor: Colors.textPrimary, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 7 },
-  fabMiniLabelText: { color: Colors.white, fontSize: 12, fontWeight: '600' },
-  modalSafe: { flex: 1, backgroundColor: Colors.background },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.card },
-  modalTitle: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary },
-  modalSubtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 1 },
-  closeBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: Colors.borderLight, alignItems: 'center', justifyContent: 'center' },
-  modalContent: { padding: 16 },
-  formScroll: { padding: 20 },
-  formSection: { fontSize: 11, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.5, marginBottom: 12, marginTop: 20 },
-  fieldWrap: { marginBottom: 14 },
-  fieldRow: { flexDirection: 'row', gap: 10 },
-  fieldHint: { fontSize: 11, color: Colors.textTertiary, marginTop: 5 },
-  pillRow: { flexDirection: 'row', gap: 8, paddingBottom: 2 },
-  formPill: { flexDirection: 'row', alignItems: 'center', borderRadius: 20, borderWidth: 1.5, borderColor: Colors.border, backgroundColor: Colors.card, overflow: 'hidden' },
-  formPillMain: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 8 },
-  formPillDelete: { paddingRight: 10, paddingLeft: 2, paddingVertical: 8 },
-  formPillText: { fontSize: 12, fontWeight: '500', color: Colors.textSecondary },
-  formPillCount: { fontSize: 10, fontWeight: '700', color: Colors.textTertiary },
-  unitRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  unitBtn: { paddingHorizontal: 16, paddingVertical: 11, borderRadius: 10, borderWidth: 1.5, borderColor: Colors.border, backgroundColor: Colors.card, alignItems: 'center', minWidth: 48 },
-  unitBtnActive: { backgroundColor: Colors.accent, borderColor: Colors.accent },
-  unitBtnText: { fontSize: 14, fontWeight: '600', color: Colors.textSecondary },
-  unitBtnTextActive: { color: Colors.white },
-  switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: Colors.card, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: Colors.border, marginBottom: 14 },
-  portionInfoBox: { marginBottom: 14, backgroundColor: Colors.accentLight, borderRadius: 10, padding: 12, borderLeftWidth: 3, borderLeftColor: Colors.accent },
-  portionInfoText: { fontSize: 12, color: Colors.textSecondary, lineHeight: 17 },
-  wvRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  wvToggle: { flexDirection: 'row', backgroundColor: Colors.borderLight, borderRadius: 10, padding: 3, borderWidth: 1.5, borderColor: Colors.border },
-  wvToggleBtn: { paddingHorizontal: 16, paddingVertical: 9, borderRadius: 8 },
-  wvToggleBtnActive: { backgroundColor: Colors.accent },
-  wvToggleText: { fontSize: 14, fontWeight: '700', color: Colors.textSecondary },
-  wvToggleTextActive: { color: Colors.white },
-  switchInfo: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, flex: 1 },
-  switchLabel: { fontSize: 14, fontWeight: '600', color: Colors.textPrimary },
-  switchHint: { fontSize: 11, color: Colors.textSecondary, marginTop: 2, lineHeight: 15 },
-  previewWrap: { marginTop: 8, marginBottom: 4 },
-  previewLabel: { fontSize: 11, fontWeight: '600', color: Colors.textSecondary, letterSpacing: 0.4, marginBottom: 8 },
-  saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: Colors.accent, paddingVertical: 15, borderRadius: 12, marginTop: 8, shadowColor: Colors.accent, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.25, shadowRadius: 6, elevation: 5 },
-  saveBtnText: { fontSize: 16, fontWeight: '700', color: Colors.white },
-  wasteRow: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: Colors.card, borderRadius: 10, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border, gap: 12 },
-  wasteLeft: { flex: 1, gap: 3 },
-  wasteName: { fontSize: 14, fontWeight: '600', color: Colors.textPrimary },
-  wasteReason: { fontSize: 12, color: Colors.textSecondary, lineHeight: 16 },
-  wasteDate: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
-  wasteRight: { alignItems: 'flex-end', justifyContent: 'center' },
-  wasteQty: { fontSize: 15, fontWeight: '700', color: Colors.danger },
-  catOverlay: { flex: 1, backgroundColor: Colors.overlay, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  catModal: { backgroundColor: Colors.card, borderRadius: 20, padding: 24, width: '100%', maxWidth: 360, gap: 16 },
-  catModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  catModalTitle: { fontSize: 17, fontWeight: '700', color: Colors.textPrimary },
-  catInput: { backgroundColor: Colors.borderLight, borderRadius: 10, paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 12 : 10, fontSize: 15, color: Colors.textPrimary, borderWidth: 1.5, borderColor: Colors.border },
-  catModalBtns: { flexDirection: 'row', gap: 10 },
-  catCancelBtn: { flex: 1, backgroundColor: Colors.borderLight, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
-  catCancelText: { fontSize: 14, fontWeight: '600', color: Colors.textSecondary },
-  catSaveBtn: { flex: 2, backgroundColor: Colors.accent, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
-  catSaveText: { fontSize: 14, fontWeight: '700', color: Colors.white },
-});

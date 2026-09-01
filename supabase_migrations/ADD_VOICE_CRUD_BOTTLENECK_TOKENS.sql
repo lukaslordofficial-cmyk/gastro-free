@@ -53,11 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_sales_log_sold_at ON sales_log(sold_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_log_menu_item ON sales_log(menu_item_id);
 
 ALTER TABLE sales_log ENABLE ROW LEVEL SECURITY;
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='sales_log' AND policyname='anon_all_sales_log') THEN
-    CREATE POLICY "anon_all_sales_log" ON sales_log FOR ALL TO anon, authenticated, service_role USING (true) WITH CHECK (true);
-  END IF;
-END $$;
+-- Izolację tenant daje FIX_FINANCE_TENANT_RLS.sql — nie twórz USING(true).
 
 -- 5) suppliers.min_order_value — logistyczne minimum darmowej dostawy.
 ALTER TABLE suppliers

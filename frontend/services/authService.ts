@@ -125,6 +125,35 @@ export async function autoConfirmUser(userId: string, email?: string): Promise<b
   }
 }
 
+/**
+ * Powitanie + link weryfikacyjny (Resend → asystent.dostaw@gastromanager.org).
+ * Fire-and-forget — rejestracja nie powinna padać, gdy mail chwilowo nie wyjdzie.
+ */
+export async function sendWelcomeEmail(input: {
+  userId: string;
+  email: string;
+  restaurantName?: string | null;
+  redirectTo?: string | null;
+}): Promise<boolean> {
+  if (!input.userId || !input.email || !BACKEND_URL) return false;
+  try {
+    const conf = await fetchJson(`${BACKEND_URL}/api/auth/welcome-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: input.userId,
+        email: input.email.trim().toLowerCase(),
+        restaurant_name: (input.restaurantName ?? '').trim() || null,
+        redirect_to: (input.redirectTo ?? '').trim() || null,
+      }),
+    });
+    return conf.ok;
+  } catch (e) {
+    if (__DEV__) console.warn('[authService] sendWelcomeEmail', e);
+    return false;
+  }
+}
+
 /** Pobiera profil tenanta. null gdy brak wiersza lub tabela jeszcze nie istnieje. */
 export async function fetchProfile(userId: string): Promise<UserProfile | null> {
   try {
@@ -176,9 +205,11 @@ export async function upsertProfile(
  */
 export async function seedSubscription(accountKey: string): Promise<void> {
   try {
+    const key = (accountKey || '').trim();
+    if (!key || key === 'default') return;
     const trialEnds = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const { error } = await supabase.from('subscriptions').insert({
-      account_key: accountKey,
+      account_key: key,
       tier_level: 0,
       credits_balance: 100,
       status: 'active',

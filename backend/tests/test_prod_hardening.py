@@ -20,6 +20,11 @@ def test_ai_paths_include_get_style_routes():
     assert is_ai_path("/api/voice/transcribe")
     assert is_ai_path("/api/inspirations/recipe")
     assert is_ai_path("/api/orders/compare-offers")
+    assert is_ai_path("/api/reports/analyze-period")
+    assert is_ai_path("/api/reports/compare-periods")
+    # PDF/Excel zbiorczy + archiwum dobowe — bez limitu AI / circuit breakera.
+    assert not is_ai_path("/api/reports/comprehensive")
+    assert not is_ai_path("/api/reports/daily")
     assert is_upload_path("/api/documents/scan")
     assert is_upload_path("/api/voice/transcribe")
     assert not is_upload_path("/api/actions/apply")
@@ -82,6 +87,18 @@ def test_supplier_orders_tenant_inject(monkeypatch):
     assert out["account_key"] == "eq.ak_test"
     payload = sr._with_tenant_payload("supplier_orders", {"status": "draft"})
     assert payload["account_key"] == "ak_test"
+
+
+def test_pos_and_warehouse_tenant_inject(monkeypatch):
+    import supabase_rest as sr
+
+    monkeypatch.setenv("ACCOUNT_KEY", "ak_test")
+    sr.configure(get_account_key=lambda: "ak_test")
+    for table in ("pos_products", "pos_settings", "recipes", "warehouse_expiry_alerts"):
+        out = sr._with_tenant_params(table, {"select": "id"})
+        assert out["account_key"] == "eq.ak_test"
+        payload = sr._with_tenant_payload(table, {"name": "x"})
+        assert payload["account_key"] == "ak_test"
 
 
 def test_deduct_credits_retries_empty_patch(monkeypatch):

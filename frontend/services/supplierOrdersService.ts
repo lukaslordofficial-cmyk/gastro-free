@@ -3,7 +3,7 @@
  */
 import { DeviceEventEmitter } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey, withAccountKey } from '@/lib/tenantScope';
 import { insertVariableCost } from '@/services/financeService';
 import { namesMatch, productMatchKey, bestProductMatch } from '@/lib/fuzzyProductMatch';
 import {
@@ -56,27 +56,30 @@ const ORDER_SELECT =
   'supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net, warehouse_product_id)';
 
 export async function saveOrderItems(orderId: string, rows: Row[], notes: string | null): Promise<void> {
+  const ak = requireTenantAccountKey();
   await supabase.from('supplier_order_items').delete().eq('order_id', orderId);
   if (rows.length) {
     const { error } = await supabase.from('supplier_order_items').insert(rows);
     if (error) throw error;
   }
-  await supabase.from('supplier_orders').update({ notes }).eq('id', orderId);
+  await supabase.from('supplier_orders').update({ notes }).eq('id', orderId).eq('account_key', ak);
 }
 
 export async function fetchGlobalBasket(): Promise<{ offerItems: Row[]; drafts: Row[] }> {
-  const accountKey = getAccountKey();
+  let accountKey: string;
+  try {
+    accountKey = requireTenantAccountKey();
+  } catch {
+    return { offerItems: [], drafts: [] };
+  }
   const draftsQuery = supabase
     .from('supplier_orders')
     .select(
       'id, supplier_id, notes, status, suppliers(name, email), supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net)',
     )
     .eq('status', 'draft')
+    .eq('account_key', accountKey)
     .order('created_at', { ascending: false });
-  // RLS i tak filtruje, ale jawny filtr chroni przed wyciekiem na 'default'
-  if (accountKey && accountKey !== 'default') {
-    draftsQuery.eq('account_key', accountKey);
-  }
   const [{ data: offerData }, { data: drafts }] = await Promise.all([
     supabase
       .from('supplier_offer_items')
@@ -98,21 +101,24 @@ function emitBasketChanged(): void {
 /** Draft → sent (Przygotowywane). Tylko ten konkretny szkic — nie kasuj innych koszyków
  * tego samego dostawcy (użytkownik mógł zapisać kilka niezależnych draftów). */
 export async function markDraftSent(orderId: string): Promise<void> {
-  const { error } = await supabase.from('supplier_orders').update({ status: 'sent' }).eq('id', orderId);
+  const ak = requireTenantAccountKey();
+  const { error } = await supabase.from('supplier_orders').update({ status: 'sent' }).eq('id', orderId).eq('account_key', ak);
   if (error) throw error;
   emitBasketChanged();
 }
 
 export async function deleteDrafts(draftIds: string[]): Promise<void> {
   if (!draftIds.length) return;
+  const ak = requireTenantAccountKey();
   await supabase.from('supplier_order_items').delete().in('order_id', draftIds);
-  await supabase.from('supplier_orders').delete().in('id', draftIds);
+  await supabase.from('supplier_orders').delete().in('id', draftIds).eq('account_key', ak);
   emitBasketChanged();
 }
 
 export async function deleteOneDraft(orderId: string): Promise<void> {
+  const ak = requireTenantAccountKey();
   await supabase.from('supplier_order_items').delete().eq('order_id', orderId);
-  await supabase.from('supplier_orders').delete().eq('id', orderId);
+  await supabase.from('supplier_orders').delete().eq('id', orderId).eq('account_key', ak);
   emitBasketChanged();
 }
 
@@ -131,24 +137,26 @@ export async function ensureSentOrderForSupplier(params: {
     warehouse_product_id?: string | null;
   }>;
 }): Promise<string> {
+  const ak = requireTenantAccountKey();
   const { data: drafts } = await supabase
     .from('supplier_orders')
     .select('id')
     .eq('supplier_id', params.supplierId)
-    .eq('status', 'draft');
+    .eq('status', 'draft')
+    .eq('account_key', ak);
   const draftIds = (drafts || []).map((r: { id: string }) => r.id);
   if (draftIds.length) {
-    await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', draftIds);
+    await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', draftIds).eq('account_key', ak);
     emitBasketChanged();
     return draftIds[0];
   }
   const { data: order, error } = await supabase
     .from('supplier_orders')
-    .insert({
+    .insert(withAccountKey({
       supplier_id: params.supplierId,
       status: 'sent',
       notes: params.notes ?? null,
-    })
+    }))
     .select('id')
     .single();
   if (error || !order) throw error ?? new Error('Nie utworzono zamówienia');
@@ -171,10 +179,12 @@ export async function ensureSentOrderForSupplier(params: {
 export async function fetchOrdersByStatuses(
   statuses: Array<'sent' | 'confirmed' | 'received'>,
 ): Promise<SupplierOrderFull[]> {
+  const ak = requireTenantAccountKey();
   const { data, error } = await supabase
     .from('supplier_orders')
     .select(ORDER_SELECT)
     .in('status', statuses)
+    .eq('account_key', ak)
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []) as SupplierOrderFull[];
@@ -238,9 +248,8 @@ export async function resolveWarehouseProductId(
 ): Promise<string | null> {
   const name = stripUnitNoiseFromProductName(productName || '');
   if (!name) return null;
-  const ak = getAccountKey();
-  let q = supabase.from('inventory_items').select('id, name').limit(5000);
-  if (ak && ak !== 'default') q = q.eq('account_key', ak);
+  const ak = requireTenantAccountKey();
+  let q = supabase.from('inventory_items').select('id, name').eq('account_key', ak).limit(5000);
   const { data } = await q;
   const rows = (data ?? []) as Array<{ id: string; name: string }>;
   if (!rows.length) return null;
@@ -273,8 +282,8 @@ export async function applyOrderItemsToInventory(
   let updated = 0;
   let created = 0;
   const assignments: InventoryAssignment[] = [];
-  const ak = getAccountKey();
-  const categories = ak && ak !== 'default' ? await loadCategories(ak) : [];
+  const ak = requireTenantAccountKey();
+  const categories = await loadCategories(ak);
   const catNameById = new Map(categories.map((c) => [c.id, c.name]));
   const inneCat =
     categories.find((c) => (c.name || '').trim().toLowerCase() === 'inne') ?? null;
@@ -283,20 +292,15 @@ export async function applyOrderItemsToInventory(
   let invQuery = supabase
     .from('inventory_items')
     .select('id, name, quantity, category_id, unit, is_active')
+    .eq('account_key', ak)
     .limit(5000);
-  if (ak && ak !== 'default') invQuery = invQuery.eq('account_key', ak);
   let { data: allInv, error: invErr } = await invQuery.eq('is_active', true);
   if (invErr && /is_active/.test(invErr.message ?? '')) {
-    const retry = await (ak && ak !== 'default'
-      ? supabase
-          .from('inventory_items')
-          .select('id, name, quantity, category_id, unit')
-          .eq('account_key', ak)
-          .limit(5000)
-      : supabase
-          .from('inventory_items')
-          .select('id, name, quantity, category_id, unit')
-          .limit(5000));
+    const retry = await supabase
+      .from('inventory_items')
+      .select('id, name, quantity, category_id, unit')
+      .eq('account_key', ak)
+      .limit(5000);
     allInv = retry.data;
     invErr = retry.error;
   }
@@ -533,14 +537,14 @@ export async function receiveSupplierOrder(
         note,
       });
       try {
-        await supabase.from('invoices').insert({
+        await supabase.from('invoices').insert(withAccountKey({
           supplier_id: order.supplier_id,
           supplier_name: supplierName,
           total_cost: total,
           note: shipping > 0
             ? `Zamówienie ręczne — zrealizowane (+ dostawa ${shipping} zł)`
             : 'Zamówienie ręczne — zrealizowane',
-        } as never);
+        }) as never);
       } catch {
         /* tabela/migracja opcjonalna */
       }
@@ -549,7 +553,8 @@ export async function receiveSupplierOrder(
   const { error } = await supabase
     .from('supplier_orders')
     .update({ status: 'received' })
-    .eq('id', order.id);
+    .eq('id', order.id)
+    .eq('account_key', requireTenantAccountKey());
   if (error) throw error;
   if (opts.applyInventory) {
     DeviceEventEmitter.emit(INVENTORY_CHANGED);

@@ -7,7 +7,7 @@ import {
 } from 'react-native';
 import { Check, Plus, X, Upload } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
-import { getAccountKey } from '@/lib/accountKey';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 import { DS } from '@/constants/premiumTheme';
 import { bestProductMatch, rankCatalogForTyping, rankProductMatches } from '@/lib/fuzzyProductMatch';
 import { inventoryDisplayName } from '@/lib/inventoryLabel';
@@ -310,6 +310,7 @@ export function IngredientNameSuggest({
         let { data, error } = await supabase
           .from('inventory_items')
           .select('id, name, variant, unit')
+          .eq('account_key', requireTenantAccountKey())
           .eq('is_active', true)
           .order('name')
           .limit(2000);
@@ -317,6 +318,7 @@ export function IngredientNameSuggest({
           const retry = await supabase
             .from('inventory_items')
             .select('id, name, unit')
+            .eq('account_key', requireTenantAccountKey())
             .eq('is_active', true)
             .order('name')
             .limit(2000);
@@ -428,12 +430,14 @@ export function DishPickEditor({
         let { data, error } = await supabase
           .from('menu_items')
           .select('id, name, price_pln')
+          .eq('account_key', requireTenantAccountKey())
           .eq('is_active', true)
           .limit(2000);
         if (error) {
           const retry = await supabase
             .from('menu_items')
             .select('id, name, price_pln')
+            .eq('account_key', requireTenantAccountKey())
             .limit(2000);
           data = retry.data;
         }
@@ -482,12 +486,14 @@ export function DishPickEditor({
         let { data, error } = await supabase
           .from('menu_items')
           .select('id, name, price_pln')
+          .eq('account_key', requireTenantAccountKey())
           .eq('is_active', true)
           .limit(2000);
         if (error) {
           const retry = await supabase
             .from('menu_items')
             .select('id, name, price_pln')
+            .eq('account_key', requireTenantAccountKey())
             .limit(2000);
           data = retry.data;
         }
@@ -499,6 +505,7 @@ export function DishPickEditor({
             const { data: ilike } = await supabase
               .from('menu_items')
               .select('id, name, price_pln')
+              .eq('account_key', requireTenantAccountKey())
               .ilike('name', `%${q}%`)
               .limit(8);
             setSuggestions((ilike as any[]) ?? []);
@@ -647,6 +654,7 @@ function OrderLine({
         let { data, error } = await supabase
           .from('inventory_items')
           .select('id, name, unit, unit_weight_volume, weight_volume_unit')
+          .eq('account_key', requireTenantAccountKey())
           .eq('is_active', true)
           .ilike('name', `%${q}%`)
           .order('name')
@@ -655,6 +663,7 @@ function OrderLine({
           const retry = await supabase
             .from('inventory_items')
             .select('id, name, unit')
+            .eq('account_key', requireTenantAccountKey())
             .ilike('name', `%${q}%`)
             .order('name')
             .limit(20);

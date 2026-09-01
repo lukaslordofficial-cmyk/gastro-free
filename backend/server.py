@@ -74,6 +74,9 @@ from cors_config import cors_allow_origins
 from billing_routes import router as billing_router
 from furgonetka_shop import router as furgonetka_shop_router
 from health_routes import router as health_router
+from auth_welcome_routes import router as auth_welcome_router
+from legal_routes import router as legal_router
+from account_routes import router as account_router
 from pos_config_routes import router as pos_config_router
 from pos_webhook_routes import router as pos_webhook_router
 from pos_sync_routes import router as pos_sync_router
@@ -143,6 +146,9 @@ app.add_middleware(
 )
 app.include_router(furgonetka_shop_router)
 app.include_router(health_router)
+app.include_router(auth_welcome_router)
+app.include_router(legal_router)
+app.include_router(account_router)
 app.include_router(pos_config_router)
 app.include_router(pos_webhook_router)
 app.include_router(pos_sync_router)
@@ -192,6 +198,7 @@ async def account_key_middleware(request: Request, call_next):
         or path.startswith("/orders/")
         or path.startswith("/api/furgonetka")
         or path.split("?")[0].rstrip("/") == "/api/pos/webhook"
+        or path.startswith("/w/")
     )
     raw = (request.headers.get("x-account-key") or "").strip()
     header_key = raw if raw and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", raw) else ""

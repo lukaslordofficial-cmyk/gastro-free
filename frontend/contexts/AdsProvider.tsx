@@ -38,36 +38,46 @@ export function AdsProvider({ children }: { children: React.ReactNode }) {
 
     let cancelled = false;
     (async () => {
+      const {
+        AdsConsent,
+        default: mobileAds,
+        InterstitialAd,
+        AdEventType,
+      } = adsMod;
+
       try {
-        const {
-          AdsConsent,
-          default: mobileAds,
-          InterstitialAd,
-          AdEventType,
-        } = adsMod;
-        const consent = Promise.race([
+        await Promise.race([
           (async () => {
             await AdsConsent.requestInfoUpdate();
             await AdsConsent.loadAndShowConsentFormIfRequired();
           })(),
-          new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+          new Promise<void>((resolve) => setTimeout(resolve, 6000)),
         ]);
-        await consent;
+      } catch (e) {
+        if (__DEV__) console.warn('[ads] UMP/consent — lecimy dalej', e);
+      }
+
+      try {
         await Promise.race([
           mobileAds().initialize(),
-          new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+          new Promise<void>((resolve) => setTimeout(resolve, 8000)),
         ]);
-        if (cancelled) return;
+      } catch (e) {
+        if (__DEV__) console.warn('[ads] mobileAds.initialize', e);
+      }
 
+      if (cancelled) return;
+
+      try {
         const interstitial = InterstitialAd.createForAdRequest(pickAdUnit('interstitial'));
         interstitialRef.current = interstitial;
         interstitial.load();
         interstitial.addAdEventListener(AdEventType.CLOSED, () => interstitial.load());
-
-        setAdsReady(true);
-      } catch {
-        setAdsReady(false);
+      } catch (e) {
+        if (__DEV__) console.warn('[ads] interstitial', e);
       }
+
+      if (!cancelled) setAdsReady(true);
     })();
 
     return () => {

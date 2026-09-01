@@ -16,6 +16,7 @@ import React, {
   useState,
 } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
+import * as Linking from 'expo-linking';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { setAccountKey, getAccountKey, accountKeyFromUserId } from '@/lib/accountKey';
 import { polishAuthError } from '@/lib/authErrors';
@@ -23,6 +24,7 @@ import * as authService from '@/services/authService';
 import type { UserProfile } from '@/services/authService';
 import { resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
 import { resetDishCustomImagesMemory } from '@/lib/dishCustomImages';
+import { resetProductCustomImagesMemory } from '@/lib/productCustomImages';
 
 export type { UserProfile };
 
@@ -87,6 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setAccountKey('default');
         resetMenuThumbCacheMemory();
         resetDishCustomImagesMemory();
+        resetProductCustomImagesMemory();
         return;
       }
       // Synchronicznie — zanim await — żeby SubscriptionContext / skany nie czytały „default".
@@ -94,6 +97,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (getAccountKey() !== immediateKey) {
         resetMenuThumbCacheMemory();
         resetDishCustomImagesMemory();
+        resetProductCustomImagesMemory();
       }
       setAccountKey(immediateKey);
       try {
@@ -174,13 +178,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { data, error } = await authService.signUp(e, password, restaurantName);
       if (error) return { ok: false as const, message: polishAuthError(error) };
 
+      const queueWelcome = (userId: string) => {
+        void authService.sendWelcomeEmail({
+          userId,
+          email: e,
+          restaurantName,
+          redirectTo: Linking.createURL('/(auth)/login'),
+        });
+      };
+
       if (data.session?.user) {
+        queueWelcome(data.session.user.id);
         await applySession(data.session);
         return { ok: true as const };
       }
 
       // Closed beta: gdy Confirm email jeszcze włączone — Admin API, potem login.
       if (data.user?.id) {
+        queueWelcome(data.user.id);
         const confirmed = await authService.autoConfirmUser(data.user.id, e);
         if (confirmed) {
           const { error: signErr } = await authService.signInWithPassword(e, password);
@@ -215,6 +230,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccountKey('default');
     resetMenuThumbCacheMemory();
     resetDishCustomImagesMemory();
+    resetProductCustomImagesMemory();
   }, []);
 
   const refreshProfile = useCallback(async () => {

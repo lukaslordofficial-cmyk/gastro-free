@@ -39,7 +39,7 @@ function filenameFromDisposition(header: string | null, fallback: string): strin
 
 export function isDirectHttpInvoiceUrl(raw: string): boolean {
   const u = (raw || '').trim().toLowerCase();
-  return u.startsWith('https://') || u.startsWith('http://');
+  return u.startsWith('https://');
 }
 
 export async function fetchProducerOrderInvoiceUrl(orderId: string): Promise<{

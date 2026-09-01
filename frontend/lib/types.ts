@@ -370,6 +370,7 @@ export type PosProduct = {
   name: string;
   price_pln: number;
   is_active: boolean;
+  account_key?: string;
   created_at: string;
 }
 
@@ -379,6 +380,7 @@ export type Recipe = {
   warehouse_product_id: string;
   quantity_per_portion: number;
   unit: string;
+  account_key?: string;
   created_at: string;
 }
 

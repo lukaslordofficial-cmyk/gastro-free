@@ -3,6 +3,8 @@
  * edge function `process-offer` (dekalog §II/§V). Zachowanie 1:1 z ekranem.
  */
 import { supabase } from '@/lib/supabase';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import { matchesAnyMenuIngredient } from '@/lib/fuzzyProductMatch';
 import { secureRandomIndex } from '@/lib/secureId';
 import { fetchSupplierOrderTotals } from '@/services/supplierSpendService';
@@ -166,13 +168,16 @@ export async function saveSupplier(input: {
     if (!err) partials.push('shipping');
   }
   if (err) throw err;
+  emitAppDataChanged('orders');
   return { partials };
 }
 
 /** Usunięcie dostawcy. Rzuca przy błędzie. */
 export async function deleteSupplier(id: string): Promise<void> {
-  const { error } = await supabase.from('suppliers').delete().eq('id', id);
+  const ak = requireTenantAccountKey();
+  const { error } = await supabase.from('suppliers').delete().eq('id', id).eq('account_key', ak);
   if (error) throw error;
+  emitAppDataChanged('orders');
 }
 
 /** Insert produktu do katalogu z fallbackiem bez kg_total. Zwraca surowy błąd. */
@@ -237,7 +242,12 @@ export async function fetchOfferItems(supplierId: string): Promise<SupplierOffer
 export async function fetchInventoryBrief(): Promise<
   Pick<Database['public']['Tables']['inventory_items']['Row'], 'id' | 'name' | 'unit'>[]
 > {
-  const { data } = await supabase.from('inventory_items').select('id, name, unit').order('name').limit(2000);
+  const { data } = await supabase
+    .from('inventory_items')
+    .select('id, name, unit')
+    .eq('account_key', requireTenantAccountKey())
+    .order('name')
+    .limit(2000);
   return (data ?? []) as Pick<Database['public']['Tables']['inventory_items']['Row'], 'id' | 'name' | 'unit'>[];
 }
 

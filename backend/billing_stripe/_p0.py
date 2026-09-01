@@ -23,11 +23,18 @@ logger = logging.getLogger("billing.stripe")
 STRIPE_API = "https://api.stripe.com/v1"
 
 STRIPE_PRODUCT_MAP = {
+    # Test mode (Dashboard toggle Test)
     "prod_UtaaLCsLbKaNKb": {"kind": "subscription", "tier_level": 1},
     "prod_UtaoGsCcAG9iTM": {"kind": "subscription", "tier_level": 2},
     "prod_Utav6FfYa4xRm5": {"kind": "topup", "package": "small", "credits": 100},
     "prod_Utb0Nd2J1MBYHE": {"kind": "topup", "package": "medium", "credits": 500},
     "prod_Utb3fRH0CMX3Nn": {"kind": "topup", "package": "large", "credits": 1000},
+    # Live catalog (konto QseiDVSEc)
+    "prod_V9KEE5ePei5dOP": {"kind": "subscription", "tier_level": 1},
+    "prod_V9KE6xgA2QKob8": {"kind": "subscription", "tier_level": 2},
+    "prod_V9KES9g92WOvnr": {"kind": "topup", "package": "small", "credits": 100},
+    "prod_V9KEZY8PBVhQjj": {"kind": "topup", "package": "medium", "credits": 500},
+    "prod_V9KEHXlb41jkam": {"kind": "topup", "package": "large", "credits": 1000},
 }
 
 # Domyślne Price ID z konta testowego (nadpisywane env)
@@ -40,12 +47,40 @@ DEFAULT_PRICES = {
 }
 
 
+def stripe_secret_key() -> str:
+    """Prefer sk_live_ when both test and live aliases exist (SECRET_STRIPE_KEY)."""
+    primary = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    alias = (os.getenv("SECRET_STRIPE_KEY") or "").strip()
+    for key in (primary, alias):
+        if key.startswith("sk_live_"):
+            return key
+    return primary or alias
+
+
+def stripe_publishable_key() -> str:
+    primary = (os.getenv("STRIPE_PUBLISHABLE_KEY") or "").strip()
+    alias = (os.getenv("PUBLISHABLE_STRIPE_KEY") or "").strip()
+    for key in (primary, alias):
+        if key.startswith("pk_live_"):
+            return key
+    return primary or alias
+
+
 def stripe_configured() -> bool:
-    return bool((os.getenv("STRIPE_SECRET_KEY") or "").strip())
+    return bool(stripe_secret_key())
+
+
+def _webhook_account_key(meta: dict, data_obj: dict) -> str:
+    """Tenant z metadanych Stripe. Nigdy ACCOUNT_KEY / 'default'."""
+    for raw in (meta.get("account_key"), data_obj.get("client_reference_id")):
+        key = str(raw or "").strip()
+        if key and key.lower() != "default":
+            return key
+    return ""
 
 
 def _secret() -> str:
-    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    key = stripe_secret_key()
     if not key:
         raise RuntimeError("Brak STRIPE_SECRET_KEY w backend/.env")
     return key
@@ -65,17 +100,38 @@ def _env_price(name: str, fallback: str) -> str:
     )
 
 
+def _assert_price_matches_key_mode(price_id: str, env_name: str) -> str:
+    """Live secret + testowe Price ID z DEFAULT_PRICES = prawie na pewno pomyłka przy go-live."""
+    sk = stripe_secret_key()
+    if sk.startswith("sk_live_") and price_id in DEFAULT_PRICES.values():
+        raise RuntimeError(
+            f"{env_name} to nadal testowe Price ID, a STRIPE_SECRET_KEY jest sk_live_. "
+            "W Stripe Dashboard (tryb Live) utwórz produkty i wklej nowe price_… na Railway."
+        )
+    return price_id
+
+
 def resolve_price_id(*, tier_level: Optional[int] = None, package: Optional[str] = None) -> str:
     if tier_level == 1:
-        return _env_price("STRIPE_PRICE_TIER1", DEFAULT_PRICES["tier1"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TIER1", DEFAULT_PRICES["tier1"]), "STRIPE_PRICE_TIER1"
+        )
     if tier_level == 2:
-        return _env_price("STRIPE_PRICE_TIER2", DEFAULT_PRICES["tier2"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TIER2", DEFAULT_PRICES["tier2"]), "STRIPE_PRICE_TIER2"
+        )
     if package == "small":
-        return _env_price("STRIPE_PRICE_TOPUP_100", DEFAULT_PRICES["topup_100"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TOPUP_100", DEFAULT_PRICES["topup_100"]), "STRIPE_PRICE_TOPUP_100"
+        )
     if package == "medium":
-        return _env_price("STRIPE_PRICE_TOPUP_500", DEFAULT_PRICES["topup_500"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TOPUP_500", DEFAULT_PRICES["topup_500"]), "STRIPE_PRICE_TOPUP_500"
+        )
     if package == "large":
-        return _env_price("STRIPE_PRICE_TOPUP_1000", DEFAULT_PRICES["topup_1000"])
+        return _assert_price_matches_key_mode(
+            _env_price("STRIPE_PRICE_TOPUP_1000", DEFAULT_PRICES["topup_1000"]), "STRIPE_PRICE_TOPUP_1000"
+        )
     raise ValueError("Nieznany produkt billingowy")
 
 
@@ -511,12 +567,15 @@ async def handle_stripe_event(
 
     if event_type == "checkout.session.completed":
         meta = dict(data_obj.get("metadata") or {})
-        account_key = meta.get("account_key") or data_obj.get("client_reference_id") or account_key_default
+        account_key = _webhook_account_key(meta, data_obj)
         kind = meta.get("kind") or ("subscription" if data_obj.get("mode") == "subscription" else "topup")
         customer_id = data_obj.get("customer")
         subscription_id = data_obj.get("subscription")
 
-        if kind == "local_producer_order":
+        if kind != "local_producer_order" and not account_key:
+            logger.warning("stripe %s skipped: missing account_key metadata", event_id)
+            result["action"] = "skipped_missing_tenant"
+        elif kind == "local_producer_order":
             from local_producers_commerce import apply_paid_producer_checkout_session
             lp = await apply_paid_producer_checkout_session(
                 data_obj,
@@ -584,82 +643,90 @@ async def handle_stripe_event(
 
     elif event_type in ("customer.subscription.updated", "customer.subscription.created"):
         meta = dict(data_obj.get("metadata") or {})
-        account_key = meta.get("account_key") or account_key_default
-        status_raw = (data_obj.get("status") or "").lower()
-        tier = int(meta.get("tier_level") or 0)
-        if status_raw in ("active", "trialing"):
-            our_status = "active"
-        elif status_raw in ("past_due", "unpaid"):
-            our_status = "past_due"
-        elif status_raw in ("canceled", "incomplete_expired"):
-            our_status = "canceled"
+        account_key = _webhook_account_key(meta, data_obj)
+        if not account_key:
+            logger.warning("stripe %s skipped: missing account_key metadata", event_id)
+            result["action"] = "skipped_missing_tenant"
         else:
-            our_status = status_raw or "active"
+            status_raw = (data_obj.get("status") or "").lower()
+            tier = int(meta.get("tier_level") or 0)
+            if status_raw in ("active", "trialing"):
+                our_status = "active"
+            elif status_raw in ("past_due", "unpaid"):
+                our_status = "past_due"
+            elif status_raw in ("canceled", "incomplete_expired"):
+                our_status = "canceled"
+            else:
+                our_status = status_raw or "active"
 
-        period_end = None
-        try:
-            ts = data_obj.get("current_period_end")
-            if ts:
-                period_end = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
-        except Exception:
             period_end = None
+            try:
+                ts = data_obj.get("current_period_end")
+                if ts:
+                    period_end = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+            except Exception:
+                period_end = None
 
-        changes = {
-            "status": our_status,
-            "stripe_subscription_id": data_obj.get("id"),
-        }
-        if data_obj.get("customer"):
-            changes["stripe_customer_id"] = data_obj.get("customer")
-        if period_end:
-            changes["current_period_end"] = period_end
-        if tier in (1, 2) and our_status in ("active", "past_due"):
-            changes["tier_level"] = tier
+            changes = {
+                "status": our_status,
+                "stripe_subscription_id": data_obj.get("id"),
+            }
+            if data_obj.get("customer"):
+                changes["stripe_customer_id"] = data_obj.get("customer")
+            if period_end:
+                changes["current_period_end"] = period_end
+            if tier in (1, 2) and our_status in ("active", "past_due"):
+                changes["tier_level"] = tier
 
-        incoming_id = str(data_obj.get("id") or "").strip()
-        existing_rows = await sb_get(client, "subscriptions", params={
-            "select": "stripe_subscription_id,status,tier_level",
-            "account_key": f"eq.{account_key}",
-            "limit": "1",
-        })
-        current_sid = str((existing_rows[0].get("stripe_subscription_id") if existing_rows else "") or "").strip()
-        # Anulowanie STAREJ sub_ po upgrade nie może nadpisać nowej (id + status canceled).
-        if (
-            incoming_id.startswith("sub_")
-            and current_sid.startswith("sub_")
-            and incoming_id != current_sid
-            and our_status in ("canceled", "expired", "incomplete_expired")
-        ):
-            result["action"] = "ignored_replaced_subscription_updated"
-        else:
-            await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, changes)
-            result["action"] = f"subscription_{our_status}"
+            incoming_id = str(data_obj.get("id") or "").strip()
+            existing_rows = await sb_get(client, "subscriptions", params={
+                "select": "stripe_subscription_id,status,tier_level",
+                "account_key": f"eq.{account_key}",
+                "limit": "1",
+            })
+            current_sid = str((existing_rows[0].get("stripe_subscription_id") if existing_rows else "") or "").strip()
+            # Anulowanie STAREJ sub_ po upgrade nie może nadpisać nowej (id + status canceled).
+            if (
+                incoming_id.startswith("sub_")
+                and current_sid.startswith("sub_")
+                and incoming_id != current_sid
+                and our_status in ("canceled", "expired", "incomplete_expired")
+            ):
+                result["action"] = "ignored_replaced_subscription_updated"
+            else:
+                await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, changes)
+                result["action"] = f"subscription_{our_status}"
 
     elif event_type == "customer.subscription.deleted":
         meta = dict(data_obj.get("metadata") or {})
-        account_key = meta.get("account_key") or account_key_default
-        deleted_id = str(data_obj.get("id") or "").strip()
-        rows = await sb_get(client, "subscriptions", params={
-            "select": "stripe_subscription_id",
-            "account_key": f"eq.{account_key}",
-            "limit": "1",
-        })
-        current_sid = str((rows[0].get("stripe_subscription_id") if rows else "") or "").strip()
-        # Po upgrade anulujemy starą sub_ — nie wolno wtedy zerować nowego planu.
-        if (
-            deleted_id.startswith("sub_")
-            and current_sid.startswith("sub_")
-            and deleted_id != current_sid
-        ):
-            result["action"] = "ignored_replaced_subscription_deleted"
+        account_key = _webhook_account_key(meta, data_obj)
+        if not account_key:
+            logger.warning("stripe %s skipped: missing account_key metadata", event_id)
+            result["action"] = "skipped_missing_tenant"
         else:
-            await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, {
-                "tier_level": 0,
-                "status": "expired",
-                "current_period_end": None,
-                "stripe_subscription_id": None,
-                "free_starter_claimed": True,
+            deleted_id = str(data_obj.get("id") or "").strip()
+            rows = await sb_get(client, "subscriptions", params={
+                "select": "stripe_subscription_id",
+                "account_key": f"eq.{account_key}",
+                "limit": "1",
             })
-            result["action"] = "subscription_deleted_to_free"
+            current_sid = str((rows[0].get("stripe_subscription_id") if rows else "") or "").strip()
+            # Po upgrade anulujemy starą sub_ — nie wolno wtedy zerować nowego planu.
+            if (
+                deleted_id.startswith("sub_")
+                and current_sid.startswith("sub_")
+                and deleted_id != current_sid
+            ):
+                result["action"] = "ignored_replaced_subscription_deleted"
+            else:
+                await _patch_subscription(client, sb_get, sb_patch, sb_post, account_key, {
+                    "tier_level": 0,
+                    "status": "expired",
+                    "current_period_end": None,
+                    "stripe_subscription_id": None,
+                    "free_starter_claimed": True,
+                })
+                result["action"] = "subscription_deleted_to_free"
 
     elif event_type == "invoice.paid":
         billing_reason = data_obj.get("billing_reason")
@@ -669,24 +736,28 @@ async def handle_stripe_event(
             for line in lines:
                 if line.get("metadata"):
                     meta = dict(line["metadata"])
-            account_key = meta.get("account_key") or account_key_default
+            account_key = _webhook_account_key(meta, data_obj)
             tier = int(meta.get("tier_level") or 0)
             sub_id = data_obj.get("subscription")
-            if not tier and sub_id:
-                try:
-                    async with httpx.AsyncClient(timeout=30.0, verify=_ssl_verify()) as c:
-                        r = await c.get(
-                            f"{STRIPE_API}/subscriptions/{sub_id}",
-                            headers={"Authorization": f"Bearer {_secret()}"},
-                        )
-                        if r.status_code < 400:
-                            sub = r.json()
-                            meta = dict(sub.get("metadata") or {})
-                            account_key = meta.get("account_key") or account_key
-                            tier = int(meta.get("tier_level") or 0)
-                except Exception as e:
-                    logger.warning("invoice.paid retrieve sub failed: %s", e)
-            if tier in (1, 2):
+            if not account_key or not tier:
+                if sub_id:
+                    try:
+                        async with httpx.AsyncClient(timeout=30.0, verify=_ssl_verify()) as c:
+                            r = await c.get(
+                                f"{STRIPE_API}/subscriptions/{sub_id}",
+                                headers={"Authorization": f"Bearer {_secret()}"},
+                            )
+                            if r.status_code < 400:
+                                sub = r.json()
+                                meta = dict(sub.get("metadata") or {})
+                                account_key = _webhook_account_key(meta, sub) or account_key
+                                tier = int(meta.get("tier_level") or 0)
+                    except Exception as e:
+                        logger.warning("invoice.paid retrieve sub failed: %s", e)
+            if not account_key:
+                logger.warning("stripe %s skipped: missing account_key metadata", event_id)
+                result["action"] = "skipped_missing_tenant"
+            elif tier in (1, 2):
                 grant = int((tier_config.get(tier) or {}).get("monthly_grant") or 0)
                 if grant > 0:
                     await _add_credits_safe(
@@ -716,4 +787,4 @@ async def handle_stripe_event(
         await _mark_processed(client, sb_post, event_id, event_type)
     return result
 
-__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'find_customer_active_subscription_id', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'upgrade_existing_subscription']
+__all__ = ['DEFAULT_PRICES', 'STRIPE_API', 'STRIPE_PRODUCT_MAP', '_add_credits_safe', '_already_processed', '_env_price', '_form_encode', '_mark_processed', '_patch_subscription', '_secret', '_stripe_delete', '_stripe_get', '_stripe_post', 'apply_paid_checkout_session', 'cancel_stripe_subscription', 'construct_event', 'create_billing_portal_session', 'create_checkout_session', 'find_customer_active_subscription_id', 'handle_stripe_event', 'logger', 'resolve_price_id', 'retrieve_checkout_session', 'stripe_configured', 'stripe_publishable_key', 'stripe_secret_key', 'upgrade_existing_subscription']

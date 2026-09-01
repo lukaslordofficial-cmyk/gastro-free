@@ -1,3 +1,8 @@
+/**
+ * AdMob units. Native App ID siedzi w app.json (plugin react-native-google-mobile-ads).
+ * Package: pl.gastromanager.app — w AdMob musi być aplikacja z TYM package,
+ * inaczej baner na APK nie wypełni się (stary com.emergent… nie pasuje).
+ */
 import { Platform } from 'react-native';
 
 const APP_ID = 'ca-app-pub-7415277897076822~9839286987';
@@ -25,7 +30,7 @@ export const AD_UNITS = {
   })!,
 };
 
-/** Google test IDs — tylko gdy jawnie EXPO_PUBLIC_ADMOB_USE_TEST_IDS=1 (dev/debug). */
+/** Google test IDs — Metro/__DEV__, albo gdy EXPO_PUBLIC_ADMOB_USE_TEST_IDS=1 (EAS preview). */
 export const TEST_AD_UNITS = {
   banner: 'ca-app-pub-3940256099942544/6300978111',
   interstitial: 'ca-app-pub-3940256099942544/1033173712',
@@ -36,14 +41,15 @@ export const INTERSTITIAL_MIN_INTERVAL_MS = 7 * 60 * 1000;
 /** @deprecated — rewarded za kredyty wyłączone */
 export const REWARDED_DAILY_LIMIT = 0;
 
-/** Domyślnie produkcyjne jednostki AdMob (release + preview). Testy tylko z flagą env. */
+/** Production AAB: live units. Preview APK / Metro: test unless EXPO_PUBLIC_ADMOB_USE_LIVE=1. */
 export function useTestAdUnits(): boolean {
-  return process.env.EXPO_PUBLIC_ADMOB_USE_TEST_IDS === '1';
+  if (process.env.EXPO_PUBLIC_ADMOB_USE_LIVE === '1') return false;
+  if (__DEV__) return true;
+  const flag = (process.env.EXPO_PUBLIC_ADMOB_USE_TEST_IDS ?? '').trim().toLowerCase();
+  return flag === '1' || flag === 'true' || flag === 'yes';
 }
 
 export function pickAdUnit(kind: keyof typeof AD_UNITS): string {
-  if (useTestAdUnits()) {
-    return TEST_AD_UNITS[kind];
-  }
+  if (useTestAdUnits()) return TEST_AD_UNITS[kind];
   return AD_UNITS[kind];
 }

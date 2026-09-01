@@ -215,9 +215,14 @@ export function getPosProvider(id: string | null | undefined): PosProvider {
 export function buildPosWebhookUrl(
   baseUrl: string,
   providerId: PosProviderId,
-  opts?: { account?: string; token?: string },
+  opts?: { account?: string; token?: string; shortPath?: string },
 ): string {
   const base = baseUrl.replace(/\/$/, '');
+  // Prefer short /w/{slug} from backend webhook-config when available.
+  if (opts?.shortPath) {
+    const p = opts.shortPath.startsWith('/') ? opts.shortPath : `/${opts.shortPath}`;
+    return `${base}${p}`;
+  }
   const params = new URLSearchParams();
   if (opts?.account) params.set('account', opts.account);
   if (opts?.token) params.set('token', opts.token);

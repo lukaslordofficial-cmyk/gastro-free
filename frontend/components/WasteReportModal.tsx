@@ -34,6 +34,7 @@ import {
 import { inventoryDisplayName, inventorySearchBlob } from '@/lib/inventoryLabel';
 import { rankCatalogForTyping } from '@/lib/fuzzyProductMatch';
 import { emitAppDataChanged } from '@/lib/appRefresh';
+import { requireTenantAccountKey } from '@/lib/tenantScope';
 
 const BACKEND_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ??
@@ -211,6 +212,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
       const { data, error: err } = await supabase
         .from('waste_logs')
         .select('id, item_name, quantity, unit, reason, created_at')
+        .eq('account_key', requireTenantAccountKey())
         .order('created_at', { ascending: false })
         .limit(300);
       if (err) throw err;
@@ -244,12 +246,14 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           let { data, error: invErr } = await supabase
             .from('inventory_items')
             .select('id, name, variant, unit, unit_weight_volume')
+            .eq('account_key', requireTenantAccountKey())
             .order('name')
             .limit(2000);
           if (invErr && /variant/i.test(invErr.message ?? '')) {
             const retry = await supabase
               .from('inventory_items')
               .select('id, name, unit, unit_weight_volume')
+              .eq('account_key', requireTenantAccountKey())
               .order('name')
               .limit(2000);
             data = retry.data;
@@ -259,6 +263,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
             const retry = await supabase
               .from('inventory_items')
               .select('id, name, variant, unit')
+              .eq('account_key', requireTenantAccountKey())
               .order('name')
               .limit(2000);
             data = retry.data;
@@ -289,6 +294,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
           let { data, error: err } = await supabase
             .from('menu_items')
             .select('id, name')
+            .eq('account_key', requireTenantAccountKey())
             .eq('is_active', true)
             .order('name')
             .limit(1000);
@@ -296,6 +302,7 @@ export function WasteReportModal({ visible, onClose, onSaved }: Props) {
             const retry = await supabase
               .from('menu_items')
               .select('id, name')
+              .eq('account_key', requireTenantAccountKey())
               .order('name')
               .limit(1000);
             data = retry.data;

@@ -119,10 +119,16 @@ export function NewOrderBrowser({
       setQ('');
       setExpandedId(null);
       setSelectedProduct(null);
-      const [invRes, supRes, catRes] = await Promise.all([
-        supabase.from('inventory_items').select('id,name,quantity,unit,min_quantity').eq('account_key', getAccountKey()).limit(3000),
-        supabase.from('suppliers').select('id,name,email,min_order_value').eq('account_key', getAccountKey()).order('name').limit(500),
-        supabase.from('supplier_catalog').select('id,supplier_id,name,variant,unit,price_pln,is_visible').limit(5000),
+      const ak = getAccountKey();
+      if (!ak || ak === 'default') {
+        setInventory([]);
+        setSuppliers([]);
+        setLoading(false);
+        return;
+      }
+      const [invRes, supRes] = await Promise.all([
+        supabase.from('inventory_items').select('id,name,quantity,unit,min_quantity').eq('account_key', ak).limit(3000),
+        supabase.from('suppliers').select('id,name,email,min_order_value').eq('account_key', ak).order('name').limit(500),
       ]);
       if (cancelled) return;
       setInventory(
@@ -134,14 +140,25 @@ export function NewOrderBrowser({
           min_quantity: Number(r.min_quantity ?? 0),
         })),
       );
-      let cats = catRes.data ?? [];
-      if (catRes.error && /is_visible/.test(catRes.error.message ?? '')) {
-        const retry = await supabase
+      const supplierIds = (supRes.data ?? []).map((s: { id: string }) => s.id).filter(Boolean);
+      let cats: unknown[] = [];
+      if (supplierIds.length) {
+        let catRes = await supabase
           .from('supplier_catalog')
-          .select('id,supplier_id,name,variant,unit,price_pln')
+          .select('id,supplier_id,name,variant,unit,price_pln,is_visible')
+          .in('supplier_id', supplierIds)
           .limit(5000);
-        cats = retry.data ?? [];
+        if (catRes.error && /is_visible/.test(catRes.error.message ?? '')) {
+          catRes = await supabase
+            .from('supplier_catalog')
+            .select('id,supplier_id,name,variant,unit,price_pln')
+            .in('supplier_id', supplierIds)
+            .limit(5000);
+        }
+        cats = catRes.data ?? [];
       }
+      const allowedSuppliers = new Set(supplierIds);
+      cats = (cats as { supplier_id?: string }[]).filter((c) => c.supplier_id && allowedSuppliers.has(c.supplier_id));
       const bySup: Record<string, CatalogBrowseRow[]> = {};
       for (const c of cats as any[]) {
         if (!(Number(c.price_pln) > 0)) continue;

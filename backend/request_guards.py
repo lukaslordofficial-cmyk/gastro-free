@@ -6,8 +6,10 @@ import os
 _PUBLIC_MUTATE = (
     "/api/billing/webhook",
     "/api/pos/webhook",
+    "/w/",
     "/api/furgonetka",
     "/api/auth/auto-confirm",
+    "/api/auth/welcome-email",
     "/api/local-producers/confirm-payment",
     "/api/stripe/connect/callback",
 )
@@ -21,7 +23,10 @@ _AI_PREFIXES = (
     "/api/orders/compare-offers",
     "/api/bargain-hunter/",
     "/api/optimizer/",
-    "/api/reports/",
+    # Tylko raporty z GPT — NIE /api/reports/comprehensive ani /daily
+    # (te są czystym SQL; wcześniej wpadały w AI rate-limit + circuit breaker).
+    "/api/reports/analyze-period",
+    "/api/reports/compare-periods",
     "/api/recipes/ocr-text",
     "/api/inventory/scan-expiration",
     "/api/orders/generate-messages",

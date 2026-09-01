@@ -8,6 +8,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import { getAccountKey } from '@/lib/accountKey';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
 
 export type FinanceTable = 'revenue_entries' | 'fixed_costs' | 'variable_cost_entries';
@@ -55,14 +56,80 @@ async function insertWithAccountKeyFallback(
     ({ error } = await supabase.from(table).insert(payload as never));
   }
   if (error) throw error;
+  emitAppDataChanged('finance');
 }
 
 export function insertRevenue(payload: { year_month: string; description: string | null; amount_pln: number }): Promise<void> {
   return insertWithAccountKeyFallback('revenue_entries', payload);
 }
 
-export function insertFixedCost(payload: { year_month: string; type: string; name: string; amount_pln: number }): Promise<void> {
+export function insertFixedCost(payload: {
+  year_month: string;
+  type: string;
+  name: string;
+  amount_pln: number;
+  note?: string | null;
+}): Promise<void> {
   return insertWithAccountKeyFallback('fixed_costs', payload);
+}
+
+/**
+ * Kopiuje koszty stałe z poprzedniego miesiąca do targetYm (nowe ID).
+ * Zwraca wstawione wiersze. No-op gdy target już ma pozycje albo źródło jest puste.
+ */
+export async function copyFixedCostsFromPreviousMonth(
+  accountKey: string,
+  targetYm: string,
+  sourceYm: string,
+): Promise<FixedCost[]> {
+  if (!isRealKey(accountKey)) {
+    throw new Error('Brak aktywnego konta (account_key). Zaloguj się ponownie.');
+  }
+  if (!/^\d{4}-\d{2}$/.test(targetYm) || !/^\d{4}-\d{2}$/.test(sourceYm)) {
+    return [];
+  }
+
+  const { data: existing, error: exErr } = await supabase
+    .from('fixed_costs')
+    .select('id')
+    .eq('account_key', accountKey)
+    .eq('year_month', targetYm)
+    .limit(1);
+  if (exErr) throw exErr;
+  if ((existing ?? []).length > 0) return [];
+
+  const { data: source, error: srcErr } = await supabase
+    .from('fixed_costs')
+    .select('type, name, amount_pln, note')
+    .eq('account_key', accountKey)
+    .eq('year_month', sourceYm)
+    .order('type');
+  if (srcErr) throw srcErr;
+  const rows = (source ?? []) as Array<{
+    type: string;
+    name: string;
+    amount_pln: number;
+    note?: string | null;
+  }>;
+  if (!rows.length) return [];
+
+  const payload = rows.map((r) => ({
+    account_key: accountKey,
+    year_month: targetYm,
+    type: r.type || 'other',
+    name: r.name || 'Koszt stały',
+    amount_pln: Number(r.amount_pln) || 0,
+    note: r.note ?? null,
+  }));
+
+  const { data: inserted, error: insErr } = await supabase
+    .from('fixed_costs')
+    .insert(payload as never)
+    .select('*');
+  if (insErr) throw insErr;
+  const out = (inserted ?? []) as FixedCost[];
+  if (out.length) emitAppDataChanged('finance');
+  return out;
 }
 
 export function insertVariableCost(payload: {
@@ -86,6 +153,7 @@ export async function updateCost(
   if (isRealKey(ak)) q = q.eq('account_key', ak);
   const { error } = await q;
   if (error) throw error;
+  emitAppDataChanged('finance');
 }
 
 /** Zapis notatki. */
@@ -100,6 +168,7 @@ export async function deleteCost(table: FinanceTable, id: string): Promise<void>
   if (isRealKey(ak)) q = q.eq('account_key', ak);
   const { error } = await q;
   if (error) throw error;
+  emitAppDataChanged('finance');
 }
 
 /**
@@ -109,8 +178,13 @@ export async function deleteCost(table: FinanceTable, id: string): Promise<void>
  */
 export async function fetchFinanceRows(accountKey: string, currentMonth: string): Promise<FinanceRows> {
   const ak = accountKey;
+  if (!isRealKey(ak)) {
+    throw new Error(
+      'Brak aktywnego konta (account_key). Zaloguj się ponownie i spróbuj jeszcze raz.',
+    );
+  }
   const scoped = <T,>(q: T & { eq: (col: string, val: string) => T }, col = 'account_key'): T =>
-    isRealKey(ak) ? q.eq(col, ak) : q;
+    q.eq(col, ak);
 
   const invSelects = [
     'id, name, quantity, min_quantity, optimal_quantity, unit, is_combo_polprodukt',
@@ -164,25 +238,10 @@ export async function fetchFinanceRows(accountKey: string, currentMonth: string)
     (r) => r.error && /account_key/i.test(r.error.message ?? ''),
   );
   if (missingAk) {
-    [
-      revRes,
-      fixedRes,
-      varRes,
-      revHistRes,
-      varHistRes,
-      revAllRes,
-      fixedAllRes,
-      varAllRes,
-    ] = await Promise.all([
-      supabase.from('revenue_entries').select('*').eq('year_month', currentMonth).order('created_at'),
-      supabase.from('fixed_costs').select('*').eq('year_month', currentMonth).order('type'),
-      supabase.from('variable_cost_entries').select('*').eq('year_month', currentMonth).order('created_at'),
-      supabase.from('revenue_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-      supabase.from('variable_cost_entries').select('year_month, amount_pln').order('year_month').limit(2000),
-      supabase.from('revenue_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-      supabase.from('fixed_costs').select('*').order('created_at', { ascending: false }).limit(1000),
-      supabase.from('variable_cost_entries').select('*').order('created_at', { ascending: false }).limit(1500),
-    ]);
+    // NIGDY nie odczytuj wszystkich wierszy bez account_key — to wyciek między tenantami.
+    throw new Error(
+      'Brak izolacji account_key w tabelach finansowych. Uruchom migrację FIX_FINANCE_TENANT_RLS.sql.',
+    );
   }
   if (revRes.error) throw revRes.error;
   if (fixedRes.error) throw fixedRes.error;

@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from openai import AsyncOpenAI
 
 from http_ssl import httpx_verify as _httpx_verify
+from http_ssl import is_production_runtime as _is_prod_runtime
 from supabase_rest import (
     configure as _configure_supabase_rest,
     sb_headers as _sb_headers,
@@ -56,7 +57,10 @@ INSPIRATIONS_MODEL = (
 )
 # Default tenant when client does not send X-Account-Key (legacy / ops).
 # Authenticated app clients send X-Account-Key from profiles.account_key.
+# Produkcja: nigdy nie dziedzicz prawdziwego tenanta z env (wyciek przy requestach bez JWT).
 _ACCOUNT_KEY_DEFAULT = (os.environ.get("ACCOUNT_KEY") or "default").strip() or "default"
+if _is_prod_runtime() and _ACCOUNT_KEY_DEFAULT != "default":
+    _ACCOUNT_KEY_DEFAULT = "default"
 _account_key_ctx: ContextVar[str] = ContextVar("account_key", default=_ACCOUNT_KEY_DEFAULT)
 _SUPABASE_ANON_KEY = (
     os.environ.get("SUPABASE_ANON_KEY", "").strip()

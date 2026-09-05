@@ -181,7 +181,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
         <View style={styles.header}>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>Skan sprzedaży</Text>
-            <Text style={styles.sub}>Notatka z sprzedanymi produktami → odjęcie z magazynu</Text>
+            <Text style={styles.sub}>Wydruk z krzyżykami / notatka → odjęcie z magazynu</Text>
           </View>
           <TouchableOpacity onPress={handleClose} hitSlop={12} style={styles.close}>
             <X size={20} color={DS.color.heading} />
@@ -205,8 +205,9 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
               <Text style={[styles.bigBtnText, { color: DS.color.greenEnd }]}>Wybierz z galerii</Text>
             </TouchableOpacity>
             <Text style={styles.hint}>
-              Spisz nazwę składnika + ilość (np. „kurczak 800 g”) albo tylko numer dania z mapowania POS
-              (np. „3 × 2”). Numery rozpoznajemy po pos_id i odejmujemy składniki receptury z magazynu.
+              Najłatwiej: wydrukuj listę z numerkami POS (Ustawienia → Mapowanie), zaznacz sprzedaż
+              obok dań (x, ✓ albo kreski — każdy znacznik = 1 szt.) i zrób zdjęcie. Działa też notatka
+              z nazwą/numerem i ilością (np. „kurczak 800 g”, „3 × 2”).
             </Text>
           </View>
         ) : null}

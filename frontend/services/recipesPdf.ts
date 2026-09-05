@@ -163,7 +163,7 @@ export async function sharePosNumberList(
       <thead><tr><th>Nr</th><th>Danie</th><th>Kategoria</th></tr></thead>
       <tbody>${tableRows}</tbody>
     </table>
-    <p class="hint">Kasjer bez POS może spisywać tylko numery. Po wgraniu skanu sprzedaży z samymi numerkami system rozpozna potrawy i zdejmie składniki z magazynu.</p>
+    <p class="hint">Wydrukuj tę listę. Kasjer zaznacza sprzedaż obok pozycji (x, ✓ albo kreski — każdy znacznik = 1 sztuka). Zeskanuj kartkę w Magazyn → Skan sprzedaży: system rozpozna numery i zdejmie składniki z magazynu.</p>
     </body></html>`;
 
   const fileName = `gastro-pos-numery_${new Date().toISOString().slice(0, 10)}.pdf`;

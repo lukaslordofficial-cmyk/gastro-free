@@ -31,7 +31,7 @@ export const WASTE_CRITICAL_TIPS: WasteTip[] = [
   {
     id: 'waste-sales-note',
     title: 'Notuj sprzedaż ręcznie',
-    body: 'Bez POS każda zmiana powinna kończyć się skanem listy sprzedaży (Magazyn → Skan sprzedaży). Inaczej stany „puchną” w systemie, a w lodówce brakuje towaru.',
+    body: 'Bez POS: wydrukuj listę z numerkami, zaznaczaj sprzedaż (x / kreski) i skanuj w Magazyn → Skan sprzedaży. Inaczej stany „puchną” w systemie, a w lodówce brakuje towaru.',
     minCostPln: 0,
   },
   {

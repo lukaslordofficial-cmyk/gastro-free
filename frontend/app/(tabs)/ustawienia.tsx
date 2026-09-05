@@ -675,8 +675,8 @@ export default function UstawieniaScreen() {
           </View>
 
           <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 10 }]}>
-            Po przypisaniu numerków kasjer może spisać tylko numery dań (np. „3 × 2”) — skan sprzedaży
-            rozpozna danie po numerze POS i odejmie składniki z magazynu.
+            Wydrukuj listę PDF, kasjer zaznacza sprzedaż obok dań (x / ✓ / kreski — każdy znacznik =
+            1 szt.), potem Magazyn → Skan sprzedaży. Można też spisać same numery (np. „3 × 2”).
           </Text>
 
           {menuItems.length === 0 ? (

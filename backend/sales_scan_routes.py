@@ -20,6 +20,17 @@ logger = logging.getLogger("sales_scan")
 router = APIRouter(tags=["sales-scan"])
 
 _PURE_NUMERIC_RE = re.compile(r"^\s*\d+\s*$")
+# Pojedyncze znaczniki sprzedaży obok pozycji na wydrukowanej liście POS.
+_MARK_UNIT_RE = re.compile(
+    r"[xX×✕✖✗✘╳☓✓✔☑✅\*★☆•·◦∙●○]|"
+    r"(?<![A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9])[iIl|](?![A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9])"
+)
+# Nazwa/nr + znaczniki na końcu wiersza (np. "3 xxx", "Schabowy |||", "12 ✓✓").
+_NAME_THEN_MARKS_RE = re.compile(
+    r"^(.+?)\s+("
+    r"(?:[xX×✕✖✗✘╳☓✓✔☑✅\*★☆•·◦∙●○iIl|\+\-/\s]){1,}"
+    r")$"
+)
 
 
 class SalesLineIn(BaseModel):
@@ -40,16 +51,26 @@ class ConfirmSalesRequest(BaseModel):
 
 
 _SALES_SYSTEM_PROMPT = """
-Jesteś OCR dla restauracji. Na zdjęciu jest RĘCZNIE lub maszynowo spisana LISTA SPRZEDANYCH produktów
-(notatka barmana/kucharza po zmianie — nazwy LUB numery dań POS + ilości).
+Jesteś OCR dla restauracji. Na zdjęciu jest lista sprzedaży — ręczna notatka ALBO WYDRUKOWANA
+lista dań z numerami POS, na której kasjer zaznaczył sprzedaż obok pozycji.
 
-Zasady:
-- product_name: czytelna nazwa PL (np. "kurczak filet", "mozarella") ALBO sam numer dania z menu POS
-  (np. "3", "12") gdy kasjer spisał tylko numerek.
-- quantity: liczba porcji / sztuk > 0; jeśli brak, 0. Dla numeru dania quantity = liczba sprzedanych porcji.
-- unit: dla dań po numerze użyj "szt"; dla składników "g"/"ml"/"szt" jak na kartce.
-- Nie wymyślaj pozycji spoza kartki. Pomiń nagłówki typu "Sprzedaż", daty, podpisy.
+Zasady ogólne:
+- product_name: nazwa PL (np. "kurczak filet") ALBO sam numer dania POS (np. "3", "12").
+- quantity: liczba sprzedanych porcji / sztuk > 0. unit: dla dań "szt"; dla składników "g"/"ml"/"szt".
+- Nie wymyślaj pozycji spoza kartki. Pomiń nagłówki ("Sprzedaż", "Nr", "Danie"), daty, podpisy.
 - Jeśli lista pusta — lines: [].
+
+WYDRUK Z NUMERKAMI POS + ZNACZNIKI (najczęstszy przypadek bez kasy):
+Kasjer drukuje listę „Nr | Danie” i obok sprzedanych pozycji stawia znaczniki: x, X, ×, ptaszek ✓,
+krzyżyk, kreska |, ukośnik /, plus +, kropka •, „i”, albo kilka kresek jak w systemie kreskowym (||||).
+- Każdy osobny znacznik = 1 sprzedana sztuka tej pozycji.
+- Policz WSZYSTKIE znaczniki przy tej samej pozycji → quantity (np. "xxx" lub "x x x" = 3; "||||" = 4; jeden "✓" = 1).
+- product_name = numer z lewej kolumny (preferowane) albo nazwa dania z wiersza — BEZ samych znaczników w nazwie.
+- Pozycje BEZ żadnego znacznika obok = NIE sprzedane — POMIŃ je (nie dodawaj do lines).
+- Jeśli przy pozycji jest też cyfra ilości (np. "3 × 2" albo "12  2szt"), użyj tej liczby jako quantity.
+
+RĘCZNA NOTATKA:
+- Nazwa/numer + ilość (np. "kurczak 800 g", "3 × 2") jak wcześniej.
 """
 
 _SALES_JSON_SCHEMA: dict[str, Any] = {
@@ -92,6 +113,52 @@ def _merge_sales_batches(parts: list[dict]) -> dict:
 
 def _looks_like_pos_id(name: str) -> bool:
     return bool(_PURE_NUMERIC_RE.match(name or ""))
+
+
+def _count_sale_marks(fragment: str) -> int:
+    """Policz ręczne znaczniki sprzedaży (x, ✓, kreski, …) w fragmencie tekstu."""
+    if not fragment:
+        return 0
+    return len(_MARK_UNIT_RE.findall(fragment))
+
+
+def _normalize_sales_ocr_row(name: str, qty: float, unit: str) -> tuple[str, float, str]:
+    """
+    Gdy OCR wrzuci znaczniki do product_name albo quantity=0 przy zaznaczonej pozycji,
+    wyodrębnij nazwę/nr i ustaw quantity = liczba znaczników.
+    """
+    raw = (name or "").strip()
+    u = (unit or "g").strip().lower() or "g"
+    if not raw:
+        return raw, float(qty or 0), u
+
+    mark_qty = 0
+    clean = raw
+    m = _NAME_THEN_MARKS_RE.match(raw)
+    if m:
+        left, marks = m.group(1).strip(), m.group(2)
+        # Lewa strona nie może być samym znacznikiem; prawa musi mieć ≥1 mark
+        n_marks = _count_sale_marks(marks)
+        if n_marks > 0 and _count_sale_marks(left) == 0:
+            clean = left
+            mark_qty = n_marks
+    elif _count_sale_marks(raw) > 0 and not _looks_like_pos_id(raw):
+        # Cały wiersz to np. same "xxx" — bez nazwy nie da się zmatchować
+        only_marks = _count_sale_marks(raw)
+        letters = re.sub(r"[\s\d]", "", _MARK_UNIT_RE.sub("", raw))
+        if only_marks > 0 and not letters:
+            return raw, float(qty or 0), u
+
+    out_qty = float(qty or 0)
+    if mark_qty > 0:
+        if out_qty <= 0:
+            out_qty = float(mark_qty)
+        # Gdy OCR dał quantity=1, a znaczników jest więcej — ufaj znacznikom
+        elif out_qty == 1 and mark_qty > 1:
+            out_qty = float(mark_qty)
+        if u in ("g", "ml", "kg", "l") and (_looks_like_pos_id(clean) or mark_qty > 0):
+            u = "szt"
+    return clean.strip(), out_qty, u
 
 
 def _menu_by_pos_id(menu_rows: list[dict], pos_key: str) -> Optional[dict]:
@@ -281,7 +348,8 @@ async def process_sales_list(
         json_schema=_SALES_JSON_SCHEMA,
         endpoint="/api/documents/process-sales",
         user_text=(
-            "Odczytaj listę sprzedanych produktów lub numerów dań POS z notatki. "
+            "Odczytaj sprzedaż z notatki LUB z wydrukowanej listy POS ze znacznikami "
+            "(x / ✓ / kreski obok pozycji = sztuki). Pozycje bez znacznika pomiń. "
             f"Strony: {pages_meta.get('pages_rendered') or 1}."
         ),
         pages_meta=pages_meta,
@@ -326,6 +394,9 @@ async def process_sales_list(
         except (TypeError, ValueError):
             qty = 0.0
         unit = str(row.get("unit") or "g").strip().lower() or "g"
+        name, qty, unit = _normalize_sales_ocr_row(name, qty, unit)
+        if not name:
+            continue
 
         # 1) Czysty numer / pos_id → danie z menu → odjęcie przez recepturę
         if _looks_like_pos_id(name) and menu_rows:

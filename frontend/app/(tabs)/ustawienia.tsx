@@ -323,9 +323,12 @@ export default function UstawieniaScreen() {
     void (async () => {
       setPosNumberBusy(true);
       try {
-        await sharePosNumberList(rows);
+        const mode = await sharePosNumberList(rows);
+        if (mode === 'saf') {
+          premiumAlert('Zapisano', 'Lista numerów POS zapisana jako PDF na telefonie.');
+        }
       } catch (e: unknown) {
-        premiumAlert('Udostępnianie', e instanceof Error ? e.message : 'Nie udało się udostępnić listy.');
+        premiumAlert('Zapis listy', e instanceof Error ? e.message : 'Nie udało się zapisać listy.');
       } finally {
         setPosNumberBusy(false);
       }
@@ -667,7 +670,7 @@ export default function UstawieniaScreen() {
               testID="settings-share-pos-list"
             >
               <Share2 size={16} color={theme.textSecondary} strokeWidth={2.4} />
-              <Text style={[styles.saveBtnText, { color: theme.text }]}>Pobierz listę nr</Text>
+              <Text style={[styles.saveBtnText, { color: theme.text }]}>Zapisz listę nr (PDF)</Text>
             </TouchableOpacity>
           </View>
 

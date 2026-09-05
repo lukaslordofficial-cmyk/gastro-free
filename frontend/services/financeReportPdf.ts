@@ -258,12 +258,43 @@ export async function fetchFinanceForRange(from: string, to: string): Promise<{
 
 export async function fetchOrdersForRange(from: string, to: string): Promise<OrderRow[]> {
   const ak = requireAccountKeyForReports();
+  const select =
+    'id, status, notes, created_at, suppliers(name), supplier_order_items(raw_product_name, quantity_ordered, unit, price_net)';
+
+  const withAk = await supabase
+    .from('supplier_orders')
+    .select(select)
+    .eq('account_key', ak)
+    .gte('created_at', dayStartIso(from))
+    .lte('created_at', dayEndIso(to))
+    .neq('status', 'draft')
+    .order('created_at', { ascending: true });
+
+  if (!withAk.error) {
+    return (withAk.data ?? []) as OrderRow[];
+  }
+
+  const errTxt = errMessage(withAk.error, '');
+  const missingAk = /account_key|does not exist|column/i.test(errTxt);
+  if (!missingAk) {
+    throw new Error(errMessage(withAk.error, 'Nie udało się wczytać zamówień / dostaw.'));
+  }
+
+  // Produkcja bez migracji: filtr przez suppliers.account_key
+  const { data: suppliers, error: supErr } = await supabase
+    .from('suppliers')
+    .select('id')
+    .eq('account_key', ak);
+  if (supErr) {
+    throw new Error(errMessage(supErr, 'Nie udało się wczytać dostawców do raportu.'));
+  }
+  const ids = (suppliers ?? []).map((s) => String((s as { id?: string }).id || '')).filter(Boolean);
+  if (!ids.length) return [];
+
   const { data, error } = await supabase
     .from('supplier_orders')
-    .select(
-      'id, status, notes, created_at, suppliers(name), supplier_order_items(raw_product_name, quantity_ordered, unit, price_net)',
-    )
-    .eq('account_key', ak)
+    .select(select)
+    .in('supplier_id', ids)
     .gte('created_at', dayStartIso(from))
     .lte('created_at', dayEndIso(to))
     .neq('status', 'draft')

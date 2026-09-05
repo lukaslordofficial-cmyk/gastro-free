@@ -160,18 +160,102 @@ export async function autoConfirmUser(userId: string, email?: string): Promise<b
 }
 
 /**
- * Reset hasła — mail z Supabase, redirect na landing (nie deep link).
+ * Reset hasła — mail z Resend (backend), nie limity e-mail Supabase.
+ * NIGDY nie wysyłamy starego hasła (RODO — hasła są hashowane).
  */
 export async function resetPasswordForEmail(email: string): Promise<{ error: AuthError | null }> {
+  if (!BACKEND_URL) {
+    return {
+      error: {
+        name: 'AuthError',
+        message: 'Brak adresu backendu — nie można wysłać resetu hasła.',
+        status: 503,
+      } as AuthError,
+    };
+  }
   try {
     const { EMAIL_PASSWORD_RESET_REDIRECT } = await import('@/lib/authVerify');
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
-      redirectTo: EMAIL_PASSWORD_RESET_REDIRECT,
+    const conf = await fetchJson(`${BACKEND_URL}/api/auth/reset-password-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: email.trim().toLowerCase(),
+        redirect_to: EMAIL_PASSWORD_RESET_REDIRECT,
+      }),
     });
-    return { error };
+    // Backend zawsze soft-ok; błędy sieciowe mapujemy.
+    if (!conf.ok && conf.status === 0) {
+      return {
+        error: {
+          name: 'AuthError',
+          message: conf.error || 'Brak połączenia z serwerem',
+          status: 0,
+        } as AuthError,
+      };
+    }
+    return { error: null };
   } catch (e) {
     if (__DEV__) console.warn('[authService] resetPassword', e);
     return { error: e as AuthError };
+  }
+}
+
+/**
+ * Rejestracja przez backend (Admin API + Resend) — omija limity maili Supabase Auth.
+ */
+export async function registerViaBackend(
+  email: string,
+  password: string,
+  shipping?: {
+    restaurantName?: string;
+    phone?: string;
+    street?: string;
+    building?: string;
+    city?: string;
+    postCode?: string;
+    nip?: string;
+    regon?: string;
+    contactEmail?: string;
+  },
+): Promise<{ ok: true; userId?: string } | { ok: false; message: string }> {
+  if (!BACKEND_URL) {
+    return { ok: false, message: 'Brak adresu backendu (EXPO_PUBLIC_BACKEND_URL).' };
+  }
+  try {
+    const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
+    const ship = shipping;
+    const conf = await fetchJson<{ user_id?: string }>(`${BACKEND_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: email.trim().toLowerCase(),
+        password,
+        restaurant_name: (ship?.restaurantName ?? '').trim() || null,
+        redirect_to: EMAIL_VERIFY_REDIRECT,
+        shipping: ship
+          ? {
+              phone: (ship.phone ?? '').trim() || null,
+              street: (ship.street ?? '').trim() || null,
+              building: (ship.building ?? '').trim() || null,
+              city: (ship.city ?? '').trim() || null,
+              post_code: (ship.postCode ?? '').trim() || null,
+              nip: (ship.nip ?? '').replace(/\D/g, '') || null,
+              regon: (ship.regon ?? '').replace(/\D/g, '') || null,
+              contact_email: (ship.contactEmail ?? email).trim().toLowerCase() || null,
+            }
+          : null,
+      }),
+    });
+    if (!conf.ok) {
+      return { ok: false, message: conf.error || 'Nie udało się utworzyć konta.' };
+    }
+    return { ok: true, userId: conf.data?.user_id };
+  } catch (e) {
+    if (__DEV__) console.warn('[authService] registerViaBackend', e);
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : 'Nie udało się utworzyć konta.',
+    };
   }
 }
 

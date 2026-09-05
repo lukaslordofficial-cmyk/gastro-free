@@ -192,42 +192,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return { ok: false as const, message: shippingErr };
       }
 
-      const { data, error } = await authService.signUp(e, password, shipping);
-      if (error) return { ok: false as const, message: polishAuthError(error) };
-
-      // Supabase często zwraca „sukces” bez błędu przy istniejącym e-mailu (puste identities).
-      const identities = data.user?.identities;
-      if (data.user && Array.isArray(identities) && identities.length === 0) {
-        return {
-          ok: false as const,
-          message: 'Ten e-mail jest już zarejestrowany — przejdź do logowania.',
-        };
+      // Rejestracja przez backend (Resend) — bez limitu maili Supabase Auth.
+      const reg = await authService.registerViaBackend(e, password, shipping);
+      if (!reg.ok) {
+        return { ok: false as const, message: polishAuthError({ message: reg.message }) };
       }
 
-      const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
-      const userId = data.user?.id;
-      if (!userId) {
-        return {
-          ok: false as const,
-          message: 'Nie udało się utworzyć konta. Spróbuj ponownie lub przejdź do logowania.',
-        };
-      }
-      // Await: force-unconfirm musi zdążyć przed ewentualnym logowaniem; mail też.
-      await authService.sendWelcomeEmail({
-        userId,
-        email: e,
-        restaurantName: shipping.restaurantName,
-        redirectTo: EMAIL_VERIFY_REDIRECT,
-        forceUnconfirm: true,
-        shipping,
-      });
-
-      // Zawsze wymagamy kliknięcia linku — nie logujemy i nie auto-confirm.
-      if (data.session) {
-        await authService.signOut();
-        await applySession(null);
-      }
-
+      await applySession(null);
       return { ok: true as const, needsEmailConfirm: true };
     },
     [applySession],

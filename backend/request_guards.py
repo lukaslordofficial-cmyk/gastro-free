@@ -10,6 +10,8 @@ _PUBLIC_MUTATE = (
     "/api/furgonetka",
     "/api/auth/auto-confirm",
     "/api/auth/welcome-email",
+    "/api/auth/reset-password-email",
+    "/api/auth/register",
     "/api/local-producers/confirm-payment",
     "/api/stripe/connect/callback",
 )

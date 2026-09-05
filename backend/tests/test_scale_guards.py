@@ -18,6 +18,8 @@ def test_public_mutate_webhooks():
     assert is_public_mutate("/api/pos/webhook")
     assert is_public_mutate("/w/oAbCdEf")
     assert is_public_mutate("/api/auth/welcome-email")
+    assert is_public_mutate("/api/auth/reset-password-email")
+    assert is_public_mutate("/api/auth/register")
     assert not is_public_mutate("/whatever")
     assert is_public_mutate("/orders")
     assert not is_public_mutate("/api/actions/apply")

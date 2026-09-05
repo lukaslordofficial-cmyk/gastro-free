@@ -9,6 +9,7 @@ import {
   Platform,
   ActivityIndicator,
   ScrollView,
+  Modal,
 } from 'react-native';
 import { Link, Redirect } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -24,6 +25,10 @@ export default function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotBusy, setForgotBusy] = useState(false);
+  const [forgotError, setForgotError] = useState<string | null>(null);
 
   if (ready && isAuthenticated) {
     return <Redirect href="/(tabs)" />;
@@ -41,21 +46,33 @@ export default function LoginScreen() {
     }
   };
 
-  const onForgotPassword = async () => {
-    setError(null);
-    setInfo(null);
-    setBusy(true);
+  const openForgot = () => {
+    setForgotError(null);
+    setForgotEmail(email.trim());
+    setForgotOpen(true);
+  };
+
+  const onSendReset = async () => {
+    setForgotError(null);
+    const target = forgotEmail.trim().toLowerCase();
+    if (!target) {
+      setForgotError('Podaj adres e-mail.');
+      return;
+    }
+    setForgotBusy(true);
     try {
-      const res = await resetPassword(email);
+      const res = await resetPassword(target);
       if (!res.ok) {
-        setError(res.message);
+        setForgotError(res.message);
         return;
       }
+      setForgotOpen(false);
       setInfo(
-        'Jeśli konto istnieje, wysłaliśmy link do resetu hasła. Sprawdź skrzynkę i ustaw nowe hasło na stronie, potem zaloguj się w aplikacji.',
+        'Jeśli konto istnieje, wysłaliśmy link do ustawienia nowego hasła. Sprawdź skrzynkę, ustaw hasło na stronie, potem zaloguj się w aplikacji.',
       );
+      setError(null);
     } finally {
-      setBusy(false);
+      setForgotBusy(false);
     }
   };
 
@@ -120,8 +137,8 @@ export default function LoginScreen() {
 
             <TouchableOpacity
               style={styles.forgotBtn}
-              onPress={() => void onForgotPassword()}
-              disabled={busy}
+              onPress={openForgot}
+              disabled={busy || forgotBusy}
               testID="login-forgot-password"
             >
               <Text style={styles.forgotText}>Zapomniałem hasła</Text>
@@ -162,6 +179,63 @@ export default function LoginScreen() {
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
+
+      <Modal
+        visible={forgotOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !forgotBusy && setForgotOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Reset hasła</Text>
+            <Text style={styles.modalSub}>
+              Podaj e-mail — wyślemy link do ustawienia nowego hasła (nie wysyłamy starego hasła).
+            </Text>
+            <Text style={styles.label}>E-mail</Text>
+            <TextInput
+              style={styles.input}
+              value={forgotEmail}
+              onChangeText={setForgotEmail}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              placeholder="nazwa@restauracja.pl"
+              placeholderTextColor={PremiumTokens.color.textFaint}
+              editable={!forgotBusy}
+              testID="forgot-email"
+            />
+            {forgotError ? <Text style={styles.error}>{forgotError}</Text> : null}
+            <TouchableOpacity
+              style={[styles.cta, forgotBusy && styles.ctaDisabled]}
+              onPress={() => void onSendReset()}
+              disabled={forgotBusy}
+              activeOpacity={0.85}
+              testID="forgot-submit"
+            >
+              <LinearGradient
+                colors={[...DS.gradient.green]}
+                start={{ x: 0, y: 0.5 }}
+                end={{ x: 1, y: 0.5 }}
+                style={styles.ctaGrad}
+              >
+                {forgotBusy ? (
+                  <ActivityIndicator color="#0A0A0A" />
+                ) : (
+                  <Text style={styles.ctaText}>Wyślij link</Text>
+                )}
+              </LinearGradient>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.modalCancel}
+              onPress={() => setForgotOpen(false)}
+              disabled={forgotBusy}
+            >
+              <Text style={styles.footerMuted}>Anuluj</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -276,4 +350,34 @@ const styles = StyleSheet.create({
   },
   footerMuted: { color: PremiumTokens.color.textMuted, fontSize: 14 },
   footerLink: { color: DS.color.greenEnd, fontSize: 14, fontWeight: '700' },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  modalCard: {
+    backgroundColor: DS.color.bgSecondary,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: DS.color.borderSubtle,
+    padding: 20,
+  },
+  modalTitle: {
+    color: DS.color.heading,
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  modalSub: {
+    color: PremiumTokens.color.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  modalCancel: {
+    marginTop: 16,
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
 });

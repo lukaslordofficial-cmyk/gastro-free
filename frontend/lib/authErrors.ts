@@ -10,14 +10,15 @@ export function polishAuthError(err: unknown): string {
     return 'Nieprawidłowy e-mail lub hasło.';
   }
   if (m.includes('email not confirmed') || m.includes('not confirmed')) {
-    return 'Najpierw potwierdź adres e-mail — kliknij link z wiadomości (kontakt@gastromanager.org), a potem zaloguj się.';
+    return 'Najpierw potwierdź adres e-mail. Kliknij link weryfikacyjny, a potem zaloguj się w aplikacji.';
   }
   if (
     m.includes('user already registered') ||
     m.includes('already been registered') ||
     m.includes('already registered') ||
     m.includes('email address is already') ||
-    m.includes('user already exists')
+    m.includes('user already exists') ||
+    m.includes('już zarejestrowany')
   ) {
     return 'Ten e-mail jest już zarejestrowany — przejdź do logowania.';
   }
@@ -27,8 +28,9 @@ export function polishAuthError(err: unknown): string {
   if (m.includes('invalid email') || m.includes('unable to validate email')) {
     return 'Podaj prawidłowy adres e-mail.';
   }
-  if (m.includes('rate limit') || m.includes('too many requests')) {
-    return 'Zbyt wiele prób — odczekaj chwilę i spróbuj ponownie.';
+  // Nie blokujemy UX komunikatem „zbyt wiele prób” — maile auth idą przez Resend.
+  if (m.includes('rate limit') || m.includes('too many requests') || m.includes('zbyt wiele')) {
+    return 'Spróbuj ponownie za chwilę. Jeśli problem wraca — napisz na kontakt@gastromanager.org.';
   }
   if (m.includes('network') || m.includes('fetch')) {
     return 'Brak połączenia z serwerem. Sprawdź internet i spróbuj ponownie.';

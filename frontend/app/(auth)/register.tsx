@@ -32,7 +32,6 @@ export default function RegisterScreen() {
   const [regon, setRegon] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
   if (ready && isAuthenticated) {
@@ -41,7 +40,6 @@ export default function RegisterScreen() {
 
   const onSubmit = async () => {
     setError(null);
-    setInfo(null);
     const shippingCheck = validateRegisterShipping({
       restaurantName,
       phone,
@@ -75,9 +73,6 @@ export default function RegisterScreen() {
         return;
       }
       setDone(true);
-      setInfo(
-        'Konto zostało utworzone. Sprawdź podanego maila i kliknij link weryfikacyjny by się zalogować.',
-      );
     } finally {
       setBusy(false);
     }
@@ -102,10 +97,6 @@ export default function RegisterScreen() {
           >
             <Text style={styles.brand}>GASTRO MANAGER</Text>
             <Text style={styles.title}>Nowe konto</Text>
-            <Text style={styles.sub}>
-              Uzupełnij dane lokalu i adres dostawy — użyjemy ich przy zamówieniach u producentów.
-              Na start: 100 kredytów AI, 30 dni trialu Premium i własny magazyn / menu.
-            </Text>
 
             {!isSupabaseConfigured && (
               <View style={styles.bannerWarn}>
@@ -115,14 +106,12 @@ export default function RegisterScreen() {
               </View>
             )}
 
-            {done && info ? (
-              <View style={styles.bannerInfo}>
-                <Text style={styles.bannerInfoText}>{info}</Text>
-                <Link href="/(auth)/login" asChild>
-                  <TouchableOpacity style={styles.afterLink} disabled={busy}>
-                    <Text style={styles.footerLink}>Przejdź do logowania</Text>
-                  </TouchableOpacity>
-                </Link>
+            {done ? (
+              <View style={styles.bannerInfo} testID="register-success">
+                <Text style={styles.bannerInfoText}>
+                  Konto zostało utworzone. Sprawdź podanego maila i kliknij link weryfikacyjny by się
+                  zalogować.
+                </Text>
               </View>
             ) : (
               <>
@@ -274,14 +263,16 @@ export default function RegisterScreen() {
               </>
             )}
 
-            <View style={styles.footerRow}>
-              <Text style={styles.footerMuted}>Masz już konto?</Text>
-              <Link href="/(auth)/login" asChild>
-                <TouchableOpacity disabled={busy}>
-                  <Text style={styles.footerLink}>Zaloguj się</Text>
-                </TouchableOpacity>
-              </Link>
-            </View>
+            {!done ? (
+              <View style={styles.footerRow}>
+                <Text style={styles.footerMuted}>Masz już konto?</Text>
+                <Link href="/(auth)/login" asChild>
+                  <TouchableOpacity disabled={busy}>
+                    <Text style={styles.footerLink}>Zaloguj się</Text>
+                  </TouchableOpacity>
+                </Link>
+              </View>
+            ) : null}
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -310,12 +301,6 @@ const styles = StyleSheet.create({
     ...PremiumTokens.type.display,
     color: DS.color.heading,
     marginBottom: 8,
-  },
-  sub: {
-    ...PremiumTokens.type.body,
-    color: PremiumTokens.color.textMuted,
-    marginBottom: 28,
-    maxWidth: 360,
   },
   section: {
     ...PremiumTokens.type.micro,
@@ -368,15 +353,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     padding: 16,
+    marginTop: 12,
     marginBottom: 12,
   },
   bannerInfoText: {
     color: DS.color.greenEnd,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 15,
+    lineHeight: 22,
     fontWeight: '600',
   },
-  afterLink: { marginTop: 14, alignSelf: 'flex-start' },
   cta: {
     marginTop: 8,
     borderRadius: DS.radius.button,

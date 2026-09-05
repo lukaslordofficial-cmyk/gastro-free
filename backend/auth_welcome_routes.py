@@ -14,12 +14,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from health_routes import auto_confirm_denied_reason, normalize_email
+from health_routes import normalize_email
 from http_ssl import httpx_verify
 from notify_resend import is_resend_configured, send_email
-from rate_limit import allow_auto_confirm
 from supabase_rest import require_supabase, sb_patch
 from url_safety import (
+    assert_supabase_origin,
     build_supabase_auth_admin_url,
     build_supabase_auth_generate_link_url,
 )
@@ -35,6 +35,7 @@ _WELCOME_FROM_DEFAULT = "kontakt@gastromanager.org"
 _CONTACT_VISIBLE = "kontakt@gastromanager.org"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _DEFAULT_VERIFY_REDIRECT = "https://gastromanager.org/auth/verified"
+_DEFAULT_RESET_REDIRECT = "https://gastromanager.org/auth/nowe-haslo"
 
 
 class ShippingBody(BaseModel):
@@ -200,13 +201,14 @@ async def _persist_shipping_profile(
             logger.warning("persist shipping slim failed: %s", e2)
 
 
-async def _generate_verify_link(
+async def _generate_auth_link(
     client: httpx.AsyncClient,
     *,
     supabase_url: str,
     supabase_key: str,
     email: str,
     redirect_to: str | None,
+    link_types: list[str],
 ) -> str | None:
     url = build_supabase_auth_generate_link_url(supabase_url)
     headers = {
@@ -214,23 +216,16 @@ async def _generate_verify_link(
         "Authorization": f"Bearer {supabase_key}",
         "Content-Type": "application/json",
     }
-    # signup najpierw — potwierdza e-mail; magiclink tylko jako fallback.
     redirect = redirect_to or _DEFAULT_VERIFY_REDIRECT
-    bodies: list[dict[str, Any]] = [
-        {"type": "signup", "email": email},
-        {"type": "magiclink", "email": email},
-    ]
-    for b in bodies:
-        b["options"] = {"redirect_to": redirect}
-
-    for body in bodies:
+    for link_type in link_types:
+        body: dict[str, Any] = {"type": link_type, "email": email, "options": {"redirect_to": redirect}}
         try:
             r = await client.post(url, headers=headers, json=body)
         except Exception as e:  # noqa: BLE001
             logger.warning("generate_link request failed: %s", e)
             continue
         if r.status_code >= 400:
-            logger.info("generate_link type=%s status=%s", body.get("type"), r.status_code)
+            logger.info("generate_link type=%s status=%s", link_type, r.status_code)
             continue
         try:
             data = r.json() or {}
@@ -241,6 +236,24 @@ async def _generate_verify_link(
             if link:
                 return link
     return None
+
+
+async def _generate_verify_link(
+    client: httpx.AsyncClient,
+    *,
+    supabase_url: str,
+    supabase_key: str,
+    email: str,
+    redirect_to: str | None,
+) -> str | None:
+    return await _generate_auth_link(
+        client,
+        supabase_url=supabase_url,
+        supabase_key=supabase_key,
+        email=email,
+        redirect_to=redirect_to,
+        link_types=["signup", "magiclink"],
+    )
 
 
 def build_welcome_email_html(
@@ -291,17 +304,51 @@ def build_welcome_email_html(
     return html, text
 
 
+def build_reset_password_email_html(*, reset_link: str | None) -> tuple[str, str]:
+    if reset_link:
+        btn = (
+            f'<p style="margin:28px 0 12px">'
+            f'<a href="{html_lib.escape(reset_link)}" '
+            f'style="display:inline-block;background:#00FF78;color:#0A0A0A;'
+            f'font-weight:800;text-decoration:none;padding:14px 22px;border-radius:10px">'
+            f"Ustaw nowe hasło</a></p>"
+            f'<p style="font-size:12px;color:#5a6b62;word-break:break-all">'
+            f"Jeśli przycisk nie działa, wklej link:<br/>{html_lib.escape(reset_link)}</p>"
+        )
+        text_link = f"\n\nUstaw nowe hasło:\n{reset_link}\n"
+    else:
+        btn = (
+            "<p style=\"margin:20px 0;color:#3d5248\">"
+            "Jeśli konto istnieje, spróbuj ponownie za chwilę albo napisz na "
+            f"{_CONTACT_VISIBLE}.</p>"
+        )
+        text_link = f"\n\nSkontaktuj się: {_CONTACT_VISIBLE}\n"
+
+    html = f"""<!DOCTYPE html>
+<html lang="pl"><body style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#122018;line-height:1.5;padding:24px">
+  <h1 style="font-size:22px;margin:0 0 12px;color:#0A120E">Reset hasła — Gastro Manager</h1>
+  <p>Otrzymaliśmy prośbę o ustawienie nowego hasła. Kliknij poniższy link (ważny czasowo).</p>
+  <p>Jeśli to nie Ty — zignoruj tę wiadomość.</p>
+  {btn}
+  <p style="margin-top:28px;font-size:13px;color:#5a6b62">Pozdrawiamy,<br/>Zespół Gastro Manager<br/>{_CONTACT_VISIBLE}</p>
+</body></html>"""
+    text = (
+        "Reset hasła — Gastro Manager\n\n"
+        "Kliknij link, aby ustawić nowe hasło."
+        f"{text_link}\n"
+        f"Pozdrawiamy,\nZespół Gastro Manager\n{_CONTACT_VISIBLE}\n"
+    )
+    return html, text
+
+
 @router.post("/api/auth/welcome-email")
 async def auth_welcome_email(body: WelcomeEmailBody, request: Request):
     """
     Po rejestracji: (opcjonalnie) force-unconfirm + zapis shipping → profiles + mail z linkiem.
+    Bez rate-limitu 429 — maile auth idą przez Resend, nie przez limit Supabase.
     """
     if not is_resend_configured():
         raise HTTPException(status_code=503, detail="Wysyłka e-mail nie jest skonfigurowana (RESEND_API_KEY).")
-
-    ip = request.client.host if request.client else "0"
-    if not allow_auto_confirm(ip):
-        raise HTTPException(status_code=429, detail="Zbyt wiele prób. Spróbuj za chwilę.")
 
     email = normalize_email(body.email)
     if not email or not _EMAIL_RE.match(email):
@@ -334,7 +381,10 @@ async def auth_welcome_email(body: WelcomeEmailBody, request: Request):
             user = lookup.json() or {}
         except Exception:  # noqa: BLE001
             raise generic_fail
-        if not isinstance(user, dict) or auto_confirm_denied_reason(user, email):
+        if not isinstance(user, dict):
+            raise generic_fail
+        # Tylko zgodność e-maila — bez limitu wieku (wcześniej 15 min blokowało ponowną wysyłkę).
+        if normalize_email(str(user.get("email") or "")) != email:
             raise generic_fail
 
         if body.force_unconfirm:
@@ -382,6 +432,197 @@ async def auth_welcome_email(body: WelcomeEmailBody, request: Request):
         "email": email,
         "verify_link_included": bool(verify_link),
         "force_unconfirmed": unconfirmed,
+        "redirect_to": redirect_to,
+        "id": result.get("id"),
+    }
+
+
+class ResetPasswordBody(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    redirect_to: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/api/auth/reset-password-email")
+async def auth_reset_password_email(body: ResetPasswordBody, request: Request):
+    """
+    Reset hasła przez Resend (link recovery). NIGDY nie wysyłamy starego hasła (RODO).
+    Zawsze zwraca ok — bez enumeracji kont. Bez rate-limitu 429.
+    """
+    # unused request kept for parity / future IP logging
+    _ = request
+    email = normalize_email(body.email)
+    # Odpowiedź zawsze sukces — nie zdradzamy czy konto istnieje.
+    soft_ok = {"ok": True, "email_sent": True}
+
+    if not email or not _EMAIL_RE.match(email):
+        return soft_ok
+    if not is_resend_configured():
+        logger.warning("reset-password: Resend not configured")
+        return soft_ok
+
+    require_supabase()
+    supabase_url, supabase_key = _supabase_creds()
+    redirect_to = _safe_redirect(body.redirect_to) or _DEFAULT_RESET_REDIRECT
+
+    async with httpx.AsyncClient(timeout=25.0, verify=httpx_verify()) as client:
+        reset_link = await _generate_auth_link(
+            client,
+            supabase_url=supabase_url,
+            supabase_key=supabase_key,
+            email=email,
+            redirect_to=redirect_to,
+            link_types=["recovery"],
+        )
+
+    if not reset_link:
+        # Brak linku (brak konta / błąd Admin) — i tak soft ok.
+        logger.info("reset-password: no recovery link for request")
+        return soft_ok
+
+    html, text = build_reset_password_email_html(reset_link=reset_link)
+    result = await send_email(
+        to=email,
+        subject="Gastro Manager — ustaw nowe hasło",
+        html=html,
+        text=text,
+        from_email=_welcome_from(),
+        from_name="Gastro Manager",
+    )
+    if not result.get("ok"):
+        logger.warning("reset-password email failed: %s", result.get("error"))
+    return soft_ok
+
+
+class RegisterBody(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=6, max_length=128)
+    restaurant_name: Optional[str] = Field(default=None, max_length=120)
+    redirect_to: Optional[str] = Field(default=None, max_length=500)
+    shipping: Optional[ShippingBody] = None
+
+
+@router.post("/api/auth/register")
+async def auth_register(body: RegisterBody, request: Request):
+    """
+    Rejestracja przez Admin API (bez maila Supabase = bez limitu e-mail Auth).
+    Potwierdzenie idzie wyłącznie Resendem z linkiem weryfikacyjnym.
+    """
+    _ = request
+    if not is_resend_configured():
+        raise HTTPException(status_code=503, detail="Wysyłka e-mail nie jest skonfigurowana (RESEND_API_KEY).")
+
+    email = normalize_email(body.email)
+    if not email or not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy e-mail.")
+    password = body.password or ""
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Hasło musi mieć co najmniej 6 znaków.")
+
+    require_supabase()
+    supabase_url, supabase_key = _supabase_creds()
+    redirect_to = _safe_redirect(body.redirect_to) or _DEFAULT_VERIFY_REDIRECT
+
+    create_url = f"{assert_supabase_origin(supabase_url)}/auth/v1/admin/users"
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+    }
+    ship = body.shipping
+    meta: dict[str, Any] = {
+        "restaurant_name": (body.restaurant_name or "").strip() or None,
+    }
+    if ship:
+        meta.update(
+            {
+                "shipping_phone": (ship.phone or "").strip() or None,
+                "shipping_street": (ship.street or "").strip() or None,
+                "shipping_building": (ship.building or "").strip() or None,
+                "shipping_city": (ship.city or "").strip() or None,
+                "shipping_post_code": (ship.post_code or "").strip() or None,
+                "shipping_nip": _digits(ship.nip) or None,
+                "shipping_regon": _digits(ship.regon) or None,
+            }
+        )
+
+    payload = {
+        "email": email,
+        "password": password,
+        "email_confirm": False,
+        "user_metadata": meta,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
+        created = await client.post(create_url, headers=headers, json=payload)
+        if created.status_code in (400, 422):
+            try:
+                err = created.json() or {}
+            except Exception:  # noqa: BLE001
+                err = {}
+            msg = str(err.get("msg") or err.get("message") or err.get("error_description") or "").lower()
+            if "already" in msg or "registered" in msg or "exists" in msg:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Ten e-mail jest już zarejestrowany — przejdź do logowania.",
+                )
+            raise HTTPException(status_code=400, detail="Nie udało się utworzyć konta.")
+        if created.status_code >= 400:
+            logger.info("admin create user failed status=%s body=%s", created.status_code, created.text[:200])
+            raise HTTPException(status_code=400, detail="Nie udało się utworzyć konta.")
+        try:
+            user = created.json() or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("register parse user: %s", e)
+            raise HTTPException(status_code=400, detail="Nie udało się utworzyć konta.")
+        uid = str(user.get("id") or "").strip()
+        if not uid:
+            raise HTTPException(status_code=400, detail="Nie udało się utworzyć konta.")
+
+        user_url = build_supabase_auth_admin_url(supabase_url, uid)
+        await _force_unconfirm_if_needed(client, user_url=user_url, headers=headers, user=user)
+        await _persist_shipping_profile(
+            client,
+            user_id=uid,
+            email=email,
+            restaurant_name=body.restaurant_name,
+            shipping=body.shipping,
+        )
+        verify_link = await _generate_verify_link(
+            client,
+            supabase_url=supabase_url,
+            supabase_key=supabase_key,
+            email=email,
+            redirect_to=redirect_to,
+        )
+
+    html, text = build_welcome_email_html(
+        restaurant_name=body.restaurant_name,
+        verify_link=verify_link,
+    )
+    result = await send_email(
+        to=email,
+        subject="Witamy w Gastro Manager — potwierdź e-mail",
+        html=html,
+        text=text,
+        from_email=_welcome_from(),
+        from_name="Gastro Manager",
+    )
+    if not result.get("ok"):
+        logger.warning("register welcome email failed: %s", result.get("error"))
+        # Konto już istnieje — nie failujemy całej rejestracji; użytkownik może poprosić o ponowny link.
+        return {
+            "ok": True,
+            "user_id": uid,
+            "email": email,
+            "verify_link_included": False,
+            "email_warning": True,
+        }
+
+    return {
+        "ok": True,
+        "user_id": uid,
+        "email": email,
+        "verify_link_included": bool(verify_link),
         "redirect_to": redirect_to,
         "id": result.get("id"),
     }

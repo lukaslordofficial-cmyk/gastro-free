@@ -21,15 +21,17 @@ Data: 2026-09-05 (produkcja: potwierdzenie e-maila wymagane + adres dostawy przy
 ```
 https://gastromanager.org
 ```
-**KRYTYCZNE:** musi być z `https://`. Wartość `www.gastromanager.org` **bez protokołu** powoduje redirect na  
-`https://<project>.supabase.co/www.gastromanager.org` → `{"error":"requested path is invalid"}`.  
-Preferuj apex `https://gastromanager.org` (bez wymuszania www — uniknij mismatch z redirectami).
+**KRYTYCZNE:** nie ustawiaj Site URL na `https://www.gastromanager.org/wyprobuj` —
+wtedy linki resetu/weryfikacji lądują na stronie „Wypróbuj” zamiast `/auth/nowe-haslo` / `/auth/verified`.
+
+Musi być z `https://`. Preferuj apex `https://gastromanager.org`.
 
 ### Redirect URLs (allowlist) — dodaj / zostaw:
 ```
 https://gastromanager.org/auth/verified
 https://gastromanager.org/auth/nowe-haslo
 https://gastromanager.org/**
+https://www.gastromanager.org/**
 https://gastromanager.org/dla-producentow/nowe-haslo
 gastromanager://auth/verified
 gastromanager://**

@@ -14,7 +14,7 @@ Zrzuty użytkownika: Site URL = `www.gastromanager.org` **bez https** → broken
 
 | Pole | Wklej dokładnie |
 |------|-----------------|
-| **Site URL** | `https://gastromanager.org` |
+| **Site URL** | `https://gastromanager.org` (**NIE** `…/wyprobuj`) |
 | Redirect | `https://gastromanager.org/auth/verified` |
 | Redirect | `https://gastromanager.org/auth/nowe-haslo` |
 | Redirect | `https://gastromanager.org/**` |
@@ -49,7 +49,7 @@ Sprawdzenie: `GET /api/admin/migration-status` z `X-Cron-Secret` (Railway) **[DO
 - Env: `RESEND_*`, `SUPABASE_*`, `STRIPE_*` (live gdy płatności), `CRON_JOB_SECRET`, `PUBLIC_API_URL`.
 - **Nie** ustawiaj `AUTO_CONFIRM_EMAIL=true` na prod.
 - Legal: `{PUBLIC_API_URL}/privacy` i `/terms` **[DONE code]** — sprawdź w przeglądarce po deployu.
-- Preferuj `WELCOME_FROM_EMAIL=kontakt@gastromanager.org` (fallback asystent jeśli Resend wymaga).
+- From maile auth: `asystent.dostaw@gastromanager.org` (nie zmieniać jeśli działa).
 
 ---
 

@@ -1,5 +1,5 @@
 """
-Welcome + verification e-mail po rejestracji (Resend → kontakt@gastromanager.org).
+Welcome + verification e-mail po rejestracji (Resend → asystent.dostaw@gastromanager.org).
 Dodatkowo: zapis adresu dostawy do profiles + force-unconfirm gdy Confirm email=OFF w Supabase.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -28,10 +29,8 @@ logger = logging.getLogger("auth.welcome")
 
 router = APIRouter(tags=["auth-welcome"])
 
-# Resend nie przyjmuje From z Gmail/Outlook — domena gastromanager.org.
-# Widoczny kontakt w stopce zawsze kontakt@; From domyślnie też kontakt@
-# (gdy Resend wymaga asystent.dostaw@ — ustaw WELCOME_FROM_EMAIL / RESEND_FROM_EMAIL).
-_WELCOME_FROM_DEFAULT = "kontakt@gastromanager.org"
+# From: asystent.dostaw (Resend / deliverability). Stopka może pokazywać kontakt@.
+_WELCOME_FROM_DEFAULT = "asystent.dostaw@gastromanager.org"
 _CONTACT_VISIBLE = "kontakt@gastromanager.org"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _DEFAULT_VERIFY_REDIRECT = "https://gastromanager.org/auth/verified"
@@ -201,6 +200,23 @@ async def _persist_shipping_profile(
             logger.warning("persist shipping slim failed: %s", e2)
 
 
+def _force_redirect_to(link: str, redirect_to: str) -> str:
+    """
+    Wymuś redirect_to w action_link z generate_link.
+    Gdy Site URL w Supabase = /wyprobuj, GoTrue czasem dokleja Site URL zamiast naszego redirectu.
+    """
+    target = (redirect_to or "").strip()
+    if not link.startswith("http") or not target:
+        return link
+    try:
+        parsed = urlparse(link)
+        q = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        q["redirect_to"] = target
+        return urlunparse(parsed._replace(query=urlencode(q)))
+    except Exception:  # noqa: BLE001
+        return link
+
+
 async def _generate_auth_link(
     client: httpx.AsyncClient,
     *,
@@ -218,7 +234,13 @@ async def _generate_auth_link(
     }
     redirect = redirect_to or _DEFAULT_VERIFY_REDIRECT
     for link_type in link_types:
-        body: dict[str, Any] = {"type": link_type, "email": email, "options": {"redirect_to": redirect}}
+        # redirect_to i w options, i top-level — różne wersje GoTrue czytają różne miejsca.
+        body: dict[str, Any] = {
+            "type": link_type,
+            "email": email,
+            "redirect_to": redirect,
+            "options": {"redirect_to": redirect},
+        }
         try:
             r = await client.post(url, headers=headers, json=body)
         except Exception as e:  # noqa: BLE001
@@ -234,7 +256,7 @@ async def _generate_auth_link(
         if isinstance(data, dict):
             link = _extract_action_link(data)
             if link:
-                return link
+                return _force_redirect_to(link, redirect)
     return None
 
 

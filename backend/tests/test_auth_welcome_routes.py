@@ -27,6 +27,15 @@ def test_welcome_html_without_link():
     assert "kontakt@gastromanager.org" in text
 
 
+def test_force_redirect_to_rewrites_query():
+    from auth_welcome_routes import _force_redirect_to
+
+    raw = "https://xyz.supabase.co/auth/v1/verify?token=abc&type=recovery&redirect_to=https%3A%2F%2Fwww.gastromanager.org%2Fwyprobuj"
+    fixed = _force_redirect_to(raw, "https://gastromanager.org/auth/nowe-haslo")
+    assert "auth/nowe-haslo" in fixed
+    assert "wyprobuj" not in fixed
+
+
 def test_reset_html_includes_link():
     from auth_welcome_routes import build_reset_password_email_html
 

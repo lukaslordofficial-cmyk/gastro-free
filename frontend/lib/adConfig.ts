@@ -37,7 +37,9 @@ export const TEST_AD_UNITS = {
   rewarded: 'ca-app-pub-3940256099942544/5224354917',
 };
 
-export const INTERSTITIAL_MIN_INTERVAL_MS = 7 * 60 * 1000;
+export const INTERSTITIAL_MIN_INTERVAL_MS = 5 * 60 * 1000;
+/** Minimalny odstęp między reklamami po akcji (zapis dostawcy itd.). */
+export const ACTION_INTERSTITIAL_MIN_MS = 90 * 1000;
 /** @deprecated — rewarded za kredyty wyłączone */
 export const REWARDED_DAILY_LIMIT = 0;
 

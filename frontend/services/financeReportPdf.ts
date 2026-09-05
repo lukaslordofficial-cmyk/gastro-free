@@ -104,11 +104,34 @@ function formatPlDate(iso: string): string {
 }
 
 function dayStartIso(ymd: string): string {
-  return `${ymd}T00:00:00.000`;
+  return `${ymd}T00:00:00.000Z`;
 }
 
 function dayEndIso(ymd: string): string {
-  return `${ymd}T23:59:59.999`;
+  return `${ymd}T23:59:59.999Z`;
+}
+
+function errMessage(err: unknown, fallback: string): string {
+  if (!err) return fallback;
+  if (typeof err === 'string' && err.trim()) return err.trim();
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'object') {
+    const o = err as { message?: string; error_description?: string; details?: string; hint?: string };
+    const m = o.message || o.error_description || o.details || o.hint;
+    if (m && String(m).trim()) return String(m).trim();
+  }
+  return fallback;
+}
+
+function isShareDismissed(err: unknown): boolean {
+  const m = errMessage(err, '').toLowerCase();
+  return (
+    m.includes('cancel') ||
+    m.includes('dismiss') ||
+    m.includes('user did not share') ||
+    m.includes('sharing cancelled') ||
+    m.includes('share is not available')
+  );
 }
 
 /** Miesiące YYYY-MM pokrywające zakres dat (włącznie). */
@@ -217,9 +240,9 @@ export async function fetchFinanceForRange(from: string, to: string): Promise<{
       .order('created_at'),
   ]);
 
-  if (revRes.error) throw revRes.error;
-  if (fixRes.error) throw fixRes.error;
-  if (varRes.error) throw varRes.error;
+  if (revRes.error) throw new Error(errMessage(revRes.error, 'Nie udało się wczytać przychodów.'));
+  if (fixRes.error) throw new Error(errMessage(fixRes.error, 'Nie udało się wczytać kosztów stałych.'));
+  if (varRes.error) throw new Error(errMessage(varRes.error, 'Nie udało się wczytać kosztów zmiennych.'));
 
   const revenue = ((revRes.data ?? []) as RevenueEntry[]).filter((r) =>
     inCreatedRange(r.created_at, from, to),
@@ -246,7 +269,7 @@ export async function fetchOrdersForRange(from: string, to: string): Promise<Ord
     .neq('status', 'draft')
     .order('created_at', { ascending: true });
 
-  if (error) throw error;
+  if (error) throw new Error(errMessage(error, 'Nie udało się wczytać zamówień / dostaw.'));
   return (data ?? []) as OrderRow[];
 }
 
@@ -790,22 +813,57 @@ export async function generateAndShareFinancePdf(
     fileName = `gastro-raport-zbiorczy_${range.from}_${range.to}.pdf`;
   }
 
-  const { uri } = await Print.printToFileAsync({ html, base64: false });
+  let printUri: string;
+  try {
+    const printed = await Print.printToFileAsync({ html, base64: false });
+    printUri = printed.uri;
+  } catch (e) {
+    throw new Error(
+      errMessage(e, 'Nie udało się wygenerować pliku PDF na urządzeniu. Spróbuj krótszy zakres dat.'),
+    );
+  }
 
   if (Platform.OS === 'web') {
     await Print.printAsync({ html });
     return;
   }
 
-  const canShare = await Sharing.isAvailableAsync();
-  if (!canShare) {
-    await Print.printAsync({ html });
-    return;
+  // Nazwany plik w cache — share z temp URI Print czasem pada na Androidzie.
+  let shareUri = printUri;
+  try {
+    const FileSystem = await import('expo-file-system/legacy');
+    const base = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+    if (base) {
+      const dest = `${base}${fileName}`;
+      const info = await FileSystem.getInfoAsync(dest);
+      if (info.exists) {
+        await FileSystem.deleteAsync(dest, { idempotent: true });
+      }
+      await FileSystem.copyAsync({ from: printUri, to: dest });
+      shareUri = dest;
+    }
+  } catch {
+    shareUri = printUri;
   }
 
-  await Sharing.shareAsync(uri, {
-    mimeType: 'application/pdf',
-    dialogTitle: fileName,
-    UTI: 'com.adobe.pdf',
-  });
+  const canShare = await Sharing.isAvailableAsync();
+  if (!canShare) {
+    try {
+      await Print.printAsync({ html });
+      return;
+    } catch (e) {
+      throw new Error(errMessage(e, 'Udostępnianie PDF jest niedostępne na tym urządzeniu.'));
+    }
+  }
+
+  try {
+    await Sharing.shareAsync(shareUri, {
+      mimeType: 'application/pdf',
+      dialogTitle: fileName,
+      UTI: 'com.adobe.pdf',
+    });
+  } catch (e) {
+    if (isShareDismissed(e)) return;
+    throw new Error(errMessage(e, 'Nie udało się udostępnić PDF. Spróbuj ponownie.'));
+  }
 }

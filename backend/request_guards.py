@@ -12,6 +12,7 @@ _PUBLIC_MUTATE = (
     "/api/auth/welcome-email",
     "/api/auth/reset-password-email",
     "/api/auth/register",
+    "/api/reports/comprehensive",
     "/api/local-producers/confirm-payment",
     "/api/stripe/connect/callback",
 )

@@ -75,6 +75,7 @@ import {
 import { DS } from '@/constants/premiumTheme';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useAds } from '@/contexts/AdsProvider';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { SupplierOrdersModal } from '@/components/SupplierOrdersModal';
@@ -100,6 +101,7 @@ export default function DostawcyScreen() {
   const theme = useAppTheme();
   const { openVoiceReport, documentScanRevision, notifyDocumentScanComplete } = useUiOverlay();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
+  const { showInterstitialAfterAction } = useAds();
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -314,6 +316,7 @@ export default function DostawcyScreen() {
       setShowAddModal(false);
       resetForm();
       await fetchSuppliers();
+      void showInterstitialAfterAction();
     } catch (e: any) {
       Alert.alert('Błąd', e.message ?? 'Nie udało się zapisać dostawcy.');
     } finally {

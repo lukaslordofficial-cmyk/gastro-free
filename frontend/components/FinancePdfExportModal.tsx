@@ -99,10 +99,17 @@ export function FinancePdfExportModal({ visible, onClose, defaultMonth }: Props)
       const msg =
         e instanceof Error
           ? e.message
-          : format === 'excel'
-            ? 'Nie udało się wygenerować Excela.'
-            : 'Nie udało się wygenerować PDF.';
-      alert(format === 'excel' ? 'Eksport Excel' : 'Eksport PDF', msg);
+          : typeof e === 'object' && e && 'message' in e
+            ? String((e as { message?: string }).message)
+            : format === 'excel'
+              ? 'Nie udało się wygenerować Excela.'
+              : 'Nie udało się wygenerować PDF.';
+      const soft = /cancel|dismiss|user did not share|sharing cancelled/i.test(msg);
+      if (soft) {
+        onClose();
+        return;
+      }
+      alert(format === 'excel' ? 'Eksport Excel' : 'Eksport PDF', msg || 'Nie można pobrać raportu.');
     } finally {
       setBusy(false);
     }

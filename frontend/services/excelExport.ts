@@ -85,17 +85,37 @@ async function shareOrDownload(fileName: string, xml: string): Promise<void> {
   const path = `${base}${fileName}`;
   const encoding =
     (FileSystem as { EncodingType?: { UTF8: string } }).EncodingType?.UTF8 ?? 'utf8';
-  await FileSystem.writeAsStringAsync(path, xml, { encoding: encoding as 'utf8' });
+  try {
+    await FileSystem.writeAsStringAsync(path, xml, { encoding: encoding as 'utf8' });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Nie udało się zapisać pliku Excel.';
+    throw new Error(msg);
+  }
 
   const canShare = await Sharing.isAvailableAsync();
   if (!canShare) {
     throw new Error('Udostępnianie plików jest niedostępne na tym urządzeniu.');
   }
-  await Sharing.shareAsync(path, {
-    mimeType: 'application/vnd.ms-excel',
-    dialogTitle: fileName,
-    UTI: 'com.microsoft.excel.xls',
-  });
+  try {
+    await Sharing.shareAsync(path, {
+      mimeType: 'application/vnd.ms-excel',
+      dialogTitle: fileName,
+      UTI: 'com.microsoft.excel.xls',
+    });
+  } catch (e) {
+    const m = String((e as { message?: string })?.message || e || '').toLowerCase();
+    if (
+      m.includes('cancel') ||
+      m.includes('dismiss') ||
+      m.includes('user did not share') ||
+      m.includes('sharing cancelled')
+    ) {
+      return;
+    }
+    throw new Error(
+      e instanceof Error ? e.message : 'Nie udało się udostępnić Excela. Spróbuj ponownie.',
+    );
+  }
 }
 
 export async function shareExcelSheets(fileName: string, sheets: ExcelSheet[]): Promise<void> {

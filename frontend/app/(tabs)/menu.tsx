@@ -98,6 +98,8 @@ import {
 import { getMenuThumbSync, subscribeMenuThumbs, resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/contexts/AuthContext';
+import { useAds } from '@/contexts/AdsProvider';
+import { useFocusEffect } from 'expo-router';
 import { normalizeMenuUnit, normalizeRecipeQuantity, parseOptionalPieceWeightG } from '@/lib/recipeUnits';
 import { namesMatch } from '@/lib/fuzzyProductMatch';
 import { secureId } from '@/lib/secureId';
@@ -119,6 +121,15 @@ export default function MenuScreen() {
   const theme = useAppTheme();
   const { openVoiceReport, documentScanRevision, notifyDocumentScanComplete } = useUiOverlay();
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
+  const { showInterstitialAfterAction, resetAdActionSeries } = useAds();
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        resetAdActionSeries('menu_dish_series');
+      };
+    }, [resetAdActionSeries]),
+  );
   const { alert: premiumAlert } = usePremiumAlert();
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [utensils, setUtensils] = useState<KitchenUtensil[]>([]);
@@ -700,6 +711,8 @@ export default function MenuScreen() {
         setSelectedCat(form.category);
         handleCloseAddModal();
         void fetchData();
+        // Pierwsza nowa potrawa w serii (bez zmiany zakładki) → 1 reklama Free.
+        void showInterstitialAfterAction({ seriesKey: 'menu_dish_series' });
       }
     } catch (e: unknown) {
       premiumAlert('Błąd zapisu', e instanceof Error ? e.message : 'Nieznany błąd');

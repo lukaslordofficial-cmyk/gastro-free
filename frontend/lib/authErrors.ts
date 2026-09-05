@@ -10,10 +10,16 @@ export function polishAuthError(err: unknown): string {
     return 'Nieprawidłowy e-mail lub hasło.';
   }
   if (m.includes('email not confirmed') || m.includes('not confirmed')) {
-    return 'Najpierw potwierdź adres e-mail — kliknij link z wiadomości (asystent.dostaw@gastromanager.org), a potem zaloguj się.';
+    return 'Najpierw potwierdź adres e-mail — kliknij link z wiadomości (kontakt@gastromanager.org), a potem zaloguj się.';
   }
-  if (m.includes('user already registered') || m.includes('already been registered')) {
-    return 'Konto z tym e-mailem już istnieje — zaloguj się.';
+  if (
+    m.includes('user already registered') ||
+    m.includes('already been registered') ||
+    m.includes('already registered') ||
+    m.includes('email address is already') ||
+    m.includes('user already exists')
+  ) {
+    return 'Ten e-mail jest już zarejestrowany — przejdź do logowania.';
   }
   if (m.includes('password') && (m.includes('least') || m.includes('short') || m.includes('6'))) {
     return 'Hasło musi mieć co najmniej 6 znaków.';

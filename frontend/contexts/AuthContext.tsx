@@ -42,6 +42,7 @@ type AuthContextValue = {
     password: string,
     shipping: RegisterShippingInput,
   ) => Promise<{ ok: true; needsEmailConfirm?: boolean } | { ok: false; message: string }>;
+  resetPassword: (email: string) => Promise<{ ok: true } | { ok: false; message: string }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 };
@@ -194,19 +195,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { data, error } = await authService.signUp(e, password, shipping);
       if (error) return { ok: false as const, message: polishAuthError(error) };
 
+      // Supabase często zwraca „sukces” bez błędu przy istniejącym e-mailu (puste identities).
+      const identities = data.user?.identities;
+      if (data.user && Array.isArray(identities) && identities.length === 0) {
+        return {
+          ok: false as const,
+          message: 'Ten e-mail jest już zarejestrowany — przejdź do logowania.',
+        };
+      }
+
       const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
       const userId = data.user?.id;
-      if (userId) {
-        // Await: force-unconfirm musi zdążyć przed ewentualnym logowaniem; mail też.
-        await authService.sendWelcomeEmail({
-          userId,
-          email: e,
-          restaurantName: shipping.restaurantName,
-          redirectTo: EMAIL_VERIFY_REDIRECT,
-          forceUnconfirm: true,
-          shipping,
-        });
+      if (!userId) {
+        return {
+          ok: false as const,
+          message: 'Nie udało się utworzyć konta. Spróbuj ponownie lub przejdź do logowania.',
+        };
       }
+      // Await: force-unconfirm musi zdążyć przed ewentualnym logowaniem; mail też.
+      await authService.sendWelcomeEmail({
+        userId,
+        email: e,
+        restaurantName: shipping.restaurantName,
+        redirectTo: EMAIL_VERIFY_REDIRECT,
+        forceUnconfirm: true,
+        shipping,
+      });
 
       // Zawsze wymagamy kliknięcia linku — nie logujemy i nie auto-confirm.
       if (data.session) {
@@ -218,6 +232,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     },
     [applySession],
   );
+
+  const resetPassword = useCallback(async (email: string) => {
+    if (!isSupabaseConfigured) {
+      return { ok: false as const, message: 'Supabase nie jest skonfigurowany (frontend/.env).' };
+    }
+    const e = email.trim().toLowerCase();
+    if (!e) {
+      return { ok: false as const, message: 'Podaj e-mail, na który wyślemy link resetu hasła.' };
+    }
+    const { error } = await authService.resetPasswordForEmail(e);
+    if (error) return { ok: false as const, message: polishAuthError(error) };
+    return { ok: true as const };
+  }, []);
 
   const signOut = useCallback(async () => {
     await authService.signOut();
@@ -244,10 +271,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isAuthenticated: !!session?.user,
       signIn,
       signUp,
+      resetPassword,
       signOut,
       refreshProfile,
     }),
-    [ready, session, profile, signIn, signUp, signOut, refreshProfile],
+    [ready, session, profile, signIn, signUp, resetPassword, signOut, refreshProfile],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

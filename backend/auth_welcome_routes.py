@@ -1,5 +1,5 @@
 """
-Welcome + verification e-mail po rejestracji (Resend → asystent.dostaw@gastromanager.org).
+Welcome + verification e-mail po rejestracji (Resend → kontakt@gastromanager.org).
 Dodatkowo: zapis adresu dostawy do profiles + force-unconfirm gdy Confirm email=OFF w Supabase.
 """
 from __future__ import annotations
@@ -28,8 +28,11 @@ logger = logging.getLogger("auth.welcome")
 
 router = APIRouter(tags=["auth-welcome"])
 
-# Resend nie przyjmuje From z Gmail/Outlook — używamy domeny gastromanager.org.
-_WELCOME_FROM_DEFAULT = "asystent.dostaw@gastromanager.org"
+# Resend nie przyjmuje From z Gmail/Outlook — domena gastromanager.org.
+# Widoczny kontakt w stopce zawsze kontakt@; From domyślnie też kontakt@
+# (gdy Resend wymaga asystent.dostaw@ — ustaw WELCOME_FROM_EMAIL / RESEND_FROM_EMAIL).
+_WELCOME_FROM_DEFAULT = "kontakt@gastromanager.org"
+_CONTACT_VISIBLE = "kontakt@gastromanager.org"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _DEFAULT_VERIFY_REDIRECT = "https://gastromanager.org/auth/verified"
 
@@ -275,7 +278,7 @@ def build_welcome_email_html(
   <p>Dziękujemy, że dołączyłeś/aś do Gastro Manager — narzędzia stworzonego dla restauracji, które chcą mieć magazyn, menu, finanse i dostawy w jednym miejscu.</p>
   <p><strong>Kliknij poniższy link, aby potwierdzić e-mail.</strong> Dopiero potem będzie można zalogować się w aplikacji.</p>
   {btn}
-  <p style="margin-top:28px;font-size:13px;color:#5a6b62">Pozdrawiamy,<br/>Zespół Gastro Manager<br/>asystent.dostaw@gastromanager.org</p>
+  <p style="margin-top:28px;font-size:13px;color:#5a6b62">Pozdrawiamy,<br/>Zespół Gastro Manager<br/>{_CONTACT_VISIBLE}</p>
 </body></html>"""
 
     text = (
@@ -283,7 +286,7 @@ def build_welcome_email_html(
         "Dziękujemy, że dołączyłeś/aś do Gastro Manager.\n"
         "Kliknij link, aby potwierdzić e-mail — dopiero potem możesz się zalogować."
         f"{text_link}\n"
-        "Pozdrawiamy,\nZespół Gastro Manager\nasystent.dostaw@gastromanager.org\n"
+        f"Pozdrawiamy,\nZespół Gastro Manager\n{_CONTACT_VISIBLE}\n"
     )
     return html, text
 

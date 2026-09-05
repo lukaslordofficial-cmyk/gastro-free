@@ -1,4 +1,5 @@
 -- Tokeny push (Expo) do alertów dat ważności
+-- Po utworzeniu tabeli uruchom FIX_DEVICE_PUSH_TOKENS_RLS.sql (zamyka USING(true)).
 create table if not exists public.device_push_tokens (
   id uuid primary key default gen_random_uuid(),
   token text not null unique,

@@ -18,11 +18,12 @@ import { useAuth } from '@/contexts/AuthContext';
 import { isSupabaseConfigured } from '@/lib/supabase';
 
 export default function LoginScreen() {
-  const { signIn, isAuthenticated, ready } = useAuth();
+  const { signIn, resetPassword, isAuthenticated, ready } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
   if (ready && isAuthenticated) {
     return <Redirect href="/(tabs)" />;
@@ -30,10 +31,29 @@ export default function LoginScreen() {
 
   const onSubmit = async () => {
     setError(null);
+    setInfo(null);
     setBusy(true);
     try {
       const res = await signIn(email, password);
       if (!res.ok) setError(res.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onForgotPassword = async () => {
+    setError(null);
+    setInfo(null);
+    setBusy(true);
+    try {
+      const res = await resetPassword(email);
+      if (!res.ok) {
+        setError(res.message);
+        return;
+      }
+      setInfo(
+        'Jeśli konto istnieje, wysłaliśmy link do resetu hasła. Sprawdź skrzynkę i ustaw nowe hasło na stronie, potem zaloguj się w aplikacji.',
+      );
     } finally {
       setBusy(false);
     }
@@ -98,7 +118,17 @@ export default function LoginScreen() {
               onSubmitEditing={() => void onSubmit()}
             />
 
+            <TouchableOpacity
+              style={styles.forgotBtn}
+              onPress={() => void onForgotPassword()}
+              disabled={busy}
+              testID="login-forgot-password"
+            >
+              <Text style={styles.forgotText}>Zapomniałem hasła</Text>
+            </TouchableOpacity>
+
             {error ? <Text style={styles.error}>{error}</Text> : null}
+            {info ? <Text style={styles.info}>{info}</Text> : null}
 
             <TouchableOpacity
               style={[styles.cta, busy && styles.ctaDisabled]}
@@ -181,8 +211,26 @@ const styles = StyleSheet.create({
     color: DS.color.heading,
     marginBottom: 16,
   },
+  forgotBtn: {
+    alignSelf: 'flex-end',
+    marginTop: -8,
+    marginBottom: 12,
+    paddingVertical: 4,
+  },
+  forgotText: {
+    color: DS.color.greenEnd,
+    fontSize: 13,
+    fontWeight: '700',
+  },
   error: {
     color: DS.color.danger,
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 12,
+    lineHeight: 18,
+  },
+  info: {
+    color: DS.color.greenEnd,
     fontSize: 13,
     fontWeight: '600',
     marginBottom: 12,

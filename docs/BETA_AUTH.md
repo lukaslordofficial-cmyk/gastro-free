@@ -10,20 +10,39 @@ Data: 2026-09-05 (produkcja: potwierdzenie e-maila wymagane + adres dostawy przy
 4. Backend `POST /api/auth/welcome-email`:
    - **force-unconfirm** gdy Supabase ma Confirm email = OFF (czyści `email_confirmed_at`),
    - zapisuje `shipping_*` + `lokal_profile_json` w `profiles`,
-   - wysyła mail z linkiem weryfikacyjnym.
-5. Link otwiera **https://gastromanager.org/auth/verified** (landing) → komunikat „Konto zweryfikowane” → logowanie w aplikacji hasłem.
+   - wysyła mail z linkiem weryfikacyjnym (stopka: **kontakt@gastromanager.org**).
+5. Link otwiera **https://gastromanager.org/auth/verified** (landing) → „Konto zweryfikowane” → logowanie w aplikacji hasłem.
 6. Bez kliknięcia linku logowanie jest zablokowane (`email_confirmed_at` + guard w `signInWithPassword` / `applySession`).
+7. Reset hasła (login → „Zapomniałem hasła”) → Supabase mail → **https://gastromanager.org/auth/nowe-haslo**.
 
-## Supabase Auth (dashboard) — obowiązkowe
+## Supabase Auth (dashboard) — OBOWIĄZKOWE (copy-paste)
 
-1. **Authentication → Providers → Email → Confirm email = ON** (zalecane).  
-   Gdy OFF — backend i tak próbuje force-unconfirm po rejestracji.
-2. **Authentication → URL Configuration → Redirect URLs** dodaj:
-   - `https://gastromanager.org/auth/verified`
-   - `https://gastromanager.org/**`
-   - (opcjonalnie deep link) `gastromanager://auth/verified`
-3. **Site URL** nie ustawiaj na `http://localhost…` w produkcji.
-4. Szablon Confirm signup: `{{ .ConfirmationURL }}`.
+### Site URL
+```
+https://gastromanager.org
+```
+**KRYTYCZNE:** musi być z `https://`. Wartość `www.gastromanager.org` **bez protokołu** powoduje redirect na  
+`https://<project>.supabase.co/www.gastromanager.org` → `{"error":"requested path is invalid"}`.  
+Preferuj apex `https://gastromanager.org` (bez wymuszania www — uniknij mismatch z redirectami).
+
+### Redirect URLs (allowlist) — dodaj / zostaw:
+```
+https://gastromanager.org/auth/verified
+https://gastromanager.org/auth/nowe-haslo
+https://gastromanager.org/**
+https://gastromanager.org/dla-producentow/nowe-haslo
+gastromanager://auth/verified
+gastromanager://**
+```
+
+### Confirm email
+**Authentication → Providers → Email → Confirm email = ON**
+
+### Po zmianie Site URL
+Stare linki weryfikacyjne są **martwe** (`otp_expired`). Zarejestruj **NOWE** konto testowe i użyj świeżego maila.
+
+### Szablon Confirm signup
+Użyj `{{ .ConfirmationURL }}` (redirect_to idzie z app / welcome-email: `https://gastromanager.org/auth/verified`).
 
 ## Migracje (Supabase SQL Editor)
 
@@ -33,14 +52,19 @@ Data: 2026-09-05 (produkcja: potwierdzenie e-maila wymagane + adres dostawy przy
 4. `ADD_TENANT_ISOLATION.sql`
 5. `FIX_TENANT_RLS.sql`
 6. `ADD_LP_RESTAURANT_SHIPPING.sql` + `ADD_PROFILES_LOKAL_JSON.sql`
+7. `ADD_DEVICE_PUSH_TOKENS.sql` + **`FIX_DEVICE_PUSH_TOKENS_RLS.sql`** (zamyka otwarte RLS)
+8. `FIX_PROD_SECURITY_RLS.sql` (jeśli jeszcze nie)
 
 ## Backend
 
 - `POST /api/auth/welcome-email` — force-unconfirm + shipping + Resend.
 - `AUTO_CONFIRM_EMAIL` — **nie ustawiaj na true** w produkcji.
+- From: preferuj `kontakt@gastromanager.org` (`WELCOME_FROM_EMAIL` / `RESEND_FROM_EMAIL`).  
+  Jeśli Resend wymaga `asystent.dostaw@…` do deliverability — ustaw env na asystent; **stopka maila i tak pokazuje kontakt@**.
 
 ## Po deployu
 
-1. Redirect URLs + Site URL (jak wyżej).
-2. Redeploy Railway + Vercel (landing `/auth/verified`).
-3. Przebuduj APK / AAB.
+1. Site URL + Redirect URLs (jak wyżej) + Confirm email ON.
+2. Redeploy Railway (backend) + Vercel (landing `/auth/verified` + `/auth/nowe-haslo`).
+3. Przebuduj AAB (EAS production) po `node scripts/sync-eas-preview-env.js` — **nie commituj** wypełnionego `eas.json` z kluczami.
+4. Nowe konto testowe → mail → verified → login.

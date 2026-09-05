@@ -76,7 +76,7 @@ export default function RegisterScreen() {
       }
       setDone(true);
       setInfo(
-        'Konto utworzone. Sprawdź skrzynkę e-mail i kliknij link weryfikacyjny — dopiero potem będzie można się zalogować w aplikacji.',
+        'Konto zostało utworzone. Sprawdź podanego maila i kliknij link weryfikacyjny by się zalogować.',
       );
     } finally {
       setBusy(false);

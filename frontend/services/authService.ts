@@ -160,7 +160,23 @@ export async function autoConfirmUser(userId: string, email?: string): Promise<b
 }
 
 /**
- * Powitanie + link weryfikacyjny (Resend → asystent.dostaw@gastromanager.org).
+ * Reset hasła — mail z Supabase, redirect na landing (nie deep link).
+ */
+export async function resetPasswordForEmail(email: string): Promise<{ error: AuthError | null }> {
+  try {
+    const { EMAIL_PASSWORD_RESET_REDIRECT } = await import('@/lib/authVerify');
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo: EMAIL_PASSWORD_RESET_REDIRECT,
+    });
+    return { error };
+  } catch (e) {
+    if (__DEV__) console.warn('[authService] resetPassword', e);
+    return { error: e as AuthError };
+  }
+}
+
+/**
+ * Powitanie + link weryfikacyjny (Resend → kontakt@gastromanager.org).
  * Backend dodatkowo force-unconfirm (gdy Confirm email OFF) i zapisuje shipping do profiles.
  */
 export async function sendWelcomeEmail(input: {

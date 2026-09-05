@@ -4,6 +4,10 @@
  */
 export const EMAIL_VERIFY_REDIRECT = 'https://gastromanager.org/auth/verified';
 
+/** Redirect po linku resetu hasła (landing — formularz nowego hasła). */
+export const EMAIL_PASSWORD_RESET_REDIRECT =
+  'https://gastromanager.org/auth/nowe-haslo';
+
 export function isEmailConfirmed(user: { email_confirmed_at?: string | null } | null | undefined): boolean {
   return !!(user?.email_confirmed_at);
 }

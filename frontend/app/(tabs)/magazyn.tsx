@@ -904,6 +904,14 @@ export default function MagazynScreen() {
         fullWidth
         icon={<FileUp size={13} color={DS.color.greenEnd} strokeWidth={2} />}
       />
+      <View style={{ height: 10 }} />
+      <PremiumOutlineBtn
+        label="Skan sprzedaży"
+        onPress={() => openDocumentScan('sales')}
+        tone="green"
+        fullWidth
+        icon={<FileUp size={13} color={DS.color.greenEnd} strokeWidth={2} />}
+      />
     </View>
   ) : (
     <View style={styles.actionBtnsWrap}>
@@ -938,6 +946,16 @@ export default function MagazynScreen() {
             <FileUp size={14} color={Colors.white} strokeWidth={2.5} />
           </View>
           <Text style={[styles.magPillText, { color: Colors.white }]}>Wgraj fakturę</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.magPillBtn, { backgroundColor: Colors.accent, shadowColor: Colors.accent }]}
+          onPress={() => openDocumentScan('sales')}
+          activeOpacity={0.85}
+        >
+          <View style={styles.magPillIcon}>
+            <FileUp size={14} color={Colors.white} strokeWidth={2.5} />
+          </View>
+          <Text style={[styles.magPillText, { color: Colors.white }]}>Skan sprzedaży</Text>
         </TouchableOpacity>
       </View>
     </View>

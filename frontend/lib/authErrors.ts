@@ -10,7 +10,7 @@ export function polishAuthError(err: unknown): string {
     return 'Nieprawidłowy e-mail lub hasło.';
   }
   if (m.includes('email not confirmed') || m.includes('not confirmed')) {
-    return 'Potwierdź adres e-mail (link z wiadomości) albo wyłącz „Confirm email” w Supabase Auth na czas bety.';
+    return 'Najpierw potwierdź adres e-mail — kliknij link z wiadomości (asystent.dostaw@gastromanager.org), a potem zaloguj się.';
   }
   if (m.includes('user already registered') || m.includes('already been registered')) {
     return 'Konto z tym e-mailem już istnieje — zaloguj się.';

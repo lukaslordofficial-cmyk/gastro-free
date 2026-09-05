@@ -24,7 +24,7 @@ export type VoiceOverlayOpts = {
   autoStartWakeListen?: boolean;
 };
 
-export type DocumentScanKind = 'invoice' | 'offer' | 'document' | 'menu';
+export type DocumentScanKind = 'invoice' | 'offer' | 'document' | 'menu' | 'sales';
 
 type UiOverlayContextValue = {
   /** Ukryj banery (Voice AI, aparat, skaner). */
@@ -168,7 +168,7 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
       setMenuScanVisible(true);
       return;
     }
-    // Wzajemne wykluczenie: oferta/faktura nie może lecieć równolegle ze skanem menu.
+    // Wzajemne wykluczenie: oferta/faktura/sprzedaż nie może lecieć równolegle ze skanem menu.
     setMenuScanVisible(false);
     setDocumentScanKind(kind ?? 'invoice');
     setDocumentScanVisible(true);

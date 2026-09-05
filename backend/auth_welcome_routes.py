@@ -69,6 +69,9 @@ def _safe_redirect(raw: str | None) -> str | None:
     return None
 
 
+_DEFAULT_VERIFY_REDIRECT = "gastromanager://auth/verified"
+
+
 def _extract_action_link(payload: dict[str, Any]) -> str | None:
     props = payload.get("properties") if isinstance(payload.get("properties"), dict) else {}
     for key in ("action_link", "actionLink"):
@@ -92,13 +95,14 @@ async def _generate_verify_link(
         "Authorization": f"Bearer {supabase_key}",
         "Content-Type": "application/json",
     }
+    # signup najpierw — potwierdza e-mail; magiclink tylko jako fallback.
+    redirect = redirect_to or _DEFAULT_VERIFY_REDIRECT
     bodies: list[dict[str, Any]] = [
-        {"type": "magiclink", "email": email},
         {"type": "signup", "email": email},
+        {"type": "magiclink", "email": email},
     ]
-    if redirect_to:
-        for b in bodies:
-            b["options"] = {"redirect_to": redirect_to}
+    for b in bodies:
+        b["options"] = {"redirect_to": redirect}
 
     for body in bodies:
         try:

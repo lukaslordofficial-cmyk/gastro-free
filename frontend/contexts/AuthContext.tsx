@@ -16,7 +16,6 @@ import React, {
   useState,
 } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
-import * as Linking from 'expo-linking';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { setAccountKey, getAccountKey, accountKeyFromUserId } from '@/lib/accountKey';
 import { polishAuthError } from '@/lib/authErrors';
@@ -81,10 +80,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { id: user.id, email: user.email ?? null, account_key, restaurant_name };
   }, []);
 
-  const applySession = useCallback(
+      const applySession = useCallback(
     async (next: Session | null) => {
       setSession(next);
       if (!next?.user) {
+        setProfile(null);
+        setAccountKey('default');
+        resetMenuThumbCacheMemory();
+        resetDishCustomImagesMemory();
+        resetProductCustomImagesMemory();
+        return;
+      }
+      // Sesja bez potwierdzonego e-maila — wyloguj (np. stary persist po rejestracji).
+      if (!next.user.email_confirmed_at) {
+        await authService.signOut();
+        setSession(null);
         setProfile(null);
         setAccountKey('default');
         resetMenuThumbCacheMemory();
@@ -178,46 +188,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { data, error } = await authService.signUp(e, password, restaurantName);
       if (error) return { ok: false as const, message: polishAuthError(error) };
 
-      const queueWelcome = (userId: string) => {
+      const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
+      const userId = data.user?.id;
+      if (userId) {
         void authService.sendWelcomeEmail({
           userId,
           email: e,
           restaurantName,
-          redirectTo: Linking.createURL('/(auth)/login'),
+          redirectTo: EMAIL_VERIFY_REDIRECT,
         });
-      };
-
-      if (data.session?.user) {
-        queueWelcome(data.session.user.id);
-        await applySession(data.session);
-        return { ok: true as const };
       }
 
-      // Closed beta: gdy Confirm email jeszcze włączone — Admin API, potem login.
-      if (data.user?.id) {
-        queueWelcome(data.user.id);
-        const confirmed = await authService.autoConfirmUser(data.user.id, e);
-        if (confirmed) {
-          const { error: signErr } = await authService.signInWithPassword(e, password);
-          if (!signErr) {
-            const { session: sess } = await authService.getSession();
-            if (sess) await applySession(sess);
-            return { ok: true as const };
-          }
-        }
+      // Zawsze wymagamy kliknięcia linku — nie logujemy i nie auto-confirm.
+      if (data.session) {
+        await authService.signOut();
+        await applySession(null);
       }
 
-      // Ostatnia próba: czasem sesja pojawia się po krótkiej chwili bez confirm.
-      const { error: retryErr } = await authService.signInWithPassword(e, password);
-      if (!retryErr) {
-        const { session: sess } = await authService.getSession();
-        if (sess) {
-          await applySession(sess);
-          return { ok: true as const };
-        }
-      }
-
-      // Tylko gdy Confirm email nadal blokuje logowanie.
       return { ok: true as const, needsEmailConfirm: true };
     },
     [applySession],

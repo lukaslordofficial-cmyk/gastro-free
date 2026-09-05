@@ -35,6 +35,7 @@ import {
   buildExpiryTipsForItem,
   EXPIRY_TIPS_LEGAL_DISCLAIMER,
 } from '@/lib/expiryTipsCatalog';
+import { pickWasteTips } from '@/lib/wasteTips';
 import { fetchJson } from '@/lib/safeFetch';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -390,6 +391,15 @@ export function IntentDoneSummary({
               : intent === 'list_expiring_soon'
                 ? renderExpiryLadder(block.items, `b${bi}`)
                 : renderPlainItems(block.items, `b${bi}`)}
+            {intent === 'rank_waste_cost'
+              ? pickWasteTips(Number(block.total_cost_pln || 0), 3).map((tip) => (
+                  <View key={tip.id} style={styles.expiryTipRow} testID={`voice-waste-tip-${tip.id}`}>
+                    <Text style={styles.expiryTipKind}>Porada</Text>
+                    <Text style={styles.expiryTipTitle}>{tip.title}</Text>
+                    <Text style={styles.expiryTipBody}>{tip.body}</Text>
+                  </View>
+                ))
+              : null}
           </View>
         ))}
       </>

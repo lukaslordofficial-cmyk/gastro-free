@@ -46,6 +46,7 @@
           "category": ["BROWSABLE", "DEFAULT"],
           "data": [
             { "scheme": "gastromanager" },
+            { "scheme": "gastromanager", "host": "auth" },
             { "scheme": "gastromanager", "host": "lp" },
             { "scheme": "gastromanager", "host": "billing" }
           ]

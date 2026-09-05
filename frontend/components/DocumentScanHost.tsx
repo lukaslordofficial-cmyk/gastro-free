@@ -1,9 +1,10 @@
 /**
- * Globalny host skanera faktury/oferty/menu — otwierany z Magazynu, Menu lub głosem.
+ * Globalny host skanera faktury/oferty/menu/sprzedaży — otwierany z Magazynu, Menu lub głosem.
  */
 import React, { useCallback } from 'react';
 import { CatalogScanModal } from '@/components/CatalogScanModal';
 import { MenuScanModal } from '@/components/MenuScanModal';
+import { SalesScanModal } from '@/components/SalesScanModal';
 import { useUiOverlay } from '@/contexts/UiOverlayContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { router } from 'expo-router';
@@ -20,6 +21,8 @@ export function DocumentScanHost() {
   } = useUiOverlay();
   const { alert: premiumAlert } = usePremiumAlert();
   const scanContext = documentScanKind === 'offer' ? 'supplier' : 'warehouse';
+  const salesOpen = documentScanVisible && documentScanKind === 'sales';
+  const catalogOpen = documentScanVisible && documentScanKind !== 'sales';
 
   const onMenuDetected = useCallback(() => {
     closeDocumentScan();
@@ -31,7 +34,6 @@ export function DocumentScanHost() {
   }, [closeDocumentScan, openMenuScan, premiumAlert]);
 
   const onScanConfirmed = useCallback(() => {
-    // Odśwież Magazyn / Dostawców — NIE zamykaj modala (użytkownik widzi wynik).
     notifyDocumentScanComplete(documentScanKind === 'offer' ? 'offer' : 'invoice');
   }, [notifyDocumentScanComplete, documentScanKind]);
 
@@ -39,18 +41,22 @@ export function DocumentScanHost() {
     <>
       <CatalogScanModal
         supplierId={null}
-        visible={documentScanVisible}
+        visible={catalogOpen}
         onClose={closeDocumentScan}
         onConfirmed={onScanConfirmed}
         scanContext={scanContext}
         onMenuDetected={onMenuDetected}
+      />
+      <SalesScanModal
+        visible={salesOpen}
+        onClose={closeDocumentScan}
+        onConfirmed={() => notifyDocumentScanComplete('sales')}
       />
       <MenuScanModal
         visible={menuScanVisible}
         onClose={closeMenuScan}
         onConfirmed={async () => {
           notifyDocumentScanComplete('menu');
-          // Daj Reactowi czas na odpalenie listenerów fetchData w Menu/Magazynie.
           await new Promise((r) => setTimeout(r, 80));
           try {
             router.push('/(tabs)/menu');

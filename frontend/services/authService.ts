@@ -64,13 +64,27 @@ export function subscribeToAuthState(
 export async function signInWithPassword(
   email: string,
   password: string,
-): Promise<{ error: AuthError | null }> {
+): Promise<{ error: AuthError | null; user: User | null }> {
   try {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    return { error };
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return { error, user: null };
+    const user = data.user ?? data.session?.user ?? null;
+    // Wymagamy kliknięcia linku weryfikacyjnego — bez email_confirmed_at nie wpuszczamy.
+    if (user && !user.email_confirmed_at) {
+      await supabase.auth.signOut();
+      return {
+        error: {
+          name: 'AuthError',
+          message: 'Email not confirmed',
+          status: 400,
+        } as AuthError,
+        user: null,
+      };
+    }
+    return { error: null, user };
   } catch (e) {
     if (__DEV__) console.warn('[authService] signIn', e);
-    return { error: e as AuthError };
+    return { error: e as AuthError, user: null };
   }
 }
 
@@ -81,13 +95,13 @@ export async function signUp(
   restaurantName?: string,
 ): Promise<{ data: SignUpData; error: AuthError | null }> {
   try {
+    const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         data: { restaurant_name: (restaurantName ?? '').trim() || null },
-        // Closed beta: Confirm email OFF w Supabase → sesja od razu.
-        // Nie ustawiamy emailRedirectTo — unikamy przepływu „sprawdź skrzynkę".
+        emailRedirectTo: EMAIL_VERIFY_REDIRECT,
       },
     });
     return { data: { user: data.user, session: data.session }, error };

@@ -10,7 +10,7 @@ import {
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import { Link, Redirect, router } from 'expo-router';
+import { Link, Redirect } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { DS, PremiumTokens } from '@/constants/premiumTheme';
@@ -42,12 +42,14 @@ export default function RegisterScreen() {
       }
       if (res.needsEmailConfirm) {
         setInfo(
-          'Konto utworzone. Wysłaliśmy e-mail powitalny z linkiem weryfikacyjnym ' +
-            '(asystent.dostaw@gastromanager.org). Otwórz skrzynkę, potwierdź adres, a potem zaloguj się.',
+          'Konto utworzone. Wysłaliśmy e-mail z linkiem weryfikacyjnym ' +
+            '(asystent.dostaw@gastromanager.org). Kliknij link w wiadomości — dopiero potem będzie można się zalogować.',
         );
         return;
       }
-      router.replace('/(tabs)');
+      setInfo(
+        'Konto utworzone. Potwierdź e-mail linkiem z wiadomości, a potem zaloguj się.',
+      );
     } finally {
       setBusy(false);
     }

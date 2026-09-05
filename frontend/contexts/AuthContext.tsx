@@ -24,6 +24,8 @@ import type { UserProfile } from '@/services/authService';
 import { resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
 import { resetDishCustomImagesMemory } from '@/lib/dishCustomImages';
 import { resetProductCustomImagesMemory } from '@/lib/productCustomImages';
+import type { RegisterShippingInput } from '@/lib/authVerify';
+import { validateRegisterShipping } from '@/lib/authVerify';
 
 export type { UserProfile };
 
@@ -38,7 +40,7 @@ type AuthContextValue = {
   signUp: (
     email: string,
     password: string,
-    restaurantName?: string,
+    shipping: RegisterShippingInput,
   ) => Promise<{ ok: true; needsEmailConfirm?: boolean } | { ok: false; message: string }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -80,7 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { id: user.id, email: user.email ?? null, account_key, restaurant_name };
   }, []);
 
-      const applySession = useCallback(
+  const applySession = useCallback(
     async (next: Session | null) => {
       setSession(next);
       if (!next?.user) {
@@ -173,7 +175,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signUp = useCallback(
-    async (email: string, password: string, restaurantName?: string) => {
+    async (email: string, password: string, shipping: RegisterShippingInput) => {
       if (!isSupabaseConfigured) {
         return { ok: false as const, message: 'Supabase nie jest skonfigurowany (frontend/.env).' };
       }
@@ -184,18 +186,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (password.length < 6) {
         return { ok: false as const, message: 'Hasło musi mieć co najmniej 6 znaków.' };
       }
+      const shippingErr = validateRegisterShipping({ ...shipping, contactEmail: shipping.contactEmail || e });
+      if (shippingErr) {
+        return { ok: false as const, message: shippingErr };
+      }
 
-      const { data, error } = await authService.signUp(e, password, restaurantName);
+      const { data, error } = await authService.signUp(e, password, shipping);
       if (error) return { ok: false as const, message: polishAuthError(error) };
 
       const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
       const userId = data.user?.id;
       if (userId) {
-        void authService.sendWelcomeEmail({
+        // Await: force-unconfirm musi zdążyć przed ewentualnym logowaniem; mail też.
+        await authService.sendWelcomeEmail({
           userId,
           email: e,
-          restaurantName,
+          restaurantName: shipping.restaurantName,
           redirectTo: EMAIL_VERIFY_REDIRECT,
+          forceUnconfirm: true,
+          shipping,
         });
       }
 

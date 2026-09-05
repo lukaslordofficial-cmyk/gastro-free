@@ -16,15 +16,24 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { DS, PremiumTokens } from '@/constants/premiumTheme';
 import { useAuth } from '@/contexts/AuthContext';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import { validateRegisterShipping } from '@/lib/authVerify';
 
 export default function RegisterScreen() {
   const { signUp, isAuthenticated, ready } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [restaurantName, setRestaurantName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [street, setStreet] = useState('');
+  const [building, setBuilding] = useState('');
+  const [city, setCity] = useState('');
+  const [postCode, setPostCode] = useState('');
+  const [nip, setNip] = useState('');
+  const [regon, setRegon] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
 
   if (ready && isAuthenticated) {
     return <Redirect href="/(tabs)" />;
@@ -33,22 +42,41 @@ export default function RegisterScreen() {
   const onSubmit = async () => {
     setError(null);
     setInfo(null);
+    const shippingCheck = validateRegisterShipping({
+      restaurantName,
+      phone,
+      street,
+      building,
+      city,
+      postCode,
+      nip,
+      regon,
+      contactEmail: email,
+    });
+    if (shippingCheck) {
+      setError(shippingCheck);
+      return;
+    }
     setBusy(true);
     try {
-      const res = await signUp(email, password, restaurantName);
+      const res = await signUp(email, password, {
+        restaurantName,
+        phone,
+        street,
+        building,
+        city,
+        postCode,
+        nip,
+        regon,
+        contactEmail: email,
+      });
       if (!res.ok) {
         setError(res.message);
         return;
       }
-      if (res.needsEmailConfirm) {
-        setInfo(
-          'Konto utworzone. Wysłaliśmy e-mail z linkiem weryfikacyjnym ' +
-            '(asystent.dostaw@gastromanager.org). Kliknij link w wiadomości — dopiero potem będzie można się zalogować.',
-        );
-        return;
-      }
+      setDone(true);
       setInfo(
-        'Konto utworzone. Potwierdź e-mail linkiem z wiadomości, a potem zaloguj się.',
+        'Konto utworzone. Sprawdź skrzynkę e-mail i kliknij link weryfikacyjny — dopiero potem będzie można się zalogować w aplikacji.',
       );
     } finally {
       setBusy(false);
@@ -75,9 +103,8 @@ export default function RegisterScreen() {
             <Text style={styles.brand}>GASTRO MANAGER</Text>
             <Text style={styles.title}>Nowe konto</Text>
             <Text style={styles.sub}>
-              Po rejestracji dostaniesz e-mail powitalny z linkiem weryfikacyjnym
-              (asystent.dostaw@gastromanager.org). Na start: 100 kredytów AI, 30 dni trialu Premium
-              i własny magazyn / menu.
+              Uzupełnij dane lokalu i adres dostawy — użyjemy ich przy zamówieniach u producentów.
+              Na start: 100 kredytów AI, 30 dni trialu Premium i własny magazyn / menu.
             </Text>
 
             {!isSupabaseConfigured && (
@@ -88,71 +115,164 @@ export default function RegisterScreen() {
               </View>
             )}
 
-            <Text style={styles.label}>Nazwa restauracji (opcjonalnie)</Text>
-            <TextInput
-              style={styles.input}
-              value={restaurantName}
-              onChangeText={setRestaurantName}
-              placeholder="np. Bistro Zielone"
-              placeholderTextColor={PremiumTokens.color.textFaint}
-              editable={!busy}
-              testID="register-restaurant"
-            />
-
-            <Text style={styles.label}>E-mail</Text>
-            <TextInput
-              style={styles.input}
-              value={email}
-              onChangeText={setEmail}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="email-address"
-              placeholder="nazwa@restauracja.pl"
-              placeholderTextColor={PremiumTokens.color.textFaint}
-              editable={!busy}
-              testID="register-email"
-            />
-
-            <Text style={styles.label}>Hasło (min. 6 znaków)</Text>
-            <TextInput
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              placeholder="••••••••"
-              placeholderTextColor={PremiumTokens.color.textFaint}
-              editable={!busy}
-              testID="register-password"
-              onSubmitEditing={() => void onSubmit()}
-            />
-
-            {error ? <Text style={styles.error}>{error}</Text> : null}
-            {info ? (
+            {done && info ? (
               <View style={styles.bannerInfo}>
                 <Text style={styles.bannerInfoText}>{info}</Text>
+                <Link href="/(auth)/login" asChild>
+                  <TouchableOpacity style={styles.afterLink} disabled={busy}>
+                    <Text style={styles.footerLink}>Przejdź do logowania</Text>
+                  </TouchableOpacity>
+                </Link>
               </View>
-            ) : null}
+            ) : (
+              <>
+                <Text style={styles.section}>Konto</Text>
 
-            <TouchableOpacity
-              style={[styles.cta, busy && styles.ctaDisabled]}
-              onPress={() => void onSubmit()}
-              disabled={busy}
-              activeOpacity={0.85}
-              testID="register-submit"
-            >
-              <LinearGradient
-                colors={[...DS.gradient.green]}
-                start={{ x: 0, y: 0.5 }}
-                end={{ x: 1, y: 0.5 }}
-                style={styles.ctaGrad}
-              >
-                {busy ? (
-                  <ActivityIndicator color="#0A0A0A" />
-                ) : (
-                  <Text style={styles.ctaText}>Utwórz konto</Text>
-                )}
-              </LinearGradient>
-            </TouchableOpacity>
+                <Text style={styles.label}>E-mail</Text>
+                <TextInput
+                  style={styles.input}
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="email-address"
+                  placeholder="nazwa@restauracja.pl"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-email"
+                />
+
+                <Text style={styles.label}>Hasło (min. 6 znaków)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                  placeholder="••••••••"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-password"
+                />
+
+                <Text style={styles.section}>Lokal i dostawy</Text>
+
+                <Text style={styles.label}>Nazwa restauracji / lokalu</Text>
+                <TextInput
+                  style={styles.input}
+                  value={restaurantName}
+                  onChangeText={setRestaurantName}
+                  placeholder="np. Bistro Zielone"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-restaurant"
+                />
+
+                <Text style={styles.label}>Telefon do dostaw</Text>
+                <TextInput
+                  style={styles.input}
+                  value={phone}
+                  onChangeText={setPhone}
+                  keyboardType="phone-pad"
+                  placeholder="+48 …"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-phone"
+                />
+
+                <Text style={styles.label}>Ulica</Text>
+                <TextInput
+                  style={styles.input}
+                  value={street}
+                  onChangeText={setStreet}
+                  placeholder="ul. Przykładowa"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-street"
+                />
+
+                <Text style={styles.label}>Numer budynku / lokalu</Text>
+                <TextInput
+                  style={styles.input}
+                  value={building}
+                  onChangeText={setBuilding}
+                  placeholder="np. 12A"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-building"
+                />
+
+                <Text style={styles.label}>Kod pocztowy</Text>
+                <TextInput
+                  style={styles.input}
+                  value={postCode}
+                  onChangeText={setPostCode}
+                  placeholder="00-000"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  autoCapitalize="none"
+                  testID="register-postcode"
+                />
+
+                <Text style={styles.label}>Miasto</Text>
+                <TextInput
+                  style={styles.input}
+                  value={city}
+                  onChangeText={setCity}
+                  placeholder="Warszawa"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-city"
+                />
+
+                <Text style={styles.label}>NIP (opcjonalnie)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={nip}
+                  onChangeText={setNip}
+                  keyboardType="number-pad"
+                  placeholder="10 cyfr"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-nip"
+                />
+
+                <Text style={styles.label}>REGON (opcjonalnie)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={regon}
+                  onChangeText={setRegon}
+                  keyboardType="number-pad"
+                  placeholder="9 lub 14 cyfr"
+                  placeholderTextColor={PremiumTokens.color.textFaint}
+                  editable={!busy}
+                  testID="register-regon"
+                  onSubmitEditing={() => void onSubmit()}
+                />
+
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+
+                <TouchableOpacity
+                  style={[styles.cta, busy && styles.ctaDisabled]}
+                  onPress={() => void onSubmit()}
+                  disabled={busy}
+                  activeOpacity={0.85}
+                  testID="register-submit"
+                >
+                  <LinearGradient
+                    colors={[...DS.gradient.green]}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={styles.ctaGrad}
+                  >
+                    {busy ? (
+                      <ActivityIndicator color="#0A0A0A" />
+                    ) : (
+                      <Text style={styles.ctaText}>Utwórz konto</Text>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </>
+            )}
 
             <View style={styles.footerRow}>
               <Text style={styles.footerMuted}>Masz już konto?</Text>
@@ -197,6 +317,14 @@ const styles = StyleSheet.create({
     marginBottom: 28,
     maxWidth: 360,
   },
+  section: {
+    ...PremiumTokens.type.micro,
+    color: DS.color.greenEnd,
+    marginBottom: 12,
+    marginTop: 8,
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+  },
   label: {
     ...PremiumTokens.type.micro,
     color: PremiumTokens.color.textMuted,
@@ -239,14 +367,16 @@ const styles = StyleSheet.create({
     borderColor: PremiumTokens.color.neonLine,
     borderWidth: 1,
     borderRadius: 14,
-    padding: 12,
+    padding: 16,
     marginBottom: 12,
   },
   bannerInfoText: {
     color: DS.color.greenEnd,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '600',
   },
+  afterLink: { marginTop: 14, alignSelf: 'flex-start' },
   cta: {
     marginTop: 8,
     borderRadius: DS.radius.button,

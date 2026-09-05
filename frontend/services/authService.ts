@@ -88,19 +88,39 @@ export async function signInWithPassword(
   }
 }
 
-/** Rejestracja e-mail + hasło (+ opcjonalna nazwa restauracji w metadanych). */
+/** Rejestracja e-mail + hasło (+ dane lokalu / dostawy w metadanych). */
 export async function signUp(
   email: string,
   password: string,
-  restaurantName?: string,
+  shipping?: {
+    restaurantName?: string;
+    phone?: string;
+    street?: string;
+    building?: string;
+    city?: string;
+    postCode?: string;
+    nip?: string;
+    regon?: string;
+    contactEmail?: string;
+  },
 ): Promise<{ data: SignUpData; error: AuthError | null }> {
   try {
     const { EMAIL_VERIFY_REDIRECT } = await import('@/lib/authVerify');
+    const restaurantName = (shipping?.restaurantName ?? '').trim() || null;
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        data: { restaurant_name: (restaurantName ?? '').trim() || null },
+        data: {
+          restaurant_name: restaurantName,
+          shipping_phone: (shipping?.phone ?? '').trim() || null,
+          shipping_street: (shipping?.street ?? '').trim() || null,
+          shipping_building: (shipping?.building ?? '').trim() || null,
+          shipping_city: (shipping?.city ?? '').trim() || null,
+          shipping_post_code: (shipping?.postCode ?? '').trim() || null,
+          shipping_nip: (shipping?.nip ?? '').replace(/\D/g, '') || null,
+          shipping_regon: (shipping?.regon ?? '').replace(/\D/g, '') || null,
+        },
         emailRedirectTo: EMAIL_VERIFY_REDIRECT,
       },
     });
@@ -141,16 +161,28 @@ export async function autoConfirmUser(userId: string, email?: string): Promise<b
 
 /**
  * Powitanie + link weryfikacyjny (Resend → asystent.dostaw@gastromanager.org).
- * Fire-and-forget — rejestracja nie powinna padać, gdy mail chwilowo nie wyjdzie.
+ * Backend dodatkowo force-unconfirm (gdy Confirm email OFF) i zapisuje shipping do profiles.
  */
 export async function sendWelcomeEmail(input: {
   userId: string;
   email: string;
   restaurantName?: string | null;
   redirectTo?: string | null;
+  forceUnconfirm?: boolean;
+  shipping?: {
+    phone?: string;
+    street?: string;
+    building?: string;
+    city?: string;
+    postCode?: string;
+    nip?: string;
+    regon?: string;
+    contactEmail?: string;
+  } | null;
 }): Promise<boolean> {
   if (!input.userId || !input.email || !BACKEND_URL) return false;
   try {
+    const ship = input.shipping;
     const conf = await fetchJson(`${BACKEND_URL}/api/auth/welcome-email`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -159,6 +191,19 @@ export async function sendWelcomeEmail(input: {
         email: input.email.trim().toLowerCase(),
         restaurant_name: (input.restaurantName ?? '').trim() || null,
         redirect_to: (input.redirectTo ?? '').trim() || null,
+        force_unconfirm: input.forceUnconfirm !== false,
+        shipping: ship
+          ? {
+              phone: (ship.phone ?? '').trim() || null,
+              street: (ship.street ?? '').trim() || null,
+              building: (ship.building ?? '').trim() || null,
+              city: (ship.city ?? '').trim() || null,
+              post_code: (ship.postCode ?? '').trim() || null,
+              nip: (ship.nip ?? '').replace(/\D/g, '') || null,
+              regon: (ship.regon ?? '').replace(/\D/g, '') || null,
+              contact_email: (ship.contactEmail ?? input.email).trim().toLowerCase() || null,
+            }
+          : null,
       }),
     });
     return conf.ok;

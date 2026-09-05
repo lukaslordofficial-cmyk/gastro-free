@@ -151,6 +151,23 @@ export async function saveMenuItemPosId(
   return { error: error ? { message: error.message } : null };
 }
 
+/** Przypisz pos_id = "1","2","3"… w podanej kolejności (nadpisuje istniejące). */
+export async function assignSequentialPosIds(
+  orderedIds: string[],
+): Promise<{ error: { message: string } | null; assigned: number }> {
+  if (!orderedIds.length) return { error: null, assigned: 0 };
+  let assigned = 0;
+  for (let i = 0; i < orderedIds.length; i++) {
+    const { error } = await supabase
+      .from('menu_items')
+      .update({ pos_id: String(i + 1) })
+      .eq('id', orderedIds[i]);
+    if (error) return { error: { message: error.message }, assigned };
+    assigned += 1;
+  }
+  return { error: null, assigned };
+}
+
 export async function deleteRecipeIngredientIds(ids: string[]): Promise<void> {
   if (!ids.length) return;
   const { error } = await supabase.from('recipe_ingredients').delete().in('id', ids);

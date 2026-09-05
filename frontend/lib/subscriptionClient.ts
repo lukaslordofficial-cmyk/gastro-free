@@ -73,8 +73,8 @@ export function isPremiumEntitled(
  * Reklamy AdMob (baner + interstitial) — wyłącznie Free (tier 0) po zakończonym trialu 30 dni.
  * Bez reklam: brak sesji, ładowanie portfela, płatny plan, aktywny trial.
  *
- * EXPO_PUBLIC_FORCE_ADS=1 — tylko na APK preview (EAS), żeby przetestować AdMob
- * przed końcem trialu / przed publikacją w Play (najlepiej z test unit IDs).
+ * EXPO_PUBLIC_FORCE_ADS=1 — tylko EAS preview / preview-apk (test AdMob mimo trialu).
+ * Profil `production` NIE ustawia FORCE_ADS — reklamy wg tieru (Free po trialu) + live units.
  */
 export function shouldShowAds(
   tierLevel: number,

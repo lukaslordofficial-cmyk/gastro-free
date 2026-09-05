@@ -144,11 +144,6 @@ export function PosSyncStatusCard() {
               Ostatni błąd: {status.last_error}
             </Text>
           ) : null}
-          <Text style={[styles.fieldHint, { color: theme.textMuted, marginTop: 4 }]}>
-            Ten pasek tylko pokazuje, czy kasa dosłała sprzedaże. Nic tu nie klikasz przy
-            każdym rachunku. Zielono = POS sam wysyła. Jeśli po awarii netu nic nie wraca —
-            zadzwoń do serwisu kasy, nie przestawiaj nic w apce.
-          </Text>
         </View>
       ) : null}
     </View>

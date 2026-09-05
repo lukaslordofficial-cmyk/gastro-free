@@ -29,6 +29,8 @@ type SalesLine = {
   matched_inventory_id?: string | null;
   matched_name?: string | null;
   match_score?: number | null;
+  matched_menu_item_id?: string | null;
+  match_kind?: string | null;
   current_qty?: number | null;
   stock_unit?: string;
   include: boolean;
@@ -132,7 +134,12 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
   }
 
   async function confirm() {
-    const payload = lines.filter((l) => l.include && l.matched_inventory_id && l.quantity > 0);
+    const payload = lines.filter(
+      (l) =>
+        l.include &&
+        l.quantity > 0 &&
+        (!!l.matched_inventory_id || !!l.matched_menu_item_id || l.match_kind === 'dish'),
+    );
     if (!payload.length) {
       setError('Zaznacz przynajmniej jedną dopasowaną pozycję z ilością > 0.');
       return;
@@ -198,8 +205,8 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
               <Text style={[styles.bigBtnText, { color: DS.color.greenEnd }]}>Wybierz z galerii</Text>
             </TouchableOpacity>
             <Text style={styles.hint}>
-              Wpisz ręcznie po sprzedaży: nazwa + ilość (np. „kurczak 800 g”, „mozzarella 2 szt”).
-              Aplikacja dopasuje zbliżone nazwy z magazynu i odejmie gramatury.
+              Spisz nazwę składnika + ilość (np. „kurczak 800 g”) albo tylko numer dania z mapowania POS
+              (np. „3 × 2”). Numery rozpoznajemy po pos_id i odejmujemy składniki receptury z magazynu.
             </Text>
           </View>
         ) : null}
@@ -227,9 +234,11 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
                     <View style={{ flex: 1, marginLeft: 10 }}>
                       <Text style={styles.cardName}>{l.product_name}</Text>
                       <Text style={styles.cardMatch}>
-                        {l.matched_name
-                          ? `→ ${l.matched_name}${l.match_score != null ? ` (${Math.round(l.match_score)}%)` : ''}`
-                          : 'Brak dopasowania w magazynie'}
+                        {l.match_kind === 'dish' || l.matched_menu_item_id
+                          ? `→ danie: ${l.matched_name || '?'}${l.match_score != null ? ` (${Math.round(l.match_score)}%)` : ''} · receptura`
+                          : l.matched_name
+                            ? `→ ${l.matched_name}${l.match_score != null ? ` (${Math.round(l.match_score)}%)` : ''}`
+                            : 'Brak dopasowania w magazynie / menu'}
                       </Text>
                     </View>
                   </View>

@@ -32,6 +32,8 @@ import {
   Image as ImageIcon,
   UtensilsCrossed,
   Package,
+  Mail,
+  FileDown,
 } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
 import {
@@ -59,6 +61,17 @@ import {
 } from '@/lib/dishImageMatch';
 import { fetchJson } from '@/lib/safeFetch';
 import { useAuth } from '@/contexts/AuthContext';
+import {
+  OrderEmailComposer,
+  ASSISTANT_FROM_EMAIL,
+  type OrderEmailDraft,
+} from '@/components/OrderEmailComposer';
+import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
+import {
+  buildRecipesEmailBody,
+  generateRecipesPdfFile,
+  shareRecipesPdf,
+} from '@/services/recipesPdf';
 
 const COLS = 2;
 const GAP = 10;
@@ -111,7 +124,7 @@ function findSlugForName(name: string): string | undefined {
 
 export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }: Props) {
   const theme = useAppTheme();
-  const { accountKey } = useAuth();
+  const { accountKey, user, profile } = useAuth();
   const { alert: premiumAlert } = usePremiumAlert();
   const prem = theme.isPremium;
   const accent = prem ? DS.color.greenEnd : Colors.accent;
@@ -131,6 +144,11 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
   const [stage, setStage] = useState<Stage>('grid');
   const [recipes, setRecipes] = useState<UserRecipe[]>([]);
   const [selected, setSelected] = useState<UserRecipe | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [pickedIds, setPickedIds] = useState<Set<string>>(() => new Set());
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [emailDraft, setEmailDraft] = useState<OrderEmailDraft | null>(null);
+  const [showEmail, setShowEmail] = useState(false);
   const [name, setName] = useState('');
   const [instructions, setInstructions] = useState('');
   const [ings, setIngs] = useState<{ key: string; name: string; quantity: string; unit: string }[]>([
@@ -152,6 +170,8 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
       void reload();
       setStage('grid');
       setSelected(null);
+      setSelectMode(false);
+      setPickedIds(new Set());
       resetAdd();
     }
     // accountKey: po przelogowaniu przeładuj listę tenanta (nie pokazuj receptur innego konta)
@@ -184,7 +204,66 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
     resetAdd();
     setStage('grid');
     setSelected(null);
+    setSelectMode(false);
+    setPickedIds(new Set());
+    setShowEmail(false);
+    setEmailDraft(null);
     onClose();
+  };
+
+  const togglePick = (id: string) => {
+    setPickedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const packAndSendRecipes = async (list: UserRecipe[]) => {
+    if (!list.length) {
+      premiumAlert('Brak wyboru', 'Zaznacz receptury albo wybierz „Wszystkie”.');
+      return;
+    }
+    setPdfBusy(true);
+    try {
+      const restaurantName = profile?.restaurant_name || undefined;
+      const { uri, fileName } = await generateRecipesPdfFile(list, { restaurantName });
+      const body = buildRecipesEmailBody(list, restaurantName);
+      let fromEmail = ASSISTANT_FROM_EMAIL;
+      let mailBody = body;
+      try {
+        const resolved = await resolveOrderEmailFrom(
+          body,
+          ASSISTANT_FROM_EMAIL,
+          user?.email || profile?.email,
+        );
+        fromEmail = resolved.fromEmail;
+        mailBody = resolved.body;
+      } catch {
+        /* asystent */
+      }
+      setEmailDraft({
+        supplierName: restaurantName || 'Receptury',
+        toEmail: '',
+        fromEmail,
+        subject: `Receptury (${list.length}) — Gastro Manager`,
+        body: mailBody,
+      });
+      setShowEmail(true);
+      // PDF do załączenia: share sheet (Mail / Drive / …)
+      try {
+        await shareRecipesPdf(uri, fileName);
+      } catch {
+        /* użytkownik mógł anulować share — mail i tak otwarty */
+      }
+      setSelectMode(false);
+      setPickedIds(new Set());
+    } catch (e: any) {
+      premiumAlert('PDF / e-mail', e?.message ?? 'Nie udało się przygotować receptur.');
+    } finally {
+      setPdfBusy(false);
+    }
   };
 
   const previewAsset = useMemo(() => resolveThumb(name || 'danie', findSlugForName(name)), [name]);
@@ -454,10 +533,94 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
                   label="+ Dodaj recepturę"
                   onPress={() => {
                     resetAdd();
+                    setSelectMode(false);
                     setStage('add');
                   }}
                   icon={<Plus size={16} color="#0A0A0A" strokeWidth={2.5} />}
                 />
+                {recipes.length > 0 ? (
+                  <View style={{ gap: 8 }}>
+                    {!selectMode ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.toolBtn,
+                          { borderColor: border, backgroundColor: card },
+                        ]}
+                        onPress={() => {
+                          setSelectMode(true);
+                          setPickedIds(new Set());
+                        }}
+                        activeOpacity={0.85}
+                        testID="recipes-send-pdf"
+                      >
+                        <Mail size={15} color={accent} strokeWidth={2.4} />
+                        <Text style={[styles.toolBtnText, { color: text }]}>Wyślij PDF</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={{ gap: 8 }}>
+                        <Text style={[styles.intro, { color: muted, marginBottom: 0 }]}>
+                          Zaznacz receptury, potem „Wybrane” albo wyślij wszystkie.
+                        </Text>
+                        <View style={styles.toolRow}>
+                          <TouchableOpacity
+                            style={[
+                              styles.toolBtn,
+                              {
+                                borderColor: accent,
+                                backgroundColor: prem ? 'rgba(0,255,120,0.14)' : Colors.accentLight,
+                                opacity: pdfBusy ? 0.6 : 1,
+                              },
+                            ]}
+                            disabled={pdfBusy}
+                            onPress={() => void packAndSendRecipes(recipes)}
+                            activeOpacity={0.85}
+                            testID="recipes-send-all"
+                          >
+                            {pdfBusy ? (
+                              <ActivityIndicator size="small" color={accent} />
+                            ) : (
+                              <FileDown size={15} color={accent} strokeWidth={2.4} />
+                            )}
+                            <Text style={[styles.toolBtnText, { color: text }]}>Wszystkie</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[
+                              styles.toolBtn,
+                              {
+                                borderColor: border,
+                                backgroundColor: card,
+                                opacity: pdfBusy ? 0.6 : 1,
+                              },
+                            ]}
+                            disabled={pdfBusy}
+                            onPress={() =>
+                              void packAndSendRecipes(
+                                recipes.filter((r) => pickedIds.has(r.id)),
+                              )
+                            }
+                            activeOpacity={0.85}
+                            testID="recipes-send-selected"
+                          >
+                            <Mail size={15} color={accent} strokeWidth={2.4} />
+                            <Text style={[styles.toolBtnText, { color: text }]}>
+                              Wybrane ({pickedIds.size})
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => {
+                            setSelectMode(false);
+                            setPickedIds(new Set());
+                          }}
+                        >
+                          <Text style={{ color: muted, fontWeight: '700', fontSize: 12 }}>
+                            Anuluj zaznaczanie
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                ) : null}
               </View>
             }
             ListEmptyComponent={
@@ -468,29 +631,57 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
                 </Text>
               </View>
             }
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[styles.tile, { width: TILE_W, backgroundColor: card, borderColor: border }]}
-                onPress={() => {
-                  setSelected(item);
-                  setStage('detail');
-                }}
-                activeOpacity={0.88}
-              >
-                <Image
-                  source={resolveThumb(item.name, item.imageSlug)}
-                  style={styles.tileImg}
-                  resizeMode="contain"
-                />
-                <Text style={[styles.tileLabel, { color: text }]} numberOfLines={2}>
-                  {item.name}
-                </Text>
-                <Text style={[styles.tileMeta, { color: muted }]}>
-                  {item.ingredients.length} skł.
-                  {item.instructions?.trim() ? ' · przepis' : ''}
-                </Text>
-              </TouchableOpacity>
-            )}
+            renderItem={({ item }) => {
+              const picked = pickedIds.has(item.id);
+              return (
+                <TouchableOpacity
+                  style={[
+                    styles.tile,
+                    {
+                      width: TILE_W,
+                      backgroundColor: card,
+                      borderColor: selectMode && picked ? accent : border,
+                      borderWidth: selectMode && picked ? 2 : 1,
+                    },
+                  ]}
+                  onPress={() => {
+                    if (selectMode) {
+                      togglePick(item.id);
+                      return;
+                    }
+                    setSelected(item);
+                    setStage('detail');
+                  }}
+                  activeOpacity={0.88}
+                >
+                  {selectMode ? (
+                    <View
+                      style={[
+                        styles.checkBadge,
+                        {
+                          backgroundColor: picked ? accent : 'rgba(0,0,0,0.45)',
+                          borderColor: picked ? accent : '#fff',
+                        },
+                      ]}
+                    >
+                      {picked ? <Check size={12} color="#0A0A0A" strokeWidth={3} /> : null}
+                    </View>
+                  ) : null}
+                  <Image
+                    source={resolveThumb(item.name, item.imageSlug)}
+                    style={styles.tileImg}
+                    resizeMode="contain"
+                  />
+                  <Text style={[styles.tileLabel, { color: text }]} numberOfLines={2}>
+                    {item.name}
+                  </Text>
+                  <Text style={[styles.tileMeta, { color: muted }]}>
+                    {item.ingredients.length} skł.
+                    {item.instructions?.trim() ? ' · przepis' : ''}
+                  </Text>
+                </TouchableOpacity>
+              );
+            }}
           />
         )}
 
@@ -695,6 +886,15 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
         )}
       </SafeAreaView>
 
+      <OrderEmailComposer
+        visible={showEmail}
+        draft={emailDraft}
+        onClose={() => {
+          setShowEmail(false);
+          setEmailDraft(null);
+        }}
+      />
+
       {/* Custom dark-premium source picker (replaces system Alert for OCR) */}
       <Modal
         visible={scanSheetVisible}
@@ -784,6 +984,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     overflow: 'hidden',
     marginBottom: GAP,
+  },
+  checkBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    zIndex: 2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   tileImg: { width: '100%', height: TILE_W, backgroundColor: '#111' },
   tileLabel: { fontSize: 12, fontWeight: '700', paddingHorizontal: 8, paddingTop: 8 },

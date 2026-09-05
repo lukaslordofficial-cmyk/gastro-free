@@ -41,6 +41,11 @@ export function MenuRecipeRowHeader({
             {menuItem.category ? (
               <Text style={[styles.itemCategory, { color: textSecondary }]}>{menuItem.category}</Text>
             ) : null}
+            {menuItem.pos_id ? (
+              <Text style={[styles.itemCategory, { color: textSecondary }]}>
+                Nr POS: {menuItem.pos_id}
+              </Text>
+            ) : null}
           </View>
         </View>
         <View style={styles.headerRight}>

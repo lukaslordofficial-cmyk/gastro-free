@@ -22,12 +22,16 @@ import {
   LogOut,
   FileText,
   Trash2,
+  Hash,
+  Share2,
 } from 'lucide-react-native';
 import {
   fetchActiveMenuPosList,
   fetchSettingsBundle,
   savePosSettings,
 } from '@/services/settingsService';
+import { assignSequentialPosIds } from '@/services/menuRecipeService';
+import { sharePosNumberList } from '@/services/recipesPdf';
 import { Colors } from '@/constants/colors';
 import { CATEGORY_COLORS } from '@/constants/menuUi';
 import MenuRecipeRow, {
@@ -91,6 +95,7 @@ export default function UstawieniaScreen() {
   const [signingOut, setSigningOut] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [settingsPane, setSettingsPane] = useState<SettingsPaneId>('lokal');
+  const [posNumberBusy, setPosNumberBusy] = useState(false);
 
   const handleDeleteAccount = () => {
     premiumAlert(
@@ -258,6 +263,75 @@ export default function UstawieniaScreen() {
 
   const unmappedPosCount = menuItems.filter((m) => !m.pos_id).length;
 
+  const orderedMenuForPos = useMemo(() => {
+    const flat: MenuItemForMapping[] = [];
+    for (const [, items] of menuByCategory) flat.push(...items);
+    return flat;
+  }, [menuByCategory]);
+
+  const handleAssignSequentialPosIds = () => {
+    if (!orderedMenuForPos.length) {
+      premiumAlert('Brak dań', 'Dodaj dania w Menu, potem przypisz numerki.');
+      return;
+    }
+    premiumAlert(
+      'Przypisz numerki 1…',
+      `Nadpisze identyfikatory POS kolejnymi numerami 1–${orderedMenuForPos.length} (kolejność: kategoria, potem nazwa). Kasjerzy będą mogli spisywać tylko numery.`,
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Przypisz',
+          style: 'primary',
+          onPress: () => {
+            void (async () => {
+              setPosNumberBusy(true);
+              try {
+                const { error, assigned } = await assignSequentialPosIds(
+                  orderedMenuForPos.map((m) => m.id),
+                );
+                if (error) {
+                  premiumAlert('Błąd', error.message);
+                  return;
+                }
+                premiumAlert('Gotowe', `Przypisano numery 1–${assigned}.`);
+                handleMenuItemChanged();
+              } finally {
+                setPosNumberBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
+  const handleSharePosList = () => {
+    const rows = orderedMenuForPos
+      .filter((m) => m.pos_id)
+      .map((m) => ({
+        pos_id: String(m.pos_id),
+        name: m.name,
+        category: m.category,
+      }));
+    if (!rows.length) {
+      premiumAlert(
+        'Brak numerów',
+        'Najpierw przypisz numerki (przycisk „Przypisz numerki 1…”).',
+      );
+      return;
+    }
+    void (async () => {
+      setPosNumberBusy(true);
+      try {
+        await sharePosNumberList(rows);
+      } catch (e: unknown) {
+        premiumAlert('Udostępnianie', e instanceof Error ? e.message : 'Nie udało się udostępnić listy.');
+      } finally {
+        setPosNumberBusy(false);
+      }
+    })();
+  };
+
   if (loading) return <LoadingScreen />;
   if (error) return <ErrorScreen message={error} />;
 
@@ -282,128 +356,130 @@ export default function UstawieniaScreen() {
 
         <SettingsTopTabs value={settingsPane} onChange={setSettingsPane} />
 
-        {/* ── Konto ── */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Info size={16} color={theme.textSecondary} />
-            <Text style={[styles.sectionTitle, { color: theme.textSecondary }]}>Konto</Text>
-          </View>
-          <View
-            style={[
-              styles.card,
-              theme.isPremium && {
-                backgroundColor: theme.card,
-                borderColor: theme.border,
-              },
-            ]}
-          >
-            <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginBottom: 4 }]}>
-              E-mail
-            </Text>
-            <Text style={{ color: theme.text, fontSize: 14, fontWeight: '600', marginBottom: 10 }}>
-              {user?.email || profile?.email || '—'}
-            </Text>
-            {profile?.restaurant_name ? (
-              <>
+        {settingsPane === 'lokal' ? (
+          <>
+            {/* ── Konto — tylko „Dane lokalu” ── */}
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Info size={16} color={theme.textSecondary} />
+                <Text style={[styles.sectionTitle, { color: theme.textSecondary }]}>Konto</Text>
+              </View>
+              <View
+                style={[
+                  styles.card,
+                  theme.isPremium && {
+                    backgroundColor: theme.card,
+                    borderColor: theme.border,
+                  },
+                ]}
+              >
                 <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginBottom: 4 }]}>
-                  Restauracja
+                  E-mail
                 </Text>
                 <Text style={{ color: theme.text, fontSize: 14, fontWeight: '600', marginBottom: 10 }}>
-                  {profile.restaurant_name}
+                  {user?.email || profile?.email || '—'}
                 </Text>
-              </>
-            ) : null}
-            <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 14 }]}>
-              Klucz konta (kredyty / Stripe): {accountKey}
-            </Text>
-            <TouchableOpacity
-              style={[
-                styles.saveBtn,
-                {
-                  backgroundColor: theme.isPremium ? 'rgba(255,90,90,0.16)' : Colors.dangerLight,
-                  borderWidth: 1,
-                  borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : Colors.danger,
-                },
-                signingOut && styles.saveBtnDisabled,
-              ]}
-              onPress={handleSignOut}
-              disabled={signingOut}
-              activeOpacity={0.85}
-              testID="settings-logout"
-            >
-              {signingOut ? (
-                <ActivityIndicator color={theme.danger} />
-              ) : (
-                <>
-                  <LogOut size={16} color={theme.danger} strokeWidth={2.4} />
-                  <Text style={[styles.saveBtnText, { color: theme.danger }]}>Wyloguj się</Text>
-                </>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.saveBtn,
-                {
-                  marginTop: 10,
-                  backgroundColor: 'transparent',
-                  borderWidth: 1,
-                  borderColor: theme.isPremium ? theme.border : '#CBD5E1',
-                },
-              ]}
-              onPress={() => openLegal(privacyPolicyUrl())}
-              activeOpacity={0.85}
-            >
-              <FileText size={16} color={theme.textSecondary} strokeWidth={2.4} />
-              <Text style={[styles.saveBtnText, { color: theme.text }]}>Polityka prywatności</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.saveBtn,
-                {
-                  marginTop: 10,
-                  backgroundColor: 'transparent',
-                  borderWidth: 1,
-                  borderColor: theme.isPremium ? theme.border : '#CBD5E1',
-                },
-              ]}
-              onPress={() => openLegal(termsUrl())}
-              activeOpacity={0.85}
-            >
-              <FileText size={16} color={theme.textSecondary} strokeWidth={2.4} />
-              <Text style={[styles.saveBtnText, { color: theme.text }]}>Regulamin</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.saveBtn,
-                {
-                  marginTop: 10,
-                  backgroundColor: theme.isPremium ? 'rgba(255,90,90,0.08)' : Colors.dangerLight,
-                  borderWidth: 1,
-                  borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : Colors.danger,
-                },
-                deletingAccount && styles.saveBtnDisabled,
-              ]}
-              onPress={handleDeleteAccount}
-              disabled={deletingAccount || signingOut}
-              activeOpacity={0.85}
-              testID="settings-delete-account"
-            >
-              {deletingAccount ? (
-                <ActivityIndicator color={theme.danger} />
-              ) : (
-                <>
-                  <Trash2 size={16} color={theme.danger} strokeWidth={2.4} />
-                  <Text style={[styles.saveBtnText, { color: theme.danger }]}>Usuń konto</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        </View>
+                {profile?.restaurant_name ? (
+                  <>
+                    <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginBottom: 4 }]}>
+                      Restauracja
+                    </Text>
+                    <Text style={{ color: theme.text, fontSize: 14, fontWeight: '600', marginBottom: 10 }}>
+                      {profile.restaurant_name}
+                    </Text>
+                  </>
+                ) : null}
+                <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 14 }]}>
+                  Klucz konta (kredyty / Stripe): {accountKey}
+                </Text>
+                <TouchableOpacity
+                  style={[
+                    styles.saveBtn,
+                    {
+                      backgroundColor: theme.isPremium ? 'rgba(255,90,90,0.16)' : Colors.dangerLight,
+                      borderWidth: 1,
+                      borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : Colors.danger,
+                    },
+                    signingOut && styles.saveBtnDisabled,
+                  ]}
+                  onPress={handleSignOut}
+                  disabled={signingOut}
+                  activeOpacity={0.85}
+                  testID="settings-logout"
+                >
+                  {signingOut ? (
+                    <ActivityIndicator color={theme.danger} />
+                  ) : (
+                    <>
+                      <LogOut size={16} color={theme.danger} strokeWidth={2.4} />
+                      <Text style={[styles.saveBtnText, { color: theme.danger }]}>Wyloguj się</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.saveBtn,
+                    {
+                      marginTop: 10,
+                      backgroundColor: 'transparent',
+                      borderWidth: 1,
+                      borderColor: theme.isPremium ? theme.border : '#CBD5E1',
+                    },
+                  ]}
+                  onPress={() => openLegal(privacyPolicyUrl())}
+                  activeOpacity={0.85}
+                >
+                  <FileText size={16} color={theme.textSecondary} strokeWidth={2.4} />
+                  <Text style={[styles.saveBtnText, { color: theme.text }]}>Polityka prywatności</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.saveBtn,
+                    {
+                      marginTop: 10,
+                      backgroundColor: 'transparent',
+                      borderWidth: 1,
+                      borderColor: theme.isPremium ? theme.border : '#CBD5E1',
+                    },
+                  ]}
+                  onPress={() => openLegal(termsUrl())}
+                  activeOpacity={0.85}
+                >
+                  <FileText size={16} color={theme.textSecondary} strokeWidth={2.4} />
+                  <Text style={[styles.saveBtnText, { color: theme.text }]}>Regulamin</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.saveBtn,
+                    {
+                      marginTop: 10,
+                      backgroundColor: theme.isPremium ? 'rgba(255,90,90,0.08)' : Colors.dangerLight,
+                      borderWidth: 1,
+                      borderColor: theme.isPremium ? 'rgba(255,90,90,0.35)' : Colors.danger,
+                    },
+                    deletingAccount && styles.saveBtnDisabled,
+                  ]}
+                  onPress={handleDeleteAccount}
+                  disabled={deletingAccount || signingOut}
+                  activeOpacity={0.85}
+                  testID="settings-delete-account"
+                >
+                  {deletingAccount ? (
+                    <ActivityIndicator color={theme.danger} />
+                  ) : (
+                    <>
+                      <Trash2 size={16} color={theme.danger} strokeWidth={2.4} />
+                      <Text style={[styles.saveBtnText, { color: theme.danger }]}>Usuń konto</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
 
-        {settingsPane === 'lokal' ? (
-          <View style={styles.section}>
-            <RestaurantBillingForm />
-          </View>
+            <View style={styles.section}>
+              <RestaurantBillingForm />
+            </View>
+          </>
         ) : null}
 
         {settingsPane === 'pos' ? (
@@ -547,6 +623,58 @@ export default function UstawieniaScreen() {
               </Text>
             </View>
           )}
+
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+            <TouchableOpacity
+              style={[
+                styles.saveBtn,
+                {
+                  flexGrow: 1,
+                  backgroundColor: theme.isPremium ? theme.accent : Colors.accent,
+                  opacity: posNumberBusy ? 0.7 : 1,
+                },
+              ]}
+              onPress={handleAssignSequentialPosIds}
+              disabled={posNumberBusy}
+              activeOpacity={0.85}
+              testID="settings-assign-pos-numbers"
+            >
+              {posNumberBusy ? (
+                <ActivityIndicator color={theme.isPremium ? '#0A0A0A' : '#fff'} />
+              ) : (
+                <>
+                  <Hash size={16} color={theme.isPremium ? '#0A0A0A' : '#fff'} strokeWidth={2.4} />
+                  <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
+                    Przypisz numerki 1…
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saveBtn,
+                {
+                  flexGrow: 1,
+                  backgroundColor: 'transparent',
+                  borderWidth: 1,
+                  borderColor: theme.isPremium ? theme.border : '#CBD5E1',
+                  opacity: posNumberBusy ? 0.7 : 1,
+                },
+              ]}
+              onPress={handleSharePosList}
+              disabled={posNumberBusy}
+              activeOpacity={0.85}
+              testID="settings-share-pos-list"
+            >
+              <Share2 size={16} color={theme.textSecondary} strokeWidth={2.4} />
+              <Text style={[styles.saveBtnText, { color: theme.text }]}>Pobierz listę nr</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 10 }]}>
+            Po przypisaniu numerków kasjer może spisać tylko numery dań (np. „3 × 2”) — skan sprzedaży
+            rozpozna danie po numerze POS i odejmie składniki z magazynu.
+          </Text>
 
           {menuItems.length === 0 ? (
             <View style={styles.emptyState}>

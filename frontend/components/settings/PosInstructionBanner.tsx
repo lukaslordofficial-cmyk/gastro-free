@@ -62,18 +62,9 @@ export function PosInstructionBanner({ providerId }: { providerId: PosProviderId
             Co gdy zniknie internet?
           </Text>
         </View>
-        <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Wklejasz link webhooka w POS jeden raz. Potem nic nie ustawiasz w Gastro-Managerze,
-          gdy padnie internet.
-        </Text>
-        <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 8 }]}>
-          Kelner dalej zbija rachunki na kasie. Gdy net wróci, POS sam powinien dosłać sprzedaże
-          na ten sam link — Ty nie klikasz nic drugi raz.
-        </Text>
-        <Text style={[instrStyles.panelHint, { color: prem ? theme.textMuted : '#3B82F6', marginBottom: 0 }]}>
-          Gastro-Manager nie dubluje magazynu, nawet gdy POS wyśle ten sam rachunek ponownie.
-          Jeśli po awarii sprzedaży nie wracają — to wina kolejki w POS; poproś serwis kasy,
-          żeby włączył ponawianie webhooka. Tego nie robi kelner.
+        <Text style={[instrStyles.stepText, { color: prem ? theme.textSecondary : '#1E3A8A', marginBottom: 0 }]}>
+          POS sam powinien dosłać sprzedaż na ten sam link. Jeśli po awarii sprzedaże nie wrócą,
+          poproś serwis POS, by włączył ponownie webhooka.
         </Text>
       </View>
     </View>

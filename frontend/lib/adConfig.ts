@@ -43,7 +43,12 @@ export const ACTION_INTERSTITIAL_MIN_MS = 90 * 1000;
 /** @deprecated — rewarded za kredyty wyłączone */
 export const REWARDED_DAILY_LIMIT = 0;
 
-/** Production AAB: live units. Preview APK / Metro: test unless EXPO_PUBLIC_ADMOB_USE_LIVE=1. */
+/**
+ * Live units when:
+ * - EAS `production` profile (no EXPO_PUBLIC_ADMOB_USE_TEST_IDS), or
+ * - EXPO_PUBLIC_ADMOB_USE_LIVE=1 on any build.
+ * Test units when: Metro (__DEV__), or EAS preview / preview-apk (TEST_IDS=1).
+ */
 export function useTestAdUnits(): boolean {
   if (process.env.EXPO_PUBLIC_ADMOB_USE_LIVE === '1') return false;
   if (__DEV__) return true;

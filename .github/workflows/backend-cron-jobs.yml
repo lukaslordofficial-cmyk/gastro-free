@@ -1,0 +1,96 @@
+# Crony backendu Gastro Manager (Railway HTTPS).
+# Wymagane sekrety repo: BACKEND_API_URL, CRON_JOB_SECRET
+#
+# BACKEND_API_URL = np. https://gastro-manager-api-production-21dd.up.railway.app
+# CRON_JOB_SECRET = ta sama wartość co zmienna CRON_JOB_SECRET na Railway
+
+name: Backend cron jobs
+
+on:
+  schedule:
+    # Codziennie 05:15 UTC — daty ważności
+    - cron: "15 5 * * *"
+    # Codziennie 05:30 UTC — auto-zamknięcie dnia
+    - cron: "30 5 * * *"
+    # Co 6h — krytyczny stan magazynu
+    - cron: "0 */6 * * *"
+    # Poniedziałek 06:00 UTC — alerty CORE manager
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Który job uruchomić"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - expiry
+          - auto-close
+          - critical-stock
+          - core-alerts
+
+jobs:
+  run-crons:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call cron endpoints
+        env:
+          BASE: ${{ secrets.BACKEND_API_URL }}
+          SECRET: ${{ secrets.CRON_JOB_SECRET }}
+          JOB: ${{ github.event.inputs.job || 'all' }}
+          EVENT_NAME: ${{ github.event_name }}
+          CRON_EXPR: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE:-}" ] || [ -z "${SECRET:-}" ]; then
+            echo "Brak secrets BACKEND_API_URL / CRON_JOB_SECRET — pomijam."
+            exit 0
+          fi
+          BASE="${BASE%/}"
+          call() {
+            local path="$1"
+            echo "→ GET $path"
+            code=$(curl -sS -o /tmp/cron_out.json -w "%{http_code}" \
+              -H "X-Cron-Secret: $SECRET" \
+              -H "Accept: application/json" \
+              "$BASE$path" || true)
+            echo "HTTP $code"
+            head -c 500 /tmp/cron_out.json || true
+            echo
+            if [ "$code" != "200" ]; then
+              echo "Cron failed: $path"
+              exit 1
+            fi
+          }
+
+          # workflow_dispatch
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            case "$JOB" in
+              expiry) call /api/inventory/expiry-daily-job ;;
+              auto-close) call /api/reports/auto-close-daily-job ;;
+              critical-stock) call /api/inventory/critical-stock-job ;;
+              core-alerts) call /api/manager/core-alerts-job ;;
+              all)
+                call /api/inventory/expiry-daily-job
+                call /api/reports/auto-close-daily-job
+                call /api/inventory/critical-stock-job
+                call /api/manager/core-alerts-job
+                ;;
+            esac
+            exit 0
+          fi
+
+          # schedule — dopasuj do cron expression
+          case "$CRON_EXPR" in
+            "15 5 * * *") call /api/inventory/expiry-daily-job ;;
+            "30 5 * * *") call /api/reports/auto-close-daily-job ;;
+            "0 */6 * * *") call /api/inventory/critical-stock-job ;;
+            "0 6 * * 1") call /api/manager/core-alerts-job ;;
+            *)
+              echo "Nieznany schedule: $CRON_EXPR — uruchamiam all"
+              call /api/inventory/expiry-daily-job
+              call /api/reports/auto-close-daily-job
+              call /api/inventory/critical-stock-job
+              ;;
+          esac

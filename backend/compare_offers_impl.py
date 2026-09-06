@@ -447,7 +447,8 @@ async def compare_offers(req: CompareOffersRequest):
             )
             # Gdy już mamy pewne lokalne trafienia — agent może dociągnąć innych dostawców
             # (synonimy). Gdy brak — agent decyduje, czy cokolwiek pasuje.
-            run_agent = bool(ai_pool and ai_item_budget > 0)
+            # Przy żądanej odmianie agent NIE wstawia zamienników do koszyka.
+            run_agent = bool(ai_pool and ai_item_budget > 0 and not it_variant)
             if run_agent:
                 ai_item_budget -= 1
                 # Top kandydaci spoza już zaakceptowanych id
@@ -589,6 +590,8 @@ async def compare_offers(req: CompareOffersRequest):
                     c for c in base_offers
                     if classify_offer(it_variant, variant_base_name, c["row"].get("name") or "") == "exact"
                 ]
+                # Wyczyść ewentualne wcześniejsze trafienia (AI/fuzzy) — bez auto-zamiennika.
+                best_by_supplier.clear()
                 for c in exact:
                     _consider(
                         best_by_supplier, c["row"], c["price_base"], c["base_dim"],

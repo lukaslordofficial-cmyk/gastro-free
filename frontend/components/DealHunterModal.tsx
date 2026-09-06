@@ -48,6 +48,45 @@ import {
   ManualBankPaymentSheet,
   type ManualPaymentOrder,
 } from '@/components/dealHunter/ManualBankPaymentSheet';
+import { formatPln } from '@/lib/format';
+
+async function readApiErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const j = await res.json();
+    const d = j?.detail ?? j?.message ?? j?.error;
+    if (typeof d === 'string' && d.trim()) return d.trim();
+    if (Array.isArray(d)) {
+      const parts = d
+        .map((x) => (typeof x === 'string' ? x : x?.msg || x?.message || ''))
+        .filter(Boolean);
+      if (parts.length) return parts.join(' ');
+    }
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
+
+function minOrderBlockMessage(groups: SupplierGroup[]): string | null {
+  const blocked = groups.filter((g) => {
+    const minV = Number(g.min_order_value ?? 0);
+    if (minV <= 0) return false;
+    const sub = Number(g.subtotal_pln ?? 0);
+    return sub + 1e-6 < minV;
+  });
+  if (!blocked.length) return null;
+  const lines = blocked.map((g) => {
+    const minV = Number(g.min_order_value ?? 0);
+    const sub = Number(g.subtotal_pln ?? 0);
+    const gap = Math.round((minV - sub) * 100) / 100;
+    return `• ${g.supplier_name || 'Dostawca'}: brakuje ${formatPln(gap)} do minimum ${formatPln(minV)}.`;
+  });
+  return (
+    `Nie można przejść dalej — koszyk poniżej minimalnej kwoty zamówienia.\n\n`
+    + `${lines.join('\n')}\n\n`
+    + 'Dodaj produkty i spróbuj ponownie.'
+  );
+}
 import { EditableCartPanel } from '@/components/dealHunter/EditableCartPanel';
 import { MessagePreviewStep } from '@/components/dealHunter/MessagePreviewStep';
 import { DealHunterHeader } from '@/components/dealHunter/DealHunterHeader';
@@ -479,27 +518,34 @@ export function DealHunterModal({
       .join('||');
   }, []);
 
-  const saveDraftCart = useCallback(async () => {
+  const saveDraftCart = useCallback(async (opts?: {
+    allowBelowMinimum?: boolean;
+    silent?: boolean;
+  }): Promise<boolean> => {
     const MAX_GAP = 150;
     const allGroups = selectedSuppliers().filter((g) => g.items.length > 0 && g.supplier_id);
-    const groups = allGroups.filter((g) => {
-      const minV = Number(g.min_order_value ?? 0);
-      if (minV <= 0) return true;
-      const gap = minV - Number(g.subtotal_pln ?? 0);
-      return gap <= MAX_GAP;
-    });
+    const groups = opts?.allowBelowMinimum
+      ? allGroups
+      : allGroups.filter((g) => {
+        const minV = Number(g.min_order_value ?? 0);
+        if (minV <= 0) return true;
+        const gap = minV - Number(g.subtotal_pln ?? 0);
+        return gap <= MAX_GAP;
+      });
     const skipped = allGroups.filter((g) => !groups.includes(g));
     if (groups.length === 0) {
-      premiumAlert(
-        'Za daleko do minimum',
-        skipped.length
-          ? `Nie zapisano koszyka — do minimum brakuje ponad ${MAX_GAP} zł (${skipped.map((g) => g.supplier_name).join(', ')}). `
-            + 'Dorzuć produkty albo wybierz dostawcę bez tak wysokiego limitu.'
-          : 'Brak pozycji do zapisania.',
-      );
-      return;
+      if (!opts?.silent) {
+        premiumAlert(
+          'Za daleko do minimum',
+          skipped.length
+            ? `Nie zapisano koszyka — do minimum brakuje ponad ${MAX_GAP} zł (${skipped.map((g) => g.supplier_name).join(', ')}). `
+              + 'Dorzuć produkty albo wybierz dostawcę bez tak wysokiego limitu.'
+            : 'Brak pozycji do zapisania.',
+        );
+      }
+      return false;
     }
-    if (skipped.length) {
+    if (skipped.length && !opts?.silent) {
       Alert.alert(
         'Pominięto koszyki',
         `Nie zapisano: ${skipped.map((g) => g.supplier_name).join(', ')} — do minimum brakuje ponad ${MAX_GAP} zł.`,
@@ -507,13 +553,16 @@ export function DealHunterModal({
     }
     const fp = draftFingerprint(groups);
     if (lastDraftFpRef.current === fp) {
-      premiumAlert('Już w koszyku', 'Już dodałeś to zamówienie do koszyka.');
-      return;
+      if (!opts?.silent) {
+        premiumAlert('Już w koszyku', 'Już dodałeś to zamówienie do koszyka.');
+      }
+      return true;
     }
     setSavingDraft(true);
     try {
       let saved = 0;
       let savedLocal = 0;
+      let savedItems = 0;
       const { data: authData } = await supabase.auth.getUser();
       const restaurantId = authData?.user?.id ?? null;
       const accountKey = getAccountKey() || null;
@@ -553,6 +602,7 @@ export function DealHunterModal({
           if (rows.length) {
             const { error: itemsErr } = await supabase.from('producer_order_items').insert(rows);
             if (itemsErr) throw itemsErr;
+            savedItems += rows.length;
           }
           savedLocal += 1;
           continue;
@@ -564,7 +614,7 @@ export function DealHunterModal({
             withAccountKey({
               supplier_id: g.supplier_id,
               status: 'draft',
-              notes: null,
+              notes: 'Szkic z Łowcy Okazji',
             }),
           )
           .select('id')
@@ -578,18 +628,39 @@ export function DealHunterModal({
             if (!wid && whName) {
               wid = await supplierOrdersService.resolveWarehouseProductId(whName);
             }
+            const qty = Number(it.quantity) || 0;
             return {
               order_id: order.id,
-              raw_product_name: it.matched_name || it.product_name,
-              price_net: it.unit_price_base ?? null,
+              raw_product_name: (it.matched_name || it.product_name || '').trim() || 'Produkt',
+              price_net: it.unit_price_base != null ? Number(it.unit_price_base) : null,
               unit: it.unit || 'szt',
-              quantity_ordered: Number(it.quantity) || 0,
+              quantity_ordered: qty > 0 ? qty : 1,
               warehouse_product_id: wid,
             };
           }),
         );
+        if (!rows.length) {
+          await supabase.from('supplier_orders').delete().eq('id', order.id);
+          throw new Error(`Koszyk „${g.supplier_name}” nie ma pozycji do zapisania.`);
+        }
         const { error: itemsErr } = await supabase.from('supplier_order_items').insert(rows);
-        if (itemsErr) throw itemsErr;
+        if (itemsErr) {
+          await supabase.from('supplier_orders').delete().eq('id', order.id);
+          throw itemsErr;
+        }
+        const { data: checkRows, error: checkErr } = await supabase
+          .from('supplier_order_items')
+          .select('id')
+          .eq('order_id', order.id);
+        if (checkErr) throw checkErr;
+        if (!(checkRows || []).length) {
+          await supabase.from('supplier_orders').delete().eq('id', order.id);
+          throw new Error(
+            'Zapisano zamówienie, ale pozycje są niewidoczne (uprawnienia RLS). '
+            + 'Uruchom migrację FIX_SUPPLIER_ORDER_ITEMS_RLS_VIA_ORDER.sql w Supabase.',
+          );
+        }
+        savedItems += rows.length;
         saved += 1;
       }
       lastDraftFpRef.current = fp;
@@ -597,19 +668,25 @@ export function DealHunterModal({
         DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
       } catch { /* ignore */ }
       const parts: string[] = [];
-      if (saved) parts.push(`${saved} szkic(ów) u hurtowników (Dostawcy → Koszyk)`);
+      if (saved) parts.push(`${saved} szkic(ów) u hurtowników (${savedItems} poz.)`);
       if (savedLocal) parts.push(`${savedLocal} szkic(ów) u lokalnych przetwórców`);
-      setDraftSavedInfo(
-        parts.length
-          ? `Utworzono: ${parts.join(' · ')}. Otwórz Dostawcy → Koszyk, żeby zobaczyć zapis.`
-          : 'Brak koszyków do zapisania.',
-      );
+      if (!opts?.silent) {
+        setDraftSavedInfo(
+          parts.length
+            ? `Utworzono: ${parts.join(' · ')}. Otwórz Dostawcy → Koszyk, żeby zobaczyć zapis.`
+            : 'Brak koszyków do zapisania.',
+        );
+      }
+      return saved + savedLocal > 0;
     } catch (e: any) {
-      premiumAlert('Błąd', e?.message ?? 'Nie udało się zapisać koszyka.');
+      if (!opts?.silent) {
+        premiumAlert('Błąd', e?.message ?? 'Nie udało się zapisać koszyka.');
+      }
+      return false;
     } finally {
       setSavingDraft(false);
     }
-  }, [selectedSuppliers, draftFingerprint, premiumAlert]);
+  }, [selectedSuppliers, draftFingerprint, product, premiumAlert]);
 
   // When user taps another scenario — drop edits and show that full cart at top
   const selectOption = useCallback((opt: SelectedOption) => {
@@ -686,6 +763,13 @@ export function DealHunterModal({
   const generateMessages = useCallback(async (groups?: SupplierGroup[]) => {
     const suppliers = groups ?? pendingGroups ?? selectedSuppliers();
     if (suppliers.length === 0) return;
+    const minMsg = minOrderBlockMessage(suppliers);
+    if (minMsg) {
+      setError(minMsg);
+      premiumAlert('Minimum zamówienia', minMsg);
+      setStep('compare');
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -697,7 +781,13 @@ export function DealHunterModal({
           suppliers,
         }),
       });
-      if (!res.ok) throw new Error(`Błąd serwera (${res.status})`);
+      if (!res.ok) {
+        const detail = await readApiErrorMessage(
+          res,
+          `Błąd serwera (${res.status})`,
+        );
+        throw new Error(detail);
+      }
       const data = await res.json();
       const msgs: MessageCard[] = data.messages ?? [];
       setMessages(msgs);
@@ -725,10 +815,12 @@ export function DealHunterModal({
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się wygenerować wiadomości.';
       setError(msg);
+      premiumAlert('Nie można przejść dalej', msg);
+      setStep('compare');
     } finally {
       setLoading(false);
     }
-  }, [selectedSuppliers, restaurantName, pendingGroups, contactEmail, accountMail]);
+  }, [selectedSuppliers, restaurantName, pendingGroups, contactEmail, accountMail, premiumAlert]);
 
   const prepareEmailForGroups = useCallback(async (groups: SupplierGroup[]) => {
     if (!groups.length) return;
@@ -1038,6 +1130,35 @@ export function DealHunterModal({
     showOrdersSentFollowUp();
   }, [messages, sendStatus, fromEmails, sendEmail, showOrdersSentFollowUp]);
 
+  const askSaveCartThenClose = useCallback(() => {
+    const hasCart = selectedSuppliers().some((g) => (g.items?.length ?? 0) > 0);
+    if (!hasCart) {
+      onClose();
+      return;
+    }
+    premiumAlert(
+      'Zapisać koszyki?',
+      'Czy chcesz zapisać te koszyki na później?\n\nTak — zapisze w Dostawcy → Koszyk.\nNie — zamknie bez zapisu.',
+      [
+        {
+          text: 'Nie',
+          style: 'cancel',
+          onPress: () => onClose(),
+        },
+        {
+          text: 'Tak',
+          style: 'primary',
+          onPress: () => {
+            void (async () => {
+              await saveDraftCart({ allowBelowMinimum: true });
+              onClose();
+            })();
+          },
+        },
+      ],
+    );
+  }, [selectedSuppliers, onClose, premiumAlert, saveDraftCart]);
+
   const requestClose = useCallback(() => {
     const hasUnsentPreview =
       step === 'preview'
@@ -1046,37 +1167,41 @@ export function DealHunterModal({
         const key = m.supplier_id ?? m.supplier_name;
         return sendStatus[key] !== 'sent';
       });
-    if (!hasUnsentPreview) {
-      onClose();
+    if (hasUnsentPreview) {
+      premiumAlert(
+        'Zamknąć bez wysyłki?',
+        'Nie wysłałeś jeszcze wszystkich zamówień. Czy dodać je do zakładki Przygotowywane dostawy?',
+        [
+          {
+            text: 'Nie dodawaj',
+            style: 'cancel',
+            onPress: () => onClose(),
+          },
+          {
+            text: 'Dodaj do Przygotowywanych',
+            style: 'primary',
+            onPress: () => {
+              void (async () => {
+                for (const m of messages) {
+                  const key = m.supplier_id ?? m.supplier_name;
+                  if (sendStatus[key] === 'sent') continue;
+                  // eslint-disable-next-line no-await-in-loop
+                  await persistSentForMessage(m);
+                }
+                onClose();
+              })();
+            },
+          },
+        ],
+      );
       return;
     }
-    premiumAlert(
-      'Zamknąć bez wysyłki?',
-      'Nie wysłałeś jeszcze wszystkich zamówień. Czy dodać je do zakładki Przygotowywane dostawy?',
-      [
-        {
-          text: 'Nie dodawaj',
-          style: 'cancel',
-          onPress: () => onClose(),
-        },
-        {
-          text: 'Dodaj do Przygotowywanych',
-          style: 'primary',
-          onPress: () => {
-            void (async () => {
-              for (const m of messages) {
-                const key = m.supplier_id ?? m.supplier_name;
-                if (sendStatus[key] === 'sent') continue;
-                // eslint-disable-next-line no-await-in-loop
-                await persistSentForMessage(m);
-              }
-              onClose();
-            })();
-          },
-        },
-      ],
-    );
-  }, [step, messages, sendStatus, onClose, premiumAlert, persistSentForMessage]);
+    if (step === 'contact' || step === 'compare' || step === 'qty') {
+      askSaveCartThenClose();
+      return;
+    }
+    onClose();
+  }, [step, messages, sendStatus, onClose, premiumAlert, persistSentForMessage, askSaveCartThenClose]);
 
   const result = liveResult;
   const stepIndex = step === 'qty' ? 0 : step === 'compare' ? 1 : 2;
@@ -1106,16 +1231,18 @@ export function DealHunterModal({
       return true;
     }
     if (step === 'compare') {
+      // Krok 1 (bulk) / krok Oferty — wstecz = pytanie o zapis, nie wyjście na oślep
       if (isBulkMode) {
-        requestClose();
+        askSaveCartThenClose();
         return true;
       }
       setStep('qty');
       return true;
     }
-    requestClose();
+    // qty (krok 1 single) → pytanie o zapis
+    askSaveCartThenClose();
     return true;
-  }, [showNewOrder, step, isBulkMode, requestClose]);
+  }, [showNewOrder, step, isBulkMode, askSaveCartThenClose]);
 
   useEffect(() => {
     if (!visible) return;

@@ -115,7 +115,18 @@ def test_variant_not_found_shows_substitutes(monkeypatch):
     res = _run(req)
     r = res["variant_reports"][0]
     assert r["exact_found"] is False
-    # nie ma exact → koszyk pusty dla tej pozycji (brak best_option / brak pokrycia)
+    # nie ma exact → koszyk pusty dla tej pozycji (brak auto-zamiennika)
+    assert res.get("best_option") is None
+    groups = (
+        (res.get("scenario_split_max") or {}).get("suppliers")
+        or (res.get("option_optimized") or {}).get("suppliers")
+        or []
+    )
+    assert not any(
+        (it.get("matched_name") or it.get("product_name") or "")
+        for g in groups
+        for it in (g.get("items") or [])
+    ), "zamiennik nie może wejść do koszyka bez decyzji użytkownika"
     labels = {s["variant_label"] for s in r["substitutes"]}
     assert {"Irys", "Gala", "Lord"}.issubset(labels)
     # cheapest substitute variant first (Gala 2.49)

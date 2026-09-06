@@ -19,6 +19,8 @@ export type AreaPoint = {
   label: string;
   value: number;
   subLabel?: string;
+  /** Wyróżnij punkt (np. dzień z kosztem zmiennym / dostawą). */
+  mark?: boolean;
 };
 
 type Props = {
@@ -196,17 +198,31 @@ export function GreenAreaLineChart({
           />
         ) : null}
 
-        {coords.map((p, i) => (
-          <Circle
-            key={`dot-${i}`}
-            cx={p.x}
-            cy={p.y}
-            r={4}
-            fill={p.v < 0 ? '#FF5252' : color}
-            stroke={dark ? '#161616' : '#fff'}
-            strokeWidth={1.5}
-          />
-        ))}
+        {coords.map((p, i) => {
+          const marked = !!points[i]?.mark;
+          return (
+            <React.Fragment key={`dot-${i}`}>
+              {marked ? (
+                <Circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={8}
+                  fill="rgba(255,171,64,0.35)"
+                  stroke="#FFAB40"
+                  strokeWidth={1.5}
+                />
+              ) : null}
+              <Circle
+                cx={p.x}
+                cy={p.y}
+                r={marked ? 5 : 4}
+                fill={p.v < 0 ? '#FF5252' : marked ? '#FFAB40' : color}
+                stroke={dark ? '#161616' : '#fff'}
+                strokeWidth={1.5}
+              />
+            </React.Fragment>
+          );
+        })}
 
         {points.map((pt, i) => {
           const x = coords[i]?.x ?? 0;

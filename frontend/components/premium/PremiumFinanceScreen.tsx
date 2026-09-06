@@ -117,6 +117,9 @@ export function PremiumFinanceScreen(props: Props) {
     dateKey?: string;
     weekday?: string;
     entries: RevenueEntry[];
+    costEntries: VariableCostEntry[];
+    variableCost: number;
+    fixedShare: number;
   } | null>(null);
 
   const totalRevenue = props.revenueEntries.reduce((s, e) => s + Number(e.amount_pln), 0);
@@ -195,9 +198,21 @@ export function PremiumFinanceScreen(props: Props) {
         }
       }
     }
+    const varByDay = new Map<string, number>();
     for (const e of varJ) {
       const ym = e.year_month || '';
       if (ym) varByMonth.set(ym, (varByMonth.get(ym) || 0) + Number(e.amount_pln));
+      const iso = String(e.created_at || '').slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+        // Koszt zmienny (np. dostawa) spada na dzień zapisu — nie rozkładamy na cały miesiąc.
+        varByDay.set(iso, (varByDay.get(iso) || 0) + Number(e.amount_pln));
+      } else if (ym) {
+        const d = new Date(e.created_at);
+        if (!Number.isNaN(d.getTime())) {
+          const k = `${ym}-${String(d.getDate()).padStart(2, '0')}`;
+          varByDay.set(k, (varByDay.get(k) || 0) + Number(e.amount_pln));
+        }
+      }
     }
     for (const e of fixedJ) {
       const ym = e.year_month || '';
@@ -230,28 +245,36 @@ export function PremiumFinanceScreen(props: Props) {
       const [yy, mm] = ym.split('-').map(Number);
       const dim = new Date(yy, mm, 0).getDate();
       const monthFixed = fixedByMonth.get(ym) || 0;
-      const monthVar = varByMonth.get(ym) || 0;
-      // Jak koszty stałe: rozkładamy sumę miesiąca / dni — wtedy dodanie kosztu zmiennego
-      // przesuwa całą linię zysku (wcześniej tylko jeden dzień z created_at).
+      // Stałe: udział dzienny. Zmienne: pełna kwota w dniu created_at (dostawa / skan).
       const dailyFixed = monthFixed / Math.max(dim, 1);
-      const dailyVar = monthVar / Math.max(dim, 1);
-      const pts: { label: string; value: number; dateKey?: string; weekday?: string }[] = [];
+      const pts: {
+        label: string;
+        value: number;
+        dateKey?: string;
+        weekday?: string;
+        hasVariableCost?: boolean;
+        variableCost?: number;
+        fixedShare?: number;
+      }[] = [];
       for (let day = 1; day <= dim; day++) {
         const key = `${ym}-${String(day).padStart(2, '0')}`;
         const rev = revByDay.get(key) || 0;
+        const dayVar = varByDay.get(key) || 0;
         const d = new Date(key + 'T12:00:00');
-        // Zysk dzienny: przychód − fixed/dni − variable/dni
         let value = 0;
         if (chartMetric === 'revenue') {
           value = rev;
         } else {
-          value = rev - dailyFixed - dailyVar;
+          value = rev - dailyFixed - dayVar;
         }
         pts.push({
           label: String(day).padStart(2, '0'),
           value,
           dateKey: key,
           weekday: WEEKDAYS_PL[d.getDay()] ?? '',
+          hasVariableCost: dayVar > 0,
+          variableCost: dayVar,
+          fixedShare: dailyFixed,
         });
       }
       return pts;
@@ -589,14 +612,24 @@ export function PremiumFinanceScreen(props: Props) {
                 onBarPress={(p) => {
                   const key = p.dateKey || '';
                   const entries = (props.revenueJournal || []).filter((e) => {
-                    const d = new Date(e.created_at);
-                    if (Number.isNaN(d.getTime()) || !key) return false;
-                    const dk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                    if (chartGrain === 'day') return dk === key;
-                    if (chartGrain === 'year') return (e.year_month || dk).startsWith(key.slice(0, 4));
-                    return (e.year_month || dk.slice(0, 7)) === key.slice(0, 7);
+                    const iso = String(e.created_at || '').slice(0, 10);
+                    if (chartGrain === 'day') return !!key && iso === key;
+                    if (chartGrain === 'year') return (e.year_month || iso).startsWith(key.slice(0, 4));
+                    return (e.year_month || iso.slice(0, 7)) === key.slice(0, 7);
                   });
-                  setDayReport({ ...p, entries });
+                  const costEntries =
+                    chartGrain === 'day' && key
+                      ? (props.variableCostsJournal || []).filter(
+                          (e) => String(e.created_at || '').slice(0, 10) === key,
+                        )
+                      : [];
+                  setDayReport({
+                    ...p,
+                    entries,
+                    costEntries,
+                    variableCost: Number(p.variableCost || 0),
+                    fixedShare: Number(p.fixedShare || 0),
+                  });
                 }}
               />
             </View>
@@ -657,34 +690,68 @@ export function PremiumFinanceScreen(props: Props) {
                 {formatPLN(dayReport?.value ?? 0)}
               </Text>
               <Text style={{ color: PremiumColors.textMuted, fontSize: 11, marginTop: 4 }}>
-                {(dayReport?.entries.length ?? 0)} wpisów
+                {(dayReport?.entries.length ?? 0)} przychodów
+                {(dayReport?.costEntries.length ?? 0) > 0
+                  ? ` · ${dayReport!.costEntries.length} kosztów zmiennych`
+                  : ''}
               </Text>
+              {chartMetric === 'profit' && (dayReport?.dateKey || '').length >= 10 ? (
+                <Text style={{ color: PremiumColors.textMuted, fontSize: 11, marginTop: 6, lineHeight: 16 }}>
+                  {dayReport!.fixedShare > 0
+                    ? `Udział kosztów stałych: −${formatPLN(dayReport!.fixedShare)}`
+                    : null}
+                  {dayReport!.variableCost > 0
+                    ? `${dayReport!.fixedShare > 0 ? ' · ' : ''}Koszty zmienne: −${formatPLN(dayReport!.variableCost)}`
+                    : null}
+                </Text>
+              ) : null}
             </View>
             <ScrollView style={{ maxHeight: 280 }}>
-              {(dayReport?.entries.length ?? 0) === 0 ? (
+              {(dayReport?.entries.length ?? 0) === 0 && (dayReport?.costEntries.length ?? 0) === 0 ? (
                 <Text style={{ color: PremiumColors.textMuted, fontSize: 13, lineHeight: 19 }}>
                   Brak szczegółowych wpisów w dzienniku dla tego okresu.
                 </Text>
               ) : (
-                dayReport!.entries.map((e) => (
-                  <View
-                    key={e.id}
-                    style={{
-                      flexDirection: 'row',
-                      paddingVertical: 10,
-                      borderBottomWidth: 1,
-                      borderBottomColor: PremiumColors.border,
-                      gap: 10,
-                    }}
-                  >
-                    <Text style={{ flex: 1, color: PremiumColors.text, fontWeight: '600' }}>
-                      {e.description || 'Przychód'}
-                    </Text>
-                    <Text style={{ color: PremiumColors.neon, fontWeight: '800' }}>
-                      {formatPLN(Number(e.amount_pln))}
-                    </Text>
-                  </View>
-                ))
+                <>
+                  {dayReport!.entries.map((e) => (
+                    <View
+                      key={e.id}
+                      style={{
+                        flexDirection: 'row',
+                        paddingVertical: 10,
+                        borderBottomWidth: 1,
+                        borderBottomColor: PremiumColors.border,
+                        gap: 10,
+                      }}
+                    >
+                      <Text style={{ flex: 1, color: PremiumColors.text, fontWeight: '600' }}>
+                        {e.description || 'Przychód'}
+                      </Text>
+                      <Text style={{ color: PremiumColors.neon, fontWeight: '800' }}>
+                        {formatPLN(Number(e.amount_pln))}
+                      </Text>
+                    </View>
+                  ))}
+                  {dayReport!.costEntries.map((e) => (
+                    <View
+                      key={e.id}
+                      style={{
+                        flexDirection: 'row',
+                        paddingVertical: 10,
+                        borderBottomWidth: 1,
+                        borderBottomColor: PremiumColors.border,
+                        gap: 10,
+                      }}
+                    >
+                      <Text style={{ flex: 1, color: PremiumColors.text, fontWeight: '600' }}>
+                        {e.name || 'Koszt zmienny'}
+                      </Text>
+                      <Text style={{ color: '#FF5252', fontWeight: '800' }}>
+                        −{formatPLN(Number(e.amount_pln))}
+                      </Text>
+                    </View>
+                  ))}
+                </>
               )}
             </ScrollView>
           </View>

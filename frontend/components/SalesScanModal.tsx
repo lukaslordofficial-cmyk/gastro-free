@@ -179,7 +179,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
       const day = res.data.sale_date || saleDate;
       const rev = res.data.revenue_added_pln;
       setResultMsg(
-        `Odjęto ${res.data.applied_count ?? 0} pozycji` +
+        `Odjęto ${res.data.applied_count ?? 0} składników z magazynu` +
           (res.data.skipped_count ? ` (pominięto ${res.data.skipped_count})` : '') +
           (day ? ` · finanse dnia ${day}` : '') +
           (rev != null && rev > 0 ? ` · +${rev.toFixed(2)} zł` : '') +
@@ -255,8 +255,9 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
                 autoCorrect={false}
               />
               <Text style={[styles.hint, { marginTop: 4, marginBottom: 12 }]}>
-                Wpisz datę z kartki (np. 2026-09-06). Magazyn odejmie się teraz, przychód trafi w ten
-                dzień.
+                Sprawdź poprawność zapisków. Po akceptacji, na podstawie receptur opisanych w menu,
+                zostaną odjęte produkty z magazynu. Do wskazanego dnia, zostaną też dopisane przychody
+                ze sprzedaży.
               </Text>
               {lines.map((l, idx) => (
                 <View key={`${l.product_name}-${idx}`} style={styles.card}>
@@ -302,7 +303,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
                 ) : (
                   <>
                     <Check size={18} color="#0A0A0A" strokeWidth={2.5} />
-                    <Text style={styles.confirmText}>Odejmij z magazynu</Text>
+                    <Text style={styles.confirmText}>Zapisz</Text>
                   </>
                 )}
               </TouchableOpacity>

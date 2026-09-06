@@ -302,6 +302,33 @@ async def _deduct_inventory_line(
     }
 
 
+async def _fetch_recipe_ingredients(
+    client: httpx.AsyncClient,
+    menu_item_id: str,
+) -> list[dict[str, Any]]:
+    """Składniki receptury — z warehouse_product_id gdy kolumna istnieje."""
+    try:
+        rows = await sb_get(
+            client,
+            "recipe_ingredients",
+            params={
+                "select": "id,ingredient_name,quantity,unit,warehouse_product_id",
+                "menu_item_id": f"eq.{menu_item_id}",
+            },
+        )
+        return rows if isinstance(rows, list) else []
+    except httpx.HTTPStatusError:
+        rows = await sb_get(
+            client,
+            "recipe_ingredients",
+            params={
+                "select": "id,ingredient_name,quantity,unit",
+                "menu_item_id": f"eq.{menu_item_id}",
+            },
+        )
+        return rows if isinstance(rows, list) else []
+
+
 async def _deduct_dish_portions(
     client: httpx.AsyncClient,
     *,
@@ -310,48 +337,67 @@ async def _deduct_dish_portions(
     portions: float,
     dish_name: str,
     note: str,
+    inv_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Odejmij składniki receptury × liczba porcji. Zwraca (applied, skipped)."""
+    """Odejmij składniki receptury × porcje. Mapowanie: warehouse_product_id lub fuzzy nazwa→magazyn."""
     applied: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    ings = await sb_get(
-        client,
-        "recipe_ingredients",
-        params={
-            "select": "id,ingredient_name,quantity,unit,warehouse_product_id",
-            "menu_item_id": f"eq.{menu_item_id}",
-        },
-    ) or []
-    mapped = [r for r in ings if r.get("warehouse_product_id")]
-    if not mapped:
+    ings = await _fetch_recipe_ingredients(client, menu_item_id)
+    if not ings:
         skipped.append(
             {
                 "product_name": dish_name,
-                "reason": "brak zmapowanych składników receptury",
+                "reason": "brak receptury w menu",
             }
         )
         return applied, skipped
 
+    stock = inv_rows if inv_rows is not None else []
     qty = float(portions)
-    for r in mapped:
-        inv_id = str(r.get("warehouse_product_id") or "").strip()
+    for r in ings:
+        ing_name = str(r.get("ingredient_name") or dish_name).strip()
         per = float(r.get("quantity") or 0) * qty
         unit = str(r.get("unit") or "g")
-        if not inv_id or per <= 0:
+        if per <= 0:
+            skipped.append({"product_name": ing_name, "reason": "brak ilości składnika"})
+            continue
+
+        inv_id = str(r.get("warehouse_product_id") or "").strip()
+        if not inv_id and stock:
+            hit_row, score = _resolve_by_fuzzy(
+                ing_name, stock, key="name", threshold=70, strict_food=True,
+            )
+            if hit_row and score >= 70 and hit_row.get("id"):
+                inv_id = str(hit_row["id"])
+                # Zapamiętaj mapowanie na przyszłość (best-effort).
+                rid = str(r.get("id") or "").strip()
+                if rid:
+                    try:
+                        await sb_patch(
+                            client,
+                            "recipe_ingredients",
+                            {"id": f"eq.{rid}"},
+                            {"warehouse_product_id": inv_id},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        if not inv_id:
             skipped.append(
                 {
-                    "product_name": r.get("ingredient_name") or dish_name,
-                    "reason": "brak ilości składnika",
+                    "product_name": ing_name,
+                    "reason": "składnik bez dopasowania w magazynie",
                 }
             )
             continue
+
         hit = await _deduct_inventory_line(
             client,
             ak=ak,
             inv_id=inv_id,
             quantity=per,
             unit=unit,
-            display_name=str(r.get("ingredient_name") or dish_name),
+            display_name=ing_name,
             note=f"{note} · danie {dish_name}",
         )
         if hit:
@@ -361,7 +407,7 @@ async def _deduct_dish_portions(
         else:
             skipped.append(
                 {
-                    "product_name": r.get("ingredient_name") or dish_name,
+                    "product_name": ing_name,
                     "reason": "brak w magazynie",
                 }
             )
@@ -601,6 +647,20 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
 
             menu_by_id = {str(m.get("id")): m for m in menu_rows if m.get("id")}
 
+            inv_rows: list[dict] = []
+            try:
+                inv = await sb_get(
+                    client,
+                    "inventory_items",
+                    params={
+                        "select": "id,name,unit,quantity",
+                        "limit": "2000",
+                    },
+                )
+                inv_rows = inv if isinstance(inv, list) else []
+            except Exception as e:  # noqa: BLE001
+                logger.warning("confirm-sales inventory fetch failed: %s", e)
+
             for line in req.lines:
                 if not line.include:
                     skipped.append({"product_name": line.product_name, "reason": "pominięte"})
@@ -655,6 +715,7 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
                             portions=float(line.quantity),
                             dish_name=dish_name,
                             note=note,
+                            inv_rows=inv_rows,
                         )
                         applied.extend(app)
                         skipped.extend(sk)

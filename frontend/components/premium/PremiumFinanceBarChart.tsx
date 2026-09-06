@@ -6,13 +6,23 @@ import { compactAxisAmount, formatPLN } from './premiumFinanceHelpers';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
+export type FinanceChartPoint = {
+  label: string;
+  value: number;
+  dateKey?: string;
+  weekday?: string;
+  hasVariableCost?: boolean;
+  variableCost?: number;
+  fixedShare?: number;
+};
+
 export function PremiumFinanceBarChart({
   points,
   onBarPress,
   metricLabel,
 }: {
-  points: { label: string; value: number; dateKey?: string; weekday?: string }[];
-  onBarPress?: (p: { label: string; value: number; dateKey?: string; weekday?: string }) => void;
+  points: FinanceChartPoint[];
+  onBarPress?: (p: FinanceChartPoint) => void;
   metricLabel?: string;
 }) {
   const values = points.map((r) => Number(r.value) || 0);
@@ -40,7 +50,7 @@ export function PremiumFinanceBarChart({
   // weekday bywało „2026-01” / „2026” i dawało „202” na każdym ticku.
   const chartPts = points.map((p) => {
     const value = Number(p.value) || 0;
-    return { label: compactAxisAmount(value), value };
+    return { label: compactAxisAmount(value), value, mark: !!p.hasVariableCost };
   });
 
   const slot = Math.max(56, Math.min(72, Math.floor((SCREEN_W - 64) / Math.min(points.length, 7))));
@@ -97,13 +107,18 @@ export function PremiumFinanceBarChart({
               {points.map((r, i) => {
                 const v = values[i];
                 const neg = v < 0;
+                const costDay = !!r.hasVariableCost;
                 return (
                   <TouchableOpacity
                     key={`${r.label}-${i}`}
                     onPress={() => onBarPress?.(r)}
                     activeOpacity={0.8}
                     style={{
-                      backgroundColor: neg ? 'rgba(255,82,82,0.12)' : 'rgba(0,230,118,0.12)',
+                      backgroundColor: costDay
+                        ? 'rgba(255,171,64,0.16)'
+                        : neg
+                          ? 'rgba(255,82,82,0.12)'
+                          : 'rgba(0,230,118,0.12)',
                       borderRadius: 10,
                       paddingHorizontal: 6,
                       paddingVertical: 8,
@@ -111,6 +126,8 @@ export function PremiumFinanceBarChart({
                       width: chipW,
                       alignItems: 'center',
                       overflow: 'visible',
+                      borderWidth: costDay ? 1 : 0,
+                      borderColor: costDay ? '#FFAB40' : 'transparent',
                     }}
                     testID={`premium-bar-${r.dateKey || i}`}
                   >
@@ -124,7 +141,7 @@ export function PremiumFinanceBarChart({
                     </Text>
                     <Text
                       style={{
-                        color: neg ? '#FF5252' : PremiumColors.neon,
+                        color: costDay ? '#FFAB40' : neg ? '#FF5252' : PremiumColors.neon,
                         fontSize: 11,
                         fontWeight: '800',
                         marginTop: 2,
@@ -147,6 +164,7 @@ export function PremiumFinanceBarChart({
       </View>
       <Text style={{ color: PremiumColors.textMuted, fontSize: 11, textAlign: 'center', marginTop: 8 }}>
         Przesuń wykres · dotknij punkt → raport
+        {points.some((p) => p.hasVariableCost) ? ' · pomarańcz = dzień z kosztem zmiennym' : ''}
       </Text>
     </View>
   );

@@ -191,6 +191,7 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
   const [showDealHunter, setShowDealHunter] = useState(false);
   const [dealHunterCompare, setDealHunterCompare] = useState<OptimizeResult | null>(null);
+  const [dealHunterDraftIds, setDealHunterDraftIds] = useState<string[]>([]);
 
   const accent = prem ? DS.color.greenEnd : Colors.accent;
   const text = prem ? DS.color.heading : Colors.textPrimary;
@@ -330,6 +331,7 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
       ]);
       return;
     }
+    setDealHunterDraftIds(usable.map((d) => d.id).filter(Boolean));
     setDealHunterCompare(draftsToOptimizeResult(usable));
     setShowDealHunter(true);
   };
@@ -620,10 +622,12 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
         product={null}
         restaurantName={undefined}
         initialCompare={dealHunterCompare}
+        sourceDraftIds={dealHunterDraftIds}
         bulkContextLabel="Koszyk zamówień"
         onClose={() => {
           setShowDealHunter(false);
           setDealHunterCompare(null);
+          setDealHunterDraftIds([]);
           setReloadKey((k) => k + 1);
         }}
       />

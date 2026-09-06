@@ -94,6 +94,8 @@ export interface Props {
   onClose: () => void;
   initialCompare?: OptimizeResult | null;
   bulkContextLabel?: string;
+  /** ID szkiców z Koszyka — przy zapisie nadpisujemy je zamiast dublować. */
+  sourceDraftIds?: string[];
 }
 
 export type Step = 'qty' | 'compare' | 'contact' | 'preview';

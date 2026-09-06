@@ -108,6 +108,7 @@ export function DealHunterModal({
   onClose,
   initialCompare,
   bulkContextLabel,
+  sourceDraftIds,
 }: Props) {
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
@@ -116,6 +117,8 @@ export function DealHunterModal({
   const accountMail = (user?.email || authProfile?.email || '').trim();
   const { dealHunterUnlocked } = useSubscription();
   const lastDraftFpRef = useRef<string | null>(null);
+  /** Szkice z Koszyka / utworzone w tej sesji — przy kolejnym zapisie zastępujemy, nie dublujemy. */
+  const replaceDraftIdsRef = useRef<string[]>([]);
   const compareScrollRef = useRef<ScrollView>(null);
   const [draftSavedInfo, setDraftSavedInfo] = useState<string | null>(null);
   const [step, setStep] = useState<Step>('qty');
@@ -151,6 +154,19 @@ export function DealHunterModal({
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
 
   const isBulkMode = !!initialCompare;
+
+  const draftFingerprint = useCallback((groups: SupplierGroup[]) => {
+    return groups
+      .map((g) => {
+        const items = g.items
+          .map((it) => `${it.product_name}:${it.quantity}:${it.unit_price_base ?? 0}`)
+          .sort()
+          .join(',');
+        return `${g.supplier_id}|${items}`;
+      })
+      .sort()
+      .join('||');
+  }, []);
 
   const patchSupplierNamesInResult = useCallback(async (normalized: OptimizeResult) => {
     const ids = new Set<string>();
@@ -284,11 +300,21 @@ export function DealHunterModal({
       setDraftSavedInfo(null);
       setPreviewGroups(null);
       setDismissedMissingKeys(new Set());
+      replaceDraftIdsRef.current = [...(sourceDraftIds ?? [])];
       if (initialCompare) {
         setStep('compare');
         setQty('1');
         // Selection + compare w jednym kroku — edytowalny koszyk od razu, bez klikania kafelka.
-        applyCompareResult(initialCompare);
+        const normalized = applyCompareResult(initialCompare);
+        // Przywrócone z Koszyka — traktuj jako już zapisane (bez dublowania przy wyjściu).
+        if ((sourceDraftIds?.length ?? 0) > 0) {
+          const sel = resolveSelectionFromCompare(normalized);
+          const groups = toSupplierGroups(normalized, sel.option, sel.tiedId)
+            .filter((g) => (g.items?.length ?? 0) > 0);
+          lastDraftFpRef.current = draftFingerprint(groups);
+        } else {
+          lastDraftFpRef.current = null;
+        }
       } else if (product) {
         setStep('qty');
         setQty(String(suggestQty(product)));
@@ -297,9 +323,20 @@ export function DealHunterModal({
         setSelectedOption(null);
         setTiedSupplierId(null);
         setCreditsNotice(null);
+        lastDraftFpRef.current = null;
       }
     }
-  }, [visible, product, initialCompare, applyCompareResult, dealHunterUnlocked, premiumAlert, onClose]);
+  }, [
+    visible,
+    product,
+    initialCompare,
+    sourceDraftIds,
+    applyCompareResult,
+    dealHunterUnlocked,
+    premiumAlert,
+    onClose,
+    draftFingerprint,
+  ]);
 
   const liveResult = useMemo(() => {
     if (!compare) return null;
@@ -504,21 +541,11 @@ export function DealHunterModal({
   const [savingDraft, setSavingDraft] = useState(false);
 
   useEffect(() => {
-    if (!visible) lastDraftFpRef.current = null;
+    if (!visible) {
+      lastDraftFpRef.current = null;
+      replaceDraftIdsRef.current = [];
+    }
   }, [visible]);
-
-  const draftFingerprint = useCallback((groups: SupplierGroup[]) => {
-    return groups
-      .map((g) => {
-        const items = g.items
-          .map((it) => `${it.product_name}:${it.quantity}:${it.unit_price_base ?? 0}`)
-          .sort()
-          .join(',');
-        return `${g.supplier_id}|${items}`;
-      })
-      .sort()
-      .join('||');
-  }, []);
 
   const saveDraftCart = useCallback(async (opts?: {
     allowBelowMinimum?: boolean;
@@ -568,6 +595,8 @@ export function DealHunterModal({
       const { data: authData } = await supabase.auth.getUser();
       const restaurantId = authData?.user?.id ?? null;
       const accountKey = getAccountKey() || null;
+      const newDraftIds: string[] = [];
+      const previousDraftIds = [...replaceDraftIdsRef.current];
 
       for (const g of groups) {
         if (g.is_local_producer) {
@@ -589,6 +618,7 @@ export function DealHunterModal({
             .select('id')
             .single();
           if (orderErr || !order) throw orderErr ?? new Error('Nie utworzono zamówienia lokalnego');
+          newDraftIds.push(order.id as string);
           const rows = g.items
             .map((it) => {
               const productId = (it as { catalog_product_id?: string }).catalog_product_id;
@@ -622,6 +652,7 @@ export function DealHunterModal({
           .select('id')
           .single();
         if (orderErr || !order) throw orderErr ?? new Error('Nie utworzono koszyka');
+        newDraftIds.push(order.id as string);
         const rows = await Promise.all(
           g.items.map(async (it) => {
             const whName = (it.product_name || '').trim();
@@ -665,6 +696,16 @@ export function DealHunterModal({
         savedItems += rows.length;
         saved += 1;
       }
+
+      const staleIds = previousDraftIds.filter((id) => !newDraftIds.includes(id));
+      if (staleIds.length) {
+        try {
+          await supplierOrdersService.deleteDrafts(staleIds);
+        } catch {
+          /* nie blokuj sukcesu nowego zapisu */
+        }
+      }
+      replaceDraftIdsRef.current = newDraftIds;
       lastDraftFpRef.current = fp;
       try {
         DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
@@ -675,7 +716,7 @@ export function DealHunterModal({
       if (!opts?.silent) {
         setDraftSavedInfo(
           parts.length
-            ? `Utworzono: ${parts.join(' · ')}. Otwórz Dostawcy → Koszyk, żeby zobaczyć zapis.`
+            ? `Zapisano: ${parts.join(' · ')}. Otwórz Dostawcy → Koszyk, żeby zobaczyć zapis.`
             : 'Brak koszyków do zapisania.',
         );
       }
@@ -1135,8 +1176,14 @@ export function DealHunterModal({
   }, [messages, sendStatus, fromEmails, sendEmail, showOrdersSentFollowUp]);
 
   const askSaveCartThenClose = useCallback(() => {
-    const hasCart = selectedSuppliers().some((g) => (g.items?.length ?? 0) > 0);
-    if (!hasCart) {
+    const cartGroups = selectedSuppliers().filter((g) => (g.items?.length ?? 0) > 0);
+    if (!cartGroups.length) {
+      onClose();
+      return;
+    }
+    const fp = draftFingerprint(cartGroups);
+    // Już zapisane w tej sesji / przywrócone z Koszyka bez zmian — nie dubluj.
+    if (lastDraftFpRef.current === fp) {
       onClose();
       return;
     }
@@ -1161,7 +1208,7 @@ export function DealHunterModal({
         },
       ],
     );
-  }, [selectedSuppliers, onClose, premiumAlert, saveDraftCart]);
+  }, [selectedSuppliers, onClose, premiumAlert, saveDraftCart, draftFingerprint]);
 
   const requestClose = useCallback(() => {
     const hasUnsentPreview =

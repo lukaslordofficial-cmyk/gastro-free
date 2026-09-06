@@ -17,7 +17,7 @@ from supabase_rest import sb_get, sb_patch, sb_post
 router = APIRouter(tags=["daily-reports"])
 logger = logging.getLogger("server")
 
-DAILY_REPORT_AUTO_CLOSE_HOURS = 25
+DAILY_REPORT_AUTO_CLOSE_HOURS = 24
 
 
 class CloseDayRequest(BaseModel):
@@ -172,7 +172,7 @@ async def persist_daily_report(
 
 
 async def auto_close_stale_daily_reports(client) -> list[str]:
-    """Domyka brakujące raporty dobowe, gdy od last close minęło ≥25h."""
+    """Domyka brakujące raporty dobowe, gdy od last close minęło ≥24h."""
     from datetime import datetime as _dt, timezone as _tz, date as _date, timedelta as _td
 
     try:

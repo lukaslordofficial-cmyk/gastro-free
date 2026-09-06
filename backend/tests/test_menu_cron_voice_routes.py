@@ -7,6 +7,8 @@ def test_cron_jobs_paths():
     paths = {getattr(r, "path", None) for r in router.routes}
     assert "/api/inventory/expiry-daily-job" in paths
     assert "/api/manager/core-alerts-job" in paths
+    assert "/api/reports/auto-close-daily-job" in paths
+    assert "/api/inventory/critical-stock-job" in paths
 
 
 def test_menu_vision_paths():

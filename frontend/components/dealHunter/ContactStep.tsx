@@ -31,6 +31,7 @@ export function ContactStep({
 }: Props) {
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
+  const ctaFg = C.isPremium ? '#0A0A0A' : C.white;
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -79,11 +80,11 @@ export function ContactStep({
           testID="deal-hunter-save-profile-btn"
         >
           {savingProfile ? (
-            <ActivityIndicator size="small" color={C.white} />
+            <ActivityIndicator size="small" color={ctaFg} />
           ) : (
             <>
-              <Text style={styles.primaryBtnText}>Zapisz i przejdź do podglądu</Text>
-              <ChevronRight size={17} color={C.white} strokeWidth={2.2} />
+              <Text style={[styles.primaryBtnText, { color: ctaFg }]}>Zapisz i przejdź do podglądu</Text>
+              <ChevronRight size={17} color={ctaFg} strokeWidth={2.2} />
             </>
           )}
         </TouchableOpacity>

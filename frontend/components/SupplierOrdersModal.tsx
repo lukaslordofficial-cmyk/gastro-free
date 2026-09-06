@@ -12,13 +12,14 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { X, PackageCheck, Truck } from 'lucide-react-native';
+import { X, PackageCheck, Truck, ChevronDown, ChevronRight, Trash2 } from 'lucide-react-native';
 import { Colors } from '@/constants/colors';
 import { DS } from '@/constants/premiumTheme';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { formatPln } from '@/lib/format';
 import {
+  deletePreparingOrder,
   fetchOrdersByStatuses,
   orderLineTotal,
   receiveSupplierOrder,
@@ -63,6 +64,7 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [preparing, setPreparing] = useState<SupplierOrderFull[]>([]);
   const [done, setDone] = useState<SupplierOrderFull[]>([]);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const bg = prem ? DS.color.bgPrimary : Colors.background;
   const card = prem ? DS.color.surfaceCard : Colors.card;
@@ -98,7 +100,8 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
   const onReceive = (order: SupplierOrderFull) => {
     alert(
       'Odebrałem dostawę',
-      'Czy przenieść produkty z zamówienia do magazynu i wpisać koszty zmienne (suma pozycji)?',
+      'Czy dodać produkty do magazynu i zwiększyć koszty zmienne?\n\n'
+      + 'Jeśli klikniesz Tak, nie musisz już skanować faktury/rachunku za to zamówienie.',
       [
         { text: 'Anuluj', style: 'cancel' },
         {
@@ -127,16 +130,17 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
       });
       await reload();
       setTab('done');
-      if (applyInventory && assignments.length) {
-        alert('Magazyn zaktualizowany', formatAssignmentsMessage(assignments), [
-          { text: 'OK', style: 'primary' },
-        ]);
+      if (applyInventory) {
+        alert(
+          'Dodano do magazynu',
+          `${formatAssignmentsMessage(assignments)}\n\n`
+          + 'Nie musisz już skanować faktury za to zamówienie — magazyn i koszty zostały zaktualizowane.',
+          [{ text: 'OK', style: 'primary' }],
+        );
       } else {
         alert(
           'Gotowe',
-          applyInventory || applyVariableCost
-            ? 'Zamówienie w „Zrealizowane”. Magazyn/koszty zaktualizowane zgodnie z wyborem.'
-            : 'Zamówienie przeniesione do „Zrealizowane”.',
+          'Zamówienie przeniesione do „Zrealizowane”.',
           [{ text: 'OK', style: 'primary' }],
         );
       }
@@ -146,6 +150,34 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
     } finally {
       setBusyId(null);
     }
+  };
+
+  const onDelete = (order: SupplierOrderFull) => {
+    alert(
+      'Usuń zamówienie',
+      `Usunąć przygotowywaną dostawę od „${order.suppliers?.name || 'dostawcy'}”?`,
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Usuń',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBusyId(order.id);
+              try {
+                await deletePreparingOrder(order.id);
+                await reload();
+              } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : 'Nie udało się usunąć.';
+                alert('Błąd', msg);
+              } finally {
+                setBusyId(null);
+              }
+            })();
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -204,7 +236,7 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
                 </Text>
                 <Text style={[styles.emptySub, { color: muted }]}>
                   {tab === 'preparing'
-                    ? 'Po „Złóż zamówienie” i przejściu do maila zamówienie pojawi się tutaj.'
+                    ? 'Po wysłaniu zamówienia (e-mail/SMS) pojawi się tutaj.'
                     : 'Po „Odebrałem dostawę” zamówienia trafią do tej zakładki.'}
                 </Text>
               </View>
@@ -215,8 +247,12 @@ export function SupplierOrdersModal({ visible, onClose }: Props) {
                   order={o}
                   colors={{ card, border, text, muted, accent, prem }}
                   showReceive={tab === 'preparing'}
+                  showDelete={tab === 'preparing'}
+                  expanded={expandedId === o.id}
+                  onToggle={() => setExpandedId((id) => (id === o.id ? null : o.id))}
                   busy={busyId === o.id}
                   onReceive={() => onReceive(o)}
+                  onDelete={() => onDelete(o)}
                 />
               ))
             )}
@@ -232,8 +268,12 @@ function OrderCard({
   order,
   colors: C,
   showReceive,
+  showDelete,
+  expanded,
+  onToggle,
   busy,
   onReceive,
+  onDelete,
 }: {
   order: SupplierOrderFull;
   colors: {
@@ -245,8 +285,12 @@ function OrderCard({
     prem?: boolean;
   };
   showReceive: boolean;
+  showDelete: boolean;
+  expanded: boolean;
+  onToggle: () => void;
   busy: boolean;
   onReceive: () => void;
+  onDelete: () => void;
 }) {
   const items = order.supplier_order_items || [];
   const total = useMemo(() => orderLineTotal(items), [items]);
@@ -254,69 +298,95 @@ function OrderCard({
 
   return (
     <View style={[styles.card, { backgroundColor: C.card, borderColor: C.border }]}>
-      <Text style={[styles.cardTitle, { color: C.text }]}>
-        {supplier?.name || 'Dostawca'}
-      </Text>
-      <Text style={[styles.meta, { color: C.muted }]}>
-        Data: {formatPlDate(order.created_at)} · status: {order.status}
-      </Text>
-      {supplier?.email ? (
-        <Text style={[styles.meta, { color: C.muted }]}>E-mail: {supplier.email}</Text>
-      ) : null}
-      {supplier?.phone ? (
-        <Text style={[styles.meta, { color: C.muted }]}>Tel.: {supplier.phone}</Text>
-      ) : null}
-      {supplier?.address ? (
-        <Text style={[styles.meta, { color: C.muted }]}>Adres: {supplier.address}</Text>
-      ) : null}
-      {supplier?.nip ? (
-        <Text style={[styles.meta, { color: C.muted }]}>NIP: {supplier.nip}</Text>
-      ) : null}
-      {supplier?.bank_account ? (
-        <Text style={[styles.meta, { color: C.muted }]}>Konto: {supplier.bank_account}</Text>
-      ) : null}
-      {order.notes ? (
-        <Text style={[styles.meta, { color: C.muted }]}>Uwagi: {order.notes}</Text>
-      ) : null}
-
-      <Text style={[styles.section, { color: C.text }]}>Pozycje</Text>
-      {items.map((it) => {
-        const line =
-          it.price_net != null ? Number(it.price_net) * (Number(it.quantity_ordered) || 0) : null;
-        return (
-          <View key={it.id} style={styles.line}>
-            <Text style={[styles.lineName, { color: C.text }]} numberOfLines={2}>
-              {it.raw_product_name}
+      <TouchableOpacity onPress={onToggle} activeOpacity={0.85} testID={`supplier-order-toggle-${order.id}`}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.cardTitle, { color: C.text }]}>
+              {supplier?.name || 'Dostawca'}
             </Text>
-            <Text style={[styles.lineMeta, { color: C.muted }]}>
-              {it.quantity_ordered} {it.unit}
-              {it.price_net != null ? ` · ${formatPln(Number(it.price_net))}/${it.unit}` : ''}
-              {line != null ? ` · ${formatPln(line)}` : ''}
+            <Text style={[styles.meta, { color: C.muted }]}>
+              Data: {formatPlDate(order.received_at || order.created_at)} · {items.length} poz. · {formatPln(total)}
             </Text>
-          </View>
-        );
-      })}
-      <Text style={[styles.total, { color: C.text }]}>Suma: {formatPln(total)}</Text>
-
-      {showReceive ? (
-        <TouchableOpacity
-          style={[styles.receiveBtn, { backgroundColor: C.accent, opacity: busy ? 0.6 : 1 }]}
-          onPress={onReceive}
-          disabled={busy}
-          activeOpacity={0.85}
-          testID={`supplier-order-receive-${order.id}`}
-        >
-          {busy ? (
-            <ActivityIndicator color={C.prem ? '#0A0A0A' : '#fff'} />
-          ) : (
-            <>
-              <PackageCheck size={16} color={C.prem ? '#0A0A0A' : '#fff'} strokeWidth={2.4} />
-              <Text style={[styles.receiveText, { color: C.prem ? '#0A0A0A' : '#fff' }]}>
-                Odebrałem dostawę
+            {order.notes ? (
+              <Text style={[styles.meta, { color: C.muted }]} numberOfLines={1}>
+                {order.notes}
               </Text>
-            </>
+            ) : null}
+          </View>
+          {expanded ? (
+            <ChevronDown size={20} color={C.muted} strokeWidth={2.2} />
+          ) : (
+            <ChevronRight size={20} color={C.muted} strokeWidth={2.2} />
           )}
-        </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+
+      {expanded ? (
+        <View style={{ marginTop: 10 }}>
+          {supplier?.email ? (
+            <Text style={[styles.meta, { color: C.muted }]}>E-mail: {supplier.email}</Text>
+          ) : null}
+          {supplier?.phone ? (
+            <Text style={[styles.meta, { color: C.muted }]}>Tel.: {supplier.phone}</Text>
+          ) : null}
+
+          <Text style={[styles.section, { color: C.text }]}>Pozycje</Text>
+          {items.length === 0 ? (
+            <Text style={[styles.meta, { color: C.muted }]}>Brak pozycji w zamówieniu.</Text>
+          ) : (
+            items.map((it) => {
+              const line =
+                it.price_net != null ? Number(it.price_net) * (Number(it.quantity_ordered) || 0) : null;
+              return (
+                <View key={it.id} style={styles.line}>
+                  <Text style={[styles.lineName, { color: C.text }]} numberOfLines={2}>
+                    {it.raw_product_name}
+                  </Text>
+                  <Text style={[styles.lineMeta, { color: C.muted }]}>
+                    {it.quantity_ordered} {it.unit}
+                    {it.price_net != null ? ` · ${formatPln(Number(it.price_net))}/${it.unit}` : ''}
+                    {line != null ? ` · ${formatPln(line)}` : ''}
+                  </Text>
+                </View>
+              );
+            })
+          )}
+          <Text style={[styles.total, { color: C.text }]}>Suma: {formatPln(total)}</Text>
+
+          {showReceive ? (
+            <TouchableOpacity
+              style={[styles.receiveBtn, { backgroundColor: C.accent, opacity: busy ? 0.6 : 1 }]}
+              onPress={onReceive}
+              disabled={busy}
+              activeOpacity={0.85}
+              testID={`supplier-order-receive-${order.id}`}
+            >
+              {busy ? (
+                <ActivityIndicator color={C.prem ? '#0A0A0A' : '#fff'} />
+              ) : (
+                <>
+                  <PackageCheck size={16} color={C.prem ? '#0A0A0A' : '#fff'} strokeWidth={2.4} />
+                  <Text style={[styles.receiveText, { color: C.prem ? '#0A0A0A' : '#fff' }]}>
+                    Odebrałem dostawę
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+          ) : null}
+
+          {showDelete ? (
+            <TouchableOpacity
+              style={[styles.deleteBtn, { borderColor: C.border, opacity: busy ? 0.6 : 1 }]}
+              onPress={onDelete}
+              disabled={busy}
+              activeOpacity={0.85}
+              testID={`supplier-order-delete-${order.id}`}
+            >
+              <Trash2 size={15} color="#DC2626" strokeWidth={2.2} />
+              <Text style={styles.deleteText}>Usuń z przygotowywanych</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       ) : null}
     </View>
   );
@@ -348,26 +418,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: 'rgba(127,127,127,0.12)',
   },
-  tabText: { fontSize: 12, fontWeight: '800' },
-  body: { padding: 16, paddingBottom: 40, gap: 12 },
-  empty: { alignItems: 'center', paddingTop: 48, gap: 10, paddingHorizontal: 24 },
-  emptyTitle: { fontSize: 15, fontWeight: '700', textAlign: 'center' },
-  emptySub: { fontSize: 13, lineHeight: 18, textAlign: 'center' },
+  tabText: { fontSize: 13, fontWeight: '700' },
+  body: { paddingHorizontal: 16, paddingTop: 8 },
+  empty: { alignItems: 'center', paddingTop: 48, gap: 8, paddingHorizontal: 24 },
+  emptyTitle: { fontSize: 16, fontWeight: '700', textAlign: 'center' },
+  emptySub: { fontSize: 13, textAlign: 'center', lineHeight: 18 },
   card: {
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 14,
     padding: 14,
-    gap: 4,
+    marginBottom: 10,
   },
-  cardTitle: { fontSize: 16, fontWeight: '800', marginBottom: 4 },
-  meta: { fontSize: 12, lineHeight: 17 },
-  section: { marginTop: 10, marginBottom: 4, fontSize: 12, fontWeight: '800' },
-  line: { marginBottom: 6 },
+  cardTitle: { fontSize: 15, fontWeight: '800' },
+  meta: { fontSize: 12, marginTop: 2 },
+  section: { fontSize: 13, fontWeight: '700', marginTop: 10, marginBottom: 6 },
+  line: { marginBottom: 8 },
   lineName: { fontSize: 13, fontWeight: '600' },
-  lineMeta: { fontSize: 11, marginTop: 2 },
-  total: { marginTop: 8, fontSize: 14, fontWeight: '800' },
+  lineMeta: { fontSize: 12, marginTop: 2 },
+  total: { fontSize: 14, fontWeight: '800', marginTop: 4, marginBottom: 8 },
   receiveBtn: {
-    marginTop: 12,
+    marginTop: 8,
     borderRadius: 12,
     paddingVertical: 12,
     flexDirection: 'row',
@@ -376,4 +446,15 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   receiveText: { fontSize: 14, fontWeight: '800' },
+  deleteBtn: {
+    marginTop: 8,
+    borderRadius: 12,
+    paddingVertical: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  deleteText: { fontSize: 13, fontWeight: '700', color: '#DC2626' },
 });

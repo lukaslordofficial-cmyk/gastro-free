@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,8 @@ import {
   Package,
   CreditCard,
   Landmark,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react-native';
 import { formatPln } from '@/lib/format';
 import type { OptimizeResult, SupplierGroup } from '@/lib/bargainHunter';
@@ -35,6 +37,17 @@ export type SubstituteOffer = {
   is_local_producer?: boolean;
 };
 
+export type BasketMissingOffer = {
+  productName: string;
+  supplier_id: string;
+  supplier_name: string;
+  supplier_email?: string | null;
+  unit_price_base: number;
+  unit: string;
+  matched_name?: string;
+  quantity: number;
+};
+
 type Props = {
   effectiveSelectedOption: SelectedOption;
   result: OptimizeResult | null;
@@ -44,6 +57,7 @@ type Props = {
   onQtyChange: (key: string, qty: number) => void;
   onRemoveItem: (supplierId: string | null, productName: string) => void;
   onAddSubstitute: (offer: SubstituteOffer, variantLabel: string) => void;
+  onAddMissingOffer: (offer: BasketMissingOffer) => void;
   onOpenNewOrder: () => void;
   onOpenCatalog: (picker: { id: string; name: string }) => void;
   onPrepareEmail: (groups: SupplierGroup[]) => void;
@@ -61,6 +75,7 @@ export function EditableCartPanel({
   onQtyChange,
   onRemoveItem,
   onAddSubstitute,
+  onAddMissingOffer,
   onOpenNewOrder,
   onOpenCatalog,
   onPrepareEmail,
@@ -70,6 +85,7 @@ export function EditableCartPanel({
 }: Props) {
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
+  const [packExpanded, setPackExpanded] = useState(false);
 
   const orderable = groups.filter(
     (g) => (g.min_order_value ?? 0) <= 0 || g.meets_minimum_order !== false,
@@ -79,9 +95,9 @@ export function EditableCartPanel({
   const ctaFg = C.isPremium ? '#0A0A0A' : C.white;
 
   // Braki: (1) nie ma w katalogach, (2) są w katalogu, ale nie weszły do koszyka (min. zamówienia itd.)
-  const { catalogMissing, basketMissing } = (() => {
+  const { catalogMissing, basketMissingOffers } = (() => {
     const catalog: string[] = [];
-    const basket: string[] = [];
+    const basketNames: string[] = [];
     const seenCat = new Set<string>();
     const seenBasket = new Set<string>();
     const pushUnique = (list: string[], seen: Set<string>, name: string) => {
@@ -92,7 +108,7 @@ export function EditableCartPanel({
       list.push(n);
     };
 
-    if (!result) return { catalogMissing: catalog, basketMissing: basket };
+    if (!result) return { catalogMissing: catalog, basketMissingOffers: [] as BasketMissingOffer[] };
 
     for (const r of result.items_requested ?? []) {
       if (r.found) continue;
@@ -102,7 +118,6 @@ export function EditableCartPanel({
       pushUnique(catalog, seenCat, name);
     }
 
-    // Braki scenariusza (znalezione, ale nie przypisane do koszyka)
     const opt = effectiveSelectedOption;
     let scenarioMissing: string[] = [];
     if (opt === 'split_max' || opt === 'monolith' || opt === 'smart_hybrid') {
@@ -124,10 +139,9 @@ export function EditableCartPanel({
         ?? [];
     }
     for (const name of scenarioMissing) {
-      pushUnique(basket, seenBasket, name);
+      pushUnique(basketNames, seenBasket, name);
     }
 
-    // Pozycje „found” których nie ma w aktualnych grupach koszyka
     const inCart = new Set<string>();
     for (const g of groups) {
       for (const it of g.items ?? []) {
@@ -140,12 +154,49 @@ export function EditableCartPanel({
       const name = String(r.product_name || '').trim();
       const key = name.toLowerCase();
       if (!name || inCart.has(key) || seenCat.has(key)) continue;
-      pushUnique(basket, seenBasket, name);
+      pushUnique(basketNames, seenBasket, name);
     }
 
-    // Nie duplikuj nazw już w „brak w katalogu”
-    const basketFiltered = basket.filter((n) => !seenCat.has(n.toLowerCase()));
-    return { catalogMissing: catalog, basketMissing: basketFiltered };
+    const basketFiltered = basketNames.filter((n) => !seenCat.has(n.toLowerCase()));
+    const offers: BasketMissingOffer[] = [];
+    for (const name of basketFiltered) {
+      const matrix = (result.pricing_matrix ?? []).find(
+        (p) => String(p.product_name || '').trim().toLowerCase() === name.toLowerCase()
+          || String(p.product_key || '').trim().toLowerCase() === name.toLowerCase(),
+      );
+      const req = (result.items_requested ?? []).find(
+        (r) => String(r.product_name || '').trim().toLowerCase() === name.toLowerCase(),
+      );
+      const quotes = matrix?.quotes ?? [];
+      const best = [...quotes].sort(
+        (a, b) => Number(a.unit_price_base || 0) - Number(b.unit_price_base || 0),
+      )[0];
+      const fromReq = (req?.offers ?? [])[0];
+      const sid = best?.supplier_id || fromReq?.supplier_id || req?.supplier_id || '';
+      const sname = best?.supplier_name || fromReq?.supplier_name || req?.supplier_name || 'Dostawca';
+      if (!sid && !sname) {
+        offers.push({
+          productName: name,
+          supplier_id: '',
+          supplier_name: 'Nieznany dostawca',
+          unit_price_base: 0,
+          unit: matrix?.unit || req?.unit || 'szt',
+          quantity: matrix?.quantity || req?.quantity || 1,
+        });
+        continue;
+      }
+      offers.push({
+        productName: name,
+        supplier_id: String(sid || ''),
+        supplier_name: String(sname || 'Dostawca'),
+        supplier_email: best?.supplier_email ?? null,
+        unit_price_base: Number(best?.unit_price_base ?? 0),
+        unit: matrix?.unit || req?.unit || 'szt',
+        matched_name: best?.matched_name || fromReq?.matched_name || name,
+        quantity: matrix?.quantity || req?.quantity || 1,
+      });
+    }
+    return { catalogMissing: catalog, basketMissingOffers: offers };
   })();
   const packNotes: string[] = Array.isArray((result as any)?.pack_adjustment_notes)
     ? ((result as any).pack_adjustment_notes as string[]).filter((n) => !!String(n || '').trim())
@@ -377,17 +428,37 @@ export function EditableCartPanel({
 
       {packNotes.length > 0 ? (
         <View style={[styles.missingBox, { borderColor: C.accent, backgroundColor: C.isPremium ? 'rgba(92,255,176,0.08)' : 'rgba(0,0,0,0.04)' }]} testID="deal-hunter-pack-notes">
-          <Text style={[styles.missingTitle, { color: C.accentDark || C.accent }]}>Dopasowanie opakowań</Text>
-          {packNotes.map((note, i) => (
-            <Text key={`pack-note-${i}`} style={[styles.missingName, { color: C.textPrimary, marginBottom: 6 }]}>
-              {note}
+          <TouchableOpacity
+            onPress={() => setPackExpanded((v) => !v)}
+            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+            activeOpacity={0.85}
+            testID="deal-hunter-pack-notes-toggle"
+          >
+            <Text style={[styles.missingTitle, { color: C.accentDark || C.accent, marginBottom: 0 }]}>
+              Dopasowanie opakowań ({packNotes.length})
             </Text>
-          ))}
+            {packExpanded ? (
+              <ChevronDown size={18} color={C.accent} strokeWidth={2.2} />
+            ) : (
+              <ChevronRight size={18} color={C.accent} strokeWidth={2.2} />
+            )}
+          </TouchableOpacity>
+          {packExpanded
+            ? packNotes.map((note, i) => (
+              <Text key={`pack-note-${i}`} style={[styles.missingName, { color: C.textPrimary, marginBottom: 6, marginTop: i === 0 ? 8 : 0 }]}>
+                {note}
+              </Text>
+            ))
+            : (
+              <Text style={[styles.editCartHint, { marginTop: 6, marginBottom: 0 }]}>
+                Zwinięte — rozwiń, aby zobaczyć szczegóły.
+              </Text>
+            )}
         </View>
       ) : null}
-      {catalogMissing.length > 0 || basketMissing.length > 0 ? (
+      {catalogMissing.length > 0 || basketMissingOffers.length > 0 ? (
         <Text style={[styles.editCartHint, { marginBottom: 6 }]} testID="deal-hunter-missing-count">
-          Braki łącznie: {catalogMissing.length + basketMissing.length}
+          Braki łącznie: {catalogMissing.length + basketMissingOffers.length}
           {result?.items_requested?.length
             ? ` z ${result.items_requested.length} pozycji`
             : ''}
@@ -405,17 +476,42 @@ export function EditableCartPanel({
           ))}
         </View>
       ) : null}
-      {basketMissing.length > 0 ? (
+      {basketMissingOffers.length > 0 ? (
         <View style={styles.missingBox} testID="deal-hunter-missing-basket">
           <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
-            Znalezione, ale nie weszły do koszyka ({basketMissing.length})
+            Znalezione, ale nie weszły do koszyka ({basketMissingOffers.length})
             {'\n'}
             (np. za daleko do minimum zamówienia albo reguły optymalizacji)
           </Text>
-          {basketMissing.map((name) => (
-            <Text key={`bask-${name}`} style={styles.missingName} numberOfLines={2}>
-              • {name}
-            </Text>
+          {basketMissingOffers.map((off) => (
+            <View
+              key={`bask-${off.productName}-${off.supplier_id}`}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.missingName, { marginBottom: 2 }]} numberOfLines={2}>
+                  • {off.productName}
+                </Text>
+                <Text style={[styles.editCartHint, { marginBottom: 0 }]} numberOfLines={1}>
+                  {off.supplier_name}
+                  {off.unit_price_base > 0 ? ` · ${formatPln(off.unit_price_base)}` : ''}
+                </Text>
+              </View>
+              {off.supplier_id ? (
+                <TouchableOpacity
+                  onPress={() => onAddMissingOffer(off)}
+                  style={{
+                    width: 30, height: 30, borderRadius: 15,
+                    alignItems: 'center', justifyContent: 'center',
+                    backgroundColor: C.accent,
+                  }}
+                  activeOpacity={0.85}
+                  testID={`deal-hunter-add-missing-${off.productName}`}
+                >
+                  <Plus size={16} color={C.isPremium ? '#0A0A0A' : '#FFFFFF'} strokeWidth={2.6} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
           ))}
         </View>
       ) : null}

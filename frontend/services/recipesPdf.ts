@@ -136,12 +136,24 @@ export async function sharePosNumberList(
     return String(a.pos_id).localeCompare(String(b.pos_id), 'pl');
   });
 
+  // Gdy mało pozycji — zwiększ padding, żeby lista wypełniła kartkę A4 (~900px treści).
+  const n = sorted.length;
+  const targetBodyPx = 780;
+  const basePad = 8;
+  const minPad = 8;
+  const maxPad = 48;
+  let cellPad = basePad;
+  if (n > 0 && n < 28) {
+    const approxRow = Math.floor(targetBodyPx / n);
+    cellPad = Math.max(minPad, Math.min(maxPad, Math.floor((approxRow - 18) / 2)));
+  }
+
   const tableRows = sorted
     .map(
       (r) =>
         `<tr>
-          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-weight:700;width:64px">${esc(String(r.pos_id))}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb">${esc(r.name)}</td>
+          <td style="padding:${cellPad}px 10px;border-bottom:1px solid #e5e7eb;font-weight:700;width:64px;vertical-align:middle">${esc(String(r.pos_id))}</td>
+          <td style="padding:${cellPad}px 10px;border-bottom:1px solid #e5e7eb;vertical-align:middle">${esc(r.name)}</td>
         </tr>`,
     )
     .join('');

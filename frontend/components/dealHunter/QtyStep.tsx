@@ -106,8 +106,8 @@ export function QtyStep({
       </ScrollView>
       <View style={styles.footer}>
         <TouchableOpacity style={styles.primaryBtn} onPress={onCompare} activeOpacity={0.85} testID="deal-hunter-compare-btn">
-          <Sparkles size={17} color={C.white} strokeWidth={2.2} />
-          <Text style={styles.primaryBtnText}>Porównaj oferty dostawców</Text>
+          <Sparkles size={17} color={C.isPremium ? '#0A0A0A' : C.white} strokeWidth={2.2} />
+          <Text style={[styles.primaryBtnText, C.isPremium && { color: '#0A0A0A' }]}>Porównaj oferty dostawców</Text>
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>

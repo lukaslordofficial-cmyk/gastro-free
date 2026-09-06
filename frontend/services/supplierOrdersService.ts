@@ -32,6 +32,9 @@ export type SupplierOrderFull = {
   status: string;
   notes: string | null;
   created_at: string;
+  received_at?: string | null;
+  inventory_applied?: boolean | null;
+  variable_cost_applied?: boolean | null;
   suppliers: {
     name?: string;
     email?: string | null;
@@ -52,6 +55,11 @@ export type SupplierOrderFull = {
 
 const ORDER_SELECT =
   'id, supplier_id, notes, status, created_at, ' +
+  'suppliers(name, email, phone, address, bank_account, nip), ' +
+  'supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net, warehouse_product_id)';
+
+const ORDER_SELECT_WITH_FLAGS =
+  'id, supplier_id, notes, status, created_at, received_at, inventory_applied, variable_cost_applied, ' +
   'suppliers(name, email, phone, address, bank_account, nip), ' +
   'supplier_order_items(id, raw_product_name, quantity_ordered, unit, price_net, warehouse_product_id)';
 
@@ -123,8 +131,8 @@ export async function deleteOneDraft(orderId: string): Promise<void> {
 }
 
 /**
- * Po „Złóż zamówienie” / przejściu do maila: podnieś drafty do sent
- * albo utwórz nowe zamówienie sent z pozycjami (Łowca Okazji).
+ * Utwórz zamówienie „przygotowywane” (sent) z pozycjami z koszyka.
+ * Zawsze zapisuje podane items (nie promuj pustych draftów).
  */
 export async function ensureSentOrderForSupplier(params: {
   supplierId: string;
@@ -137,19 +145,6 @@ export async function ensureSentOrderForSupplier(params: {
     warehouse_product_id?: string | null;
   }>;
 }): Promise<string> {
-  const ak = requireTenantAccountKey();
-  const { data: drafts } = await supabase
-    .from('supplier_orders')
-    .select('id')
-    .eq('supplier_id', params.supplierId)
-    .eq('status', 'draft')
-    .eq('account_key', ak);
-  const draftIds = (drafts || []).map((r: { id: string }) => r.id);
-  if (draftIds.length) {
-    await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', draftIds).eq('account_key', ak);
-    emitBasketChanged();
-    return draftIds[0];
-  }
   const { data: order, error } = await supabase
     .from('supplier_orders')
     .insert(withAccountKey({
@@ -174,6 +169,140 @@ export async function ensureSentOrderForSupplier(params: {
   }
   emitBasketChanged();
   return order.id as string;
+}
+
+/** Usuń zamówienie z Przygotowywanych (sent/confirmed). */
+export async function deletePreparingOrder(orderId: string): Promise<void> {
+  const ak = requireTenantAccountKey();
+  await supabase.from('supplier_order_items').delete().eq('order_id', orderId);
+  const { error } = await supabase
+    .from('supplier_orders')
+    .delete()
+    .eq('id', orderId)
+    .eq('account_key', ak)
+    .in('status', ['sent', 'confirmed']);
+  if (error) throw error;
+  emitBasketChanged();
+}
+
+function productNamesOverlap(
+  a: string[],
+  b: string[],
+): number {
+  if (!a.length || !b.length) return 0;
+  const keysB = new Set(b.map((n) => productMatchKey(n)).filter(Boolean));
+  let hit = 0;
+  for (const n of a) {
+    const k = productMatchKey(n);
+    if (k && keysB.has(k)) hit += 1;
+    else if (b.some((x) => namesMatch(n, x, 55))) hit += 1;
+  }
+  return hit / Math.max(a.length, 1);
+}
+
+/** Zamówienia już odebrane z magazynem — do ostrzeżenia przy skanie faktury. */
+export async function findReceivedOrdersForInvoice(params: {
+  supplierId?: string | null;
+  supplierName?: string | null;
+  productNames: string[];
+}): Promise<SupplierOrderFull[]> {
+  const ak = requireTenantAccountKey();
+  let q = supabase
+    .from('supplier_orders')
+    .select(ORDER_SELECT_WITH_FLAGS)
+    .eq('status', 'received')
+    .eq('account_key', ak)
+    .order('created_at', { ascending: false })
+    .limit(30);
+  if (params.supplierId) {
+    q = q.eq('supplier_id', params.supplierId);
+  }
+  let { data, error } = await q;
+  if (error) {
+    const fallback = await supabase
+      .from('supplier_orders')
+      .select(ORDER_SELECT)
+      .eq('status', 'received')
+      .eq('account_key', ak)
+      .order('created_at', { ascending: false })
+      .limit(30);
+    data = fallback.data;
+    error = fallback.error;
+  }
+  if (error) throw error;
+  const rows = (data ?? []) as SupplierOrderFull[];
+  const withInv = rows.filter((o) => o.inventory_applied !== false);
+  return filterOrdersBySupplierOrProducts(withInv.length ? withInv : rows, params);
+}
+
+function filterOrdersBySupplierOrProducts(
+  rows: SupplierOrderFull[],
+  params: {
+    supplierId?: string | null;
+    supplierName?: string | null;
+    productNames: string[];
+  },
+): SupplierOrderFull[] {
+  const sn = (params.supplierName || '').trim().toLowerCase();
+  return rows.filter((o) => {
+    if (params.supplierId && o.supplier_id === params.supplierId) {
+      const names = (o.supplier_order_items || []).map((it) => it.raw_product_name);
+      return productNamesOverlap(params.productNames, names) >= 0.35 || !params.productNames.length;
+    }
+    if (sn && (o.suppliers?.name || '').trim().toLowerCase() === sn) {
+      const names = (o.supplier_order_items || []).map((it) => it.raw_product_name);
+      return productNamesOverlap(params.productNames, names) >= 0.35;
+    }
+    return false;
+  });
+}
+
+/** Po skanie faktury: przygotowywane → zrealizowane (bez ponownego magazynu). */
+export async function markPreparingReceivedFromInvoice(params: {
+  supplierId?: string | null;
+  supplierName?: string | null;
+}): Promise<number> {
+  const ak = requireTenantAccountKey();
+  let q = supabase
+    .from('supplier_orders')
+    .select('id, supplier_id, suppliers(name)')
+    .in('status', ['sent', 'confirmed'])
+    .eq('account_key', ak)
+    .limit(50);
+  if (params.supplierId) q = q.eq('supplier_id', params.supplierId);
+  const { data } = await q;
+  let rows = (data ?? []) as Array<{
+    id: string;
+    supplier_id: string;
+    suppliers: { name?: string } | null;
+  }>;
+  if (!params.supplierId && params.supplierName) {
+    const sn = params.supplierName.trim().toLowerCase();
+    rows = rows.filter((r) => (r.suppliers?.name || '').trim().toLowerCase() === sn);
+  }
+  if (!rows.length) return 0;
+  const ids = rows.map((r) => r.id);
+  const patch: Record<string, unknown> = {
+    status: 'received',
+    received_at: new Date().toISOString(),
+    inventory_applied: true,
+    variable_cost_applied: true,
+  };
+  const { error } = await supabase
+    .from('supplier_orders')
+    .update(patch)
+    .in('id', ids)
+    .eq('account_key', ak);
+  if (error) {
+    // bez nowych kolumn
+    await supabase
+      .from('supplier_orders')
+      .update({ status: 'received' })
+      .in('id', ids)
+      .eq('account_key', ak);
+  }
+  emitBasketChanged();
+  return ids.length;
 }
 
 export async function fetchOrdersByStatuses(
@@ -550,11 +679,25 @@ export async function receiveSupplierOrder(
       }
     }
   }
-  const { error } = await supabase
+  const patch: Record<string, unknown> = {
+    status: 'received',
+    received_at: new Date().toISOString(),
+    inventory_applied: !!opts.applyInventory,
+    variable_cost_applied: !!opts.applyVariableCost,
+  };
+  let { error } = await supabase
     .from('supplier_orders')
-    .update({ status: 'received' })
+    .update(patch)
     .eq('id', order.id)
     .eq('account_key', requireTenantAccountKey());
+  if (error && /received_at|inventory_applied|variable_cost_applied/.test(error.message ?? '')) {
+    const r2 = await supabase
+      .from('supplier_orders')
+      .update({ status: 'received' })
+      .eq('id', order.id)
+      .eq('account_key', requireTenantAccountKey());
+    error = r2.error;
+  }
   if (error) throw error;
   if (opts.applyInventory) {
     DeviceEventEmitter.emit(INVENTORY_CHANGED);

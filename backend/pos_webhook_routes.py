@@ -334,6 +334,11 @@ async def _pos_webhook_impl(request: Request, provider: Optional[str] = None):
                         )
                     except Exception as e:
                         logger.debug("_recompute_menu_availability skipped: %s", e)
+                    try:
+                        from critical_stock_alerts import maybe_notify_critical_after_consume
+                        await maybe_notify_critical_after_consume(client, inventory_updates)
+                    except Exception as e:
+                        logger.debug("critical stock push skipped: %s", e)
 
                 await mark_pos_connected(client, account_key=pos_account, provider=provider)
 

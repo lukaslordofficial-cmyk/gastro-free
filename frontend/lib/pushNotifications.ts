@@ -133,8 +133,8 @@ export async function promptAndRegisterPush(
 
     await new Promise<void>((resolve) => {
       alertFn(
-        'Powiadomienia o ważności',
-        'Gastro Manager może wysyłać powiadomienia, gdy produkt zbliża się do końca terminu przydatności. Czy chcesz je włączyć?',
+        'Powiadomienia',
+        'Gastro Manager może wysyłać powiadomienia o kończącej się dacie ważności oraz o krytycznym stanie magazynu — także gdy aplikacja jest zamknięta. Czy chcesz je włączyć?',
         [
           {
             text: 'Nie teraz',

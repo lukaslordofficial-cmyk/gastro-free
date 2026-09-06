@@ -407,41 +407,119 @@ export function CatalogScanModal({
     if (!ensureCredits()) return;
     // Ref-lock: chroni przed podwójnym tapnięciem przy wolnym internecie.
     if (processingRef.current) return;
-    processingRef.current = true;
-    setIsSavingProducts(true);
-    setStage('processing');
-    setError(null);
-    setScanBusy(true);
-    try {
-      const products = productsOverride ?? invProducts;
-      const { apiJsonHeaders } = await import('@/lib/apiHeaders');
-      const res = await fetch(`${BACKEND_URL}/api/documents/confirm-invoice`, {
-        method: 'POST',
-        headers: await apiJsonHeaders(),
-        body: JSON.stringify({
-          supplier_id: invSupplierId,
-          supplier_name: invSupplierName,
-          total_amount: invTotal,
-          products,
-          destination: 'inventory',
-          supplier: invSupplierMeta ?? undefined,
-        }),
-      });
-      if (!res.ok) {
-        const detail = await parseErrorDetail(res);
-        throw new Error(friendlyApiError(res.status, detail));
+
+    const products = productsOverride ?? invProducts;
+    const productNames = products
+      .map((p) => String((p as InvoiceProduct).product_name || (p as CommitProduct).name || '').trim())
+      .filter(Boolean);
+
+    const runSave = async (forceDuplicate: boolean) => {
+      processingRef.current = true;
+      setIsSavingProducts(true);
+      setStage('processing');
+      setError(null);
+      setScanBusy(true);
+      try {
+        if (!forceDuplicate) {
+          try {
+            const { findReceivedOrdersForInvoice } = await import('@/services/supplierOrdersService');
+            const matches = await findReceivedOrdersForInvoice({
+              supplierId: invSupplierId || supplierId || null,
+              supplierName: invSupplierName || supplierName || null,
+              productNames,
+            });
+            if (matches.length) {
+              processingRef.current = false;
+              setScanBusy(false);
+              setIsSavingProducts(false);
+              setStage(expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
+              const first = matches[0];
+              const when = first.received_at || first.created_at;
+              const whenLabel = (() => {
+                try {
+                  return new Date(when).toLocaleDateString('pl-PL');
+                } catch {
+                  return String(when).slice(0, 10);
+                }
+              })();
+              premiumAlert(
+                'Dostawa już odebrana',
+                `To zamówienie od „${first.suppliers?.name || invSupplierName || 'dostawcy'}” zostało już odebrane ręcznie (${whenLabel}).\n\n`
+                + 'Czy na pewno chcesz dodać jeszcze raz te same produkty do magazynu i kwoty do kosztów zmiennych?',
+                [
+                  {
+                    text: 'Nie',
+                    style: 'cancel',
+                    onPress: () => {
+                      processingRef.current = false;
+                    },
+                  },
+                  {
+                    text: 'Tak, dodaj jeszcze raz',
+                    style: 'primary',
+                    onPress: () => void runSave(true),
+                  },
+                ],
+              );
+              return;
+            }
+          } catch {
+            /* brak flag / migracji — kontynuuj */
+          }
+        }
+
+        const { apiJsonHeaders } = await import('@/lib/apiHeaders');
+        const res = await fetch(`${BACKEND_URL}/api/documents/confirm-invoice`, {
+          method: 'POST',
+          headers: await apiJsonHeaders(),
+          body: JSON.stringify({
+            supplier_id: invSupplierId,
+            supplier_name: invSupplierName,
+            total_amount: invTotal,
+            products,
+            destination: 'inventory',
+            supplier: invSupplierMeta ?? undefined,
+          }),
+        });
+        if (!res.ok) {
+          const detail = await parseErrorDetail(res);
+          throw new Error(friendlyApiError(res.status, detail));
+        }
+        const data = await res.json();
+        try {
+          const { markPreparingReceivedFromInvoice } = await import('@/services/supplierOrdersService');
+          await markPreparingReceivedFromInvoice({
+            supplierId: invSupplierId || supplierId || null,
+            supplierName: invSupplierName || supplierName || null,
+          });
+        } catch {
+          /* best-effort */
+        }
+        setIsSavingProducts(false);
+        finishWithResult(data);
+      } catch (e: any) {
+        processingRef.current = false;
+        setScanBusy(false);
+        setIsSavingProducts(false);
+        setError(e.message ?? 'Nie udało się zaksięgować faktury.');
+        setStage(expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
       }
-      const data = await res.json();
-      setIsSavingProducts(false);
-      finishWithResult(data);
-    } catch (e: any) {
-      processingRef.current = false;
-      setScanBusy(false);
-      setIsSavingProducts(false);
-      setError(e.message ?? 'Nie udało się zaksięgować faktury.');
-      setStage(expiryDrafts.length ? 'expiry_review' : 'invoice_preview');
-    }
-  }, [invSupplierId, invSupplierName, invSupplierMeta, invTotal, invProducts, ensureCredits, expiryDrafts.length, finishWithResult]);
+    };
+
+    void runSave(false);
+  }, [
+    invSupplierId,
+    invSupplierName,
+    invSupplierMeta,
+    invTotal,
+    invProducts,
+    ensureCredits,
+    expiryDrafts.length,
+    finishWithResult,
+    premiumAlert,
+    supplierId,
+    supplierName,
+  ]);
 
   const goToExpiryReview = useCallback(() => {
     setExpiryDrafts(buildExpiryDrafts(invProducts));

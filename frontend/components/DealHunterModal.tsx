@@ -104,6 +104,8 @@ export function DealHunterModal({
   const [manualCart, setManualCart] = useState<SupplierGroup[] | null>(null);
   const [catalogPicker, setCatalogPicker] = useState<{ id: string; name: string } | null>(null);
   const [pendingGroups, setPendingGroups] = useState<SupplierGroup[] | null>(null);
+  /** Grupy użyte do wygenerowania wiadomości (do zapisu w Przygotowywane przy wysyłce / zamknięciu). */
+  const [previewGroups, setPreviewGroups] = useState<SupplierGroup[] | null>(null);
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [lpPayGroup, setLpPayGroup] = useState<SupplierGroup | null>(null);
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
@@ -240,6 +242,7 @@ export function DealHunterModal({
       setFromEmails({});
       setToEmails({});
       setDraftSavedInfo(null);
+      setPreviewGroups(null);
       if (initialCompare) {
         setStep('compare');
         setQty('1');
@@ -715,37 +718,10 @@ export function DealHunterModal({
       setSubjectText(subjectInit);
       setFromEmails(fromInit);
       setToEmails(toInit);
+      setPreviewGroups(suppliers);
       setPendingGroups(null);
       setStep('preview');
-      // Panel Zamówienia → Przygotowywane
-      try {
-        for (const g of suppliers) {
-          if (g.is_local_producer || !g.supplier_id) continue;
-          await supplierOrdersService.ensureSentOrderForSupplier({
-            supplierId: g.supplier_id,
-            notes: 'Łowca Okazji',
-            items: await Promise.all(
-              (g.items || []).map(async (it) => {
-                const whName = (it.product_name || '').trim();
-                let wid: string | null =
-                  product && whName && product.product_name === whName ? product.id : null;
-                if (!wid && whName) {
-                  wid = await supplierOrdersService.resolveWarehouseProductId(whName);
-                }
-                return {
-                  raw_product_name: it.matched_name || it.product_name,
-                  price_net: it.unit_price_base ?? null,
-                  unit: it.unit || 'szt',
-                  quantity_ordered: Number(it.quantity) || 0,
-                  warehouse_product_id: wid,
-                };
-              }),
-            ),
-          });
-        }
-      } catch {
-        /* best-effort — mail i tak działa */
-      }
+      // Przygotowywane dopiero po wysyłce / potwierdzeniu przy zamykaniu — nie wcześniej
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Nie udało się wygenerować wiadomości.';
       setError(msg);
@@ -834,19 +810,13 @@ export function DealHunterModal({
       const data = await res.json();
       setContactEmail((data.contact_email || accountMail || '').trim());
       setContactPhone(data.contact_phone ?? '');
-      const emailOk = !!(String(data.contact_email || accountMail || '').trim());
-      const phoneOk = !!(String(data.contact_phone || '').trim());
-      if (emailOk && phoneOk) {
-        await generateMessages(cleaned);
-      } else {
-        setStep('contact');
-        setLoading(false);
-      }
     } catch {
-      setStep('contact');
-      setLoading(false);
+      setContactEmail(accountMail || '');
     }
-  }, [generateMessages, accountMail]);
+    // Zawsze krok 2 (Kontakt) — nie przeskakuj od razu do podglądu
+    setStep('contact');
+    setLoading(false);
+  }, [accountMail]);
 
   const saveProfile = useCallback(async () => {
     const email = contactEmail.trim();
@@ -933,7 +903,51 @@ export function DealHunterModal({
     setTimeout(() => setCopiedId(null), 1800);
   }
 
-  const sendEmail = useCallback(async (m: MessageCard) => {
+  const persistSentForMessage = useCallback(async (m: MessageCard) => {
+    if (!m.supplier_id) return;
+    const g = (previewGroups || []).find(
+      (x) => x.supplier_id === m.supplier_id || x.supplier_name === m.supplier_name,
+    );
+    if (!g || g.is_local_producer) return;
+    try {
+      await supplierOrdersService.ensureSentOrderForSupplier({
+        supplierId: m.supplier_id,
+        notes: 'Łowca Okazji',
+        items: await Promise.all(
+          (g.items || []).map(async (it) => {
+            const whName = (it.product_name || '').trim();
+            let wid: string | null =
+              product && whName && product.product_name === whName ? product.id : null;
+            if (!wid && whName) {
+              wid = await supplierOrdersService.resolveWarehouseProductId(whName);
+            }
+            return {
+              raw_product_name: it.matched_name || it.product_name,
+              price_net: it.unit_price_base ?? null,
+              unit: it.unit || 'szt',
+              quantity_ordered: Number(it.quantity) || 0,
+              warehouse_product_id: wid,
+            };
+          }),
+        ),
+      });
+    } catch {
+      /* best-effort */
+    }
+  }, [previewGroups, product]);
+
+  const showOrdersSentFollowUp = useCallback(() => {
+    premiumAlert(
+      'Wiadomości wysłane',
+      'Zamówienia trafiły do dostawców i do zakładki Dostawcy → Zamówienia (Przygotowywane).\n\n'
+      + 'Gdy odbierzesz dostawę, możesz zaktualizować magazyn i koszty zmienne:\n'
+      + '• skanując fakturę, albo\n'
+      + '• klikając „Odebrałem dostawę” w Dostawcy → Zamówienia.',
+      [{ text: 'OK', style: 'primary' }],
+    );
+  }, [premiumAlert]);
+
+  const sendEmail = useCallback(async (m: MessageCard, opts?: { skipFollowUp?: boolean }) => {
     const key = m.supplier_id ?? m.supplier_name;
     const to = (toEmails[key] ?? m.supplier_email ?? '').trim();
     const from = (fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
@@ -966,31 +980,8 @@ export function DealHunterModal({
           body: bodyToSend,
         });
         setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-        if (m.supplier_id) {
-          try {
-            const ak = requireTenantAccountKey();
-            const q = supabase
-              .from('supplier_orders')
-              .select('id')
-              .eq('supplier_id', m.supplier_id)
-              .eq('status', 'draft')
-              .eq('account_key', ak);
-            const { data } = await q;
-            const ids = (data || []).map((r: { id: string }) => r.id);
-            if (ids.length) {
-              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids).eq('account_key', ak);
-              try {
-                DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
-              } catch { /* ignore */ }
-            }
-          } catch {
-            /* best-effort */
-          }
-        }
-        premiumAlert(
-          'Zamówienie',
-          'Twoje zamówienie trafiło do zakładki Dostawy - Przygotowywane',
-        );
+        await persistSentForMessage(m);
+        if (!opts?.skipFollowUp) showOrdersSentFollowUp();
       } catch {
         setSendStatus((s) => ({ ...s, [key]: 'error' }));
       }
@@ -1011,31 +1002,12 @@ export function DealHunterModal({
       });
       if (!res.ok) throw new Error();
       setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-      if (m.supplier_id) {
-        try {
-          const ak = requireTenantAccountKey();
-          const q = supabase
-            .from('supplier_orders')
-            .select('id')
-            .eq('supplier_id', m.supplier_id)
-            .eq('status', 'draft')
-            .eq('account_key', ak);
-          const { data } = await q;
-          const ids = (data || []).map((r: { id: string }) => r.id);
-            if (ids.length) {
-              await supabase.from('supplier_orders').update({ status: 'sent' }).in('id', ids).eq('account_key', ak);
-            try {
-              DeviceEventEmitter.emit(supplierOrdersService.SUPPLIER_BASKET_CHANGED);
-            } catch { /* ignore */ }
-          }
-        } catch {
-          /* best-effort */
-        }
-      }
+      await persistSentForMessage(m);
+      if (!opts?.skipFollowUp) showOrdersSentFollowUp();
     } catch {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
     }
-  }, [toEmails, fromEmails, bodyText, subjectText, premiumAlert]);
+  }, [toEmails, fromEmails, bodyText, subjectText, premiumAlert, persistSentForMessage, showOrdersSentFollowUp]);
 
   const sendAllEmails = useCallback(async () => {
     if (!messages.length) return;
@@ -1061,9 +1033,50 @@ export function DealHunterModal({
     }
     for (const m of pending) {
       // eslint-disable-next-line no-await-in-loop
-      await sendEmail(m);
+      await sendEmail(m, { skipFollowUp: true });
     }
-  }, [messages, sendStatus, fromEmails, sendEmail, premiumAlert]);
+    showOrdersSentFollowUp();
+  }, [messages, sendStatus, fromEmails, sendEmail, showOrdersSentFollowUp]);
+
+  const requestClose = useCallback(() => {
+    const hasUnsentPreview =
+      step === 'preview'
+      && messages.length > 0
+      && messages.some((m) => {
+        const key = m.supplier_id ?? m.supplier_name;
+        return sendStatus[key] !== 'sent';
+      });
+    if (!hasUnsentPreview) {
+      onClose();
+      return;
+    }
+    premiumAlert(
+      'Zamknąć bez wysyłki?',
+      'Nie wysłałeś jeszcze wszystkich zamówień. Czy dodać je do zakładki Przygotowywane dostawy?',
+      [
+        {
+          text: 'Nie dodawaj',
+          style: 'cancel',
+          onPress: () => onClose(),
+        },
+        {
+          text: 'Dodaj do Przygotowywanych',
+          style: 'primary',
+          onPress: () => {
+            void (async () => {
+              for (const m of messages) {
+                const key = m.supplier_id ?? m.supplier_name;
+                if (sendStatus[key] === 'sent') continue;
+                // eslint-disable-next-line no-await-in-loop
+                await persistSentForMessage(m);
+              }
+              onClose();
+            })();
+          },
+        },
+      ],
+    );
+  }, [step, messages, sendStatus, onClose, premiumAlert, persistSentForMessage]);
 
   const result = liveResult;
   const stepIndex = step === 'qty' ? 0 : step === 'compare' ? 1 : 2;
@@ -1094,16 +1107,15 @@ export function DealHunterModal({
     }
     if (step === 'compare') {
       if (isBulkMode) {
-        onClose();
+        requestClose();
         return true;
       }
       setStep('qty');
       return true;
     }
-    // qty → zamknij modal
-    onClose();
+    requestClose();
     return true;
-  }, [showNewOrder, step, isBulkMode, onClose]);
+  }, [showNewOrder, step, isBulkMode, requestClose]);
 
   useEffect(() => {
     if (!visible) return;
@@ -1127,6 +1139,18 @@ export function DealHunterModal({
         onQtyChange={updateQty}
         onRemoveItem={removeCartItem}
         onAddSubstitute={addSubstituteToCart}
+        onAddMissingOffer={(off) => {
+          if (!off.supplier_id) return;
+          addProductToOrder({
+            supplierId: off.supplier_id,
+            supplierName: off.supplier_name,
+            supplierEmail: off.supplier_email ?? null,
+            productName: off.matched_name || off.productName,
+            unit: off.unit || 'szt',
+            unitPrice: off.unit_price_base || 0,
+            quantity: off.quantity || 1,
+          });
+        }}
         onOpenNewOrder={() => setShowNewOrder(true)}
         onOpenCatalog={setCatalogPicker}
         onPrepareEmail={(groups) => void prepareEmailForGroups(groups)}
@@ -1171,7 +1195,7 @@ export function DealHunterModal({
           stepLabels={stepLabels}
           activeStepIndex={bulkStepIndex}
           error={error}
-          onClose={onClose}
+          onClose={requestClose}
         />
 
         {step === 'qty' && product && (

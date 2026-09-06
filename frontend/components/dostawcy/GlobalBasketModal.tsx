@@ -91,6 +91,85 @@ import { secureId } from '@/lib/secureId';
 
 import type { DraftOrder, GlobalBasketGroup } from './types';
 import { DraftCartEditor } from './DraftCartEditor';
+import { DealHunterModal } from '@/components/DealHunterModal';
+import type { OptimizeResult, OfferItem, SupplierGroup } from '@/lib/bargainHunter';
+
+function draftsToOptimizeResult(drafts: DraftOrder[]): OptimizeResult {
+  const suppliers: SupplierGroup[] = drafts
+    .filter((d) => d.supplier_id && d.items.length > 0)
+    .map((d) => {
+      const items: OfferItem[] = d.items.map((it) => {
+        const price = it.price != null ? Number(it.price) : 0;
+        const qty = Number(it.qty) || 0;
+        return {
+          product_name: it.name,
+          quantity: qty,
+          unit: it.unit || 'szt',
+          base_dim: it.unit || 'szt',
+          unit_price_base: price,
+          matched_name: it.name,
+          line_total: Math.round(price * qty * 100) / 100,
+        };
+      });
+      const subtotal = Math.round(items.reduce((s, it) => s + it.line_total, 0) * 100) / 100;
+      return {
+        supplier_id: d.supplier_id,
+        supplier_name: d.supplier_name,
+        supplier_email: d.supplier_email,
+        items,
+        subtotal_pln: subtotal,
+        total_pln: subtotal,
+        meets_minimum_order: true,
+      };
+    });
+  const total = Math.round(suppliers.reduce((s, g) => s + g.subtotal_pln, 0) * 100) / 100;
+  const itemsRequested = suppliers.flatMap((g) =>
+    g.items.map((it) => ({
+      product_name: it.product_name,
+      quantity: it.quantity,
+      unit: it.unit,
+      found: true,
+      supplier_id: g.supplier_id,
+      supplier_name: g.supplier_name,
+      matched_name: it.matched_name,
+    })),
+  );
+  return {
+    is_optimized: true,
+    is_multivariable: true,
+    items_requested: itemsRequested,
+    best_option: {
+      type: 'optimized',
+      suppliers,
+      subtotal_pln: total,
+      total_pln: total,
+      missing: [],
+    },
+    tied_suppliers: [],
+    variant_monolith: null,
+    variant_split: { type: 'optimized', suppliers, total_pln: total, missing: [] },
+    savings_pln: 0,
+    cheaper_variant: 'split',
+    pricing_matrix: [],
+    assistant_speech: 'Wznowiono zapisane koszyki z panelu Dostawcy.',
+    option_all_one: null,
+    option_optimized: { type: 'optimized', suppliers, total_pln: total, missing: [] },
+    scenario_split_max: {
+      id: 'split_max',
+      label: 'Zapisane koszyki',
+      description: 'Kontynuacja zamówienia z koszyka',
+      suppliers,
+      products_pln: total,
+      shipping_pln: 0,
+      total_pln: total,
+      supplier_count: suppliers.length,
+      meets_all_minimums: true,
+      missing: [],
+      viable: true,
+    },
+    recommended_scenario_id: 'split_max',
+  };
+}
 
 export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const theme = useAppTheme();
@@ -110,6 +189,8 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
   const [emailBusy, setEmailBusy] = useState(false);
   const [emailDraftOrderId, setEmailDraftOrderId] = useState<string | null>(null);
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
+  const [showDealHunter, setShowDealHunter] = useState(false);
+  const [dealHunterCompare, setDealHunterCompare] = useState<OptimizeResult | null>(null);
 
   const accent = prem ? DS.color.greenEnd : Colors.accent;
   const text = prem ? DS.color.heading : Colors.textPrimary;
@@ -241,66 +322,20 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
     })();
   };
 
-  const orderAllDrafts = () => {
-    if (!draftOrders.length) {
+  const openDealHunterFromDrafts = (drafts: DraftOrder[]) => {
+    const usable = drafts.filter((d) => d.supplier_id && d.items.length > 0);
+    if (!usable.length) {
       alert('Brak zamówień', 'W koszyku nie ma zapisanych zamówień do wysyłki.', [
         { text: 'OK', style: 'primary' },
       ]);
       return;
     }
-    const preview = draftOrders
-      .map((d, i) => `${i + 1}. ${d.supplier_name} — ${d.items.length} poz.${d.supplier_email ? ` (${d.supplier_email})` : ''}`)
-      .join('\n');
-    alert(
-      `Zamów zbiorczo · ${draftOrders.length} maili`,
-      `Przygotowano szablony e-mail (jak w Łowcy Okazji) do ${draftOrders.length} dostawców:\n\n${preview}\n\nOtworzymy kolejno edytor z gotową treścią — nadawca: asystent AI.`,
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        {
-          text: 'Otwórz szablony',
-          style: 'primary',
-          onPress: () => {
-            void (async () => {
-              setEmailBusy(true);
-              try {
-                for (const d of draftOrders) {
-                  if (d.supplier_id) {
-                    const check = await checkSupplierMinOrder({
-                      supplierId: d.supplier_id,
-                      subtotalPln: draftTotal(d),
-                      supplierName: d.supplier_name,
-                    });
-                    if (!check.ok) {
-                      const copy = minOrderAlertCopy(check);
-                      alert(copy.title, copy.message, [{ text: 'OK', style: 'primary' }]);
-                      continue;
-                    }
-                  }
-                  const { subject, body, email } = await buildOrderEmail(d);
-                  const resolved = await resolveOrderEmailFrom(body, ASSISTANT_FROM_EMAIL, accountMail);
-                  setEmailDraftOrderId(d.id);
-                  setEmailDraft({
-                    supplierName: d.supplier_name,
-                    toEmail: email,
-                    fromEmail: resolved.fromEmail,
-                    subject,
-                    body: resolved.body,
-                    supplierId: d.supplier_id,
-                    totalPln: draftTotal(d),
-                  });
-                  setShowEmail(true);
-                  await new Promise((r) => setTimeout(r, 600));
-                }
-              } catch (e: any) {
-                alert('Błąd', e?.message || 'Nie udało się wygenerować szablonów.');
-              } finally {
-                setEmailBusy(false);
-              }
-            })();
-          },
-        },
-      ],
-    );
+    setDealHunterCompare(draftsToOptimizeResult(usable));
+    setShowDealHunter(true);
+  };
+
+  const orderAllDrafts = () => {
+    openDealHunterFromDrafts(draftOrders);
   };
 
   const clearEntireBasket = () => {
@@ -364,26 +399,42 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
     >
       <View style={[gbStyles.container, { backgroundColor: bg }]}>
         <View style={[gbStyles.header, prem && { backgroundColor: bg, borderBottomColor: border }]}>
-          <View style={gbStyles.headerLeft}>
-            <ShoppingCart size={18} color={accent} strokeWidth={2} />
-            <Text style={[gbStyles.title, { color: text }]}>Koszyk zamówień</Text>
-          </View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            {emailBusy ? <ActivityIndicator size="small" color={accent} /> : null}
-            {!isEmpty && draftOrders.length > 0 ? (
-              <TouchableOpacity onPress={orderAllDrafts} hitSlop={8} disabled={emailBusy}>
-                <Text style={{ color: accent, fontWeight: '800', fontSize: 12 }}>Zamów</Text>
-              </TouchableOpacity>
-            ) : null}
+          <TouchableOpacity
+            onPress={onClose}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={gbStyles.headerClose}
+          >
+            <X size={22} color={muted} strokeWidth={2} />
+          </TouchableOpacity>
+          <View style={gbStyles.headerCenter}>
+            <View style={gbStyles.headerTitleRow}>
+              <ShoppingCart size={18} color={accent} strokeWidth={2} />
+              <Text style={[gbStyles.title, { color: text }]}>Koszyk zamówień</Text>
+            </View>
             {!isEmpty ? (
-              <TouchableOpacity onPress={clearEntireBasket} hitSlop={8}>
-                <Text style={{ color: Colors.danger, fontWeight: '700', fontSize: 12 }}>Wyczyść</Text>
-              </TouchableOpacity>
+              <View style={gbStyles.headerActions}>
+                {emailBusy ? <ActivityIndicator size="small" color={accent} /> : null}
+                {draftOrders.length > 0 ? (
+                  <TouchableOpacity
+                    style={[gbStyles.headerActionBtn, { backgroundColor: accent }]}
+                    onPress={orderAllDrafts}
+                    disabled={emailBusy}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={[gbStyles.headerActionBtnText, prem && { color: '#0A0A0A' }]}>Zamów</Text>
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity
+                  style={[gbStyles.headerActionBtn, gbStyles.headerClearBtn]}
+                  onPress={clearEntireBasket}
+                  activeOpacity={0.85}
+                >
+                  <Text style={gbStyles.headerClearBtnText}>Wyczyść</Text>
+                </TouchableOpacity>
+              </View>
             ) : null}
-            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-              <X size={22} color={muted} strokeWidth={2} />
-            </TouchableOpacity>
           </View>
+          <View style={gbStyles.headerCloseSpacer} />
         </View>
 
         {loading ? (
@@ -459,7 +510,7 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
                         </Text>
                         <TouchableOpacity
                           style={[gbStyles.orderBtn, prem && { backgroundColor: accent }]}
-                          onPress={() => openDraftEmailTemplate(d)}
+                          onPress={() => openDealHunterFromDrafts([d])}
                           activeOpacity={0.85}
                         >
                           <Text style={[gbStyles.orderBtnText, prem && { color: '#0A0A0A' }]}>Zamów</Text>
@@ -564,15 +615,56 @@ export function GlobalBasketModal({ visible, onClose }: { visible: boolean; onCl
           onSaved={() => setReloadKey((k) => k + 1)}
         />
       )}
+      <DealHunterModal
+        visible={showDealHunter && !!dealHunterCompare}
+        product={null}
+        restaurantName={undefined}
+        initialCompare={dealHunterCompare}
+        bulkContextLabel="Koszyk zamówień"
+        onClose={() => {
+          setShowDealHunter(false);
+          setDealHunterCompare(null);
+          setReloadKey((k) => k + 1);
+        }}
+      />
     </Modal>
   );
 }
 
 export const gbStyles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.card },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  title: { fontSize: 17, fontWeight: '700', color: Colors.textPrimary },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    backgroundColor: Colors.card,
+  },
+  headerClose: { width: 36, paddingTop: 2, alignItems: 'flex-start' },
+  headerCloseSpacer: { width: 36 },
+  headerCenter: { flex: 1, alignItems: 'center', gap: 12 },
+  headerTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  title: { fontSize: 17, fontWeight: '700', color: Colors.textPrimary, textAlign: 'center' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  headerActionBtn: {
+    backgroundColor: Colors.accent,
+    borderRadius: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    minWidth: 96,
+    alignItems: 'center',
+  },
+  headerActionBtnText: { fontSize: 13, fontWeight: '800', color: Colors.white },
+  headerClearBtn: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: Colors.danger,
+  },
+  headerClearBtnText: { fontSize: 13, fontWeight: '700', color: Colors.danger },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 32 },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: Colors.textSecondary, textAlign: 'center' },
   emptySub: { fontSize: 13, color: Colors.textTertiary, textAlign: 'center', lineHeight: 19 },

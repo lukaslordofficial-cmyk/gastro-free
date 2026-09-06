@@ -54,6 +54,7 @@ type Props = {
   groups: SupplierGroup[];
   loading: boolean;
   savingDraft: boolean;
+  dismissedMissingKeys?: Set<string>;
   onQtyChange: (key: string, qty: number) => void;
   onRemoveItem: (supplierId: string | null, productName: string) => void;
   onAddSubstitute: (offer: SubstituteOffer, variantLabel: string) => void;
@@ -72,6 +73,7 @@ export function EditableCartPanel({
   groups,
   loading,
   savingDraft,
+  dismissedMissingKeys,
   onQtyChange,
   onRemoveItem,
   onAddSubstitute,
@@ -145,19 +147,33 @@ export function EditableCartPanel({
     const inCart = new Set<string>();
     for (const g of groups) {
       for (const it of g.items ?? []) {
-        const k = String(it.product_name || '').trim().toLowerCase();
-        if (k) inCart.add(k);
+        for (const raw of [it.product_name, it.matched_name]) {
+          const k = String(raw || '').trim().toLowerCase();
+          if (k) inCart.add(k);
+        }
       }
     }
+    const isInCart = (name: string) => {
+      const key = name.trim().toLowerCase();
+      if (!key) return false;
+      if (inCart.has(key)) return true;
+      if (dismissedMissingKeys?.has(key)) return true;
+      for (const c of inCart) {
+        if (c.includes(key) || key.includes(c)) return true;
+      }
+      return false;
+    };
     for (const r of result.items_requested ?? []) {
       if (!r.found) continue;
       const name = String(r.product_name || '').trim();
       const key = name.toLowerCase();
-      if (!name || inCart.has(key) || seenCat.has(key)) continue;
+      if (!name || isInCart(name) || seenCat.has(key)) continue;
       pushUnique(basketNames, seenBasket, name);
     }
 
-    const basketFiltered = basketNames.filter((n) => !seenCat.has(n.toLowerCase()));
+    const basketFiltered = basketNames.filter(
+      (n) => !seenCat.has(n.toLowerCase()) && !isInCart(n),
+    );
     const offers: BasketMissingOffer[] = [];
     for (const name of basketFiltered) {
       const matrix = (result.pricing_matrix ?? []).find(
@@ -481,7 +497,9 @@ export function EditableCartPanel({
           <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
             Znalezione, ale nie weszły do koszyka ({basketMissingOffers.length})
             {'\n'}
-            (np. za daleko do minimum zamówienia albo reguły optymalizacji)
+            Łowca nie startuje nowego koszyka u dostawcy, gdy do jego minimum brakuje ponad 150 zł
+            (przy samej tej pozycji / małej grupie). Dodaj „+”, żeby złożyć większe zamówienie —
+            wtedy minimum może zostać spełnione łącznie.
           </Text>
           {basketMissingOffers.map((off) => (
             <View

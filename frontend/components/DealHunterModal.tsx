@@ -145,6 +145,7 @@ export function DealHunterModal({
   const [pendingGroups, setPendingGroups] = useState<SupplierGroup[] | null>(null);
   /** Grupy użyte do wygenerowania wiadomości (do zapisu w Przygotowywane przy wysyłce / zamknięciu). */
   const [previewGroups, setPreviewGroups] = useState<SupplierGroup[] | null>(null);
+  const [dismissedMissingKeys, setDismissedMissingKeys] = useState<Set<string>>(() => new Set());
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [lpPayGroup, setLpPayGroup] = useState<SupplierGroup | null>(null);
   const [manualPayOrder, setManualPayOrder] = useState<ManualPaymentOrder | null>(null);
@@ -282,6 +283,7 @@ export function DealHunterModal({
       setToEmails({});
       setDraftSavedInfo(null);
       setPreviewGroups(null);
+      setDismissedMissingKeys(new Set());
       if (initialCompare) {
         setStep('compare');
         setQty('1');
@@ -944,19 +946,21 @@ export function DealHunterModal({
     supplierName: string;
     supplierEmail: string | null;
     productName: string;
+    matchedName?: string;
     unit: string;
     unitPrice: number;
     quantity?: number;
     minOrder?: number;
   }) => {
     const qty = opts.quantity ?? 1;
+    const displayMatched = (opts.matchedName || opts.productName).trim();
     const newItem: OfferItem = {
       product_name: opts.productName,
       quantity: qty,
       unit: opts.unit || 'szt',
       base_dim: opts.unit || 'szt',
       unit_price_base: opts.unitPrice,
-      matched_name: opts.productName,
+      matched_name: displayMatched,
       line_total: recalcLineTotal(opts.unitPrice, qty, opts.unit || 'szt'),
     };
     setManualCart((prev) => {
@@ -1263,19 +1267,32 @@ export function DealHunterModal({
         groups={cartGroups}
         loading={loading}
         savingDraft={savingDraft}
+        dismissedMissingKeys={dismissedMissingKeys}
         onQtyChange={updateQty}
         onRemoveItem={removeCartItem}
         onAddSubstitute={addSubstituteToCart}
         onAddMissingOffer={(off) => {
           if (!off.supplier_id) return;
+          const key = off.productName.trim().toLowerCase();
+          if (key) {
+            setDismissedMissingKeys((prev) => {
+              const next = new Set(prev);
+              next.add(key);
+              if (off.matched_name) next.add(off.matched_name.trim().toLowerCase());
+              return next;
+            });
+          }
+          const existing = cartGroups.find((g) => g.supplier_id === off.supplier_id);
           addProductToOrder({
             supplierId: off.supplier_id,
             supplierName: off.supplier_name,
             supplierEmail: off.supplier_email ?? null,
-            productName: off.matched_name || off.productName,
+            productName: off.productName,
+            matchedName: off.matched_name || off.productName,
             unit: off.unit || 'szt',
             unitPrice: off.unit_price_base || 0,
             quantity: off.quantity || 1,
+            minOrder: existing?.min_order_value,
           });
         }}
         onOpenNewOrder={() => setShowNewOrder(true)}

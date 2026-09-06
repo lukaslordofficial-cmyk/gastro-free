@@ -82,6 +82,8 @@ export interface ProductLike {
   variant?: string | null;
   current_qty: number;
   critical_threshold: number;
+  /** Próg optymalny magazynu (opcjonalny) — Łowca celuje w ten poziom. */
+  optimal_threshold?: number;
   unit: string;
 }
 

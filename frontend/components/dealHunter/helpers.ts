@@ -137,7 +137,21 @@ export function resolveSelectionFromCompare(compare: OptimizeResult): {
 }
 
 export function suggestQty(p: ProductLike): number {
-  const base = p.current_qty > 0 ? p.current_qty * 1.5 : Math.max(p.critical_threshold, 1);
+  const cur = Number(p.current_qty) || 0;
+  const opt = Number(p.optimal_threshold) || 0;
+  if (opt > 0) {
+    const need = Math.round((opt - cur) * 100) / 100;
+    return need > 0 ? need : 1;
+  }
+  const crit = Number(p.critical_threshold) || 0;
+  if (crit > 0) {
+    // Najmniejsza ilość, która wyprowadza powyżej progu krytycznego (qty > min)
+    const unitStep = 1;
+    const target = crit + unitStep;
+    const need = Math.round((target - cur) * 100) / 100;
+    return need > 0 ? need : unitStep;
+  }
+  const base = cur > 0 ? cur * 1.5 : 1;
   const rounded = Math.round(base * 100) / 100;
   return rounded > 0 ? rounded : 1;
 }

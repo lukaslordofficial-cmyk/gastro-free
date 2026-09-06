@@ -402,8 +402,39 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                         is_short = qty < 1.0
                     if not is_short:
                         continue
-                    if optimal <= 0:
-                        optimal = max(minq, 1.0)
+                    # Priorytet: próg optymalny użytkownika; inaczej najmniejsza
+                    # ilość wychodząca POWYŻEJ progu krytycznego (qty > minq).
+                    if opt_user > 0:
+                        target = opt_user
+                    elif minq > 0:
+                        unit_step = 1.0
+                        target = minq + unit_step
+                    else:
+                        target = max(1.0, qty + 1.0)
+                    deficit = max(0.0, round(target - qty, 4))
+                    if deficit <= 0:
+                        continue
+                    qty_lo = round(deficit * 0.9, 4)
+                    qty_hi = round(deficit * 1.1, 4)
+                    critical.append({
+                        "id": r["id"],
+                        "name": name,
+                        "variant": (r.get("variant") or "").strip() or None,
+                        "unit": r.get("unit") or "szt",
+                        "current_quantity": qty,
+                        "min_quantity": minq,
+                        "safety_buffer_percent": buf_pct,
+                        "optimal_quantity": round(opt_user if opt_user > 0 else target, 4),
+                        "deficit": deficit,
+                        "order_qty_min": qty_lo,
+                        "order_qty_max": qty_hi,
+                        "category": effective_cat,
+                        "category_id": r.get("category_id"),
+                        "source": "category_shortage",
+                        "unit_weight_volume": r.get("unit_weight_volume"),
+                        "weight_volume_unit": r.get("weight_volume_unit"),
+                    })
+                    continue
                 else:
                     # optimal: wszystko poniżej progu; pusty stan bez progu → zamów 1
                     if optimal <= 0:
@@ -463,7 +494,7 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
             display_name = (hit.get("name") if hit else nr["name"]).strip()
             unit = (hit.get("unit") if hit else None) or nr["unit"]
             qty_order = nr.get("quantity")
-            # Brak jawnej ilości + produkt w magazynie → dopełnij do stanu optymalnego
+            # Brak jawnej ilości + produkt w magazynie → dopełnij wg reguł stock_target
             if hit is not None and qty_order is None:
                 try:
                     cur = float(hit.get("quantity") or 0)
@@ -476,12 +507,14 @@ async def orders_critical_by_category(req: CriticalByCategoryRequest):
                 except (TypeError, ValueError):
                     opt_user = 0.0
                 if opt_user > 0:
-                    optimal = opt_user
+                    target = opt_user
+                elif target_mode == "critical" and minq > 0:
+                    target = minq + 1.0
                 elif minq > 0:
-                    optimal = minq * (1.0 + buf_pct / 100.0)
+                    target = minq * (1.0 + buf_pct / 100.0)
                 else:
-                    optimal = 1.0
-                qty_order = max(0.0, round(optimal - cur, 4))
+                    target = 1.0
+                qty_order = max(0.0, round(target - cur, 4))
             if qty_order is None:
                 qty_order = 1.0
             qty_order = float(qty_order)

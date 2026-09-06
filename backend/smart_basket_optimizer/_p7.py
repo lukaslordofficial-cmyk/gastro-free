@@ -21,16 +21,18 @@ def build_smart_optimize_response(
     kitchen_priorities: Optional[dict[str, dict]] = None,
     waste_top: Optional[list[dict]] = None,
     fillers: Optional[list[dict]] = None,
+    cart_objective: Optional[str] = None,
 ) -> dict[str, Any]:
     """Pełna odpowiedź v2: do 3 scenariuszy + flaga is_multivariable.
 
     kitchen_priorities: mapa id/nazwa → {score, class_a, reasons} (POS/usage/waste/stock).
     waste_top / fillers: sygnały do suggestions (math-first).
+    cart_objective: lowest_price | min_deliveries | fast_delivery — wpływa na przydział SKU.
     """
     items = attach_kitchen_priorities(items, kitchen_priorities)
     items = sort_items_by_kitchen_priority(items)
 
-    split_sc = compute_split_max(items, suppliers_meta)
+    split_sc = compute_split_max(items, suppliers_meta, cart_objective=cart_objective)
     mono_sc = compute_monolith_scenario(items, suppliers_meta)
     hybrid_sc = compute_smart_hybrid(items, suppliers_meta, split_sc, mono_sc)
 

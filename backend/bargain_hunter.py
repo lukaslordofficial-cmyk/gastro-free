@@ -28,11 +28,22 @@ def _meets_minimum(subtotal: float, min_val: float) -> bool:
 
 
 def _item_line_entry(pi: dict, b: dict) -> dict:
+    # Ilość z oferty (opakowania), NIE z mediany po wszystkich dostawcach —
+    # inaczej 1 kg vs 5 kg u innych zawyża koszyk (np. 8 kg → 10 kg).
+    if b.get("order_base_qty") is not None:
+        try:
+            qty = float(b["order_base_qty"])
+        except (TypeError, ValueError):
+            qty = float(pi.get("quantity") or 0)
+        unit = (b.get("base_dim") or pi.get("base_dim") or pi.get("unit") or "szt")
+    else:
+        qty = float(pi.get("quantity") or 0)
+        unit = pi.get("unit") or "szt"
     out = {
         "product_name": pi["product_name"],
-        "quantity": pi["quantity"],
-        "unit": pi["unit"],
-        "base_dim": pi["base_dim"],
+        "quantity": round(qty, 4),
+        "unit": unit,
+        "base_dim": b.get("base_dim") or pi.get("base_dim") or unit,
         "unit_price_base": b["unit_price_base"],
         "matched_name": b["matched_name"],
         "line_total": b["line_total"],

@@ -222,17 +222,34 @@ async def compare_offers(req: CompareOffersRequest):
             order_base_qty = capped_qty
             line_total = round(price_base * order_base_qty, 2)
             prev = bbs.get(sid)
-            # Tańsza linia wygrywa; przy remisie — ilość bliżej targetu
+            # Tańsza cena jednostkowa (przy pokryciu targetu) wygrywa;
+            # przy remisie — mniej nadmiaru opakowań, potem niższy line_total.
             better = False
+            overshoot = max(0.0, float(order_base_qty) - float(target_base_qty or 0))
+            covers = float(order_base_qty) + 1e-9 >= float(target_base_qty or 0) * 0.98
             if prev is None:
                 better = True
-            elif line_total < prev["line_total"] - 1e-9:
-                better = True
-            elif abs(line_total - prev["line_total"]) < 1e-9:
-                if abs(order_base_qty - target_base_qty) < abs(
-                    float(prev.get("order_base_qty") or 0) - target_base_qty
-                ):
+            else:
+                prev_qty = float(prev.get("order_base_qty") or 0)
+                prev_price = float(prev.get("unit_price_base") or 0)
+                prev_overshoot = max(0.0, prev_qty - float(target_base_qty or 0))
+                prev_covers = prev_qty + 1e-9 >= float(target_base_qty or 0) * 0.98
+                if covers and prev_covers:
+                    if price_base < prev_price - 1e-9:
+                        better = True
+                    elif abs(price_base - prev_price) < 1e-9:
+                        if overshoot < prev_overshoot - 1e-9:
+                            better = True
+                        elif abs(overshoot - prev_overshoot) < 1e-9 and line_total < prev["line_total"] - 1e-9:
+                            better = True
+                elif covers and not prev_covers:
                     better = True
+                elif not covers and not prev_covers:
+                    if line_total < prev["line_total"] - 1e-9:
+                        better = True
+                    elif abs(line_total - prev["line_total"]) < 1e-9:
+                        if abs(order_base_qty - target_base_qty) < abs(prev_qty - target_base_qty):
+                            better = True
             if better:
                 sup = sup_by_id.get(sid, {})
                 is_lp = bool(
@@ -604,48 +621,35 @@ async def compare_offers(req: CompareOffersRequest):
                     base_offers, bool(exact), sup_by_id,
                 ))
 
-            # Ilość zamówienia: mediana order_base z dopasowań (albo target)
-            ordered_bases = [
-                float(v.get("order_base_qty") or req_base_qty)
-                for v in best_by_supplier.values()
-            ]
+            # Ilość w per_item = żądany target (próg optymalny / deficyt).
+            # Opakowania per dostawca są w order_base_qty oferty — nie bierz mediany,
+            # bo gruby pack u jednego dostawcy zawyżałby ilość w koszyku (8→10 kg).
             chosen_dim = req_dim
-            if ordered_bases:
-                ordered_bases.sort()
-                chosen_base = ordered_bases[len(ordered_bases) // 2]
-                # wymiar z najlepszej oferty (po konwersji może być kg mimo req szt)
-                sample = next(iter(best_by_supplier.values()), None)
-                if sample and sample.get("base_dim"):
-                    chosen_dim = sample["base_dim"]
-                    match_target_base = float(sample.get("target_base_qty") or match_target_base)
-            else:
-                chosen_base = req_base_qty
-
-            # Notatka PL gdy opakowanie ≠ dokładne zapotrzebowanie
-            note_target = match_target_base if item_pack_adjusted else req_base_qty
-            note_dim = match_dim_used if item_pack_adjusted else chosen_dim
+            sample = next(iter(best_by_supplier.values()), None) if best_by_supplier else None
+            if sample and sample.get("base_dim"):
+                chosen_dim = sample["base_dim"]
+                match_target_base = float(sample.get("target_base_qty") or match_target_base)
+            # Notatka gdy którakolwiek oferta mocno odbiega opakowaniem od targetu
             if best_by_supplier:
-                note = _pack_mismatch_note(
-                    it.product_name_or_id, note_target, chosen_base, note_dim,
-                )
-                if note:
-                    pack_notes.append(note)
-                    item_pack_adjusted = True
-
-            # Wyświetl ilość w jednostce żądania gdy da się przeliczyć z powrotem
-            if chosen_dim == req_dim:
-                display_qty = chosen_base / req_factor if req_factor else chosen_base
-                display_unit = it.unit
-            else:
-                display_qty = chosen_base
-                display_unit = chosen_dim
+                for v in best_by_supplier.values():
+                    ob = float(v.get("order_base_qty") or 0)
+                    tb = float(v.get("target_base_qty") or req_base_qty)
+                    note = _pack_mismatch_note(
+                        it.product_name_or_id, tb, ob, v.get("base_dim") or chosen_dim,
+                    )
+                    if note and note not in pack_notes:
+                        pack_notes.append(note)
+                        item_pack_adjusted = True
 
             per_item.append({
                 "product_name": it.product_name_or_id,
-                "quantity": round(display_qty, 4),
-                "unit": display_unit,
+                "quantity": round(float(it.quantity), 4),
+                "unit": it.unit,
                 "base_dim": chosen_dim,
-                "base_quantity": round(chosen_base, 4),
+                "base_quantity": round(
+                    float(sample.get("target_base_qty") or req_base_qty) if sample else req_base_qty,
+                    4,
+                ),
                 "target_quantity": float(it.quantity),
                 "quantity_min": float(it.quantity_min) if it.quantity_min is not None else round(float(it.quantity) * 0.9, 4),
                 "quantity_max": float(it.quantity_max) if it.quantity_max is not None else round(float(it.quantity) * 1.1, 4),
@@ -707,6 +711,7 @@ async def compare_offers(req: CompareOffersRequest):
             kitchen_priorities=kitchen_priorities,
             waste_top=waste_top,
             fillers=fillers,
+            cart_objective=req.cart_objective,
         )
         result = apply_cart_objective(result, req.cart_objective, suppliers_meta)
         result = _sanitize_optimize_unique_products(result)

@@ -72,28 +72,70 @@ def _price_slack_ok(cheapest_lt: float, candidate_lt: float) -> bool:
     return False
 
 
+def _normalize_cart_objective(objective: Optional[str]) -> str:
+    """lowest_price | min_deliveries | fast_delivery | ''."""
+    obj = (objective or "").strip().lower()
+    aliases = {
+        "najniższa cena": "lowest_price",
+        "najnizsza cena": "lowest_price",
+        "price": "lowest_price",
+        "lowest": "lowest_price",
+        "minimalna liczba dostaw": "min_deliveries",
+        "min dostaw": "min_deliveries",
+        "monolith": "min_deliveries",
+        "szybki czas dostawy": "fast_delivery",
+        "szybka dostawa": "fast_delivery",
+        "fast": "fast_delivery",
+        "lead_time": "fast_delivery",
+    }
+    obj = aliases.get(obj, obj)
+    if obj in ("lowest_price", "min_deliveries", "fast_delivery"):
+        return obj
+    return ""
+
+
 def _pick_practical_supplier(
     pi: dict,
     groups: dict[str, dict],
     suppliers_meta: dict[str, dict],
     decision_log: Optional[list] = None,
+    *,
+    cart_objective: Optional[str] = None,
 ) -> Optional[tuple[str, dict]]:
     """
-    Wybór dostawcy pod SKU z regułami praktycznymi + TCO:
-      1) Preferuj koszyki spełniające min / z mniejszą luką (TCO wszystkich koszyków).
-      2) Score = TCO wszystkich koszyków po dodaniu (produkty + ship + kara min).
-      3) Preferuj konsolidację gdy obniża TCO (nawet gdy linia droższa).
-      4) Pojedyncza pozycja NIE blokuje nowego koszyka — luka > 150 zł oceniana
-         dopiero po zsumowaniu wszystkich produktów u dostawcy (purge).
+    Wybór dostawcy pod SKU — reguły zależne od preferencji użytkownika:
+
+      • lowest_price / domyślnie: najtańsza cena jednostkowa, gdy koszyk
+        miękko-wykonalny (już w koszyku LUB luka ≤ 150 zł LUB spełnia min).
+      • min_deliveries: konsolidacja / TCO — nie otwieraj nowego koszyka tylko
+        dlatego, że linia jest tańsza.
+      • fast_delivery: najpierw lead_time, przy remisie cena.
+
+    Pojedyncza pozycja nie blokuje nowego koszyka — luka > 150 oceniana po sumie (purge).
     """
+    from ._p0 import resolve_lead_time_days
+
     bbs = pi.get("best_by_supplier") or {}
     if not bbs:
         return None
 
+    obj = _normalize_cart_objective(cart_objective)
+    prefer_consolidate = obj == "min_deliveries"
+    prefer_speed = obj == "fast_delivery"
+    # Domyślnie i przy lowest_price — cena jednostkowa
+    prefer_price = not prefer_consolidate and not prefer_speed
+    if obj == "lowest_price" or obj == "":
+        prefer_price = True
+        prefer_consolidate = False
+
     quotes = [(sid, q, float(q["line_total"])) for sid, q in bbs.items()]
-    quotes.sort(key=lambda x: x[2])
+    quotes.sort(key=lambda x: (
+        float(x[1].get("unit_price_base") or 1e18),
+        x[2],
+    ))
     cheapest_lt = quotes[0][2]
     cheapest_sid = quotes[0][0]
+    cheapest_unit = float(quotes[0][1].get("unit_price_base") or 0)
 
     scored: list[tuple[tuple, str, dict, float]] = []
     for sid, quote, lt in quotes:
@@ -103,9 +145,12 @@ def _pick_practical_supplier(
         projected = cur_sub + lt
         gap_after = _gap_to_min(projected, min_v)
         meets_after = gap_after <= 0
+        soft_viable = in_basket or meets_after or gap_after <= MAX_GAP_NEW_BASKET_PLN
         anchor = in_basket and _is_anchor_group(groups[sid], suppliers_meta)
+        unit_price = float(quote.get("unit_price_base") or 0)
+        meta = suppliers_meta.get(sid) or {}
+        lead = float(resolve_lead_time_days(meta))
 
-        # Symuluj TCO po dodaniu linii
         sim: dict[str, dict] = {
             k: {
                 "supplier_id": v["supplier_id"],
@@ -121,8 +166,6 @@ def _pick_practical_supplier(
         soft_penalty = 0
         if gap_after > SOFT_GAP_PREFER_ANCHOR_PLN and not meets_after:
             soft_penalty = 1
-        # Lekka kara gdy po tej linii luka i tak > soft max — nadal pozwalamy dodać
-        # (kolejne SKU u tego dostawcy mogą dobić sumę ≤ 150).
         hard_gap_penalty = 1 if (min_v > 0 and gap_after > MAX_GAP_NEW_BASKET_PLN) else 0
 
         under_min_now = False
@@ -133,19 +176,46 @@ def _pick_practical_supplier(
             (under_min_now and _price_slack_ok(cheapest_lt, lt))
             or (anchor and _price_slack_ok(cheapest_lt, lt))
         )
-
-        # Główny ranking: TCO (niższe = lepsze), potem minima / cena linii
         tier = 0 if prefer_existing else 1
-        key = (
-            tco_after,
-            hard_gap_penalty,
-            tier,
-            0 if meets_after else 1,
-            soft_penalty,
-            lt,
-            0 if in_basket else 1,
-            gap_after,
-        )
+
+        if prefer_consolidate:
+            # Minimalna liczba dostaw — TCO / konsolidacja nad czystą ceną
+            key = (
+                hard_gap_penalty,
+                tco_after,
+                tier,
+                0 if meets_after else 1,
+                soft_penalty,
+                lt,
+                0 if in_basket else 1,
+                unit_price,
+                gap_after,
+            )
+        elif prefer_speed:
+            key = (
+                hard_gap_penalty,
+                0 if soft_viable else 1,
+                lead,
+                unit_price,
+                lt,
+                tco_after,
+                0 if in_basket else 1,
+                gap_after,
+            )
+        else:
+            # lowest_price / default: najtańsza cena gdy soft-viable
+            key = (
+                hard_gap_penalty,
+                0 if soft_viable else 1,
+                unit_price,
+                lt,
+                lead,
+                0 if meets_after else 1,
+                soft_penalty,
+                tco_after,
+                0 if in_basket else 1,
+                gap_after,
+            )
         scored.append((key, sid, quote, tco_after))
 
     if not scored:
@@ -164,9 +234,17 @@ def _pick_practical_supplier(
     scored.sort(key=lambda x: x[0])
     best_sid, best_quote, best_tco = scored[0][1], scored[0][2], scored[0][3]
     best_lt = float(best_quote["line_total"])
-    reason = "TCO_BEST"
+    best_unit = float(best_quote.get("unit_price_base") or 0)
+    reason = "PRICE_BEST" if prefer_price else ("LEAD_BEST" if prefer_speed else "TCO_BEST")
     if best_sid != cheapest_sid:
-        reason = "TCO_CONSOLIDATE" if best_lt > cheapest_lt else "TCO_BEST"
+        if prefer_consolidate and best_lt > cheapest_lt:
+            reason = "TCO_CONSOLIDATE"
+        elif prefer_speed:
+            reason = "LEAD_THEN_PRICE"
+        elif best_unit > cheapest_unit + 1e-9:
+            reason = "SOFT_VIABLE_TRADEOFF"
+        else:
+            reason = "PRICE_BEST"
     _log_decision(
         decision_log,
         product=pi.get("product_name") or "",
@@ -178,7 +256,7 @@ def _pick_practical_supplier(
             (float(groups[best_sid]["subtotal_pln"]) if best_sid in groups else 0.0) + best_lt,
             _min_order_value(suppliers_meta, best_sid),
         ),
-        tco_note=f"TCO po dodaniu ≈ {best_tco:.2f} zł",
+        tco_note=f"obj={obj or 'lowest_price'} TCO≈{best_tco:.2f}",
     )
     return best_sid, best_quote
 
@@ -189,4 +267,4 @@ def _cheapest_line_total(pi: dict) -> float:
         return 0.0
     return min(float(q["line_total"]) for q in bbs.values())
 
-__all__ = ['_cheapest_line_total', '_cheapest_supplier_id', '_is_anchor_group', '_log_decision', '_pick_practical_supplier', '_price_slack_ok']
+__all__ = ['_cheapest_line_total', '_cheapest_supplier_id', '_is_anchor_group', '_log_decision', '_normalize_cart_objective', '_pick_practical_supplier', '_price_slack_ok']

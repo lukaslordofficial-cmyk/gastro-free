@@ -198,7 +198,9 @@ def _simulate_assign_excluding(
             # Zawsze dodaj — ostateczna luka > 150 zł liczona po sumie koszyka (purge).
             _add_line_to_groups(groups, pi, force, quote, suppliers_meta)
             continue
-        picked = _pick_practical_supplier(pi, groups, suppliers_meta, decision_log=None)
+        picked = _pick_practical_supplier(
+            pi, groups, suppliers_meta, decision_log=None, cart_objective=None,
+        )
         if not picked:
             missing.append(pname)
             continue
@@ -569,8 +571,10 @@ def _assign_all_practical(
     items: list[dict],
     suppliers_meta: dict[str, dict],
     decision_log: Optional[list] = None,
+    *,
+    cart_objective: Optional[str] = None,
 ) -> tuple[dict[str, dict], list[str]]:
-    """Przydziel wszystkie SKU: exclusive gate → TCO pick dla pozostałych.
+    """Przydziel wszystkie SKU: exclusive gate → pick wg preferencji (cena/TCO/lead).
 
     Kolejność: kitchen Class A / priority score, potem wartość linii.
     """
@@ -649,7 +653,9 @@ def _assign_all_practical(
             assigned.add(pname)
             continue
 
-        picked = _pick_practical_supplier(pi, groups, suppliers_meta, decision_log)
+        picked = _pick_practical_supplier(
+            pi, groups, suppliers_meta, decision_log, cart_objective=cart_objective,
+        )
         if not picked:
             if pname not in missing:
                 missing.append(pname)
@@ -740,6 +746,8 @@ def _purge_under_min_groups(
     item_by_name: dict[str, dict],
     suppliers_meta: dict[str, dict],
     missing: list[str],
+    *,
+    cart_objective: Optional[str] = None,
 ) -> tuple[dict[str, dict], list[str]]:
     """Usuwa koszyki z luką > 150 zł do min; próbuje przenieść linie do kotwic."""
     miss = list(missing)
@@ -770,7 +778,9 @@ def _purge_under_min_groups(
             bbs = pi.get("best_by_supplier") or {}
             # tymczasowo bez broken
             tmp = {k: v for k, v in groups.items() if k != broken_sid}
-            picked = _pick_practical_supplier(pi, tmp, suppliers_meta)
+            picked = _pick_practical_supplier(
+                pi, tmp, suppliers_meta, cart_objective=cart_objective,
+            )
             if picked is None:
                 if pname and pname not in miss:
                     miss.append(pname)
@@ -812,15 +822,19 @@ def _purge_under_min_groups(
 def compute_split_max(
     items: list[dict],
     suppliers_meta: dict[str, dict],
+    *,
+    cart_objective: Optional[str] = None,
 ) -> dict:
     """
-    Split praktyczny: przydział SKU z regułami kotwic / minimów / TCO,
+    Split praktyczny: przydział SKU z regułami kotwic / minimów / TCO/ceny,
     potem naprawa koszyków poniżej min i purge luk > 150 zł.
     """
     decision_log: list = []
     # Packaging band first — drop oversize quotes before assignment
     items = apply_packaging_band_filter(items, decision_log)
-    groups, missing = _assign_all_practical(items, suppliers_meta, decision_log)
+    groups, missing = _assign_all_practical(
+        items, suppliers_meta, decision_log, cart_objective=cart_objective,
+    )
     item_by_name = {pi["product_name"]: pi for pi in items}
 
     def _failing() -> list[str]:
@@ -845,7 +859,9 @@ def compute_split_max(
                 continue
             broken["items"] = [x for x in broken["items"] if x["product_name"] != pname]
             broken["subtotal_pln"] = round(sum(x["line_total"] for x in broken["items"]), 2)
-            picked = _pick_practical_supplier(pi, groups, suppliers_meta, decision_log)
+            picked = _pick_practical_supplier(
+                pi, groups, suppliers_meta, decision_log, cart_objective=cart_objective,
+            )
             if not picked or picked[0] == broken_sid:
                 broken["items"].append(line)
                 broken["subtotal_pln"] = round(sum(x["line_total"] for x in broken["items"]), 2)
@@ -874,9 +890,13 @@ def compute_split_max(
 
     # Najpierw dopełnij soft/exclusive luki (zanim purge wyrzuci exclusive SKU)
     groups = _fill_soft_gaps_min_delta(groups, items, suppliers_meta)
-    groups, missing = _purge_under_min_groups(groups, item_by_name, suppliers_meta, missing)
+    groups, missing = _purge_under_min_groups(
+        groups, item_by_name, suppliers_meta, missing, cart_objective=cart_objective,
+    )
     groups = _fill_soft_gaps_min_delta(groups, items, suppliers_meta)
-    groups, missing = _purge_under_min_groups(groups, item_by_name, suppliers_meta, missing)
+    groups, missing = _purge_under_min_groups(
+        groups, item_by_name, suppliers_meta, missing, cart_objective=cart_objective,
+    )
 
     group_list = list(groups.values())
     for g in group_list:

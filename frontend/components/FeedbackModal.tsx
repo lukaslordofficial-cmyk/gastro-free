@@ -187,7 +187,7 @@ export function FeedbackModal({ visible, onClose, defaultLocation }: Props) {
         <View style={styles.header}>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>Zgłoś uwagi</Text>
-            <Text style={styles.sub}>Feedback dla testerów — błędy, pomysły, opinie</Text>
+            <Text style={styles.sub}>Feedback od użytkowników — błędy, pomysły, opinie</Text>
           </View>
           <TouchableOpacity onPress={handleClose} hitSlop={12} style={styles.close}>
             <X size={20} color={DS.color.heading} />

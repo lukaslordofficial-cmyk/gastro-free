@@ -27,8 +27,9 @@ const plugins = (appJson.expo.plugins || []).map((p) => {
       android: {
         ...prevAndroid,
         usesCleartextTraffic: false,
-        targetSdkVersion: 35,
-        compileSdkVersion: 35,
+        targetSdkVersion: 36,
+        compileSdkVersion: 36,
+        buildToolsVersion: '36.0.0',
         minSdkVersion: Math.max(24, Number(prevAndroid.minSdkVersion) || 24),
         ...(arm64OnlyApk ? { buildArchs: ['arm64-v8a'] } : {}),
       },
@@ -45,8 +46,9 @@ if (!hasBuildProps) {
     {
       android: {
         usesCleartextTraffic: false,
-        targetSdkVersion: 35,
-        compileSdkVersion: 35,
+        targetSdkVersion: 36,
+        compileSdkVersion: 36,
+        buildToolsVersion: '36.0.0',
         minSdkVersion: 24,
         ...(arm64OnlyApk ? { buildArchs: ['arm64-v8a'] } : {}),
       },

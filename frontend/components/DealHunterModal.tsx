@@ -413,6 +413,16 @@ export function DealHunterModal({
     });
   }, [baseSelectedSuppliers]);
 
+  const removeSupplierCart = useCallback((supplierId: string | null) => {
+    setManualCart((prev) => {
+      const cart = prev ?? baseSelectedSuppliers().map((g) => recalcGroup({
+        ...g,
+        items: g.items.map((it) => ({ ...it })),
+      }));
+      return cart.filter((g) => g.supplier_id !== supplierId);
+    });
+  }, [baseSelectedSuppliers]);
+
   const addCatalogProduct = useCallback((row: CatalogRow) => {
     if (!catalogPicker) return;
     setManualCart((prev) => {
@@ -1317,6 +1327,7 @@ export function DealHunterModal({
         dismissedMissingKeys={dismissedMissingKeys}
         onQtyChange={updateQty}
         onRemoveItem={removeCartItem}
+        onRemoveSupplierCart={removeSupplierCart}
         onAddSubstitute={addSubstituteToCart}
         onAddMissingOffer={(off) => {
           if (!off.supplier_id) return;

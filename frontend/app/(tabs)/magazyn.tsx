@@ -798,9 +798,20 @@ export default function MagazynScreen() {
       const mapped = mapDbRow(row);
       if (editingId) {
         setInventory((prev) => prev.map((i) => (i.id === editingId ? mapped : i)));
+        premiumAlert(
+          'Zmiany zapisane',
+          `Zaktualizowano „${mapped.product_name}”.`
+            + (mapped.critical_threshold > 0
+              ? `\nPróg krytyczny: ${mapped.critical_threshold} ${mapped.unit}`
+              : '')
+            + (mapped.optimal_threshold > 0
+              ? `\nPróg optymalny: ${mapped.optimal_threshold} ${mapped.unit}`
+              : ''),
+        );
       } else {
         setInventory((prev) => [...prev, mapped]);
         await autoUnlockOfferItems(row.id, row.name);
+        premiumAlert('Produkt zapisany', `Dodano „${mapped.product_name}” do magazynu.`);
       }
       if (form.category) {
         setExpandedCategories((prev) => new Set([...prev, form.category]));

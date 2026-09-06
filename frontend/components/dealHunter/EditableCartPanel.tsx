@@ -17,6 +17,7 @@ import {
   Landmark,
   ChevronDown,
   ChevronRight,
+  Trash2,
 } from 'lucide-react-native';
 import { formatPln } from '@/lib/format';
 import type { OptimizeResult, SupplierGroup } from '@/lib/bargainHunter';
@@ -57,6 +58,7 @@ type Props = {
   dismissedMissingKeys?: Set<string>;
   onQtyChange: (key: string, qty: number) => void;
   onRemoveItem: (supplierId: string | null, productName: string) => void;
+  onRemoveSupplierCart: (supplierId: string | null) => void;
   onAddSubstitute: (offer: SubstituteOffer, variantLabel: string) => void;
   onAddMissingOffer: (offer: BasketMissingOffer) => void;
   onOpenNewOrder: () => void;
@@ -76,6 +78,7 @@ export function EditableCartPanel({
   dismissedMissingKeys,
   onQtyChange,
   onRemoveItem,
+  onRemoveSupplierCart,
   onAddSubstitute,
   onAddMissingOffer,
   onOpenNewOrder,
@@ -350,7 +353,12 @@ export function EditableCartPanel({
                   ? `E-mail: ${g.supplier_email}`
                   : 'Brak e-maila dostawcy — uzupełnij w module Dostawcy.'}
             </Text>
-            <MinOrderBadge meets={g.meets_minimum_order} minVal={g.min_order_value} />
+            <MinOrderBadge
+              meets={g.meets_minimum_order}
+              minVal={g.min_order_value}
+              subtotal={g.subtotal_pln}
+              gapPln={g.gap_to_minimum_pln}
+            />
             {g.items.map((it, idx) => (
               <OfferLine
                 key={`edit-${g.supplier_id}-${it.product_name}-${idx}`}
@@ -361,6 +369,27 @@ export function EditableCartPanel({
                 onRemove={() => onRemoveItem(g.supplier_id, it.product_name)}
               />
             ))}
+            <TouchableOpacity
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                paddingVertical: 10,
+                marginBottom: 6,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: C.danger,
+              }}
+              onPress={() => onRemoveSupplierCart(g.supplier_id)}
+              activeOpacity={0.85}
+              testID={`deal-hunter-remove-cart-${g.supplier_id ?? gi}`}
+            >
+              <Trash2 size={14} color={C.danger} strokeWidth={2.2} />
+              <Text style={{ fontSize: 12, fontWeight: '700', color: C.danger }}>
+                Usuń cały koszyk
+              </Text>
+            </TouchableOpacity>
             {/* „Dodaj z katalogu” tylko dla hurtowników — lokalni mają produkty marketplace */}
             {!g.is_local_producer ? (
             <TouchableOpacity
@@ -497,9 +526,8 @@ export function EditableCartPanel({
           <Text style={[styles.editCartHint, { color: C.danger, marginBottom: 4 }]}>
             Znalezione, ale nie weszły do koszyka ({basketMissingOffers.length})
             {'\n'}
-            Łowca nie startuje nowego koszyka u dostawcy, gdy do jego minimum brakuje ponad 150 zł
-            (przy samej tej pozycji / małej grupie). Dodaj „+”, żeby złożyć większe zamówienie —
-            wtedy minimum może zostać spełnione łącznie.
+            Po zsumowaniu potrzebnych produktów u dostawcy do minimum brakuje ponad 150 zł —
+            Łowca nie zakłada takiego koszyka. Możesz dodać „+”, żeby dołączyć pozycję ręcznie.
           </Text>
           {basketMissingOffers.map((off) => (
             <View

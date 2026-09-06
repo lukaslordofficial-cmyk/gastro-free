@@ -163,11 +163,13 @@ export function recalcGroup(g: SupplierGroup): SupplierGroup {
   }));
   const subtotal = Math.round(items.reduce((s, it) => s + it.line_total, 0) * 100) / 100;
   const minVal = g.min_order_value ?? 0;
+  const gap = minVal > 0 ? Math.max(0, Math.round((minVal - subtotal) * 100) / 100) : 0;
   return {
     ...g,
     items,
     subtotal_pln: subtotal,
     meets_minimum_order: !minVal || minVal <= 0 || subtotal >= minVal,
+    gap_to_minimum_pln: gap,
   };
 }
 

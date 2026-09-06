@@ -39,6 +39,8 @@ export interface SupplierGroup {
   subtotal_pln: number;
   min_order_value?: number;
   meets_minimum_order?: boolean;
+  /** Ile brakuje do minimum logistycznego (zł), gdy koszyk poniżej min. */
+  gap_to_minimum_pln?: number;
   shipping_pln?: number;
   total_pln?: number;
   /** Marketplace B2B — Lokalni Przetwórcy (nie suppliers) */
@@ -607,11 +609,13 @@ function patchGroupQuantities(
   });
   const subtotal = Math.round(items.reduce((s, it) => s + it.line_total, 0) * 100) / 100;
   const minVal = g.min_order_value ?? 0;
+  const gap = minVal > 0 ? Math.max(0, Math.round((minVal - subtotal) * 100) / 100) : 0;
   return {
     ...g,
     items,
     subtotal_pln: subtotal,
     meets_minimum_order: !minVal || minVal <= 0 || subtotal >= minVal,
+    gap_to_minimum_pln: gap,
     total_pln: Math.round((subtotal + (g.shipping_pln ?? 0)) * 100) / 100,
   };
 }

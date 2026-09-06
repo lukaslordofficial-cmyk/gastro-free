@@ -80,10 +80,11 @@ def _pick_practical_supplier(
 ) -> Optional[tuple[str, dict]]:
     """
     Wybór dostawcy pod SKU z regułami praktycznymi + TCO:
-      1) Nie twórz nowego koszyka, jeśli po dodaniu luka do min > 150 zł.
+      1) Preferuj koszyki spełniające min / z mniejszą luką (TCO wszystkich koszyków).
       2) Score = TCO wszystkich koszyków po dodaniu (produkty + ship + kara min).
       3) Preferuj konsolidację gdy obniża TCO (nawet gdy linia droższa).
-      4) Brak legalnej opcji → None (pozycja idzie do missing, nie wymuszamy koszyka).
+      4) Pojedyncza pozycja NIE blokuje nowego koszyka — luka > 150 zł oceniana
+         dopiero po zsumowaniu wszystkich produktów u dostawcy (purge).
     """
     bbs = pi.get("best_by_supplier") or {}
     if not bbs:
@@ -102,16 +103,7 @@ def _pick_practical_supplier(
         projected = cur_sub + lt
         gap_after = _gap_to_min(projected, min_v)
         meets_after = gap_after <= 0
-        is_new = not in_basket
         anchor = in_basket and _is_anchor_group(groups[sid], suppliers_meta)
-
-        # TWARDY: nowy koszyk z luką > 150 zł — odrzuć (także exclusive —
-        # lepiej missing niż zamówienie 30 zł przy min. 800 zł).
-        if is_new and min_v > 0 and gap_after > MAX_GAP_NEW_BASKET_PLN:
-            continue
-        # TWARDY: istniejący koszyk, który po dodaniu wciąż ma lukę > 150 i nie jest kotwicą
-        if in_basket and not meets_after and gap_after > MAX_GAP_NEW_BASKET_PLN and not anchor:
-            continue
 
         # Symuluj TCO po dodaniu linii
         sim: dict[str, dict] = {
@@ -129,6 +121,9 @@ def _pick_practical_supplier(
         soft_penalty = 0
         if gap_after > SOFT_GAP_PREFER_ANCHOR_PLN and not meets_after:
             soft_penalty = 1
+        # Lekka kara gdy po tej linii luka i tak > soft max — nadal pozwalamy dodać
+        # (kolejne SKU u tego dostawcy mogą dobić sumę ≤ 150).
+        hard_gap_penalty = 1 if (min_v > 0 and gap_after > MAX_GAP_NEW_BASKET_PLN) else 0
 
         under_min_now = False
         if in_basket:
@@ -139,10 +134,11 @@ def _pick_practical_supplier(
             or (anchor and _price_slack_ok(cheapest_lt, lt))
         )
 
-        # Główny ranking: TCO (niższe = lepsze), potem cena linii / minima
+        # Główny ranking: TCO (niższe = lepsze), potem minima / cena linii
         tier = 0 if prefer_existing else 1
         key = (
             tco_after,
+            hard_gap_penalty,
             tier,
             0 if meets_after else 1,
             soft_penalty,
@@ -153,7 +149,6 @@ def _pick_practical_supplier(
         scored.append((key, sid, quote, tco_after))
 
     if not scored:
-        # Brak legalnej opcji — NIGDY nie wrzucaj do koszyka z luką > 150.
         _log_decision(
             decision_log,
             product=pi.get("product_name") or "",
@@ -162,7 +157,7 @@ def _pick_practical_supplier(
             alt_cheaper_supplier=cheapest_sid,
             price_delta=0.0,
             gap_to_min=_gap_to_min(cheapest_lt, _min_order_value(suppliers_meta, cheapest_sid)),
-            tco_note="Wszystkie oferty tworzą lukę > MAX_GAP lub są niedostępne.",
+            tco_note="Brak ofert do przydziału.",
         )
         return None
 

@@ -195,15 +195,7 @@ def _simulate_assign_excluding(
         force = force_sid_for.get(pname)
         if force and force in bbs:
             quote = bbs[force]
-            min_v = _min_order_value(suppliers_meta, force)
-            cur = float(groups[force]["subtotal_pln"]) if force in groups else 0.0
-            gap = _gap_to_min(cur + float(quote["line_total"]), min_v)
-            if min_v > 0 and gap > MAX_GAP_NEW_BASKET_PLN and force not in groups:
-                missing.append(pname)
-                continue
-            if force in groups and min_v > 0 and gap > MAX_GAP_NEW_BASKET_PLN:
-                missing.append(pname)
-                continue
+            # Zawsze dodaj — ostateczna luka > 150 zł liczona po sumie koszyka (purge).
             _add_line_to_groups(groups, pi, force, quote, suppliers_meta)
             continue
         picked = _pick_practical_supplier(pi, groups, suppliers_meta, decision_log=None)
@@ -791,10 +783,6 @@ def _purge_under_min_groups(
             lt = float(quote["line_total"])
             min_v = _min_order_value(suppliers_meta, target_sid)
             if target_sid not in groups:
-                if min_v > 0 and _gap_to_min(lt, min_v) > MAX_GAP_NEW_BASKET_PLN:
-                    if pname and pname not in miss:
-                        miss.append(pname)
-                    continue
                 groups[target_sid] = {
                     "supplier_id": target_sid,
                     "supplier_name": quote["supplier_name"],
@@ -803,12 +791,6 @@ def _purge_under_min_groups(
                     "subtotal_pln": 0.0,
                     "min_order_value": min_v,
                 }
-            else:
-                projected = float(groups[target_sid]["subtotal_pln"]) + lt
-                if min_v > 0 and _gap_to_min(projected, min_v) > MAX_GAP_NEW_BASKET_PLN:
-                    if pname and pname not in miss:
-                        miss.append(pname)
-                    continue
             tg = groups[target_sid]
             tg["items"] = [x for x in tg["items"] if x.get("product_name") != pname]
             tg["items"].append(_item_line_entry(pi, quote))
@@ -871,11 +853,6 @@ def compute_split_max(
             target_sid, quote = picked
             if target_sid not in groups:
                 min_v = _min_order_value(suppliers_meta, target_sid)
-                lt = float(quote["line_total"])
-                if min_v > 0 and _gap_to_min(lt, min_v) > MAX_GAP_NEW_BASKET_PLN:
-                    broken["items"].append(line)
-                    broken["subtotal_pln"] = round(sum(x["line_total"] for x in broken["items"]), 2)
-                    continue
                 groups[target_sid] = {
                     "supplier_id": target_sid,
                     "supplier_name": quote["supplier_name"],

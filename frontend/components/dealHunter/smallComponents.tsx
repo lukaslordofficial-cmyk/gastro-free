@@ -180,13 +180,32 @@ export function OfferLine({
   );
 }
 
-export function MinOrderBadge({ meets, minVal }: { meets?: boolean; minVal?: number }) {
+export function MinOrderBadge({
+  meets,
+  minVal,
+  subtotal,
+  gapPln,
+}: {
+  meets?: boolean;
+  minVal?: number;
+  subtotal?: number;
+  gapPln?: number;
+}) {
   const C = useDealColors();
   const styles = useMemo(() => themedStyles(C), [C]);
   if (!minVal || minVal <= 0 || meets) return null;
+  const gap =
+    gapPln != null && gapPln > 0
+      ? gapPln
+      : subtotal != null
+        ? Math.max(0, minVal - subtotal)
+        : 0;
   return (
     <View style={styles.minOrderBadge}>
-      <Text style={styles.minOrderText}>Min. zamówienie: {formatPln(minVal)}</Text>
+      <Text style={styles.minOrderText}>
+        Min. zamówienie: {formatPln(minVal)}
+        {gap > 0 ? ` · brakuje ${formatPln(gap)} do minimum logistycznego` : ''}
+      </Text>
     </View>
   );
 }

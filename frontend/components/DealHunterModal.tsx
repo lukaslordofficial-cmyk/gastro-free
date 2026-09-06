@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Alert,
   DeviceEventEmitter,
+  BackHandler,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Package } from 'lucide-react-native';
@@ -697,22 +698,15 @@ export function DealHunterModal({
       const data = await res.json();
       const msgs: MessageCard[] = data.messages ?? [];
       setMessages(msgs);
-      const profileEmail = (
-        (data.profile?.contact_email as string | undefined)
-        || contactEmail
-        || accountMail
-        || ''
-      ).trim();
-      const preferredFrom = profileEmail || ASSISTANT_FROM_EMAIL;
-      const useAssistant = preferredFrom.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
+      // Łowca: zawsze asystent.dostaw@… (nie e-mail restauracji z profilu)
+      const preferredFrom = ASSISTANT_FROM_EMAIL;
       const initial: Record<string, string> = {};
       const subjectInit: Record<string, string> = {};
       const fromInit: Record<string, string> = {};
       const toInit: Record<string, string> = {};
       msgs.forEach((m) => {
         const key = m.supplier_id ?? m.supplier_name;
-        const raw = m.email_body_text ?? m.email_text ?? '';
-        initial[key] = useAssistant ? raw : stripAssistantOrderFooter(raw);
+        initial[key] = m.email_body_text ?? m.email_text ?? '';
         subjectInit[key] = m.email_subject ?? '';
         fromInit[key] = preferredFrom;
         toInit[key] = m.supplier_email ?? '';
@@ -1084,6 +1078,39 @@ export function DealHunterModal({
           : 0
     : stepIndex;
 
+  const handleHardwareBack = useCallback(() => {
+    if (showNewOrder) {
+      setShowNewOrder(false);
+      return true;
+    }
+    if (step === 'preview') {
+      if (isBulkMode) setStep('contact');
+      else setStep('compare');
+      return true;
+    }
+    if (step === 'contact') {
+      setStep('compare');
+      return true;
+    }
+    if (step === 'compare') {
+      if (isBulkMode) {
+        onClose();
+        return true;
+      }
+      setStep('qty');
+      return true;
+    }
+    // qty → zamknij modal
+    onClose();
+    return true;
+  }, [showNewOrder, step, isBulkMode, onClose]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', handleHardwareBack);
+    return () => sub.remove();
+  }, [visible, handleHardwareBack]);
+
   const cartGroups = effectiveSelectedOption
     ? selectedSuppliers().filter((g) => g.items.length > 0)
     : [];
@@ -1137,7 +1164,7 @@ export function DealHunterModal({
 
   return (
     <>
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleHardwareBack}>
       <View style={styles.container} testID="deal-hunter-modal">
         <DealHunterHeader
           subtitle={bulkContextLabel ?? product?.product_name ?? ''}

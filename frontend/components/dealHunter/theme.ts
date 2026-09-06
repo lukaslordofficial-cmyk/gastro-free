@@ -481,8 +481,8 @@ export function themedStyles(C: DealColors) {
     msgHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     msgSupplier: { flex: 1, fontSize: 14, fontWeight: '800', color: C.textPrimary },
     msgTotal: { fontSize: 13, fontWeight: '700', color: C.accent },
-    metaRow: { flexDirection: 'row', gap: 6 },
-    metaLabel: { fontSize: 12, fontWeight: '600', color: C.textTertiary, width: 48 },
+    metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+    metaLabel: { fontSize: 12, fontWeight: '600', color: C.textTertiary, flexShrink: 0 },
     metaValue: { flex: 1, fontSize: 12, color: C.textSecondary },
     msgSectionLabel: { fontSize: 11, fontWeight: '700', color: C.textSecondary, letterSpacing: 0.3 },
     bodyInput: {

@@ -98,7 +98,7 @@ export function MessagePreviewStep({
                 <Text style={styles.msgTotal}>{formatPln(m.subtotal_pln)}</Text>
               </View>
               <View style={styles.metaRow}>
-                <Text style={styles.metaLabel}>Nadawca:</Text>
+                <Text style={styles.metaLabel}>Nadawca</Text>
               </View>
               <TextInput
                 style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}
@@ -117,14 +117,14 @@ export function MessagePreviewStep({
                 placeholder={ASSISTANT_FROM_EMAIL}
                 testID={`deal-hunter-from-${m.supplier_name}`}
               />
-              <Text style={{ fontSize: 11, color: C.textTertiary, marginBottom: 8 }}>
-                {(fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim().toLowerCase() ===
-                ASSISTANT_FROM_EMAIL.toLowerCase()
-                  ? 'Wysyłka przez asystenta dostaw (backend :8001).'
-                  : 'Otworzymy Twoją aplikację pocztową — bez stopki asystenta.'}
-              </Text>
+              {(fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim().toLowerCase() !==
+              ASSISTANT_FROM_EMAIL.toLowerCase() ? (
+                <Text style={{ fontSize: 11, color: C.textTertiary, marginBottom: 8 }}>
+                  Otworzymy Twoją aplikację pocztową — bez stopki asystenta.
+                </Text>
+              ) : null}
               <View style={styles.metaRow}>
-                <Text style={styles.metaLabel}>Odbiorca:</Text>
+                <Text style={styles.metaLabel}>Odbiorca</Text>
               </View>
               <TextInput
                 style={[styles.bodyInput, { minHeight: 44, marginBottom: 8 }]}

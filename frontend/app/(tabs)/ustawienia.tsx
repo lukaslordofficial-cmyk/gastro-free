@@ -275,13 +275,14 @@ export default function UstawieniaScreen() {
       premiumAlert('Brak dań', 'Dodaj dania w Menu, potem przypisz numerki.');
       return;
     }
+    const n = orderedMenuForPos.length;
     premiumAlert(
-      'Przypisz numerki 1…',
-      `Nadpisze identyfikatory POS kolejnymi numerami 1–${orderedMenuForPos.length} (kolejność: kategoria, potem nazwa). Kasjerzy będą mogli spisywać tylko numery.`,
+      'Brak POS?',
+      `Przypisze potrawom numery od 1 do ${n}. Wydrukuj tę listę i zostaw kasjerowi. Po każdej sprzedaży będzie zaznaczał obok sprzedanej potrawy x, I, lub dowolny znacznik. Każdy znacznik to jedna sztuka. Na koniec dnia zeskanuj ten dokument w aplikacji. Kasjer może też wysłać ci zdjęcie dokumentu, a ty możesz wgrać je do zakładki Magazyn → Skan sprzedaży, by aktualizować Finanse i stan magazynowy, nawet gdy nie masz dostępu do dokumentu.`,
       [
         { text: 'Anuluj', style: 'cancel' },
         {
-          text: 'Przypisz',
+          text: 'Przypisz numery',
           style: 'primary',
           onPress: () => {
             void (async () => {
@@ -294,7 +295,10 @@ export default function UstawieniaScreen() {
                   premiumAlert('Błąd', error.message);
                   return;
                 }
-                premiumAlert('Gotowe', `Przypisano numery 1–${assigned}.`);
+                premiumAlert(
+                  'Gotowe',
+                  `Przypisano numery 1–${assigned}. Użyj „Zapisz listę nr (PDF)”, wydrukuj i daj kasjerowi.`,
+                );
                 handleMenuItemChanged();
               } finally {
                 setPosNumberBusy(false);
@@ -317,7 +321,7 @@ export default function UstawieniaScreen() {
     if (!rows.length) {
       premiumAlert(
         'Brak numerów',
-        'Najpierw przypisz numerki (przycisk „Przypisz numerki 1…”).',
+        'Najpierw kliknij „Brak POS? Kliknij”, żeby przypisać numery.',
       );
       return;
     }
@@ -362,7 +366,6 @@ export default function UstawieniaScreen() {
 
         {settingsPane === 'lokal' ? (
           <>
-            {/* ── Konto — tylko „Dane lokalu” ── */}
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <Info size={16} color={theme.textSecondary} />
@@ -393,9 +396,26 @@ export default function UstawieniaScreen() {
                     </Text>
                   </>
                 ) : null}
-                <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 14 }]}>
+                <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 0 }]}>
                   Klucz konta (kredyty / Stripe): {accountKey}
                 </Text>
+              </View>
+            </View>
+
+            <View style={styles.section}>
+              <RestaurantBillingForm />
+            </View>
+
+            <View style={styles.section}>
+              <View
+                style={[
+                  styles.card,
+                  theme.isPremium && {
+                    backgroundColor: theme.card,
+                    borderColor: theme.border,
+                  },
+                ]}
+              >
                 <TouchableOpacity
                   style={[
                     styles.saveBtn,
@@ -478,10 +498,6 @@ export default function UstawieniaScreen() {
                   )}
                 </TouchableOpacity>
               </View>
-            </View>
-
-            <View style={styles.section}>
-              <RestaurantBillingForm />
             </View>
           </>
         ) : null}
@@ -602,23 +618,6 @@ export default function UstawieniaScreen() {
             }}
           />
 
-          <View
-            style={[
-              styles.hintBox,
-              theme.isPremium && {
-                backgroundColor: theme.accentSoft,
-                borderWidth: 1,
-                borderColor: theme.border,
-              },
-            ]}
-          >
-            <Info size={14} color={theme.isPremium ? theme.accent : '#3B82F6'} />
-            <Text style={[styles.hintText, { color: theme.isPremium ? theme.textSecondary : '#1D4ED8' }]}>
-              Składniki 1:1 z Menu — edytujesz tu lub w Menu, obie strony się synchronizują. Zmapuj je
-              do magazynu (auto po nazwie). Przy sprzedaży POS aplikacja odejmie te ilości z magazynu.
-            </Text>
-          </View>
-
           {unmappedPosCount > 0 && (
             <View
               style={[
@@ -659,7 +658,7 @@ export default function UstawieniaScreen() {
                 <>
                   <Hash size={16} color={theme.isPremium ? '#0A0A0A' : '#fff'} strokeWidth={2.4} />
                   <Text style={[styles.saveBtnText, theme.isPremium && { color: '#0A0A0A' }]}>
-                    Przypisz numerki 1…
+                    Brak POS? Kliknij
                   </Text>
                 </>
               )}
@@ -686,8 +685,9 @@ export default function UstawieniaScreen() {
           </View>
 
           <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 10 }]}>
-            Wydrukuj listę PDF, kasjer zaznacza sprzedaż obok dań (x / ✓ / kreski — każdy znacznik =
-            1 szt.), potem Magazyn → Skan sprzedaży. Można też spisać same numery (np. „3 × 2”).
+            Brak kasy POS: kliknij powyżej, wydrukuj listę PDF, kasjer zaznacza sprzedaż (x / I / ✓),
+            potem Magazyn → Skan sprzedaży. Dokument z datą 6.09 wgrany 9.09 i tak trafi do finansów
+            dnia 6.09.
           </Text>
 
           {menuItems.length === 0 ? (

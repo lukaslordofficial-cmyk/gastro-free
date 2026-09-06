@@ -296,17 +296,47 @@ def _headers(prefer: str = "return=representation"):
     }
 
 
+ACCOUNT_KEY: str | None = None
+
+
 async def sb_get(client: httpx.AsyncClient, table: str, params: dict):
-    r = await client.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=_headers(), params=params)
+    p = dict(params or {})
+    if ACCOUNT_KEY and table in (
+        "inventory_items",
+        "recipe_ingredients",
+        "menu_items",
+        "suppliers",
+        "subscriptions",
+        "profiles",
+    ):
+        # recipe_ingredients nie ma account_key — filtr przez menu poniżej
+        if table != "recipe_ingredients":
+            p.setdefault("account_key", f"eq.{ACCOUNT_KEY}")
+    r = await client.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=_headers(), params=p)
     r.raise_for_status()
     return r.json()
 
 
 async def sb_post(client: httpx.AsyncClient, table: str, rows, *, prefer: str = "return=representation"):
+    payload = rows
+    if ACCOUNT_KEY:
+        if isinstance(rows, list):
+            payload = [
+                {**r, "account_key": ACCOUNT_KEY} if "account_key" not in r else r
+                for r in rows
+            ]
+            if table == "supplier_catalog":
+                payload = rows  # bez account_key
+            elif table == "suppliers":
+                payload = [{**r, "account_key": ACCOUNT_KEY} for r in (rows if isinstance(rows, list) else [rows])]
+                if not isinstance(rows, list):
+                    payload = payload[0]
+        elif isinstance(rows, dict) and table != "supplier_catalog":
+            payload = {**rows, "account_key": ACCOUNT_KEY}
     r = await client.post(
         f"{SUPABASE_URL}/rest/v1/{table}",
         headers=_headers(prefer),
-        json=rows,
+        json=payload,
     )
     if r.status_code >= 400:
         raise RuntimeError(f"POST {table}: {r.status_code} {r.text[:500]}")
@@ -315,11 +345,14 @@ async def sb_post(client: httpx.AsyncClient, table: str, rows, *, prefer: str = 
 
 async def wipe_sim(client: httpx.AsyncClient):
     print(f"Czyszczenie poprzednich dostawców {SIM_TAG}...")
-    rows = await sb_get(client, "suppliers", {
+    params = {
         "select": "id,name,notes",
         "notes": f"like.*{SIM_TAG}*",
         "limit": "100",
-    }) or []
+    }
+    if ACCOUNT_KEY:
+        params["account_key"] = f"eq.{ACCOUNT_KEY}"
+    rows = await sb_get(client, "suppliers", params) or []
     if not rows:
         print("  (brak poprzednich SIM_SUP)")
         return
@@ -341,16 +374,88 @@ async def wipe_sim(client: httpx.AsyncClient):
         print(f"  wipe supplier {sid[:8]}... -> {r.status_code}")
 
 
+async def resolve_account_key(client: httpx.AsyncClient, email: str | None, account_key: str | None) -> str:
+    if account_key:
+        return account_key.strip()
+    if not email:
+        raise SystemExit("Podaj --email lub --account-key")
+    rows = await sb_get(client, "profiles", {
+        "select": "id,email,account_key",
+        "email": f"ilike.{email.strip()}",
+        "limit": "1",
+    }) or []
+    if not rows or not rows[0].get("account_key"):
+        raise SystemExit(f"Brak profilu / account_key dla {email}")
+    return str(rows[0]["account_key"])
+
+
+async def grant_trial(client: httpx.AsyncClient, ak: str, days: int = 30, credits: int = 500):
+    from datetime import datetime, timedelta, timezone
+
+    ends = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    existing = await sb_get(client, "subscriptions", {
+        "select": "id,account_key,credits_balance,tier_level,trial_ends_at",
+        "account_key": f"eq.{ak}",
+        "limit": "1",
+    }) or []
+    patch = {
+        "trial_ends_at": ends,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if existing:
+        cur_credits = int(existing[0].get("credits_balance") or 0)
+        if cur_credits < credits:
+            patch["credits_balance"] = credits
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/subscriptions",
+            headers=_headers("return=representation"),
+            params={"account_key": f"eq.{ak}"},
+            json=patch,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"trial patch: {r.status_code} {r.text[:300]}")
+        print(f"Trial odświeżony do {ends} (credits_balance patch={patch.get('credits_balance', 'bez zmian')})")
+    else:
+        await sb_post(client, "subscriptions", {
+            "account_key": ak,
+            "tier_level": 0,
+            "credits_balance": credits,
+            "trial_ends_at": ends,
+            "status": "active",
+            "free_starter_claimed": True,
+        })
+        print(f"Utworzono subscriptions + trial do {ends}, credits_balance={credits}")
+
+
 async def load_ingredients(client: httpx.AsyncClient) -> list[dict]:
-    """Unikalne składniki z receptur (+ uzupełnienie z magazynu)."""
-    ri = await sb_get(client, "recipe_ingredients", {
-        "select": "ingredient_name,unit",
-        "limit": "5000",
-    }) or []
-    inv = await sb_get(client, "inventory_items", {
-        "select": "name,unit",
-        "limit": "5000",
-    }) or []
+    """Unikalne składniki z receptur (+ uzupełnienie z magazynu) — tenant ACCOUNT_KEY."""
+    if ACCOUNT_KEY:
+        menus = await sb_get(client, "menu_items", {
+            "select": "id",
+            "account_key": f"eq.{ACCOUNT_KEY}",
+            "limit": "2000",
+        }) or []
+        menu_ids = [m["id"] for m in menus if m.get("id")]
+        ri = []
+        for i in range(0, len(menu_ids), 80):
+            chunk = menu_ids[i:i + 80]
+            if not chunk:
+                break
+            part = await sb_get(client, "recipe_ingredients", {
+                "select": "ingredient_name,unit,menu_item_id",
+                "menu_item_id": f"in.({','.join(chunk)})",
+                "limit": "5000",
+            }) or []
+            ri.extend(part)
+    else:
+        ri = await sb_get(client, "recipe_ingredients", {
+            "select": "ingredient_name,unit",
+            "limit": "5000",
+        }) or []
+    inv_params = {"select": "name,unit", "limit": "5000"}
+    if ACCOUNT_KEY:
+        inv_params["account_key"] = f"eq.{ACCOUNT_KEY}"
+    inv = await sb_get(client, "inventory_items", inv_params) or []
 
     units: dict[str, Counter] = defaultdict(Counter)
     for r in ri:
@@ -438,10 +543,10 @@ def build_catalog_row(supplier_id: str, prod: dict, sdef: dict, sort_order: int)
 
 async def ensure_inventory_units(client: httpx.AsyncClient, products: list[dict]):
     """Uzupełnij magazyn brakującymi nazwami + popraw unit na kg/l/szt pod deal hunter."""
-    inv = await sb_get(client, "inventory_items", {
-        "select": "id,name,unit",
-        "limit": "5000",
-    }) or []
+    inv_params = {"select": "id,name,unit", "limit": "5000"}
+    if ACCOUNT_KEY:
+        inv_params["account_key"] = f"eq.{ACCOUNT_KEY}"
+    inv = await sb_get(client, "inventory_items", inv_params) or []
     by_lower = {(i.get("name") or "").strip().lower(): i for i in inv}
 
     to_insert = []
@@ -456,21 +561,26 @@ async def ensure_inventory_units(client: httpx.AsyncClient, products: list[dict]
                 r = await client.patch(
                     f"{SUPABASE_URL}/rest/v1/inventory_items",
                     headers=_headers("return=minimal"),
-                    params={"id": f"eq.{existing['id']}"},
+                    params={
+                        "id": f"eq.{existing['id']}",
+                        **({"account_key": f"eq.{ACCOUNT_KEY}"} if ACCOUNT_KEY else {}),
+                    },
                     json={"unit": want_unit},
                 )
                 if r.status_code < 300:
                     patched += 1
             continue
-        to_insert.append({
+        row = {
             "name": p["name"],
             "unit": want_unit,
-            # NIE dokładać sztucznego stanu — magazyn rośnie tylko ręcznie / komendą / fakturą
             "quantity": 0.0,
             "min_quantity": 2.0,
             "unit_cost": round(p["base_price"], 2),
             "is_active": True,
-        })
+        }
+        if ACCOUNT_KEY:
+            row["account_key"] = ACCOUNT_KEY
+        to_insert.append(row)
 
     if to_insert:
         # batch 80
@@ -513,6 +623,8 @@ async def seed(client: httpx.AsyncClient, *, sync_inventory: bool):
             "free_shipping_threshold": s["free_shipping_threshold"],
             "is_active": True,
         }
+        if ACCOUNT_KEY:
+            payload["account_key"] = ACCOUNT_KEY
         rows = await sb_post(client, "suppliers", payload)
         sid = rows[0]["id"] if isinstance(rows, list) else rows["id"]
         id_by_key[s["key"]] = sid
@@ -570,6 +682,7 @@ async def seed(client: httpx.AsyncClient, *, sync_inventory: bool):
 
 
 async def main():
+    global ACCOUNT_KEY
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise SystemExit("Brak SUPABASE_URL / SUPABASE_KEY w .env")
 
@@ -580,9 +693,23 @@ async def main():
         action="store_true",
         help="Nie synchronizuj inventory_items",
     )
+    ap.add_argument("--email", help="Profil restauracji (np. mithril.cane@gmail.com)")
+    ap.add_argument("--account-key", help="account_key tenanta")
+    ap.add_argument("--grant-trial", action="store_true", help="Ustaw trial Premium 30 dni")
+    ap.add_argument("--trial-days", type=int, default=30)
+    ap.add_argument("--credits", type=int, default=500)
     args = ap.parse_args()
 
     async with httpx.AsyncClient(verify=False, timeout=120) as client:
+        if args.email or args.account_key:
+            ACCOUNT_KEY = await resolve_account_key(client, args.email, args.account_key)
+            print(f"Tenant account_key={ACCOUNT_KEY}")
+        if args.grant_trial:
+            if not ACCOUNT_KEY:
+                raise SystemExit("--grant-trial wymaga --email lub --account-key")
+            await grant_trial(client, ACCOUNT_KEY, days=args.trial_days, credits=args.credits)
+        if not ACCOUNT_KEY:
+            raise SystemExit("Wymagane --email lub --account-key (seed/wipe tylko dla jednego tenanta)")
         if args.wipe:
             await wipe_sim(client)
         await seed(client, sync_inventory=not args.no_inventory)

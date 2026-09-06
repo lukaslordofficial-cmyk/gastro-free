@@ -47,6 +47,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [lines, setLines] = useState<SalesLine[]>([]);
+  const [saleDate, setSaleDate] = useState('');
   const [busy, setBusy] = useState(false);
   const [resultMsg, setResultMsg] = useState('');
 
@@ -55,6 +56,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
     setError(null);
     setPreviewUri(null);
     setLines([]);
+    setSaleDate('');
     setBusy(false);
     setResultMsg('');
   }, []);
@@ -81,7 +83,11 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
         type: 'image/jpeg',
       } as any);
       const headers = await apiMultipartHeaders();
-      const res = await fetchJson<{ lines?: SalesLine[]; detail?: string }>(
+      const res = await fetchJson<{
+        lines?: SalesLine[];
+        document_date?: string | null;
+        detail?: string;
+      }>(
         `${BACKEND_URL}/api/documents/process-sales`,
         { method: 'POST', headers, body: form },
       );
@@ -97,6 +103,8 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
         unit: l.unit || 'g',
       }));
       setLines(next);
+      const docDate = (res.data.document_date || '').trim();
+      setSaleDate(docDate || new Date().toISOString().slice(0, 10));
       setStage('review');
     } catch (e: any) {
       setError(e?.message || 'Skan nie powiódł się.');
@@ -151,19 +159,29 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
       const res = await fetchJson<{
         applied_count?: number;
         skipped_count?: number;
+        sale_date?: string;
+        revenue_added_pln?: number;
         detail?: string;
       }>(`${BACKEND_URL}/api/documents/confirm-sales`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ lines: payload, note: 'Skan listy sprzedaży' }),
+        body: JSON.stringify({
+          lines: payload,
+          note: 'Skan listy sprzedaży',
+          sale_date: (saleDate || '').trim() || undefined,
+        }),
       });
       if (!res.ok) {
         setError(res.error);
         return;
       }
+      const day = res.data.sale_date || saleDate;
+      const rev = res.data.revenue_added_pln;
       setResultMsg(
         `Odjęto ${res.data.applied_count ?? 0} pozycji` +
           (res.data.skipped_count ? ` (pominięto ${res.data.skipped_count})` : '') +
+          (day ? ` · finanse dnia ${day}` : '') +
+          (rev != null && rev > 0 ? ` · +${rev.toFixed(2)} zł` : '') +
           '.',
       );
       setStage('done');
@@ -205,9 +223,9 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
               <Text style={[styles.bigBtnText, { color: DS.color.greenEnd }]}>Wybierz z galerii</Text>
             </TouchableOpacity>
             <Text style={styles.hint}>
-              Najłatwiej: wydrukuj listę z numerkami POS (Ustawienia → Mapowanie), zaznacz sprzedaż
-              obok dań (x, ✓ albo kreski — każdy znacznik = 1 szt.) i zrób zdjęcie. Działa też notatka
-              z nazwą/numerem i ilością (np. „kurczak 800 g”, „3 × 2”).
+              Najłatwiej: wydrukuj listę z numerkami (Ustawienia → Mapowanie → Brak POS?), zaznacz
+              sprzedaż (x / I / ✓ — każdy = 1 szt.) i zrób zdjęcie. Data na dokumencie = dzień w
+              Finanse, nawet gdy wgrywasz skan później. Działa też notatka z nazwą/numerem i ilością.
             </Text>
           </View>
         ) : null}
@@ -224,6 +242,20 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
           <>
             <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 120 }} keyboardShouldPersistTaps="handled">
               <Text style={styles.reviewLabel}>{lines.length} pozycji — sprawdź dopasowania</Text>
+              <Text style={[styles.hint, { marginBottom: 6 }]}>Data sprzedaży (Finanse)</Text>
+              <TextInput
+                style={styles.qtyInput}
+                value={saleDate}
+                onChangeText={setSaleDate}
+                placeholder="RRRR-MM-DD"
+                placeholderTextColor="#666"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Text style={[styles.hint, { marginTop: 4, marginBottom: 12 }]}>
+                Wpisz datę z kartki (np. 2026-09-06). Magazyn odejmie się teraz, przychód trafi w ten
+                dzień.
+              </Text>
               {lines.map((l, idx) => (
                 <View key={`${l.product_name}-${idx}`} style={styles.card}>
                   <View style={styles.cardTop}>

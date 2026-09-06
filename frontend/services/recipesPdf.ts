@@ -140,9 +140,9 @@ export async function sharePosNumberList(
     .map(
       (r) =>
         `<tr>
-          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-weight:700;width:64px">${esc(String(r.pos_id))}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb">${esc(r.name)}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;color:#64748b;font-size:12px">${esc(r.category || '—')}</td>
+          <td style="padding:10px 8px;border-bottom:1px solid #e5e7eb;font-weight:700;width:48px;vertical-align:top">${esc(String(r.pos_id))}</td>
+          <td style="padding:10px 8px;border-bottom:1px solid #e5e7eb;vertical-align:top">${esc(r.name)}</td>
+          <td style="padding:10px 8px;border-bottom:1px solid #e5e7eb;min-height:36px;height:36px"></td>
         </tr>`,
     )
     .join('');
@@ -157,13 +157,13 @@ export async function sharePosNumberList(
       th{text-align:left;padding:8px 10px;border-bottom:2px solid #111;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
       .hint{margin-top:20px;font-size:11px;color:#64748b;line-height:1.4}
     </style></head><body>
-    <h1>Lista numerów POS</h1>
-    <p class="meta">Gastro Manager · ${esc(dateLabel)} · ${sorted.length} potraw</p>
+    <h1>Lista sprzedaży — numery potraw</h1>
+    <p class="meta">Gastro Manager · ${esc(dateLabel)} · ${sorted.length} potraw · data zmiany: __________</p>
     <table>
-      <thead><tr><th>Nr</th><th>Danie</th><th>Kategoria</th></tr></thead>
+      <thead><tr><th style="width:48px">Nr</th><th>Danie</th><th style="width:42%">Znaczniki (x / I / ✓…)</th></tr></thead>
       <tbody>${tableRows}</tbody>
     </table>
-    <p class="hint">Wydrukuj tę listę. Kasjer zaznacza sprzedaż obok pozycji (x, ✓ albo kreski — każdy znacznik = 1 sztuka). Zeskanuj kartkę w Magazyn → Skan sprzedaży: system rozpozna numery i zdejmie składniki z magazynu.</p>
+    <p class="hint">Kasjer zaznacza sprzedaż w kolumnie po prawej (każdy znacznik = 1 szt.). Na koniec dnia zeskanuj kartkę w Magazyn → Skan sprzedaży — system rozpozna numery, zdejmie składniki z receptur i dopisze sprzedaż do dnia z nagłówka / daty na dokumencie.</p>
     </body></html>`;
 
   const fileName = `gastro-pos-numery_${new Date().toISOString().slice(0, 10)}.pdf`;

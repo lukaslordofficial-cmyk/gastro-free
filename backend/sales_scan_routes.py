@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -48,6 +49,8 @@ class SalesLineIn(BaseModel):
 class ConfirmSalesRequest(BaseModel):
     lines: list[SalesLineIn] = Field(default_factory=list)
     note: Optional[str] = None
+    # Data sprzedaży z dokumentu (YYYY-MM-DD) — finanse trafiają w ten dzień.
+    sale_date: Optional[str] = None
 
 
 _SALES_SYSTEM_PROMPT = """
@@ -57,17 +60,19 @@ lista dań z numerami POS, na której kasjer zaznaczył sprzedaż obok pozycji.
 Zasady ogólne:
 - product_name: nazwa PL (np. "kurczak filet") ALBO sam numer dania POS (np. "3", "12").
 - quantity: liczba sprzedanych porcji / sztuk > 0. unit: dla dań "szt"; dla składników "g"/"ml"/"szt".
-- Nie wymyślaj pozycji spoza kartki. Pomiń nagłówki ("Sprzedaż", "Nr", "Danie"), daty, podpisy.
+- document_date: data zmiany / sprzedaży z nagłówka lub ręcznie wpisana na kartce (YYYY-MM-DD).
+  Jeśli widzisz „6.09”, „06.09.2026”, „2026-09-06” — znormalizuj do ISO. Gdy brak daty: "".
+- Nie wymyślaj pozycji spoza kartki. Pomiń nagłówki ("Sprzedaż", "Nr", "Danie"), podpisy.
 - Jeśli lista pusta — lines: [].
 
 WYDRUK Z NUMERKAMI POS + ZNACZNIKI (najczęstszy przypadek bez kasy):
 Kasjer drukuje listę „Nr | Danie” i obok sprzedanych pozycji stawia znaczniki: x, X, ×, ptaszek ✓,
-krzyżyk, kreska |, ukośnik /, plus +, kropka •, „i”, albo kilka kresek jak w systemie kreskowym (||||).
+krzyżyk, kreska |, ukośnik /, plus +, kropka •, „i” / „I”, albo kilka kresek (||||).
 - Każdy osobny znacznik = 1 sprzedana sztuka tej pozycji.
-- Policz WSZYSTKIE znaczniki przy tej samej pozycji → quantity (np. "xxx" lub "x x x" = 3; "||||" = 4; jeden "✓" = 1).
-- product_name = numer z lewej kolumny (preferowane) albo nazwa dania z wiersza — BEZ samych znaczników w nazwie.
-- Pozycje BEZ żadnego znacznika obok = NIE sprzedane — POMIŃ je (nie dodawaj do lines).
-- Jeśli przy pozycji jest też cyfra ilości (np. "3 × 2" albo "12  2szt"), użyj tej liczby jako quantity.
+- Policz WSZYSTKIE znaczniki przy tej samej pozycji → quantity.
+- product_name = numer z lewej kolumny (preferowane) albo nazwa dania — BEZ znaczników w nazwie.
+- Pozycje BEZ znacznika = NIE sprzedane — POMIŃ.
+- Cyfra ilości przy pozycji (np. "3 × 2") też jest OK jako quantity.
 
 RĘCZNA NOTATKA:
 - Nazwa/numer + ilość (np. "kurczak 800 g", "3 × 2") jak wcześniej.
@@ -81,6 +86,7 @@ _SALES_JSON_SCHEMA: dict[str, Any] = {
         "additionalProperties": False,
         "properties": {
             "document_type": {"type": "string"},
+            "document_date": {"type": "string"},
             "lines": {
                 "type": "array",
                 "items": {
@@ -95,20 +101,65 @@ _SALES_JSON_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-        "required": ["document_type", "lines"],
+        "required": ["document_type", "document_date", "lines"],
     },
 }
 
 
 def _merge_sales_batches(parts: list[dict]) -> dict:
     lines: list[dict] = []
+    doc_date = ""
     for p in parts:
         if not isinstance(p, dict):
             continue
+        if not doc_date:
+            doc_date = str(p.get("document_date") or "").strip()
         for row in p.get("lines") or []:
             if isinstance(row, dict):
                 lines.append(row)
-    return {"document_type": "LISTA_SPRZEDAZY", "lines": lines}
+    return {
+        "document_type": "LISTA_SPRZEDAZY",
+        "document_date": doc_date,
+        "lines": lines,
+    }
+
+
+_DATE_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_DATE_PL_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?(?!\d)"
+)
+
+
+def _normalize_sale_date(raw: Optional[str]) -> Optional[str]:
+    """Zwraca YYYY-MM-DD albo None."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    m = _DATE_ISO_RE.match(s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = _DATE_PL_RE.search(s)
+    if not m:
+        return None
+    d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
+    year = datetime.now(timezone.utc).year
+    if y:
+        yi = int(y)
+        year = yi if yi >= 100 else 2000 + yi
+    try:
+        return datetime(year, mo, d, tzinfo=timezone.utc).strftime("%Y-%m-%d")
+    except ValueError:
+        try:
+            return datetime(year, d, mo, tzinfo=timezone.utc).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+
+def _sale_day_bounds(sale_date: str) -> tuple[str, str]:
+    """ISO created_at na południe UTC danego dnia + year_month."""
+    y, m, d = [int(x) for x in sale_date.split("-")]
+    noon = datetime(y, m, d, 12, 0, 0, tzinfo=timezone.utc)
+    return noon.isoformat(), sale_date[:7]
 
 
 def _looks_like_pos_id(name: str) -> bool:
@@ -349,7 +400,8 @@ async def process_sales_list(
         endpoint="/api/documents/process-sales",
         user_text=(
             "Odczytaj sprzedaż z notatki LUB z wydrukowanej listy POS ze znacznikami "
-            "(x / ✓ / kreski obok pozycji = sztuki). Pozycje bez znacznika pomiń. "
+            "(x / ✓ / I / kreski = sztuki). Odczytaj też datę dokumentu jeśli jest. "
+            "Pozycje bez znacznika pomiń. "
             f"Strony: {pages_meta.get('pages_rendered') or 1}."
         ),
         pages_meta=pages_meta,
@@ -360,6 +412,7 @@ async def process_sales_list(
     if not isinstance(data, dict):
         data = {}
     lines_raw = data.get("lines") if isinstance(data.get("lines"), list) else []
+    document_date = _normalize_sale_date(str(data.get("document_date") or ""))
 
     async with httpx.AsyncClient(timeout=60.0, verify=httpx_verify()) as httpx_c:
         inv = await sb_get(
@@ -375,7 +428,7 @@ async def process_sales_list(
             httpx_c,
             "menu_items",
             params={
-                "select": "id,name,pos_id",
+                "select": "id,name,pos_id,price_pln",
                 "is_active": "eq.true",
                 "limit": "2000",
             },
@@ -476,6 +529,7 @@ async def process_sales_list(
         {
             "ok": True,
             "document_type": "LISTA_SPRZEDAZY",
+            "document_date": document_date,
             "lines": out_lines,
             "inventory_count": len(inv_rows),
             "menu_count": len(menu_rows),
@@ -487,7 +541,7 @@ async def process_sales_list(
 
 @router.post("/api/documents/confirm-sales")
 async def confirm_sales_list(req: ConfirmSalesRequest):
-    """Odjęcie zatwierdzonych pozycji: składniki magazynu lub receptury dań (nr POS)."""
+    """Odjęcie magazynu + przychód z datą dokumentu (nawet gdy skan jest później)."""
     from server import require_tenant_account_key
 
     ak = require_tenant_account_key()
@@ -496,18 +550,25 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
     if not req.lines:
         raise HTTPException(status_code=400, detail="Brak pozycji sprzedaży.")
 
-    note = (req.note or "Skan listy sprzedaży").strip()[:200]
+    sale_date = _normalize_sale_date(req.sale_date) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    created_iso, year_month = _sale_day_bounds(sale_date)
+    note = (req.note or f"Skan listy sprzedaży · {sale_date}").strip()[:200]
     applied: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    revenue_total = 0.0
+    dish_summaries: list[str] = []
 
     async with httpx.AsyncClient(timeout=90.0, verify=httpx_verify()) as client:
-        # Cache menu by pos_id for numeric lines without matched_menu_item_id
         menu_rows: list[dict] = []
         need_menu = any(
-            (line.include and (
-                (line.matched_menu_item_id or "").strip()
-                or _looks_like_pos_id(line.product_name or "")
-            ))
+            (
+                line.include
+                and (
+                    (line.matched_menu_item_id or "").strip()
+                    or _looks_like_pos_id(line.product_name or "")
+                    or (line.match_kind or "").strip().lower() == "dish"
+                )
+            )
             for line in req.lines
         )
         if need_menu:
@@ -515,12 +576,14 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
                 client,
                 "menu_items",
                 params={
-                    "select": "id,name,pos_id",
+                    "select": "id,name,pos_id,price_pln",
                     "is_active": "eq.true",
                     "limit": "2000",
                 },
             )
             menu_rows = menu if isinstance(menu, list) else []
+
+        menu_by_id = {str(m.get("id")): m for m in menu_rows if m.get("id")}
 
         for line in req.lines:
             if not line.include:
@@ -531,7 +594,6 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
             menu_id = (line.matched_menu_item_id or "").strip()
             kind = (line.match_kind or "").strip().lower()
 
-            # Resolve dish by pos_id if needed
             if not menu_id and _looks_like_pos_id(line.product_name or ""):
                 dish = _menu_by_pos_id(menu_rows, line.product_name)
                 if dish:
@@ -546,6 +608,12 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
                     )
                     continue
                 dish_name = (line.matched_name or name or "?").strip()
+                menu_row = menu_by_id.get(menu_id) or {}
+                unit_price = float(menu_row.get("price_pln") or 0)
+                line_rev = round(unit_price * float(line.quantity), 2)
+                revenue_total = round(revenue_total + line_rev, 2)
+                dish_summaries.append(f"{dish_name} × {line.quantity:g}")
+
                 app, sk = await _deduct_dish_portions(
                     client,
                     ak=ak,
@@ -556,6 +624,21 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
                 )
                 applied.extend(app)
                 skipped.extend(sk)
+
+                try:
+                    await sb_post(
+                        client,
+                        "sales_log",
+                        {
+                            "account_key": ak,
+                            "menu_item_id": menu_id,
+                            "quantity": float(line.quantity),
+                            "revenue_pln": line_rev,
+                            "sold_at": created_iso,
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 continue
 
             inv_id = (line.matched_inventory_id or "").strip()
@@ -579,8 +662,35 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
             else:
                 skipped.append({"product_name": name, "reason": "brak w magazynie"})
 
+        revenue_id = None
+        if revenue_total > 0:
+            desc = f"Skan sprzedaży {sale_date}: " + ", ".join(dish_summaries[:12])
+            if len(dish_summaries) > 12:
+                desc += "…"
+            try:
+                rev_rows = await sb_post(
+                    client,
+                    "revenue_entries",
+                    {
+                        "account_key": ak,
+                        "year_month": year_month,
+                        "description": desc[:255],
+                        "amount_pln": revenue_total,
+                        "note": note,
+                        "created_at": created_iso,
+                    },
+                )
+                revenue_id = (
+                    (rev_rows[0] if isinstance(rev_rows, list) else rev_rows) or {}
+                ).get("id")
+            except Exception as e:  # noqa: BLE001
+                skipped.append({"product_name": "przychód", "reason": str(e)[:120]})
+
     return {
         "ok": True,
+        "sale_date": sale_date,
+        "revenue_added_pln": revenue_total,
+        "revenue_entry_id": revenue_id,
         "applied_count": len(applied),
         "skipped_count": len(skipped),
         "applied": applied,

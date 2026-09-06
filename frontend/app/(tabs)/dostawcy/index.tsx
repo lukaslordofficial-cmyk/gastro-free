@@ -384,7 +384,7 @@ export default function DostawcyScreen() {
             >
               <View style={{ marginBottom: DS.space[16], gap: 10 }}>
                 <PremiumGlowCta
-                  label="Zgłoś informację"
+                  label="Sterowanie głosem"
                   onPress={() => openVoiceReport()}
                   icon={<Sparkles size={16} color="#0A0A0A" strokeWidth={2.5} />}
                 />

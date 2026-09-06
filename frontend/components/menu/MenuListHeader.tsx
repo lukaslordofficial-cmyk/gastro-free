@@ -28,7 +28,7 @@ export function MenuListHeader({
         icon={<BookOpen size={16} color="#0A0A0A" strokeWidth={2.5} />}
       />
       <PremiumGlowCta
-        label="Zgłoś informację"
+        label="Sterowanie głosem"
         onPress={onOpenVoiceReport}
         icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
       />

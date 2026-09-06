@@ -17,6 +17,7 @@ router = APIRouter(tags=["account"])
 _WIPE_TABLES = (
     "token_usage",
     "waste_logs",
+    "app_feedback",
     "sales_log",
     "pos_sales_log",
     "pos_sync_events",

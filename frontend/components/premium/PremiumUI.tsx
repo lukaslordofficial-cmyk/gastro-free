@@ -311,7 +311,7 @@ const outline = StyleSheet.create({
   textLg: { fontSize: 13 },
 });
 
-/** ── Primary glow CTA (Zgłoś informację) ── */
+/** ── Primary glow CTA (Sterowanie głosem) ── */
 export function PremiumGlowCta({
   label,
   onPress,

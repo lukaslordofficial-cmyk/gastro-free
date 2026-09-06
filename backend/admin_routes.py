@@ -40,6 +40,7 @@ async def admin_migration_status(request: Request):
             ("recipes.account_key", "recipes", {"select": "account_key", "limit": "1"}, "FIX_POS_TENANT_RLS.sql"),
             ("warehouse_expiry_alerts.account_key", "warehouse_expiry_alerts", {"select": "account_key", "limit": "1"}, "FIX_WAREHOUSE_EXPIRY_TENANT_RLS.sql"),
             ("subscriptions.account_key", "subscriptions", {"select": "account_key", "limit": "1"}, "FIX_SUBSCRIPTIONS_TENANT_RLS.sql"),
+            ("app_feedback table", "app_feedback", {"select": "id,account_key,kind", "limit": "1"}, "ADD_APP_FEEDBACK.sql"),
         ]
         for name, table, params, sql_file in probes:
             try:

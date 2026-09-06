@@ -927,7 +927,7 @@ export default function MagazynScreen() {
   const actionButtons = theme.isPremium ? (
     <View style={styles.actionBtnsWrap}>
       <PremiumGlowCta
-        label="Zgłoś informację"
+        label="Sterowanie głosem"
         onPress={() => setShowVoiceModal(true)}
         icon={<Mic size={16} color="#0A0A0A" strokeWidth={2.5} />}
       />

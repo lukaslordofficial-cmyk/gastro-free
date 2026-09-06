@@ -1,5 +1,5 @@
 /**
- * ReportInfoButton – widoczna ikona mikrofonu z podpisem "Zgłoś informację".
+ * ReportInfoButton – widoczna ikona mikrofonu z podpisem „Sterowanie głosem”.
  */
 import React, { useEffect, useState } from 'react';
 import { TouchableOpacity, Text, StyleSheet, View } from 'react-native';
@@ -47,7 +47,7 @@ export function ReportInfoButton({ contextHint, onApplied, compact, centered, da
           <Mic size={compact ? 13 : 14} color={darkText ? '#0A0A0A' : Colors.white} strokeWidth={2.5} />
         </View>
         {!compact && (
-          <Text style={[styles.text, darkText && styles.textDark]}>Zgłoś informację</Text>
+          <Text style={[styles.text, darkText && styles.textDark]}>Sterowanie głosem</Text>
         )}
       </TouchableOpacity>
       {open ? (

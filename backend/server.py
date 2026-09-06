@@ -94,6 +94,7 @@ from reports_routes import router as reports_router
 from stripe_connect_routes import router as stripe_connect_router
 from inventory_yield_routes import router as inventory_yield_router
 from sales_scan_routes import router as sales_scan_router
+from feedback_routes import router as feedback_router
 from documents_routes import router as documents_router
 from supplier_catalog_scan_routes import router as supplier_catalog_scan_router
 from inventory_expiry_scan_routes import router as inventory_expiry_scan_router
@@ -169,6 +170,7 @@ app.include_router(stripe_connect_router)
 app.include_router(inventory_yield_router)
 app.include_router(documents_router)
 app.include_router(sales_scan_router)
+app.include_router(feedback_router)
 app.include_router(supplier_catalog_scan_router)
 app.include_router(inventory_expiry_scan_router)
 app.include_router(cron_jobs_router)

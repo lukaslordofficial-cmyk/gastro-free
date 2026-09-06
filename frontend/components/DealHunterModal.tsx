@@ -17,13 +17,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunterGate';
 import { rankProductMatches } from '@/lib/fuzzyProductMatch';
-import {
-  checkSupplierMinOrder,
-  minOrderAlertCopy,
-} from '@/lib/supplierMinOrder';
 import { ASSISTANT_FROM_EMAIL } from '@/components/OrderEmailComposer';
-import { stripAssistantOrderFooter } from '@/lib/orderEmailFooter';
-import { openMailInBrowser } from '@/lib/openMailCompose';
 import * as supplierOrdersService from '@/services/supplierOrdersService';
 import {
   type OptimizeResult,
@@ -49,23 +43,13 @@ import {
   type ManualPaymentOrder,
 } from '@/components/dealHunter/ManualBankPaymentSheet';
 import { formatPln } from '@/lib/format';
-
-async function readApiErrorMessage(res: Response, fallback: string): Promise<string> {
-  try {
-    const j = await res.json();
-    const d = j?.detail ?? j?.message ?? j?.error;
-    if (typeof d === 'string' && d.trim()) return d.trim();
-    if (Array.isArray(d)) {
-      const parts = d
-        .map((x) => (typeof x === 'string' ? x : x?.msg || x?.message || ''))
-        .filter(Boolean);
-      if (parts.length) return parts.join(' ');
-    }
-  } catch {
-    /* ignore */
-  }
-  return fallback;
-}
+import { readApiErrorMessage } from '@/components/dealHunter/apiErrors';
+import {
+  alertPrivateFromBatch,
+  buildSendSummary,
+  sendOneOrderEmail,
+  type SendEmailResult,
+} from '@/components/dealHunter/sendOrderEmails';
 
 function minOrderBlockMessage(groups: SupplierGroup[]): string | null {
   const blocked = groups.filter((g) => {
@@ -1083,78 +1067,61 @@ export function DealHunterModal({
     }
   }, [previewGroups, product]);
 
-  const showOrdersSentFollowUp = useCallback(() => {
-    premiumAlert(
-      'Wiadomości wysłane',
-      'Zamówienia trafiły do dostawców i do zakładki Dostawcy → Zamówienia (Przygotowywane).\n\n'
-      + 'Gdy odbierzesz dostawę, możesz zaktualizować magazyn i koszty zmienne:\n'
-      + '• skanując fakturę, albo\n'
-      + '• klikając „Odebrałem dostawę” w Dostawcy → Zamówienia.',
-      [{ text: 'OK', style: 'primary' }],
-    );
+  const showSendResultsFollowUp = useCallback((results: SendEmailResult[]) => {
+    const summary = buildSendSummary(results);
+    premiumAlert(summary.title, summary.message, [{ text: 'OK', style: 'primary' }]);
   }, [premiumAlert]);
+
+  const removeSentSuppliersFromCart = useCallback((sentKeys: string[]) => {
+    if (!sentKeys.length) return;
+    const keySet = new Set(sentKeys);
+    setMessages((prev) => prev.filter((m) => !keySet.has(m.supplier_id ?? m.supplier_name)));
+    setPreviewGroups((prev) =>
+      (prev || []).filter((g) => !keySet.has(g.supplier_id ?? g.supplier_name)),
+    );
+    setManualCart((prev) => {
+      if (!prev) return prev;
+      return prev.filter((g) => !keySet.has(g.supplier_id ?? g.supplier_name));
+    });
+    setPendingGroups((prev) => {
+      if (!prev) return prev;
+      return prev.filter((g) => !keySet.has(g.supplier_id ?? g.supplier_name));
+    });
+  }, []);
 
   const sendEmail = useCallback(async (m: MessageCard, opts?: { skipFollowUp?: boolean }) => {
     const key = m.supplier_id ?? m.supplier_name;
-    const to = (toEmails[key] ?? m.supplier_email ?? '').trim();
-    const from = (fromEmails[key] ?? ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
-    const subject = (subjectText[key] ?? m.email_subject ?? '').trim() || m.email_subject;
-    const body = bodyText[key] ?? m.email_body_text;
-    if (!to) {
-      Alert.alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy.');
-      return;
-    }
-    if (m.supplier_id) {
-      const check = await checkSupplierMinOrder({
-        supplierId: m.supplier_id,
-        subtotalPln: Number(m.subtotal_pln) || 0,
-        supplierName: m.supplier_name,
-      });
-      if (!check.ok) {
-        const copy = minOrderAlertCopy(check);
-        premiumAlert(copy.title, copy.message);
-        return;
-      }
-    }
-    const usesAssistant = from.toLowerCase() === ASSISTANT_FROM_EMAIL.toLowerCase();
-    const bodyToSend = usesAssistant ? body : stripAssistantOrderFooter(body);
-    if (!usesAssistant) {
-      try {
-        await openMailInBrowser({
-          fromEmail: from,
-          to,
-          subject,
-          body: bodyToSend,
-        });
-        setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-        await persistSentForMessage(m);
-        if (!opts?.skipFollowUp) showOrdersSentFollowUp();
-      } catch {
-        setSendStatus((s) => ({ ...s, [key]: 'error' }));
-      }
-      return;
-    }
     setSendStatus((s) => ({ ...s, [key]: 'sending' }));
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/orders/send-email`, {
-        method: 'POST',
-        headers: await apiJsonHeaders(),
-        body: JSON.stringify({
-          to,
-          subject,
-          body_text: bodyToSend,
-          from_email: ASSISTANT_FROM_EMAIL,
-          supplier_name: m.supplier_name,
-        }),
-      });
-      if (!res.ok) throw new Error();
-      setSendStatus((s) => ({ ...s, [key]: 'sent' }));
-      await persistSentForMessage(m);
-      if (!opts?.skipFollowUp) showOrdersSentFollowUp();
-    } catch {
+    const result = await sendOneOrderEmail(m, {
+      backendUrl: BACKEND_URL,
+      apiHeaders: () => apiJsonHeaders(),
+      toEmails,
+      fromEmails,
+      bodyText,
+      subjectText,
+    });
+    if (!result.ok) {
       setSendStatus((s) => ({ ...s, [key]: 'error' }));
+      if (!opts?.skipFollowUp) {
+        premiumAlert('Nie wysłano', `${result.supplierName}: ${result.error || 'błąd wysyłki'}`);
+      }
+      return result;
     }
-  }, [toEmails, fromEmails, bodyText, subjectText, premiumAlert, persistSentForMessage, showOrdersSentFollowUp]);
+    setSendStatus((s) => ({ ...s, [key]: 'sent' }));
+    await persistSentForMessage(m);
+    removeSentSuppliersFromCart([key]);
+    if (!opts?.skipFollowUp) showSendResultsFollowUp([result]);
+    return result;
+  }, [
+    toEmails,
+    fromEmails,
+    bodyText,
+    subjectText,
+    premiumAlert,
+    persistSentForMessage,
+    removeSentSuppliersFromCart,
+    showSendResultsFollowUp,
+  ]);
 
   const sendAllEmails = useCallback(async () => {
     if (!messages.length) return;
@@ -1172,18 +1139,19 @@ export function DealHunterModal({
       return from === ASSISTANT_FROM_EMAIL.toLowerCase();
     });
     if (!allAssistant) {
-      Alert.alert(
-        'Wysyłka po kolei',
-        'Przy prywatnym nadawcy otwieramy skrzynkę osobno dla każdego dostawcy. '
-        + 'Ustaw nadawcę na asystent.dostaw@gastromanager.org, aby wysłać wszystko naraz z poziomu aplikacji.',
-      );
+      alertPrivateFromBatch();
     }
+    const results: SendEmailResult[] = [];
     for (const m of pending) {
       // eslint-disable-next-line no-await-in-loop
-      await sendEmail(m, { skipFollowUp: true });
+      const r = await sendEmail(m, { skipFollowUp: true });
+      if (r) results.push(r);
     }
-    showOrdersSentFollowUp();
-  }, [messages, sendStatus, fromEmails, sendEmail, showOrdersSentFollowUp]);
+    showSendResultsFollowUp(results);
+    if (results.every((r) => r.ok)) {
+      setStep('compare');
+    }
+  }, [messages, sendStatus, fromEmails, sendEmail, showSendResultsFollowUp]);
 
   const askSaveCartThenClose = useCallback(() => {
     const cartGroups = selectedSuppliers().filter((g) => (g.items?.length ?? 0) > 0);

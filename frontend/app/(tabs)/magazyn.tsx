@@ -62,6 +62,7 @@ import { DEAL_HUNTER_GATE_MESSAGE, DEAL_HUNTER_GATE_TITLE } from '@/lib/dealHunt
 import type { CategoryRow, ComboIngredientDraft, MagListRow, MockInventoryItem, WasteLogRow } from '@/components/magazyn/types';
 import { BLANK_FORM, CAT_AUTO_COLORS, FALLBACK_COLOR } from '@/components/magazyn/constants';
 import { getStatus, mapDbRow, newComboIngredient, findExistingWarehouseItem } from '@/components/magazyn/helpers';
+import { describeProductChanges } from '@/components/magazyn/describeProductChanges';
 import { ItemCard } from '@/components/magazyn/ItemCard';
 import { CategorySection, catStyles } from '@/components/magazyn/CategorySection';
 import { magazynScreenStyles as styles } from '@/components/magazyn/magazynScreenStyles';
@@ -98,6 +99,8 @@ export default function MagazynScreen() {
   const [form, setForm] = useState(BLANK_FORM);
   const [comboIngredients, setComboIngredients] = useState<ComboIngredientDraft[]>([newComboIngredient()]);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [highlightProductId, setHighlightProductId] = useState<string | null>(null);
+  const magListRef = useRef<FlashList<MagListRow>>(null);
 
   const [addingCat, setAddingCat] = useState(false);
   const [newCatName, setNewCatName] = useState('');
@@ -515,6 +518,7 @@ export default function MagazynScreen() {
               catColor={categoryColorMap[item.item.category] ?? FALLBACK_COLOR}
               libraryThumb={libraryThumbByName.get(item.item.product_name)}
               photoTick={customImageTick}
+              highlighted={highlightProductId === item.item.id}
               onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
@@ -592,6 +596,7 @@ export default function MagazynScreen() {
               catColor={item.catColor}
               libraryThumb={libraryThumbByName.get(item.item.product_name)}
               photoTick={customImageTick}
+              highlighted={highlightProductId === item.item.id}
               onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
@@ -637,6 +642,7 @@ export default function MagazynScreen() {
               catColor={FALLBACK_COLOR}
               libraryThumb={libraryThumbByName.get(item.item.product_name)}
               photoTick={customImageTick}
+              highlighted={highlightProductId === item.item.id}
               onChangePhoto={handleChangeProductPhoto}
               onDelete={() => handleDeleteItem(item.item)}
               onPress={() => handlePressItem(item.item)}
@@ -654,9 +660,29 @@ export default function MagazynScreen() {
       expandedCategories,
       libraryThumbByName,
       customImageTick,
+      highlightProductId,
       handleChangeProductPhoto,
     ],
   );
+
+  useEffect(() => {
+    if (!highlightProductId) return;
+    const idx = magRows.findIndex((row) => {
+      if (row.type === 'cat_item' || row.type === 'uncat_item' || row.type === 'search_item') {
+        return row.item.id === highlightProductId;
+      }
+      return false;
+    });
+    if (idx >= 0) {
+      try {
+        magListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.25 });
+      } catch {
+        /* FlashList może nie mieć jeszcze layoutu */
+      }
+    }
+    const t = setTimeout(() => setHighlightProductId(null), 4500);
+    return () => clearTimeout(t);
+  }, [highlightProductId, magRows, expandedCategories]);
 
   // ── Auto-unlock offer items ────────────────────────────────────────────────────────────
 
@@ -796,30 +822,28 @@ export default function MagazynScreen() {
       }
 
       const mapped = mapDbRow(row);
+      const before = editingId ? inventory.find((i) => i.id === editingId) ?? null : null;
+      const changeLines = describeProductChanges(before, mapped);
+
       if (editingId) {
         setInventory((prev) => prev.map((i) => (i.id === editingId ? mapped : i)));
-        premiumAlert(
-          'Zmiany zapisane',
-          `Zaktualizowano „${mapped.product_name}”.`
-            + (mapped.critical_threshold > 0
-              ? `\nPróg krytyczny: ${mapped.critical_threshold} ${mapped.unit}`
-              : '')
-            + (mapped.optimal_threshold > 0
-              ? `\nPróg optymalny: ${mapped.optimal_threshold} ${mapped.unit}`
-              : ''),
-        );
       } else {
         setInventory((prev) => [...prev, mapped]);
         await autoUnlockOfferItems(row.id, row.name);
-        premiumAlert('Produkt zapisany', `Dodano „${mapped.product_name}” do magazynu.`);
       }
-      if (form.category) {
-        setExpandedCategories((prev) => new Set([...prev, form.category]));
+      if (form.category || mapped.category) {
+        setExpandedCategories((prev) => new Set([...prev, form.category || mapped.category]));
       }
       setForm({ ...BLANK_FORM, category: formCategories[0] ?? '' });
       setComboIngredients([newComboIngredient()]);
       setEditingId(null);
       setShowAddModal(false);
+      setHighlightProductId(mapped.id);
+      premiumAlert(
+        editingId ? 'Zmiany zapisane' : 'Produkt zapisany',
+        `„${mapped.product_name}”\n\n${changeLines.join('\n')}`,
+        [{ text: 'OK', style: 'primary' }],
+      );
     } catch (e: any) {
       premiumAlert('Błąd zapisu', e.message ?? 'Nieznany błąd');
     } finally {
@@ -1017,8 +1041,9 @@ export default function MagazynScreen() {
 
       {/* Main content — FlashList recycles rows + images stay on disk cache */}
       <FlashList
+        ref={magListRef}
         data={magRows}
-        extraData={`${expandedCategories.size}:${customImageTick}:${libraryThumbByName.size}`}
+        extraData={`${expandedCategories.size}:${customImageTick}:${libraryThumbByName.size}:${highlightProductId ?? ''}`}
         keyExtractor={(row, index) => {
           switch (row.type) {
             case 'search_item': return `si-${row.item.id}`;

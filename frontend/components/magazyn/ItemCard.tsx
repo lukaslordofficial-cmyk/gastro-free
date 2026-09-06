@@ -31,6 +31,8 @@ type Props = {
   onChangePhoto?: (item: MockInventoryItem) => void;
   /** Wymusza re-render po zmianie custom zdjęcia. */
   photoTick?: number;
+  /** Podświetlenie po zapisie edycji. */
+  highlighted?: boolean;
 };
 
 export function ItemCard({
@@ -43,6 +45,7 @@ export function ItemCard({
   libraryThumb,
   onChangePhoto,
   photoTick = 0,
+  highlighted = false,
 }: Props) {
   const theme = useAppTheme();
   const status = getStatus(item);
@@ -115,7 +118,11 @@ export function ItemCard({
         activeOpacity={onPress ? 0.8 : 1}
         onPress={onPress}
         onLongPress={onEdit}
-        style={[itemStyles.premCard, status === 'critical' && DS.shadow.redGlow]}
+        style={[
+          itemStyles.premCard,
+          status === 'critical' && DS.shadow.redGlow,
+          highlighted && { borderWidth: 2, borderColor: DS.color.greenEnd },
+        ]}
       >
         <View style={[itemStyles.premEdge, { backgroundColor: edge }]} />
         <View style={itemStyles.premBody}>
@@ -227,7 +234,11 @@ export function ItemCard({
       activeOpacity={onPress ? 0.85 : 1}
       onPress={onPress}
       onLongPress={onEdit}
-      style={[itemStyles.card, { borderColor: palette.border, backgroundColor: Colors.card }]}
+      style={[
+        itemStyles.card,
+        { borderColor: highlighted ? Colors.accent : palette.border, backgroundColor: Colors.card },
+        highlighted && { borderWidth: 2 },
+      ]}
     >
       <View style={[itemStyles.accentBar, { backgroundColor: palette.accent }]} />
       <View style={itemStyles.body}>

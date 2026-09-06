@@ -419,7 +419,10 @@ async def process_sales_list(
     file: UploadFile = File(...),
 ):
     """Vision OCR → lista sprzedanych produktów + podpowiedzi matchingu magazynu / nr POS."""
+    from billing_credits import _deduct_credits
     from server import (
+        VISION_MODEL,
+        _guard_ai,
         _images_from_upload,
         _openai,
         _openai_vision_json_batches,
@@ -428,6 +431,7 @@ async def process_sales_list(
     )
 
     require_tenant_account_key()
+    await _guard_ai()
     client = _openai()
     contents = await file.read()
     if not contents:
@@ -454,6 +458,21 @@ async def process_sales_list(
         merge_fn=_merge_sales_batches,
     )
     image_uris = []
+    billing = dict(billing or {})
+
+    # Brak usage OpenAI / zerowy koszt → minimum 1 kredyt (jak inne akcje bez AI).
+    if int(billing.get("credits_deducted") or 0) <= 0:
+        async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as httpx_c:
+            new_bal = await _deduct_credits(
+                httpx_c, 1, endpoint="/api/documents/process-sales",
+            )
+        billing["credits_deducted"] = 1
+        billing["credits_remaining"] = new_bal
+        billing["flat_min_credit"] = True
+        if not billing.get("cost_pln"):
+            billing["cost_pln"] = 0.01
+        if not billing.get("cost_usd"):
+            billing["cost_usd"] = 0.0
 
     if not isinstance(data, dict):
         data = {}
@@ -585,7 +604,7 @@ async def process_sales_list(
             }
         )
 
-    return _with_billing(
+    out = _with_billing(
         {
             "ok": True,
             "document_type": "LISTA_SPRZEDAZY",
@@ -597,6 +616,14 @@ async def process_sales_list(
         },
         billing,
     )
+    # Opis rozliczenia dla UI (cennik token_billing → kredyty).
+    out["cost_usd"] = round(float(billing.get("cost_usd") or 0), 6)
+    out["cost_pln"] = round(float(billing.get("cost_pln") or 0), 6)
+    out["prompt_tokens"] = int(billing.get("prompt_tokens") or 0)
+    out["completion_tokens"] = int(billing.get("completion_tokens") or 0)
+    out["billing_model"] = str(billing.get("model") or VISION_MODEL)
+    out["flat_min_credit"] = bool(billing.get("flat_min_credit"))
+    return out
 
 
 @router.post("/api/documents/confirm-sales")

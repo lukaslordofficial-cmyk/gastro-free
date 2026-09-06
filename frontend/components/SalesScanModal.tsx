@@ -20,6 +20,8 @@ import { DS } from '@/constants/premiumTheme';
 import { apiMultipartHeaders, apiJsonHeaders } from '@/lib/apiHeaders';
 import { fetchJson } from '@/lib/safeFetch';
 import { emitAppDataChanged } from '@/lib/appRefresh';
+import { useSubscription } from '@/contexts/SubscriptionContext';
+import { CreditsGateModal } from '@/components/ads/CreditsGateModal';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
@@ -43,7 +45,41 @@ type Props = {
   onConfirmed?: () => void;
 };
 
+function describeSalesBilling(data: {
+  credits_deducted?: number;
+  credits_remaining?: number | null;
+  cost_pln?: number;
+  cost_usd?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  billing_model?: string;
+  flat_min_credit?: boolean;
+}): string | null {
+  const deducted = Number(data.credits_deducted ?? 0);
+  if (deducted <= 0) return null;
+  const rem = data.credits_remaining != null ? Number(data.credits_remaining) : null;
+  const tokens = Number(data.prompt_tokens || 0) + Number(data.completion_tokens || 0);
+  const costPln = Number(data.cost_pln || 0);
+  const model = (data.billing_model || 'gpt-4o').trim();
+  let detail: string;
+  if (data.flat_min_credit || tokens <= 0) {
+    detail = 'brak rozliczenia tokenów OpenAI → minimum 1 kredyt';
+  } else {
+    detail =
+      `wg cennika AI (${model}` +
+      (costPln > 0 ? `, ~${costPln.toFixed(4)} zł` : '') +
+      (tokens > 0 ? `, ${tokens} tokenów` : '') +
+      ')';
+  }
+  return rem != null
+    ? `Skan AI: −${deducted} kredytów (${detail}). Saldo: ${rem}. Zapis nie zużywa dodatkowych kredytów.`
+    : `Skan AI: −${deducted} kredytów (${detail}). Zapis nie zużywa dodatkowych kredytów.`;
+}
+
 export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
+  const { tier, credits, loading: creditsLoading, refresh: refreshCredits, trialActive } =
+    useSubscription();
+  const [showCreditsGate, setShowCreditsGate] = useState(false);
   const [stage, setStage] = useState<'choose' | 'processing' | 'review' | 'done'>('choose');
   const [error, setError] = useState<string | null>(null);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
@@ -51,6 +87,17 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
   const [saleDate, setSaleDate] = useState('');
   const [busy, setBusy] = useState(false);
   const [resultMsg, setResultMsg] = useState('');
+  const [creditsHint, setCreditsHint] = useState<string | null>(null);
+
+  const ensureCredits = useCallback((): boolean => {
+    if (creditsLoading) return true;
+    if (trialActive || tier > 0) return true;
+    if (credits <= 0) {
+      setShowCreditsGate(true);
+      return false;
+    }
+    return true;
+  }, [tier, credits, creditsLoading, trialActive]);
 
   const reset = useCallback(() => {
     setStage('choose');
@@ -60,6 +107,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
     setSaleDate('');
     setBusy(false);
     setResultMsg('');
+    setCreditsHint(null);
   }, []);
 
   const handleClose = () => {
@@ -68,6 +116,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
   };
 
   async function processUri(uri: string) {
+    if (!ensureCredits()) return;
     if (!BACKEND_URL) {
       setError('Brak EXPO_PUBLIC_BACKEND_URL.');
       return;
@@ -75,6 +124,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
     setPreviewUri(uri);
     setStage('processing');
     setError(null);
+    setCreditsHint(null);
     setBusy(true);
     try {
       const form = new FormData();
@@ -88,6 +138,14 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
         lines?: SalesLine[];
         document_date?: string | null;
         detail?: string;
+        credits_deducted?: number;
+        credits_remaining?: number | null;
+        cost_pln?: number;
+        cost_usd?: number;
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        billing_model?: string;
+        flat_min_credit?: boolean;
       }>(
         `${BACKEND_URL}/api/documents/process-sales`,
         { method: 'POST', headers, body: form },
@@ -97,6 +155,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
         setStage('choose');
         return;
       }
+      void refreshCredits();
       const next = (res.data.lines || []).map((l) => ({
         ...l,
         include: !!l.include,
@@ -106,6 +165,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
       setLines(next);
       const docDate = (res.data.document_date || '').trim();
       setSaleDate(docDate || new Date().toISOString().slice(0, 10));
+      setCreditsHint(describeSalesBilling(res.data));
       setStage('review');
     } catch (e: any) {
       setError(e?.message || 'Skan nie powiódł się.');
@@ -116,6 +176,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
   }
 
   async function pickCamera() {
+    if (!ensureCredits()) return;
     let perm = await ImagePicker.getCameraPermissionsAsync();
     if (!perm.granted && perm.canAskAgain) perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) {
@@ -128,6 +189,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
   }
 
   async function pickGallery() {
+    if (!ensureCredits()) return;
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
       setError('Brak dostępu do galerii.');
@@ -214,6 +276,12 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
           </View>
         ) : null}
 
+        {creditsHint ? (
+          <View style={styles.creditsBox}>
+            <Text style={styles.creditsText}>{creditsHint}</Text>
+          </View>
+        ) : null}
+
         {stage === 'choose' ? (
           <View style={styles.choose}>
             <TouchableOpacity style={styles.bigBtn} onPress={pickCamera} activeOpacity={0.85}>
@@ -228,6 +296,9 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
               Najłatwiej: wydrukuj listę z numerkami (Ustawienia → Mapowanie → Brak POS?), zaznacz
               sprzedaż (x / I / ✓ — każdy = 1 szt.) i zrób zdjęcie. Data na dokumencie = dzień w
               Finanse, nawet gdy wgrywasz skan później. Działa też notatka z nazwą/numerem i ilością.
+              {'\n\n'}
+              OCR zużywa kredyty wg realnego kosztu tokenów OpenAI (cennik w aplikacji). Gdy AI nie
+              zwróci usage — minimum 1 kredyt. Zapis listy nie pobiera dodatkowych kredytów.
             </Text>
           </View>
         ) : null}
@@ -315,12 +386,18 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
           <View style={styles.center}>
             <Check size={48} color={DS.color.greenEnd} strokeWidth={2.5} />
             <Text style={styles.title}>{resultMsg || 'Zapisano.'}</Text>
+            {creditsHint ? <Text style={styles.hint}>{creditsHint}</Text> : null}
             <TouchableOpacity style={styles.bigBtn} onPress={handleClose}>
               <Text style={styles.bigBtnText}>Gotowe</Text>
             </TouchableOpacity>
           </View>
         ) : null}
       </View>
+      <CreditsGateModal
+        visible={showCreditsGate}
+        onClose={() => setShowCreditsGate(false)}
+        actionLabel="ten skan sprzedaży"
+      />
     </Modal>
   );
 }
@@ -353,6 +430,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,90,90,0.12)',
   },
   errText: { color: DS.color.danger, fontSize: 13 },
+  creditsBox: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,230,118,0.10)',
+  },
+  creditsText: { color: DS.color.greenEnd, fontSize: 12, fontWeight: '600', lineHeight: 17 },
   choose: { padding: 24, gap: 14 },
   bigBtn: {
     flexDirection: 'row',

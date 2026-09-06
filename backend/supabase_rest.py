@@ -36,6 +36,8 @@ _TENANT_TABLES = frozenset({
     "pos_sync_events",
     "pos_products",
     "pos_settings",
+    "pos_raw_logs",
+    "unmapped_pos_items",
     "recipes",
     "financial_records",
     "subscriptions",
@@ -219,6 +221,31 @@ async def sb_post(client: httpx.AsyncClient, path: str, payload: Any):
     r = await client.post(url, headers=sb_headers(), json=body)
     if r.status_code >= 400 and _retry_without_tenant_column(r):
         r = await client.post(url, headers=sb_headers(), json=_strip_account_key_payload(body))
+    r.raise_for_status()
+    return r.json() if r.text else None
+
+
+async def sb_upsert(
+    client: httpx.AsyncClient,
+    path: str,
+    payload: Any,
+    *,
+    on_conflict: str,
+):
+    """POST z Prefer: resolution=merge-duplicates + on_conflict (PostgREST UPSERT)."""
+    require_supabase()
+    body = _with_tenant_payload(path, payload)
+    url = _rest_url(path)
+    headers = {**sb_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}
+    params = {"on_conflict": on_conflict}
+    r = await client.post(url, headers=headers, params=params, json=body)
+    if r.status_code >= 400 and _retry_without_tenant_column(r):
+        r = await client.post(
+            url,
+            headers=headers,
+            params=params,
+            json=_strip_account_key_payload(body),
+        )
     r.raise_for_status()
     return r.json() if r.text else None
 

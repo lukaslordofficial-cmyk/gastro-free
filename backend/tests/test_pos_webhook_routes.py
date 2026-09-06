@@ -11,6 +11,23 @@ def test_pos_webhook_router_wired():
     paths = {getattr(r, "path", None) for r in pos_webhook_routes.router.routes}
     assert "/api/pos/webhook" in paths
     assert "/w/{code}" in paths
+    methods = {
+        (getattr(r, "path", None), tuple(sorted(getattr(r, "methods", set()) or [])))
+        for r in pos_webhook_routes.router.routes
+    }
+    assert ("/api/pos/webhook", ("GET", "POST")) in methods or any(
+        p == "/api/pos/webhook" and "GET" in m and "POST" in m for p, m in methods
+    )
+
+
+def test_empty_sales_body_handshake():
+    assert pos_webhook_routes._is_empty_sales_body(None) is True
+    assert pos_webhook_routes._is_empty_sales_body({}) is True
+    assert pos_webhook_routes._is_empty_sales_body({"ping": True}) is True
+    assert pos_webhook_routes._is_empty_sales_body({"items": []}) is True
+    assert pos_webhook_routes._is_empty_sales_body(
+        {"items": [{"pos_external_id": "1", "quantity_sold": 1}]}
+    ) is False
 
 
 def test_pos_webhook_models():

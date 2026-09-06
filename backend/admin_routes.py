@@ -32,6 +32,8 @@ async def admin_migration_status(request: Request):
             ("token_usage table", "token_usage", {"select": "id", "limit": "1"}, "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"),
             ("suppliers.min_order_value", "suppliers", {"select": "min_order_value", "limit": "1"}, "ADD_VOICE_CRUD_BOTTLENECK_TOKENS.sql"),
             ("pos_sync_events", "pos_sync_events", {"select": "id,account_key,event_id", "limit": "1"}, "ADD_POS_SYNC_EVENTS.sql"),
+            ("pos_raw_logs", "pos_raw_logs", {"select": "id,account_key", "limit": "1"}, "ADD_POS_WEBHOOK_HARDENING.sql"),
+            ("unmapped_pos_items", "unmapped_pos_items", {"select": "id,account_key,pos_sku", "limit": "1"}, "ADD_POS_WEBHOOK_HARDENING.sql"),
             ("invoices.account_key", "invoices", {"select": "account_key", "limit": "1"}, "FIX_INVOICES_TENANT_RLS.sql"),
             ("pos_products.account_key", "pos_products", {"select": "account_key", "limit": "1"}, "FIX_POS_TENANT_RLS.sql"),
             ("pos_settings.account_key", "pos_settings", {"select": "account_key", "limit": "1"}, "FIX_POS_TENANT_RLS.sql"),

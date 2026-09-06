@@ -62,6 +62,9 @@ export type Database = {
         Omit<PosSalesLog, 'id'> & { id?: string },
         Partial<PosSalesLog>
       >;
+      pos_raw_logs: DbTable<Record<string, unknown>>;
+      unmapped_pos_items: DbTable<Record<string, unknown>>;
+      pos_sync_events: DbTable<Record<string, unknown>>;
       subscriptions: DbTable<
         Subscription,
         Omit<Subscription, 'id' | 'created_at' | 'updated_at'> & {
@@ -357,6 +360,8 @@ export type PosSettings = {
   api_key: string | null;
   location_id: string | null;
   is_connected: boolean;
+  connection_status?: 'pending' | 'connected' | 'disconnected' | null;
+  webhook_secret_token?: string | null;
   last_sync_at: string | null;
   webhook_url?: string | null;
   account_key?: string;

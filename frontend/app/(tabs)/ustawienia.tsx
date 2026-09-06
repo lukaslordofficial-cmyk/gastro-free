@@ -42,6 +42,7 @@ import { LoadingScreen, ErrorScreen } from '@/components/LoadingScreen';
 import { PosProviderPicker } from '@/components/PosProviderPicker';
 import { PosInstructionBanner } from '@/components/settings/PosInstructionBanner';
 import { PosSyncStatusCard } from '@/components/settings/PosSyncStatusCard';
+import { UnmappedPosItemsCard } from '@/components/settings/UnmappedPosItemsCard';
 import { WebhookUrlRow } from '@/components/settings/WebhookUrlRow';
 import { RestaurantBillingForm } from '@/components/settings/RestaurantBillingForm';
 import { SettingsTopTabs, type SettingsPaneId } from '@/components/settings/SettingsTopTabs';
@@ -489,7 +490,7 @@ export default function UstawieniaScreen() {
           <>
             <PosInstructionBanner providerId={posProvider} />
 
-            <PosSyncStatusCard />
+            <PosSyncStatusCard accountKey={accountKey} />
 
             <View
               style={[
@@ -590,6 +591,16 @@ export default function UstawieniaScreen() {
             <MapIcon size={16} color={theme.textSecondary} />
             <Text style={[styles.sectionTitle, { color: theme.textSecondary }]}>Mapowanie Receptur</Text>
           </View>
+
+          <UnmappedPosItemsCard
+            accountKey={accountKey}
+            onAssignHint={(sku) => {
+              premiumAlert(
+                'Kod z POS',
+                `SKU „${sku}” — wpisz ten sam kod w polu identyfikatora POS przy odpowiednim daniu poniżej, potem zapisz.`,
+              );
+            }}
+          />
 
           <View
             style={[

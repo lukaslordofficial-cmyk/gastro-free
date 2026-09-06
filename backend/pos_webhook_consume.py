@@ -93,8 +93,8 @@ async def process_via_menu_item(
     processed: list[dict],
     inventory_updates: list[dict],
     warnings: list[str],
-) -> float:
-    """Zwraca line_total (0 gdy pominięto). Dopina wpis do processed."""
+) -> tuple[float, bool]:
+    """Zwraca (line_total, matched). matched=False → wołający robi UPSERT unmapped."""
     key = pos_external_id or dish_name or "?"
     menu_row = None
     if pos_external_id:
@@ -118,7 +118,7 @@ async def process_via_menu_item(
 
     if menu_row is None:
         warnings.append(f"Pominięto '{key}' — brak dopasowania w pos_products ani menu_items.")
-        return 0.0
+        return 0.0, False
 
     qty = float(quantity_sold)
     unit_price = (
@@ -160,4 +160,4 @@ async def process_via_menu_item(
         "line_total_pln": line_total,
         "inventory_consumed": item_consumed,
     })
-    return line_total
+    return line_total, True

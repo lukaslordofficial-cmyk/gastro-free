@@ -16,6 +16,8 @@ type Props = {
   onPickApp: () => void;
   onPickLoginPage?: () => void;
   onPickAssistant: () => void;
+  /** Tylko Asystent (np. receptury z PDF — zewnętrzna poczta nie dostanie załączników). */
+  assistantOnly?: boolean;
 };
 
 export function MailSendMethodSheet({
@@ -25,6 +27,7 @@ export function MailSendMethodSheet({
   onPickApp,
   onPickLoginPage,
   onPickAssistant,
+  assistantOnly = false,
 }: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
@@ -49,27 +52,31 @@ export function MailSendMethodSheet({
             </TouchableOpacity>
           </View>
           <Text style={[styles.sub, { color: muted }]}>
-            Wybierz sposób wysyłki zamówienia do dostawcy.
+            {assistantOnly
+              ? 'Receptury wyślemy jako osobne pliki PDF przez Asystenta dostaw.'
+              : 'Wybierz sposób wysyłki zamówienia do dostawcy.'}
           </Text>
 
-          <TouchableOpacity
-            style={[styles.row, { borderColor: border, backgroundColor: rowBg }]}
-            onPress={onPickApp}
-            activeOpacity={0.85}
-            testID="mail-send-app"
-          >
-            <View style={[styles.icon, { backgroundColor: iconBg }]}>
-              <Smartphone size={18} color={accent} strokeWidth={2.2} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowTitle, { color: text }]}>Aplikacja pocztowa</Text>
-              <Text style={[styles.rowSub, { color: muted }]}>
-                Gotowy szkic (adresat, temat, treść) w Gmail / Outlook / innej aplikacji
-              </Text>
-            </View>
-          </TouchableOpacity>
+          {!assistantOnly ? (
+            <TouchableOpacity
+              style={[styles.row, { borderColor: border, backgroundColor: rowBg }]}
+              onPress={onPickApp}
+              activeOpacity={0.85}
+              testID="mail-send-app"
+            >
+              <View style={[styles.icon, { backgroundColor: iconBg }]}>
+                <Smartphone size={18} color={accent} strokeWidth={2.2} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.rowTitle, { color: text }]}>Aplikacja pocztowa</Text>
+                <Text style={[styles.rowSub, { color: muted }]}>
+                  Gotowy szkic (adresat, temat, treść) w Gmail / Outlook / innej aplikacji
+                </Text>
+              </View>
+            </TouchableOpacity>
+          ) : null}
 
-          {provider && onPickLoginPage ? (
+          {!assistantOnly && provider && onPickLoginPage ? (
             <TouchableOpacity
               style={[styles.row, { borderColor: border, backgroundColor: rowBg }]}
               onPress={onPickLoginPage}

@@ -49,6 +49,12 @@ class GenerateMessagesRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class EmailAttachment(BaseModel):
+    filename: str
+    content_base64: str
+    content_type: Optional[str] = "application/pdf"
+
+
 class SendEmailRequest(BaseModel):
     to: str
     subject: str
@@ -57,6 +63,7 @@ class SendEmailRequest(BaseModel):
     supplier_name: Optional[str] = None
     api_key: Optional[str] = None
     from_email: Optional[str] = None
+    attachments: Optional[list[EmailAttachment]] = None
 
 
 @router.post("/api/orders/generate-messages")
@@ -215,7 +222,27 @@ async def send_order_email(req: SendEmailRequest):
     if not html:
         raise HTTPException(status_code=400, detail="Brak treści wiadomości.")
 
-    async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
+    resend_attachments: list[dict] = []
+    for att in req.attachments or []:
+        fname = (att.filename or "").strip() or "zalacznik.pdf"
+        raw_b64 = (att.content_base64 or "").strip()
+        if not raw_b64:
+            continue
+        # Limit ~7 MB base64 ≈ ~5 MB pliku — ochrona przed ogromnymi payloadami.
+        if len(raw_b64) > 10_000_000:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Załącznik „{fname}” jest za duży.",
+            )
+        item: dict = {"filename": fname, "content": raw_b64}
+        ctype = (att.content_type or "").strip()
+        if ctype:
+            item["content_type"] = ctype
+        resend_attachments.append(item)
+    if len(resend_attachments) > 40:
+        raise HTTPException(status_code=400, detail="Maksymalnie 40 załączników.")
+
+    async with httpx.AsyncClient(timeout=90.0, verify=httpx_verify()) as client:
         profile = await get_restaurant_profile(client)
         login_email = await account_login_email(client)
         payload = {
@@ -224,6 +251,8 @@ async def send_order_email(req: SendEmailRequest):
             "subject": req.subject,
             "html": html,
         }
+        if resend_attachments:
+            payload["attachments"] = resend_attachments
         reply_to = (profile.get("contact_email") or "").strip() or login_email
         if reply_to:
             payload["reply_to"] = reply_to
@@ -248,4 +277,9 @@ async def send_order_email(req: SendEmailRequest):
         raise HTTPException(status_code=502, detail=f"Resend odrzucił wysyłkę: {detail}")
 
     data = r.json() if r.text else {}
-    return {"ok": True, "id": data.get("id"), "to": req.to}
+    return {
+        "ok": True,
+        "id": data.get("id"),
+        "to": req.to,
+        "attachments_count": len(resend_attachments),
+    }

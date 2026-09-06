@@ -595,11 +595,6 @@ export function PremiumFinanceScreen(props: Props) {
                 {chartMetric === 'revenue' ? 'Przychody' : 'Zysk / strata'} ·{' '}
                 {chartGrain === 'day' ? chartMonthYm : chartGrain === 'month' ? chartYear : 'lata'}
               </Text>
-              {chartMetric === 'profit' && chartGrain === 'day' ? (
-                <Text style={[styles.kpiSub, { marginTop: 2, marginBottom: 6, opacity: 0.85 }]}>
-                  Dzień = przychód − (stałe÷dni miesiąca) − koszty zmienne tego dnia
-                </Text>
-              ) : null}
               <PremiumFinanceBarChart
                 points={salesChartPoints}
                 metricLabel={chartMetric === 'revenue' ? 'Przychód łącznie' : 'Zysk / strata łącznie'}

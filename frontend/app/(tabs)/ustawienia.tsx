@@ -396,9 +396,6 @@ export default function UstawieniaScreen() {
                     </Text>
                   </>
                 ) : null}
-                <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 0 }]}>
-                  Klucz konta (kredyty / Stripe): {accountKey}
-                </Text>
               </View>
             </View>
 
@@ -686,8 +683,7 @@ export default function UstawieniaScreen() {
 
           <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 10 }]}>
             Brak kasy POS: kliknij powyżej, wydrukuj listę PDF, kasjer zaznacza sprzedaż (x / I / ✓),
-            potem Magazyn → Skan sprzedaży. Dokument z datą 6.09 wgrany 9.09 i tak trafi do finansów
-            dnia 6.09.
+            potem Magazyn → Skan sprzedaży.
           </Text>
 
           {menuItems.length === 0 ? (

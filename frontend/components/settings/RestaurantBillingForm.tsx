@@ -102,10 +102,6 @@ export function RestaurantBillingForm() {
         theme.isPremium && { backgroundColor: theme.card, borderColor: border },
       ]}
     >
-      <Text style={[styles.fieldHint, { color: theme.textMuted, marginBottom: 12 }]}>
-        Te dane trafiają do tytułu przelewu („Opłać zamówienie”), szablonu „Dane do wysyłki”
-        i jako kontakt w e-mailach do dostawców.
-      </Text>
       {loading ? (
         <ActivityIndicator color={theme.accent} style={{ marginVertical: 16 }} />
       ) : (

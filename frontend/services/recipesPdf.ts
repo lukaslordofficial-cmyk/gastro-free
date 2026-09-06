@@ -39,20 +39,96 @@ function recipeHtml(r: UserRecipe): string {
 
 export function buildRecipesEmailBody(recipes: UserRecipe[], restaurantName?: string): string {
   const header = restaurantName?.trim()
-    ? `Receptury — ${restaurantName.trim()}\n\n`
-    : 'Receptury z Gastro Manager\n\n';
-  const blocks = recipes.map((r, idx) => {
-    const ings =
-      r.ingredients?.length > 0
-        ? r.ingredients.map((i) => `  • ${i.name}: ${i.quantity} ${i.unit || ''}`).join('\n')
-        : '  (brak składników)';
-    const instr = (r.instructions || '').trim();
-    return `${idx + 1}. ${r.name}\nSkładniki:\n${ings}${instr ? `\nPrzepis:\n${instr}` : ''}`;
-  });
+    ? `Receptury — ${restaurantName.trim()}`
+    : 'Receptury z Gastro Manager';
+  const n = recipes.length;
+  const names = recipes.map((r) => `• ${r.name}`).join('\n');
   return (
-    `${header}W załączniku PDF z ${recipes.length} recepturami (lub treść poniżej).\n\n` +
-    `${blocks.join('\n\n—\n\n')}\n`
+    `${header}\n\n`
+    + `W załączniku znajdziesz ${n} ${n === 1 ? 'plik PDF' : 'plików PDF'} `
+    + `(każda receptura w osobnym pliku do pobrania).\n\n`
+    + `Lista:\n${names}\n`
   );
+}
+
+function safePdfFileName(name: string, index: number): string {
+  const base = String(name || `receptura-${index + 1}`)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 48);
+  return `${base || `receptura-${index + 1}`}.pdf`;
+}
+
+export async function generateSingleRecipePdfFile(
+  recipe: UserRecipe,
+  opts?: { restaurantName?: string; index?: number },
+): Promise<{ uri: string; fileName: string }> {
+  const title = opts?.restaurantName?.trim()
+    ? `${esc(opts.restaurantName.trim())} — ${esc(recipe.name)}`
+    : esc(recipe.name);
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+    <style>
+      body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:13px;color:#111;padding:24px}
+      h1{font-size:22px;margin:0 0 6px}
+      .meta{color:#666;font-size:12px;margin-bottom:24px}
+      ul{margin:0;padding-left:18px}
+      li{margin-bottom:4px}
+      h3{font-size:13px;margin:10px 0 4px}
+    </style></head><body>
+    <h1>${title}</h1>
+    <p class="meta">Gastro Manager · ${new Date().toLocaleDateString('pl-PL')}</p>
+    ${recipeHtml(recipe)}
+    </body></html>`;
+
+  const printed = await Print.printToFileAsync({ html, base64: false });
+  let uri = printed.uri;
+  const fileName = safePdfFileName(recipe.name, opts?.index ?? 0);
+
+  if (Platform.OS !== 'web') {
+    try {
+      const FileSystem = await import('expo-file-system/legacy');
+      const base = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+      if (base) {
+        const dest = `${base}${fileName}`;
+        const info = await FileSystem.getInfoAsync(dest);
+        if (info.exists) await FileSystem.deleteAsync(dest, { idempotent: true });
+        await FileSystem.copyAsync({ from: printed.uri, to: dest });
+        uri = dest;
+      }
+    } catch {
+      /* keep print uri */
+    }
+  }
+  return { uri, fileName };
+}
+
+export async function generateRecipePdfAttachments(
+  recipes: UserRecipe[],
+  opts?: { restaurantName?: string },
+): Promise<Array<{ filename: string; contentBase64: string; contentType: string }>> {
+  if (!recipes.length) throw new Error('Brak receptur do eksportu.');
+  const FileSystem = await import('expo-file-system/legacy');
+  const out: Array<{ filename: string; contentBase64: string; contentType: string }> = [];
+  for (let i = 0; i < recipes.length; i += 1) {
+    const r = recipes[i];
+    const { uri, fileName } = await generateSingleRecipePdfFile(r, {
+      restaurantName: opts?.restaurantName,
+      index: i,
+    });
+    const contentBase64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    if (!contentBase64) throw new Error(`Nie udało się odczytać PDF: ${fileName}`);
+    out.push({
+      filename: fileName,
+      contentBase64,
+      contentType: 'application/pdf',
+    });
+  }
+  return out;
 }
 
 export async function generateRecipesPdfFile(

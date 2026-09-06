@@ -1,5 +1,6 @@
 /**
- * Edytowalny szablon e-maila zamówienia (Łowca Okazji + zamówienie ręczne).
+ * Edytowalny szablon e-maila zamówienia (Łowca Okazji + zamówienie ręczne)
+ * lub wiadomości ogólnej (np. receptury).
  */
 import React, { useMemo, useState } from 'react';
 import {
@@ -40,10 +41,19 @@ import {
 import { useAuth } from '@/contexts/AuthContext';
 import { MailSendMethodSheet } from '@/components/MailSendMethodSheet';
 
+/** Zweryfikowany nadawca Resend (Gmail jako From jest blokowany). */
 export const ASSISTANT_FROM_EMAIL = 'asystent.dostaw@gastromanager.org';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/$/, '');
 const PREP_MSG = 'Twoje zamówienie trafiło do zakładki Dostawy - Przygotowywane';
+const ASSISTANT_SENT_MSG =
+  `Wiadomość została wysłana na podany adres, z maila ${ASSISTANT_FROM_EMAIL}`;
+
+export type OrderEmailAttachment = {
+  filename: string;
+  contentBase64: string;
+  contentType?: string;
+};
 
 export type OrderEmailDraft = {
   supplierName: string;
@@ -53,6 +63,7 @@ export type OrderEmailDraft = {
   body: string;
   supplierId?: string | null;
   totalPln?: number;
+  attachments?: OrderEmailAttachment[];
 };
 
 type Props = {
@@ -62,6 +73,8 @@ type Props = {
   onSent?: () => void;
   onMailClientOpened?: () => void;
   onPayPress?: () => void;
+  /** `message` = receptury / ogólny mail (bez komunikatów zamówienia). */
+  mode?: 'order' | 'message';
 };
 
 function isAssistantFrom(email: string): boolean {
@@ -75,6 +88,7 @@ export function OrderEmailComposer({
   onSent,
   onMailClientOpened,
   onPayPress,
+  mode = 'order',
 }: Props) {
   const theme = useAppTheme();
   const prem = theme.isPremium;
@@ -87,11 +101,22 @@ export function OrderEmailComposer({
   const [sending, setSending] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showSendMethod, setShowSendMethod] = useState(false);
+  const isMessage = mode === 'message';
 
   React.useEffect(() => {
     if (!visible || !draft) return;
     let cancelled = false;
     const rawBody = draft.body || '';
+    if (isMessage) {
+      setToEmail(draft.toEmail || '');
+      setSubject(draft.subject || '');
+      setFromEmail(ASSISTANT_FROM_EMAIL);
+      setBody(rawBody);
+      setCopied(false);
+      return () => {
+        cancelled = true;
+      };
+    }
     const seedFrom = (draft.fromEmail || ASSISTANT_FROM_EMAIL).trim() || ASSISTANT_FROM_EMAIL;
     setToEmail(draft.toEmail || '');
     setSubject(draft.subject || '');
@@ -99,7 +124,6 @@ export function OrderEmailComposer({
     setBody(isAssistantFrom(seedFrom) ? rawBody : stripAssistantOrderFooter(rawBody));
     setCopied(false);
 
-    // Zawsze odśwież From z aktualnych ustawień restauracji (nie trzymaj starego Gmaila)
     void resolveOrderEmailFrom(rawBody, ASSISTANT_FROM_EMAIL, user?.email).then((resolved) => {
       if (cancelled) return;
       setFromEmail(resolved.fromEmail);
@@ -108,7 +132,7 @@ export function OrderEmailComposer({
     return () => {
       cancelled = true;
     };
-  }, [visible, draft, user?.email]);
+  }, [visible, draft, user?.email, isMessage]);
 
   const bg = prem ? DS.color.bgPrimary : Colors.background;
   const card = prem ? DS.color.surfaceCard : Colors.card;
@@ -120,6 +144,10 @@ export function OrderEmailComposer({
   const providerLabel = useMemo(() => mailProviderLabel(fromEmail), [fromEmail]);
 
   const onChangeFrom = (next: string) => {
+    if (isMessage) {
+      setFromEmail(ASSISTANT_FROM_EMAIL);
+      return;
+    }
     setFromEmail(next);
     if (!isAssistantFrom(next)) {
       setBody((b) => stripAssistantOrderFooter(b));
@@ -135,6 +163,15 @@ export function OrderEmailComposer({
 
   const afterExternalOpen = (opts?: { loginOnly?: boolean }) => {
     onMailClientOpened?.();
+    if (isMessage) {
+      const extra = opts?.loginOnly
+        ? '\n\nTreść jest w schowku. Po zalogowaniu: Nowa wiadomość → wklej (długie przytrzymanie).'
+        : '';
+      alert('Wiadomość', `Dokończ wysyłkę w aplikacji pocztowej.${extra}`, [
+        { text: 'OK', style: 'primary' },
+      ]);
+      return;
+    }
     const extra = opts?.loginOnly
       ? '\n\nTreść jest w schowku. Po zalogowaniu: Nowa wiadomość → wklej (długie przytrzymanie).'
       : '';
@@ -144,7 +181,9 @@ export function OrderEmailComposer({
   const sendViaApp = async () => {
     setShowSendMethod(false);
     const to = toEmail.trim();
-    const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
+    const from = isMessage
+      ? ASSISTANT_FROM_EMAIL
+      : fromEmail.trim() || ASSISTANT_FROM_EMAIL;
     try {
       await openMailInApp({
         fromEmail: from,
@@ -162,7 +201,9 @@ export function OrderEmailComposer({
   const sendViaLoginPage = async () => {
     setShowSendMethod(false);
     const to = toEmail.trim();
-    const from = fromEmail.trim() || ASSISTANT_FROM_EMAIL;
+    const from = isMessage
+      ? ASSISTANT_FROM_EMAIL
+      : fromEmail.trim() || ASSISTANT_FROM_EMAIL;
     try {
       await Clipboard.setStringAsync(
         `Do: ${to}\nTemat: ${subject.trim()}\n\n${stripAssistantOrderFooter(body)}`,
@@ -198,6 +239,13 @@ export function OrderEmailComposer({
         /* body bez stopki jeśli profil niedostępny */
       }
       const bodyText = withAssistantFooterIfNeeded(body, true, footerHint);
+      const attachments = (draft?.attachments || [])
+        .filter((a) => a?.filename && a?.contentBase64)
+        .map((a) => ({
+          filename: a.filename,
+          content_base64: a.contentBase64,
+          content_type: a.contentType || 'application/pdf',
+        }));
       const res = await fetchJson<{ ok?: boolean; detail?: string; id?: string }>(
         `${BACKEND_URL}/api/orders/send-email`,
         {
@@ -209,11 +257,12 @@ export function OrderEmailComposer({
             body_text: bodyText,
             from_email: ASSISTANT_FROM_EMAIL,
             supplier_name: draft?.supplierName,
+            ...(attachments.length ? { attachments } : {}),
           }),
         },
       );
       if (!res.ok) throw new Error(res.error || 'Błąd wysyłki');
-      alert('Wysłano', PREP_MSG, [{ text: 'OK', style: 'primary' }]);
+      alert('Wysłano', ASSISTANT_SENT_MSG, [{ text: 'OK', style: 'primary' }]);
       onSent?.();
       onClose();
     } catch (e: unknown) {
@@ -224,31 +273,13 @@ export function OrderEmailComposer({
     }
   };
 
-  const confirmAssistantSend = async () => {
+  const pickAssistantSend = () => {
     setShowSendMethod(false);
-    let mail = (user?.email || '').trim() || '—';
-    let phone = '—';
-    try {
-      const profile = await fetchRestaurantProfile();
-      mail = (profile.contact_email || '').trim() || mail;
-      phone = (profile.contact_phone || '').trim() || '—';
-    } catch {
-      /* użyj fallbacku */
-    }
-    const msg =
-      `Wiadomość zostanie wysłana z adresu ${ASSISTANT_FROM_EMAIL} w imieniu Twojej restauracji.\n\n`
-      + `Dostawca zobaczy w treści dane kontaktowe do spraw tego zamówienia:\n`
-      + `• e-mail: ${mail}\n`
-      + `• telefon: ${phone}\n\n`
-      + `Przypis: wiadomość wygenerowana automatycznie. Odpowiedzi na ${ASSISTANT_FROM_EMAIL} `
-      + `zostaną przekierowane na adres restauracji (${mail}).`;
-    alert('Asystent dostaw', msg, [
-      { text: 'Anuluj', style: 'cancel' },
-      { text: 'Wyślij', style: 'primary', onPress: () => void sendViaAssistant() },
-    ]);
+    void sendViaAssistant();
   };
 
   const ensureMinOrderMet = async (): Promise<boolean> => {
+    if (isMessage) return true;
     const sid = (draft?.supplierId || '').trim();
     if (!sid) return true;
     const subtotal = Number(draft?.totalPln);
@@ -267,7 +298,7 @@ export function OrderEmailComposer({
   const send = async () => {
     const to = toEmail.trim();
     if (!to) {
-      alert('Brak odbiorcy', 'Podaj adres e-mail dostawcy (odbiorca).', [
+      alert('Brak odbiorcy', 'Podaj adres e-mail odbiorcy.', [
         { text: 'OK', style: 'primary' },
       ]);
       return;
@@ -294,7 +325,9 @@ export function OrderEmailComposer({
           <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <Mail size={18} color={prem ? DS.color.greenEnd : Colors.accent} strokeWidth={2} />
             <View style={{ flex: 1 }}>
-              <Text style={[styles.title, { color: text }]}>Szablon zamówienia</Text>
+              <Text style={[styles.title, { color: text }]}>
+                {isMessage ? 'Wyślij wiadomość' : 'Szablon zamówienia'}
+              </Text>
               <Text style={[styles.sub, { color: muted }]} numberOfLines={1}>
                 {draft.supplierName}
               </Text>
@@ -315,6 +348,7 @@ export function OrderEmailComposer({
             style={[styles.input, { backgroundColor: inputBg, borderColor: border, color: text }]}
             value={fromEmail}
             onChangeText={onChangeFrom}
+            editable={!isMessage}
             autoCapitalize="none"
             keyboardType="email-address"
             placeholder={ASSISTANT_FROM_EMAIL}
@@ -322,17 +356,22 @@ export function OrderEmailComposer({
             testID="order-email-from"
           />
           <Text style={[styles.hint, { color: muted }]}>
-            Po „Wyślij mail” wybierzesz: aplikację pocztową, logowanie {providerLabel}, albo wysyłkę przez Asystenta dostaw.
+            {isMessage
+              ? `Wiadomość wyśle Asystent dostaw z adresu ${ASSISTANT_FROM_EMAIL} (Resend)`
+                + `${(draft.attachments?.length || 0) > 0
+                  ? ` · ${(draft.attachments || []).length} PDF w załączniku`
+                  : ''}.`
+              : `Po „Wyślij mail” wybierzesz: aplikację pocztową, logowanie ${providerLabel}, albo wysyłkę przez Asystenta dostaw.`}
           </Text>
 
-          <Text style={[styles.label, { color: muted }]}>Odbiorca (dostawca)</Text>
+          <Text style={[styles.label, { color: muted }]}>Odbiorca</Text>
           <TextInput
             style={[styles.input, { backgroundColor: inputBg, borderColor: border, color: text }]}
             value={toEmail}
             onChangeText={setToEmail}
             autoCapitalize="none"
             keyboardType="email-address"
-            placeholder="zamowienia@dostawca.pl"
+            placeholder="adres@email.pl"
             placeholderTextColor={muted}
             testID="order-email-to"
           />
@@ -348,7 +387,7 @@ export function OrderEmailComposer({
 
           <View style={styles.bodyLabelRow}>
             <Text style={[styles.label, { color: muted, marginTop: 0, marginBottom: 0 }]}>
-              Treść zamówienia
+              {isMessage ? 'Treść' : 'Treść zamówienia'}
             </Text>
             <TouchableOpacity
               onPress={() => void copyBody()}
@@ -361,7 +400,12 @@ export function OrderEmailComposer({
               ) : (
                 <Copy size={14} color={muted} strokeWidth={2.2} />
               )}
-              <Text style={[styles.copyText, { color: copied ? (prem ? DS.color.greenEnd : Colors.accent) : muted }]}>
+              <Text
+                style={[
+                  styles.copyText,
+                  { color: copied ? (prem ? DS.color.greenEnd : Colors.accent) : muted },
+                ]}
+              >
                 {copied ? 'Skopiowano' : 'Kopiuj'}
               </Text>
             </TouchableOpacity>
@@ -383,7 +427,7 @@ export function OrderEmailComposer({
         </ScrollView>
 
         <View style={[styles.footer, { borderTopColor: border, backgroundColor: card }]}>
-          {onPayPress ? (
+          {onPayPress && !isMessage ? (
             <TouchableOpacity
               onPress={() => {
                 void (async () => {
@@ -430,10 +474,11 @@ export function OrderEmailComposer({
       <MailSendMethodSheet
         visible={showSendMethod}
         fromEmail={fromEmail}
+        assistantOnly={isMessage}
         onClose={() => setShowSendMethod(false)}
         onPickApp={() => void sendViaApp()}
         onPickLoginPage={() => void sendViaLoginPage()}
-        onPickAssistant={() => void confirmAssistantSend()}
+        onPickAssistant={pickAssistantSend}
       />
     </Modal>
   );

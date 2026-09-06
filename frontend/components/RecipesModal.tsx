@@ -66,11 +66,9 @@ import {
   ASSISTANT_FROM_EMAIL,
   type OrderEmailDraft,
 } from '@/components/OrderEmailComposer';
-import { resolveOrderEmailFrom } from '@/services/restaurantProfileService';
 import {
   buildRecipesEmailBody,
-  generateRecipesPdfFile,
-  shareRecipesPdf,
+  generateRecipePdfAttachments,
 } from '@/services/recipesPdf';
 
 const COLS = 2;
@@ -124,7 +122,7 @@ function findSlugForName(name: string): string | undefined {
 
 export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }: Props) {
   const theme = useAppTheme();
-  const { accountKey, user, profile } = useAuth();
+  const { accountKey, profile } = useAuth();
   const { alert: premiumAlert } = usePremiumAlert();
   const prem = theme.isPremium;
   const accent = prem ? DS.color.greenEnd : Colors.accent;
@@ -228,35 +226,17 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
     setPdfBusy(true);
     try {
       const restaurantName = profile?.restaurant_name || undefined;
-      const { uri, fileName } = await generateRecipesPdfFile(list, { restaurantName });
+      const attachments = await generateRecipePdfAttachments(list, { restaurantName });
       const body = buildRecipesEmailBody(list, restaurantName);
-      let fromEmail = ASSISTANT_FROM_EMAIL;
-      let mailBody = body;
-      try {
-        const resolved = await resolveOrderEmailFrom(
-          body,
-          ASSISTANT_FROM_EMAIL,
-          user?.email || profile?.email,
-        );
-        fromEmail = resolved.fromEmail;
-        mailBody = resolved.body;
-      } catch {
-        /* asystent */
-      }
       setEmailDraft({
         supplierName: restaurantName || 'Receptury',
         toEmail: '',
-        fromEmail,
+        fromEmail: ASSISTANT_FROM_EMAIL,
         subject: `Receptury (${list.length}) — Gastro Manager`,
-        body: mailBody,
+        body,
+        attachments,
       });
       setShowEmail(true);
-      // PDF do załączenia: share sheet (Mail / Drive / …)
-      try {
-        await shareRecipesPdf(uri, fileName);
-      } catch {
-        /* użytkownik mógł anulować share — mail i tak otwarty */
-      }
       setSelectMode(false);
       setPickedIds(new Set());
     } catch (e: any) {
@@ -522,6 +502,7 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
         {stage === 'grid' && (
           <FlatList
             data={recipes}
+            extraData={{ selectMode, pickedKey: Array.from(pickedIds).sort().join('|'), pdfBusy }}
             keyExtractor={(item) => item.id}
             numColumns={COLS}
             columnWrapperStyle={recipes.length ? { gap: GAP } : undefined}
@@ -559,15 +540,15 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
                     ) : (
                       <View style={{ gap: 8 }}>
                         <Text style={[styles.intro, { color: muted, marginBottom: 0 }]}>
-                          Zaznacz receptury, potem „Wybrane” albo wyślij wszystkie.
+                          Dotknij kafelki, żeby zaznaczyć receptury, potem „Wybrane”. Albo wyślij wszystkie.
                         </Text>
                         <View style={styles.toolRow}>
                           <TouchableOpacity
                             style={[
                               styles.toolBtn,
                               {
-                                borderColor: accent,
-                                backgroundColor: prem ? 'rgba(0,255,120,0.14)' : Colors.accentLight,
+                                borderColor: border,
+                                backgroundColor: card,
                                 opacity: pdfBusy ? 0.6 : 1,
                               },
                             ]}
@@ -587,17 +568,28 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
                             style={[
                               styles.toolBtn,
                               {
-                                borderColor: border,
-                                backgroundColor: card,
-                                opacity: pdfBusy ? 0.6 : 1,
+                                borderColor: pickedIds.size > 0 ? accent : border,
+                                backgroundColor:
+                                  pickedIds.size > 0
+                                    ? prem
+                                      ? 'rgba(0,255,120,0.14)'
+                                      : Colors.accentLight
+                                    : card,
+                                opacity: pdfBusy || pickedIds.size === 0 ? 0.55 : 1,
                               },
                             ]}
-                            disabled={pdfBusy}
-                            onPress={() =>
-                              void packAndSendRecipes(
-                                recipes.filter((r) => pickedIds.has(r.id)),
-                              )
-                            }
+                            disabled={pdfBusy || pickedIds.size === 0}
+                            onPress={() => {
+                              const selected = recipes.filter((r) => pickedIds.has(r.id));
+                              if (!selected.length) {
+                                premiumAlert(
+                                  'Brak zaznaczenia',
+                                  'Najpierw kliknij kafelki receptur, które chcesz wysłać.',
+                                );
+                                return;
+                              }
+                              void packAndSendRecipes(selected);
+                            }}
                             activeOpacity={0.85}
                             testID="recipes-send-selected"
                           >
@@ -889,6 +881,7 @@ export function RecipesModal({ visible, onClose, onUseInMenu, onAddToInventory }
       <OrderEmailComposer
         visible={showEmail}
         draft={emailDraft}
+        mode="message"
         onClose={() => {
           setShowEmail(false);
           setEmailDraft(null);

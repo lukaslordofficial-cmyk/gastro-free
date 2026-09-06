@@ -39,10 +39,11 @@ export async function fetchJson<T = unknown>(
   try {
     data = JSON.parse(trimmed) as T;
   } catch {
+    const snippet = trimmed.replace(/\s+/g, ' ').slice(0, 140);
     return {
       ok: false,
       status: res.status,
-      error: `Odpowiedź nie jest prawidłowym JSON (HTTP ${res.status}).`,
+      error: `Odpowiedź nie jest prawidłowym JSON (HTTP ${res.status})${snippet ? `: ${snippet}` : '.'}`,
       raw: trimmed.slice(0, 120),
     };
   }

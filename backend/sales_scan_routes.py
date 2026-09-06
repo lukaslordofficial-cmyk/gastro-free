@@ -415,25 +415,39 @@ async def process_sales_list(
     document_date = _normalize_sale_date(str(data.get("document_date") or ""))
 
     async with httpx.AsyncClient(timeout=60.0, verify=httpx_verify()) as httpx_c:
-        inv = await sb_get(
-            httpx_c,
-            "inventory_items",
-            params={
-                "select": "id,name,unit,quantity,critical_threshold",
-                "limit": "2000",
-            },
-        )
-        inv_rows = inv if isinstance(inv, list) else []
-        menu = await sb_get(
-            httpx_c,
-            "menu_items",
-            params={
-                "select": "id,name,pos_id,price_pln",
-                "is_active": "eq.true",
-                "limit": "2000",
-            },
-        )
-        menu_rows = menu if isinstance(menu, list) else []
+        inv_rows: list[dict] = []
+        try:
+            # Kolumna w DB to min_quantity (nie critical_threshold) — zły select → 400 → HTTP 500 bez JSON.
+            inv = await sb_get(
+                httpx_c,
+                "inventory_items",
+                params={
+                    "select": "id,name,unit,quantity,min_quantity",
+                    "limit": "2000",
+                },
+            )
+            inv_rows = inv if isinstance(inv, list) else []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("process-sales inventory fetch failed: %s", e)
+
+        menu_rows: list[dict] = []
+        try:
+            menu = await sb_get(
+                httpx_c,
+                "menu_items",
+                params={
+                    "select": "id,name,pos_id,price_pln",
+                    "is_active": "eq.true",
+                    "limit": "2000",
+                },
+            )
+            menu_rows = menu if isinstance(menu, list) else []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("process-sales menu fetch failed: %s", e)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Nie udało się pobrać menu do dopasowania: {str(e)[:160]}",
+            ) from e
 
     out_lines: list[dict[str, Any]] = []
     for row in lines_raw:
@@ -557,134 +571,179 @@ async def confirm_sales_list(req: ConfirmSalesRequest):
     skipped: list[dict[str, Any]] = []
     revenue_total = 0.0
     dish_summaries: list[str] = []
+    revenue_id = None
 
-    async with httpx.AsyncClient(timeout=90.0, verify=httpx_verify()) as client:
-        menu_rows: list[dict] = []
-        need_menu = any(
-            (
-                line.include
-                and (
-                    (line.matched_menu_item_id or "").strip()
-                    or _looks_like_pos_id(line.product_name or "")
-                    or (line.match_kind or "").strip().lower() == "dish"
-                )
-            )
-            for line in req.lines
-        )
-        if need_menu:
-            menu = await sb_get(
-                client,
-                "menu_items",
-                params={
-                    "select": "id,name,pos_id,price_pln",
-                    "is_active": "eq.true",
-                    "limit": "2000",
-                },
-            )
-            menu_rows = menu if isinstance(menu, list) else []
-
-        menu_by_id = {str(m.get("id")): m for m in menu_rows if m.get("id")}
-
-        for line in req.lines:
-            if not line.include:
-                skipped.append({"product_name": line.product_name, "reason": "pominięte"})
-                continue
-
-            name = (line.product_name or line.matched_name or "").strip()
-            menu_id = (line.matched_menu_item_id or "").strip()
-            kind = (line.match_kind or "").strip().lower()
-
-            if not menu_id and _looks_like_pos_id(line.product_name or ""):
-                dish = _menu_by_pos_id(menu_rows, line.product_name)
-                if dish:
-                    menu_id = str(dish.get("id") or "")
-                    name = str(dish.get("name") or name)
-                    kind = "dish"
-
-            if menu_id or kind == "dish":
-                if not menu_id or line.quantity <= 0:
-                    skipped.append(
-                        {"product_name": name or "?", "reason": "brak dania lub ilości"}
+    try:
+        async with httpx.AsyncClient(timeout=90.0, verify=httpx_verify()) as client:
+            menu_rows: list[dict] = []
+            need_menu = any(
+                (
+                    line.include
+                    and (
+                        (line.matched_menu_item_id or "").strip()
+                        or _looks_like_pos_id(line.product_name or "")
+                        or (line.match_kind or "").strip().lower() == "dish"
                     )
-                    continue
-                dish_name = (line.matched_name or name or "?").strip()
-                menu_row = menu_by_id.get(menu_id) or {}
-                unit_price = float(menu_row.get("price_pln") or 0)
-                line_rev = round(unit_price * float(line.quantity), 2)
-                revenue_total = round(revenue_total + line_rev, 2)
-                dish_summaries.append(f"{dish_name} × {line.quantity:g}")
-
-                app, sk = await _deduct_dish_portions(
-                    client,
-                    ak=ak,
-                    menu_item_id=menu_id,
-                    portions=float(line.quantity),
-                    dish_name=dish_name,
-                    note=note,
                 )
-                applied.extend(app)
-                skipped.extend(sk)
-
-                try:
-                    await sb_post(
-                        client,
-                        "sales_log",
-                        {
-                            "account_key": ak,
-                            "menu_item_id": menu_id,
-                            "quantity": float(line.quantity),
-                            "revenue_pln": line_rev,
-                            "sold_at": created_iso,
-                        },
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                continue
-
-            inv_id = (line.matched_inventory_id or "").strip()
-            if not inv_id or line.quantity <= 0:
-                skipped.append(
-                    {"product_name": name or "?", "reason": "brak dopasowania lub ilości"}
-                )
-                continue
-
-            hit = await _deduct_inventory_line(
-                client,
-                ak=ak,
-                inv_id=inv_id,
-                quantity=float(line.quantity),
-                unit=line.unit or "g",
-                display_name=name,
-                note=note,
+                for line in req.lines
             )
-            if hit:
-                applied.append(hit)
-            else:
-                skipped.append({"product_name": name, "reason": "brak w magazynie"})
-
-        revenue_id = None
-        if revenue_total > 0:
-            desc = f"Skan sprzedaży {sale_date}: " + ", ".join(dish_summaries[:12])
-            if len(dish_summaries) > 12:
-                desc += "…"
-            try:
-                rev_rows = await sb_post(
+            if need_menu:
+                menu = await sb_get(
                     client,
-                    "revenue_entries",
-                    {
-                        "account_key": ak,
-                        "year_month": year_month,
-                        "description": desc[:255],
-                        "amount_pln": revenue_total,
-                        "note": note,
-                        "created_at": created_iso,
+                    "menu_items",
+                    params={
+                        "select": "id,name,pos_id,price_pln",
+                        "is_active": "eq.true",
+                        "limit": "2000",
                     },
                 )
-                revenue_id = (
-                    (rev_rows[0] if isinstance(rev_rows, list) else rev_rows) or {}
-                ).get("id")
-            except Exception as e:  # noqa: BLE001
-                skipped.append({"product_name": "przychód", "reason": str(e)[:120]})
+                menu_rows = menu if isinstance(menu, list) else []
+
+            menu_by_id = {str(m.get("id")): m for m in menu_rows if m.get("id")}
+
+            for line in req.lines:
+                if not line.include:
+                    skipped.append({"product_name": line.product_name, "reason": "pominięte"})
+                    continue
+
+                name = (line.product_name or line.matched_name or "").strip()
+                menu_id = (line.matched_menu_item_id or "").strip()
+                kind = (line.match_kind or "").strip().lower()
+
+                try:
+                    if not menu_id and _looks_like_pos_id(line.product_name or ""):
+                        dish = _menu_by_pos_id(menu_rows, line.product_name)
+                        if dish:
+                            menu_id = str(dish.get("id") or "")
+                            name = str(dish.get("name") or name)
+                            kind = "dish"
+
+                    if menu_id or kind == "dish":
+                        if not menu_id or line.quantity <= 0:
+                            skipped.append(
+                                {"product_name": name or "?", "reason": "brak dania lub ilości"}
+                            )
+                            continue
+                        dish_name = (line.matched_name or name or "?").strip()
+                        menu_row = menu_by_id.get(menu_id) or {}
+                        if not menu_row:
+                            # Id z OCR może nie być w is_active=true — dociągnij pojedynczo.
+                            try:
+                                one = await sb_get(
+                                    client,
+                                    "menu_items",
+                                    params={
+                                        "select": "id,name,pos_id,price_pln",
+                                        "id": f"eq.{menu_id}",
+                                        "limit": "1",
+                                    },
+                                )
+                                menu_row = (one[0] if isinstance(one, list) and one else {}) or {}
+                                if menu_row.get("id"):
+                                    menu_by_id[str(menu_row["id"])] = menu_row
+                            except Exception:  # noqa: BLE001
+                                menu_row = {}
+                        unit_price = float(menu_row.get("price_pln") or 0)
+                        line_rev = round(unit_price * float(line.quantity), 2)
+                        revenue_total = round(revenue_total + line_rev, 2)
+                        dish_summaries.append(f"{dish_name} × {line.quantity:g}")
+
+                        app, sk = await _deduct_dish_portions(
+                            client,
+                            ak=ak,
+                            menu_item_id=menu_id,
+                            portions=float(line.quantity),
+                            dish_name=dish_name,
+                            note=note,
+                        )
+                        applied.extend(app)
+                        skipped.extend(sk)
+
+                        try:
+                            await sb_post(
+                                client,
+                                "sales_log",
+                                {
+                                    "account_key": ak,
+                                    "menu_item_id": menu_id,
+                                    "quantity": float(line.quantity),
+                                    "revenue_pln": line_rev,
+                                    "sold_at": created_iso,
+                                },
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        continue
+
+                    inv_id = (line.matched_inventory_id or "").strip()
+                    if not inv_id or line.quantity <= 0:
+                        skipped.append(
+                            {"product_name": name or "?", "reason": "brak dopasowania lub ilości"}
+                        )
+                        continue
+
+                    hit = await _deduct_inventory_line(
+                        client,
+                        ak=ak,
+                        inv_id=inv_id,
+                        quantity=float(line.quantity),
+                        unit=line.unit or "g",
+                        display_name=name,
+                        note=note,
+                    )
+                    if hit:
+                        applied.append(hit)
+                    else:
+                        skipped.append({"product_name": name, "reason": "brak w magazynie"})
+                except httpx.HTTPStatusError as e:
+                    detail = (e.response.text or str(e))[:160]
+                    logger.warning("confirm-sales line failed: %s", detail)
+                    skipped.append(
+                        {"product_name": name or "?", "reason": f"błąd zapisu: {detail}"}
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("confirm-sales line failed: %s", e)
+                    skipped.append(
+                        {"product_name": name or "?", "reason": f"błąd: {str(e)[:120]}"}
+                    )
+
+            if revenue_total > 0:
+                desc = f"Skan sprzedaży {sale_date}: " + ", ".join(dish_summaries[:12])
+                if len(dish_summaries) > 12:
+                    desc += "…"
+                try:
+                    rev_rows = await sb_post(
+                        client,
+                        "revenue_entries",
+                        {
+                            "account_key": ak,
+                            "year_month": year_month,
+                            "description": desc[:255],
+                            "amount_pln": revenue_total,
+                            "note": note,
+                            "created_at": created_iso,
+                        },
+                    )
+                    revenue_id = (
+                        (rev_rows[0] if isinstance(rev_rows, list) else rev_rows) or {}
+                    ).get("id")
+                except Exception as e:  # noqa: BLE001
+                    skipped.append({"product_name": "przychód", "reason": str(e)[:120]})
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as e:
+        detail = (e.response.text or str(e))[:200]
+        logger.exception("confirm-sales failed: %s", detail)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Błąd zapisu sprzedaży: {detail}",
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        logger.exception("confirm-sales failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Nie udało się zatwierdzić sprzedaży: {str(e)[:200]}",
+        ) from e
 
     return {
         "ok": True,

@@ -19,6 +19,7 @@ import { Camera, FileUp, X, Check } from 'lucide-react-native';
 import { DS } from '@/constants/premiumTheme';
 import { apiMultipartHeaders, apiJsonHeaders } from '@/lib/apiHeaders';
 import { fetchJson } from '@/lib/safeFetch';
+import { emitAppDataChanged } from '@/lib/appRefresh';
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim().replace(/\/$/, '');
 
@@ -185,6 +186,7 @@ export function SalesScanModal({ visible, onClose, onConfirmed }: Props) {
           '.',
       );
       setStage('done');
+      emitAppDataChanged('all');
       onConfirmed?.();
     } catch (e: any) {
       setError(e?.message || 'Zapis nie powiódł się.');

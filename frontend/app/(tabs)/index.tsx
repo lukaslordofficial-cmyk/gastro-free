@@ -263,20 +263,23 @@ export default function FinanseScreen() {
     return () => sub.remove();
   }, [fetchData]);
 
-  // Po powrocie z Magazynu — zsynchronizuj licznik tylko gdy jeszcze nie ma danych.
+  // Po powrocie na Finanse — zawsze dograj świeże dane (koszty z dostaw / skanów).
   useFocusEffect(
     useCallback(() => {
       if (!accountKey || accountKey === 'default') return;
-      if (hasFinanceDataRef.current) return;
       void fetchData();
     }, [accountKey, fetchData]),
   );
 
   // Po skanie FAKTURY — auto-odśwież koszty zmienne z retry.
-  // Skan menu NIE powinien tu wchodzić (wcześniej mylny alert „Koszty z faktury”).
+  // Skan menu / oferty / sprzedaży: osobna ścieżka (bez alertu „Koszty z faktury”).
   useEffect(() => {
     if (documentScanRevision <= 0) return;
     if (lastDocumentScanKind === 'menu' || lastDocumentScanKind === 'offer') return;
+    if (lastDocumentScanKind === 'sales') {
+      void fetchData();
+      return;
+    }
     let cancelled = false;
     varCountBeforeScanRef.current = variableEntries.length;
     scanRetryRef.current = 0;

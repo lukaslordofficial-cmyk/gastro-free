@@ -699,8 +699,13 @@ export async function receiveSupplierOrder(
     error = r2.error;
   }
   if (error) throw error;
+  // insertVariableCost emituje FINANCE_CHANGED; tu dogrywamy inventory/orders (bez cyklu importów z appRefresh).
   if (opts.applyInventory) {
     DeviceEventEmitter.emit(INVENTORY_CHANGED);
   }
+  if (opts.applyVariableCost) {
+    DeviceEventEmitter.emit('gm/finance-changed');
+  }
+  DeviceEventEmitter.emit('gm/supplier-orders-changed');
   return { assignments };
 }

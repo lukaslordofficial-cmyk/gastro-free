@@ -84,17 +84,32 @@ def _verify_admob_signature(query_string: str, signature_b64: str, key_id: str, 
         logger.error("Brak pakietu cryptography do weryfikacji SSV: %s", e)
         return False
 
-    # Payload = query bez signature i key_id (kolejność oryginalna parametrów)
-    pairs = parse_qsl(query_string, keep_blank_values=True)
-    filtered = [(k, v) for (k, v) in pairs if k not in ("signature", "key_id")]
-    payload = urlencode(filtered, doseq=True).encode("utf-8")
+    # Google: treść do weryfikacji = query BEZ ostatnich parametrów signature i key_id
+    # (kolejność oryginalna, bez re-encode — urlencode psuje podpis).
+    qs = query_string or ""
+    cut = qs.find("signature=")
+    if cut > 0:
+        payload = qs[: cut - 1].encode("utf-8")  # usuń trailing '&'
+    else:
+        pairs = parse_qsl(qs, keep_blank_values=True)
+        filtered = [(k, v) for (k, v) in pairs if k not in ("signature", "key_id")]
+        payload = urlencode(filtered, doseq=True).encode("utf-8")
 
-    raw_sig = base64.urlsafe_b64decode(signature_b64 + "==")
+    pad = "=" * ((4 - len(signature_b64) % 4) % 4)
+    try:
+        raw_sig = base64.urlsafe_b64decode(signature_b64 + pad)
+    except Exception:
+        try:
+            raw_sig = base64.b64decode(signature_b64 + pad)
+        except Exception as e:
+            logger.warning("AdMob SSV signature b64 decode failed: %s", e)
+            return False
+
     pub = serialization.load_pem_public_key(pem.encode("utf-8"), backend=default_backend())
     if not isinstance(pub, ec.EllipticCurvePublicKey):
         return False
     try:
-        # AdMob często podaje DER; czasem raw r||s
+        # AdMob: ECDSA DER; czasem raw r||s (64 B)
         try:
             pub.verify(raw_sig, payload, ec.ECDSA(hashes.SHA256()))
             return True
@@ -109,6 +124,20 @@ def _verify_admob_signature(query_string: str, signature_b64: str, key_id: str, 
     except Exception as e:
         logger.warning("AdMob SSV signature invalid: %s", e)
         return False
+
+
+def _is_console_test_ping(params: dict[str, str], account_key: str) -> bool:
+    """Ping z panelu AdMob (Verify) — często bez user_id/custom_data albo z testowym tx."""
+    tx = (params.get("transaction_id") or "").strip().lower()
+    if not tx or tx in {"test", "0", "dummy"} or tx.startswith("test"):
+        return True
+    if not account_key or account_key.lower() in {"default", "test", "null", "undefined"}:
+        return True
+    # Brak typowych pól nagrody z prawdziwego callbacka
+    if not (params.get("ad_unit") or params.get("reward_amount") or params.get("reward_item")):
+        if not (params.get("user_id") or params.get("custom_data")):
+            return True
+    return False
 
 
 async def _already(client: httpx.AsyncClient, event_id: str) -> bool:
@@ -239,8 +268,11 @@ async def reward_ssv(request: Request):
     Callback AdMob Server-Side Verification.
     W konsoli AdMob ustaw URL: https://<railway>/api/ads/reward-ssv
     custom_data / user_id = account_key.
+
+    Ping walidacyjny z panelu AdMob (Verify) musi dostać HTTP 200 OK —
+    często bez user_id/custom_data; wtedy nie przyznajemy kredytów.
     """
-    qs = request.url.query
+    qs = request.url.query or ""
     params = dict(parse_qsl(qs, keep_blank_values=True))
     signature = (params.get("signature") or "").strip()
     key_id = (params.get("key_id") or "").strip()
@@ -249,42 +281,77 @@ async def reward_ssv(request: Request):
     user_id = (params.get("user_id") or "").strip()
     account_key = custom_data or user_id
 
-    if not signature or not key_id or not transaction_id:
-        raise HTTPException(status_code=400, detail="Brak signature/key_id/transaction_id.")
-    if not account_key or account_key == "default":
-        raise HTTPException(status_code=400, detail="Brak account_key w custom_data/user_id.")
+    # Pusty GET / health / wstępny ping konsoli
+    if not qs.strip():
+        logger.info("AdMob SSV empty ping — OK")
+        return Response(content="OK", media_type="text/plain")
 
-    event_id = f"admob_ssv_{transaction_id}"[:200]
+    # Konsola czasem wysyła niekompletny request — nie wolno zwracać 400
+    if not signature or not key_id:
+        logger.info(
+            "AdMob SSV incomplete ping (sig=%s key=%s) — OK",
+            bool(signature),
+            bool(key_id),
+        )
+        return Response(content="OK", media_type="text/plain")
 
     async with httpx.AsyncClient(timeout=30.0, verify=httpx_verify()) as client:
-        if await _already(client, event_id):
-            return Response(content="OK", media_type="text/plain")
-
         try:
             keys = await _fetch_admob_keys(client)
         except Exception as e:
             logger.exception("AdMob keys fetch failed")
+            # Konsola Verify i tak oczekuje 200 przy samym „czy endpoint żyje”;
+            # przy prawdziwym callbacku i tak nie przyznamy bez kluczy.
+            if _is_console_test_ping(params, account_key):
+                return Response(content="OK", media_type="text/plain")
             raise HTTPException(status_code=502, detail=f"Nie pobrano kluczy AdMob: {e}") from e
 
-        pem = keys.get(key_id)
+        pem = keys.get(key_id) or keys.get(str(key_id))
         if not pem:
+            # key_id bywa int w JSON, a w query stringiem
+            for k, v in keys.items():
+                if str(k) == str(key_id):
+                    pem = v
+                    break
+        if not pem:
+            logger.warning("AdMob SSV unknown key_id=%s — OK for ping", key_id)
+            if _is_console_test_ping(params, account_key) or not transaction_id:
+                return Response(content="OK", media_type="text/plain")
             raise HTTPException(status_code=400, detail="Nieznany key_id AdMob.")
 
         if not _verify_admob_signature(qs, signature, key_id, pem):
+            # Test tool AdMob bywa kapryśny względem encodingu — nie blokuj Verify 403/400
+            if _is_console_test_ping(params, account_key):
+                logger.warning("AdMob SSV test ping signature mismatch — returning OK")
+                return Response(content="OK", media_type="text/plain")
             raise HTTPException(status_code=403, detail="Nieprawidłowy podpis SSV.")
+
+        # Zweryfikowany callback bez konta / testowy — potwierdź odbiór, bez grantu
+        if _is_console_test_ping(params, account_key) or not transaction_id:
+            logger.info(
+                "AdMob SSV test/verified ping (tx=%s ak=%s) — no grant",
+                transaction_id or "-",
+                account_key or "-",
+            )
+            return Response(content="OK", media_type="text/plain")
+
+        event_id = f"admob_ssv_{transaction_id}"[:200]
+        if await _already(client, event_id):
+            return Response(content="OK", media_type="text/plain")
 
         limit = _daily_limit()
         used = await _count_today(client, account_key)
-        # SSV też liczymy do limitu (osobny wpis claim-like)
         if limit > 0 and used >= limit:
             await _mark(client, event_id, "admob.reward.ssv_capped")
             return Response(content="OK", media_type="text/plain")
 
         await _grant(client, account_key)
         await _mark(client, event_id, "admob.reward.ssv")
-        # Dodatkowo wpis „claim” żeby limit dzienny widział SSV
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        claim_id = f"admob_claim_{account_key}_{day}_ssv_{hashlib.sha1(transaction_id.encode()).hexdigest()[:12]}"
+        claim_id = (
+            f"admob_claim_{account_key}_{day}_ssv_"
+            f"{hashlib.sha1(transaction_id.encode()).hexdigest()[:12]}"
+        )
         await _mark(client, claim_id, "admob.reward.ssv_claim")
 
     return Response(content="OK", media_type="text/plain")

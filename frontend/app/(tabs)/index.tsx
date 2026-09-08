@@ -31,7 +31,7 @@ export default function FinanseScreen() {
   const { accountKey } = useAuth();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [view, setView] = useState<'panel' | 'raporty' | 'subskrypcja'>('panel');
+  const [view, setView] = useState<'panel' | 'raporty'>('panel');
   const [pdfOpen, setPdfOpen] = useState(false);
   const [invoicePreview, setInvoicePreview] = useState<InvoicePreviewState | null>(null);
   const [showUsageHistory, setShowUsageHistory] = useState(false);

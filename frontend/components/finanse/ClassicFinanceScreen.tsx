@@ -18,8 +18,8 @@ import { RevenueChart } from '@/components/RevenueChart';
 import { Colors } from '@/constants/colors';
 import { FinanceHeaderActions } from '@/components/FinanceHeaderActions';
 import { ReportsArchive } from '@/components/ReportsArchive';
-import { SubscriptionPanel } from '@/components/SubscriptionPanel';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
+import { RewardedCreditsButton } from '@/components/ads/RewardedCreditsButton';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { AppScreenHeader } from '@/components/premium/AppScreenHeader';
@@ -51,8 +51,8 @@ type ChartRecord = {
 };
 
 type Props = {
-  view: 'panel' | 'raporty' | 'subskrypcja';
-  onViewChange: (view: 'panel' | 'raporty' | 'subskrypcja') => void;
+  view: 'panel' | 'raporty';
+  onViewChange: (view: 'panel' | 'raporty') => void;
   refreshing: boolean;
   onRefresh: () => void;
   onFetchApplied: () => void;
@@ -198,25 +198,6 @@ export function ClassicFinanceScreen({
               Raporty
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.segmentBtn,
-              view === 'subskrypcja' && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
-            ]}
-            onPress={() => onViewChange('subskrypcja')}
-            testID="segment-subskrypcja"
-            activeOpacity={0.85}
-          >
-            <Text
-              style={[
-                styles.segmentText,
-                { color: theme.textMuted },
-                view === 'subskrypcja' && { color: theme.text },
-              ]}
-            >
-              Subskrypcja
-            </Text>
-          </TouchableOpacity>
         </View>
 
         {view === 'raporty' && (
@@ -251,11 +232,12 @@ export function ClassicFinanceScreen({
           </>
         )}
 
-        {view === 'subskrypcja' && <SubscriptionPanel />}
-
         {view === 'panel' && (
           <>
             <CreditsWalletCard onPress={onOpenUsageHistory} testID="panel-wallet-widget" />
+            <View style={{ marginBottom: 12 }}>
+              <RewardedCreditsButton testID="panel-rewarded-credits" />
+            </View>
             <AlertBanner count={criticalCount} onPress={() => router.push('/(tabs)/magazyn')} />
 
             <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>

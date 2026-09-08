@@ -104,6 +104,7 @@ from voice_interpret_routes import router as voice_interpret_router
 from actions_routes import router as actions_router
 from orders_hunter_routes import router as orders_hunter_router
 from local_producers_routes import router as local_producers_router
+from ads_reward_routes import router as ads_reward_router
 
 # ─── Fundament + implementacje domenowe (re-eksport pełnej powierzchni API) ───
 from app_core import *  # noqa: F401,F403
@@ -179,6 +180,7 @@ app.include_router(voice_interpret_router)
 app.include_router(actions_router)
 app.include_router(orders_hunter_router)
 app.include_router(local_producers_router)
+app.include_router(ads_reward_router)
 
 
 def _json_error(status: int, detail: str, request_id: str) -> JSONResponse:
@@ -202,6 +204,7 @@ async def account_key_middleware(request: Request, call_next):
         or path.startswith("/orders/")
         or path.startswith("/api/furgonetka")
         or path.split("?")[0].rstrip("/") == "/api/pos/webhook"
+        or path.split("?")[0].rstrip("/") == "/api/ads/reward-ssv"
         or path.startswith("/w/")
     )
     raw = (request.headers.get("x-account-key") or "").strip()

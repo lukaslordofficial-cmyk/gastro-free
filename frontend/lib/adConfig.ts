@@ -40,8 +40,11 @@ export const TEST_AD_UNITS = {
 export const INTERSTITIAL_MIN_INTERVAL_MS = 5 * 60 * 1000;
 /** Minimalny odstęp między reklamami po akcji (zapis dostawcy itd.). */
 export const ACTION_INTERSTITIAL_MIN_MS = 90 * 1000;
-/** @deprecated — rewarded za kredyty wyłączone */
-export const REWARDED_DAILY_LIMIT = 0;
+/** Limit nagród za reklamę / dzień (klient UI + backend). */
+export const REWARDED_DAILY_LIMIT = Math.max(
+  0,
+  Number(process.env.EXPO_PUBLIC_AD_REWARD_DAILY_LIMIT || '5') || 5,
+);
 
 /**
  * Live units when:

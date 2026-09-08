@@ -101,7 +101,7 @@ export default function UstawieniaScreen() {
   const handleDeleteAccount = () => {
     premiumAlert(
       'Usuń konto',
-      'To trwale skasuje login, profil i dane restauracji oraz anuluje subskrypcję Stripe. Tej operacji nie da się cofnąć.',
+      'To trwale skasuje login, profil i dane restauracji. Tej operacji nie da się cofnąć.',
       [
         { text: 'Anuluj', style: 'cancel' },
         {

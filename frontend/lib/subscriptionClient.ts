@@ -70,22 +70,18 @@ export function isPremiumEntitled(
 }
 
 /**
- * Reklamy AdMob (baner + interstitial) — wyłącznie Free (tier 0) po zakończonym trialu 30 dni.
- * Bez reklam: brak sesji, ładowanie portfela, płatny plan, aktywny trial.
- *
- * EXPO_PUBLIC_FORCE_ADS=1 — tylko EAS preview / preview-apk (test AdMob mimo trialu).
- * Profil `production` NIE ustawia FORCE_ADS — reklamy wg tieru (Free po trialu) + live units.
+ * Reklamy AdMob (baner + interstitial) — Free (tier 0).
+ * Trial nie blokuje reklam w wersji darmowej Play.
+ * EXPO_PUBLIC_FORCE_ADS=1 — wymusza reklamy (preview).
  */
 export function shouldShowAds(
   tierLevel: number,
-  trialEndsAt: string | null | undefined,
+  _trialEndsAt?: string | null | undefined,
 ): boolean {
   const force = (process.env.EXPO_PUBLIC_FORCE_ADS ?? '').trim().toLowerCase();
   if (force === '1' || force === 'true' || force === 'yes') return true;
   const tier = Number(tierLevel ?? 0);
-  if (tier >= 1) return false;
-  if (isPremiumTrialActive(trialEndsAt)) return false;
-  return true;
+  return tier < 1;
 }
 
 export type SubscriptionRow = {
@@ -345,14 +341,65 @@ export async function topupCredits(packageKey: TopupKey): Promise<SubscriptionSt
   );
 }
 
-/** Wyłączone — kredyty tylko z subskrypcji / top-up (bez reklam rewarded). */
-export async function grantRewardCredit(): Promise<{ ok: boolean; credits_balance: number; message: string }> {
+/** Po obejrzeniu rewarded — backend dolicza +1 (limit dzienny / SSV). */
+export async function claimRewardCredit(): Promise<{
+  ok: boolean;
+  credits_balance: number;
+  message: string;
+}> {
   const row = await ensureRow();
-  return {
-    ok: false,
-    credits_balance: Number(row.credits_balance ?? 0),
-    message: 'Kredyty za reklamy są wyłączone. Dokup pakiet w Subskrypcji.',
-  };
+  const bal = Number(row.credits_balance ?? 0);
+  if (!BACKEND_URL) {
+    return {
+      ok: false,
+      credits_balance: bal,
+      message: 'Brak backendu — nie można przyznać kredytu za reklamę.',
+    };
+  }
+  try {
+    const key = requireTenantAccountKey();
+    const { data: sess } = await supabase.auth.getSession();
+    const token = sess.session?.access_token;
+    const res = await fetch(`${BACKEND_URL}/api/ads/claim-reward`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Account-Key': key,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ source: 'rewarded_ad' }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      credits_balance?: number;
+      detail?: string;
+      message?: string;
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        credits_balance: Number(data.credits_balance ?? bal),
+        message: data.detail || data.message || 'Limit reklam lub błąd przyznania kredytu.',
+      };
+    }
+    return {
+      ok: true,
+      credits_balance: Number(data.credits_balance ?? bal + 1),
+      message: data.message || 'Dodano +1 kredyt AI.',
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Błąd sieci przy przyznawaniu kredytu.';
+    return { ok: false, credits_balance: bal, message: msg };
+  }
+}
+
+/** @deprecated — użyj claimRewardCredit */
+export async function grantRewardCredit(): Promise<{
+  ok: boolean;
+  credits_balance: number;
+  message: string;
+}> {
+  return claimRewardCredit();
 }
 
 /** Opcjonalnie synchronizuj z backendem (AI billing) — nie blokuje UI. */

@@ -6,6 +6,7 @@ import os
 _PUBLIC_MUTATE = (
     "/api/billing/webhook",
     "/api/pos/webhook",
+    "/api/ads/reward-ssv",
     "/w/",
     "/api/furgonetka",
     "/api/auth/auto-confirm",

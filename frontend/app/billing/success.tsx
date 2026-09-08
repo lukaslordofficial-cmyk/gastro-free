@@ -38,7 +38,7 @@ export default function BillingSuccessScreen() {
       } else if (conf.message) {
         alert('Płatność', conf.message, [{ text: 'OK', style: 'primary' }]);
       }
-      router.replace('/(tabs)/ustawienia');
+      router.replace('/(tabs)/');
     })();
   }, [accountKey, alert, params.session_id, refresh, router]);
 

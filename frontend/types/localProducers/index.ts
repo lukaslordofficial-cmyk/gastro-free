@@ -284,6 +284,8 @@ export type UpdateLocalProducerInput = Partial<CreateLocalProducerInput> & {
 
 export const LOCAL_PRODUCERS_MODULE = {
   id: 'localProducers',
+  /** Free Play: ukryte do czasu nabycia dystrybutorów — włącz na true, by przywrócić UI. */
+  enabled: false,
   routeSegment: 'lokalni-przetworcy',
   tabLabel: 'Lokalni Przetwórcy',
   parentTab: 'dostawcy',

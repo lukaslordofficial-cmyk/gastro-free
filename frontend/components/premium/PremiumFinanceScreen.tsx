@@ -37,7 +37,7 @@ import { DS } from '@/constants/premiumTheme';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
 import { FinanceHeaderActions } from '@/components/FinanceHeaderActions';
 import { ReportsArchive } from '@/components/ReportsArchive';
-import { RewardedCreditsButton } from '@/components/ads/RewardedCreditsButton';
+import { RewardedAdsSection } from '@/components/ads/RewardedAdsSection';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import type { FixedCost, RevenueEntry, VariableCostEntry } from '@/lib/types';
 import Animated, { FadeInDown } from 'react-native-reanimated';
@@ -98,7 +98,7 @@ type Props = {
 
 export function PremiumFinanceScreen(props: Props) {
   const [pdfOpen, setPdfOpen] = useState(false);
-  const [view, setView] = useState<'panel' | 'raporty'>('panel');
+  const [view, setView] = useState<'panel' | 'raporty' | 'reklamy'>('panel');
   const [openRevenue, setOpenRevenue] = useState(true);
   const [openFixed, setOpenFixed] = useState(false);
   const [openVariable, setOpenVariable] = useState(false);
@@ -409,14 +409,21 @@ export function PremiumFinanceScreen(props: Props) {
         ) : null}
 
         <View style={styles.segment}>
-          {(['panel', 'raporty'] as const).map((key) => (
+          {(
+            [
+              ['panel', 'Panel'],
+              ['raporty', 'Raporty'],
+              ['reklamy', 'Reklamy'],
+            ] as const
+          ).map(([key, label]) => (
             <TouchableOpacity
               key={key}
               style={[styles.segmentBtn, view === key && styles.segmentBtnActive]}
               onPress={() => setView(key)}
+              testID={`segment-${key}-premium`}
             >
               <Text style={[styles.segmentText, view === key && styles.segmentTextActive]}>
-                {key === 'panel' ? 'Panel' : 'Raporty'}
+                {label}
               </Text>
             </TouchableOpacity>
           ))}
@@ -472,12 +479,16 @@ export function PremiumFinanceScreen(props: Props) {
           </>
         )}
 
+        {view === 'reklamy' && (
+          <>
+            <CreditsWalletCard onPress={props.onOpenUsageHistory} testID="reklamy-wallet-premium" />
+            <RewardedAdsSection testID="panel-rewarded-credits-premium" />
+          </>
+        )}
+
         {view === 'panel' && (
           <>
             <CreditsWalletCard onPress={props.onOpenUsageHistory} testID="panel-wallet-premium" />
-            <View style={{ marginBottom: 12 }}>
-              <RewardedCreditsButton testID="panel-rewarded-credits-premium" />
-            </View>
             {props.criticalCount > 0 ? (
               <PremiumAlertBanner
                 title={`${props.criticalCount} produktów wymaga uzupełnienia`}

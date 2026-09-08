@@ -19,7 +19,7 @@ import { Colors } from '@/constants/colors';
 import { FinanceHeaderActions } from '@/components/FinanceHeaderActions';
 import { ReportsArchive } from '@/components/ReportsArchive';
 import { CreditsWalletCard } from '@/components/CreditsWalletCard';
-import { RewardedCreditsButton } from '@/components/ads/RewardedCreditsButton';
+import { RewardedAdsSection } from '@/components/ads/RewardedAdsSection';
 import { AdBannerFooter } from '@/components/ads/AdBannerFooter';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { AppScreenHeader } from '@/components/premium/AppScreenHeader';
@@ -50,9 +50,11 @@ type ChartRecord = {
   created_at: string;
 };
 
+type FinanceView = 'panel' | 'raporty' | 'reklamy';
+
 type Props = {
-  view: 'panel' | 'raporty';
-  onViewChange: (view: 'panel' | 'raporty') => void;
+  view: FinanceView;
+  onViewChange: (view: FinanceView) => void;
   refreshing: boolean;
   onRefresh: () => void;
   onFetchApplied: () => void;
@@ -160,44 +162,34 @@ export function ClassicFinanceScreen({
         )}
 
         <View style={[styles.segment, { backgroundColor: theme.segmentBg }]} testID="finance-segment">
-          <TouchableOpacity
-            style={[
-              styles.segmentBtn,
-              view === 'panel' && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
-            ]}
-            onPress={() => onViewChange('panel')}
-            testID="segment-panel"
-            activeOpacity={0.85}
-          >
-            <Text
+          {(
+            [
+              ['panel', 'Panel'],
+              ['raporty', 'Raporty'],
+              ['reklamy', 'Reklamy'],
+            ] as const
+          ).map(([key, label]) => (
+            <TouchableOpacity
+              key={key}
               style={[
-                styles.segmentText,
-                { color: theme.textMuted },
-                view === 'panel' && { color: theme.text },
+                styles.segmentBtn,
+                view === key && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
               ]}
+              onPress={() => onViewChange(key)}
+              testID={`segment-${key}`}
+              activeOpacity={0.85}
             >
-              Panel
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.segmentBtn,
-              view === 'raporty' && [styles.segmentBtnActive, { backgroundColor: theme.segmentActive }],
-            ]}
-            onPress={() => onViewChange('raporty')}
-            testID="segment-raporty"
-            activeOpacity={0.85}
-          >
-            <Text
-              style={[
-                styles.segmentText,
-                { color: theme.textMuted },
-                view === 'raporty' && { color: theme.text },
-              ]}
-            >
-              Raporty
-            </Text>
-          </TouchableOpacity>
+              <Text
+                style={[
+                  styles.segmentText,
+                  { color: theme.textMuted },
+                  view === key && { color: theme.text },
+                ]}
+              >
+                {label}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
 
         {view === 'raporty' && (
@@ -232,12 +224,16 @@ export function ClassicFinanceScreen({
           </>
         )}
 
+        {view === 'reklamy' && (
+          <>
+            <CreditsWalletCard onPress={onOpenUsageHistory} testID="reklamy-wallet-widget" />
+            <RewardedAdsSection testID="panel-rewarded-credits" />
+          </>
+        )}
+
         {view === 'panel' && (
           <>
             <CreditsWalletCard onPress={onOpenUsageHistory} testID="panel-wallet-widget" />
-            <View style={{ marginBottom: 12 }}>
-              <RewardedCreditsButton testID="panel-rewarded-credits" />
-            </View>
             <AlertBanner count={criticalCount} onPress={() => router.push('/(tabs)/magazyn')} />
 
             <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>

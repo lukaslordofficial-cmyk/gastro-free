@@ -2,7 +2,7 @@
   "expo": {
     "name": "Gastro Manager",
     "slug": "gastro-manager",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "gastromanager",
@@ -25,12 +25,15 @@
       "bundleIdentifier": "pl.gastromanager.app"
     },
     "android": {
-      "versionCode": 10,
+      "versionCode": 11,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A120E"
       },
       "usesCleartextTraffic": false,
+      "blockedPermissions": [
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",

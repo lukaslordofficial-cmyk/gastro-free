@@ -1,6 +1,6 @@
 /**
  * Przełącznik podzakładek w module Dostawcy.
- * U góry tylko: Dostawcy | Lokalni Przetwórcy.
+ * U góry: Dostawcy | Lokalni Przetwórcy (gdy LOCAL_PRODUCERS_MODULE.enabled).
  * (Dostawy są wewnątrz Lokalnych Przetwórców.)
  */
 import React from 'react';
@@ -25,6 +25,10 @@ export function DostawcySubTabs() {
   const router = useRouter();
   const theme = useAppTheme();
   const isPremium = theme.isPremium;
+
+  if (!LOCAL_PRODUCERS_MODULE.enabled) {
+    return null;
+  }
 
   const activeKey =
     pathname.includes('lokalni-przetworcy')

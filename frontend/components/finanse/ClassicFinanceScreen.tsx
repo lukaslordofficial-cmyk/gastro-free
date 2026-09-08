@@ -140,7 +140,7 @@ export function ClassicFinanceScreen({
           <View style={{ marginTop: 8, marginBottom: 16, alignItems: 'center' }}>
             <AppScreenHeader
               title="Gastro Manager"
-              subtitle={`Panel finansowy · ${currentYearMonth()}`}
+              subtitle={`Wyniki · ${currentYearMonth()}`}
               showDevToggle
               centered
             />
@@ -152,7 +152,7 @@ export function ClassicFinanceScreen({
           <>
             <AppScreenHeader
               title="Gastro Manager"
-              subtitle={`Panel finansowy · ${currentYearMonth()}`}
+              subtitle={`Wyniki · ${currentYearMonth()}`}
               showDevToggle
             />
             <View style={{ marginTop: 4, marginBottom: 16 }}>

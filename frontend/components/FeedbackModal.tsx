@@ -35,7 +35,7 @@ const KIND_OPTIONS: { key: FeedbackKind; label: string }[] = [
 
 const LOCATION_HINTS = [
   'Magazyn',
-  'Finanse',
+  'Wyniki',
   'Zakupy',
   'Faktury',
   'Menu',

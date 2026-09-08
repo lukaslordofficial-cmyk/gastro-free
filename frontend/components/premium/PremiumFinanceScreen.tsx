@@ -378,7 +378,7 @@ export function PremiumFinanceScreen(props: Props) {
               GASTRO-MANAGER
             </Text>
             <Text style={styles.brandSub}>PRO DARK · JARVIS VOICE</Text>
-            <Text style={styles.monthLabel}>Panel finansowy · {props.currentMonth}</Text>
+            <Text style={styles.monthLabel}>Wyniki · {props.currentMonth}</Text>
           </View>
         </Animated.View>
 

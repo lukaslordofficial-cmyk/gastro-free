@@ -109,7 +109,7 @@ export default function TabLayout() {
         <Tabs.Screen
           name="index"
           options={{
-            title: 'Finanse',
+            title: 'Wyniki',
             tabBarIcon: ({ color, size, focused }) => (
               isPremiumUi ? (
                 <PremiumTabIcon focused={focused}>

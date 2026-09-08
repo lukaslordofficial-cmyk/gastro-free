@@ -18,7 +18,7 @@ type Props = {
 };
 
 export function FinanceHeaderActions({
-  contextHint = 'Finanse',
+  contextHint = 'Wyniki',
   onApplied,
   centered,
   darkText,

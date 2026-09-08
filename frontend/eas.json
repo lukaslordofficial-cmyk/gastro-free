@@ -41,6 +41,21 @@
         "EXPO_PUBLIC_FORCE_ADS": "1"
       }
     },
+    "preview-apk-live": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleRelease -PreactNativeArchitectures=arm64-v8a"
+      },
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_SUPABASE_URL": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "SET_VIA_scripts/sync-eas-preview-env.js",
+        "ORG_GRADLE_PROJECT_reactNativeArchitectures": "arm64-v8a",
+        "EXPO_PUBLIC_ADMOB_USE_LIVE": "1"
+      }
+    },
     "production": {
       "distribution": "store",
       "android": {

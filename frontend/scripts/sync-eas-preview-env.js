@@ -37,7 +37,7 @@ const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
 const env = parseEnv(stripBom(fs.readFileSync(envPath, 'utf8')));
 const eas = JSON.parse(stripBom(fs.readFileSync(easPath, 'utf8')));
 eas.build = eas.build || {};
-const profiles = ['preview', 'preview-apk', 'production'].filter((p) => eas.build[p]);
+const profiles = ['preview', 'preview-apk', 'preview-apk-live', 'production'].filter((p) => eas.build[p]);
 if (!profiles.includes('preview')) {
   eas.build.preview = { env: {} };
   profiles.push('preview');

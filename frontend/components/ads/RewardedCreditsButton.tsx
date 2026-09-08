@@ -1,5 +1,6 @@
 /**
- * Rewarded AdMob → +1 kredyt AI (backend claim / SSV).
+ * Rewarded Interstitial AdMob → +1 kredyt AI (backend claim / SSV).
+ * Format jednostki: „Reklama pełnoekranowa z nagrodą” (RewardedInterstitialAd).
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -27,6 +28,13 @@ type Props = {
   onGranted?: (balance: number) => void;
 };
 
+type RewardedLike = {
+  load: () => void;
+  show: () => Promise<void>;
+  loaded: boolean;
+  addAdEventListener: (type: string, listener: (...args: unknown[]) => void) => () => void;
+};
+
 export function RewardedCreditsButton({
   compact,
   testID = 'rewarded-credits-btn',
@@ -40,7 +48,7 @@ export function RewardedCreditsButton({
   const adsMod = loadAdsModule();
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
-  const rewardedRef = useRef<ReturnType<NonNullable<typeof adsMod>['RewardedAd']['createForAdRequest']> | null>(null);
+  const rewardedRef = useRef<RewardedLike | null>(null);
   const earnedRef = useRef(false);
 
   const accent = prem ? DS.color.greenEnd : Colors.accent;
@@ -55,8 +63,24 @@ export function RewardedCreditsButton({
       return;
     }
     try {
-      const { RewardedAd, RewardedAdEventType, AdEventType } = adsMod;
-      const ad = RewardedAd.createForAdRequest(pickAdUnit('rewarded'), {
+      const {
+        RewardedInterstitialAd,
+        RewardedAd,
+        RewardedAdEventType,
+        AdEventType,
+      } = adsMod as typeof adsMod & {
+        RewardedInterstitialAd?: {
+          createForAdRequest: (id: string, opts?: object) => RewardedLike;
+        };
+      };
+
+      const Factory = RewardedInterstitialAd || RewardedAd;
+      if (!Factory?.createForAdRequest) {
+        setReady(false);
+        return;
+      }
+
+      const ad = Factory.createForAdRequest(pickAdUnit('rewarded'), {
         serverSideVerificationOptions: {
           userId: accountKey,
           customData: accountKey,
@@ -78,7 +102,6 @@ export function RewardedCreditsButton({
           earnedRef.current = false;
           setBusy(true);
           try {
-            // SSV może dojść z opóźnieniem — claim + krótki poll odświeża saldo.
             const claim = await claimRewardCredit();
             await new Promise((r) => setTimeout(r, 1200));
             await refresh();
@@ -104,7 +127,7 @@ export function RewardedCreditsButton({
         unsubClosed();
       };
     } catch (e) {
-      if (__DEV__) console.warn('[ads] rewarded setup', e);
+      if (__DEV__) console.warn('[ads] rewarded interstitial setup', e);
       setReady(false);
       return undefined;
     }

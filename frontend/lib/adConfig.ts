@@ -34,7 +34,8 @@ export const AD_UNITS = {
 export const TEST_AD_UNITS = {
   banner: 'ca-app-pub-3940256099942544/6300978111',
   interstitial: 'ca-app-pub-3940256099942544/1033173712',
-  rewarded: 'ca-app-pub-3940256099942544/5224354917',
+  /** Rewarded Interstitial (format jak GastroManager_Wideo_Nagroda_Kredyty) */
+  rewarded: 'ca-app-pub-3940256099942544/5354046379',
 };
 
 export const INTERSTITIAL_MIN_INTERVAL_MS = 5 * 60 * 1000;

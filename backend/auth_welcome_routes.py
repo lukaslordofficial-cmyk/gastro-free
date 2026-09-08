@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from health_routes import normalize_email
 from http_ssl import httpx_verify
 from notify_resend import is_resend_configured, send_email
+from mailerlite import subscribe_subscriber
 from supabase_rest import require_supabase, sb_patch
 from url_safety import (
     assert_supabase_origin,
@@ -35,6 +36,21 @@ _CONTACT_VISIBLE = "kontakt@gastromanager.org"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _DEFAULT_VERIFY_REDIRECT = "https://gastromanager.org/auth/verified"
 _DEFAULT_RESET_REDIRECT = "https://gastromanager.org/auth/nowe-haslo"
+
+
+async def _subscribe_newsletter(*, email: str, restaurant_name: Optional[str]) -> bool:
+    """Best-effort Mailerlite — nie blokuje rejestracji."""
+    try:
+        res = await subscribe_subscriber(
+            email=email,
+            name=(restaurant_name or "").strip() or None,
+        )
+        if not res.get("ok") and not res.get("skipped"):
+            logger.warning("mailerlite subscribe failed: %s", res.get("error"))
+        return bool(res.get("ok"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("mailerlite subscribe exception: %s", e)
+        return False
 
 
 class ShippingBody(BaseModel):
@@ -632,14 +648,17 @@ async def auth_register(body: RegisterBody, request: Request):
     if not result.get("ok"):
         logger.warning("register welcome email failed: %s", result.get("error"))
         # Konto już istnieje — nie failujemy całej rejestracji; użytkownik może poprosić o ponowny link.
+        mailerlite_ok = await _subscribe_newsletter(email=email, restaurant_name=body.restaurant_name)
         return {
             "ok": True,
             "user_id": uid,
             "email": email,
             "verify_link_included": False,
             "email_warning": True,
+            "newsletter_ok": mailerlite_ok,
         }
 
+    mailerlite_ok = await _subscribe_newsletter(email=email, restaurant_name=body.restaurant_name)
     return {
         "ok": True,
         "user_id": uid,
@@ -647,4 +666,5 @@ async def auth_register(body: RegisterBody, request: Request):
         "verify_link_included": bool(verify_link),
         "redirect_to": redirect_to,
         "id": result.get("id"),
+        "newsletter_ok": mailerlite_ok,
     }

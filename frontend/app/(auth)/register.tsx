@@ -33,6 +33,7 @@ export default function RegisterScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [newsletterAccepted, setNewsletterAccepted] = useState(false);
 
   if (ready && isAuthenticated) {
     return <Redirect href="/(tabs)" />;
@@ -40,6 +41,12 @@ export default function RegisterScreen() {
 
   const onSubmit = async () => {
     setError(null);
+    if (!newsletterAccepted) {
+      setError(
+        'Zaznacz zgodę na Regulamin i newsletter, aby utworzyć darmowe konto.',
+      );
+      return;
+    }
     const shippingCheck = validateRegisterShipping({
       restaurantName,
       phone,
@@ -235,8 +242,31 @@ export default function RegisterScreen() {
                   placeholderTextColor={PremiumTokens.color.textFaint}
                   editable={!busy}
                   testID="register-regon"
-                  onSubmitEditing={() => void onSubmit()}
                 />
+
+                <TouchableOpacity
+                  style={styles.checkRow}
+                  onPress={() => setNewsletterAccepted((v) => !v)}
+                  disabled={busy}
+                  activeOpacity={0.85}
+                  testID="register-newsletter-consent"
+                >
+                  <View
+                    style={[
+                      styles.checkbox,
+                      newsletterAccepted && styles.checkboxOn,
+                    ]}
+                  >
+                    {newsletterAccepted ? (
+                      <Text style={styles.checkboxMark}>✓</Text>
+                    ) : null}
+                  </View>
+                  <Text style={styles.checkText}>
+                    Zakładając darmowe konto, akceptujesz Regulamin i wyrażasz zgodę na zapisanie się
+                    do newslettera Gastro Manager w celu otrzymywania darmowych poradników i
+                    informacji handlowych.
+                  </Text>
+                </TouchableOpacity>
 
                 {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -332,6 +362,40 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     marginBottom: 12,
+    lineHeight: 18,
+  },
+  checkRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginBottom: 16,
+    marginTop: 4,
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: DS.color.borderSubtle,
+    backgroundColor: 'rgba(22,22,22,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  checkboxOn: {
+    borderColor: DS.color.greenEnd,
+    backgroundColor: 'rgba(0,255,120,0.18)',
+  },
+  checkboxMark: {
+    color: DS.color.greenEnd,
+    fontSize: 13,
+    fontWeight: '900',
+    lineHeight: 16,
+  },
+  checkText: {
+    flex: 1,
+    color: PremiumTokens.color.textMuted,
+    fontSize: 12,
     lineHeight: 18,
   },
   bannerWarn: {

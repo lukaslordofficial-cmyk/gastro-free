@@ -147,7 +147,7 @@ class TestSubscribe:
         assert j["status"] == "active"
         assert j["credits_balance"] == before + 1000
         assert j["current_period_end"], "should set period end"
-        assert j["deal_hunter_unlocked"] is False
+        assert j["deal_hunter_unlocked"] is True
 
     def test_subscribe_tier2_grants_2500_and_unlocks_dh(self, api_client):
         before = _get_sub(api_client)["credits_balance"]

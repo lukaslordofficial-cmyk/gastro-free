@@ -24,8 +24,9 @@ def _trial_active(sub: dict) -> bool:
 
 
 def _premium_entitled(sub: dict) -> bool:
-    """Płatny Profesjonalny (tier>=2) LUB aktywny 30-dniowy trial Premium."""
-    return int(sub.get("tier_level") or 0) >= 2 or _trial_active(sub)
+    """Play free: wszystkie moduły odblokowane (tier/trial nie blokują UI)."""
+    _ = sub
+    return True
 
 
 def _trial_ends_iso_from_now() -> str:
@@ -141,12 +142,7 @@ async def _check_ai_access(client: httpx.AsyncClient, *, needs_credits: bool = T
         logger.warning("subscriptions niedostępne → autoryzacja pominięta (dev): %s", e)
         return {"tier_level": 2, "credits_balance": 10 ** 9, "status": "active"}
     # Łowca: płatny tier 2 LUB aktywny 30-dniowy trial Premium
-    if needs_deal_hunter and not _premium_entitled(sub):
-        raise HTTPException(
-            status_code=403,
-            detail="Moduł „Łowca Okazji” dostępny w planie Profesjonalnym (Tier 2) "
-                   "lub podczas 30-dniowego trialu Premium. "
-                   "Ulepsz subskrypcję w zakładce Subskrypcja.")
+    # Play free: Łowca i pozostałe moduły bez blokady tieru (tylko kredyty AI).
     bal = int(sub.get("credits_balance") or 0)
     if needs_credits and bal <= 0:
         raise HTTPException(
@@ -176,15 +172,10 @@ def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
     bal = int(sub.get("credits_balance") or 0)
     trial_active = _trial_active(sub)
     premium = _premium_entitled(sub)
-    effective_tier = max(tier, 2) if premium else tier
+    effective_tier = max(tier, 2)
     features = []
     for f in FEATURE_CATALOG:
-        needs_dh = f["requires_deal_hunter"]
-        reason = None
-        if needs_dh and not premium:
-            reason = "Wymaga planu Profesjonalny lub aktywnego trialu Premium (30 dni)"
-        elif bal <= 0:
-            reason = "Brak kredytów"
+        reason = "Brak kredytów" if bal <= 0 else None
         features.append({**f, "locked": reason is not None, "locked_reason": reason})
     tier_label = cfg["name"]
     if trial_active and tier < 2:
@@ -201,7 +192,7 @@ def _subscription_view(sub: dict, message: Optional[str] = None) -> dict:
         "trial_ends_at": sub.get("trial_ends_at"),
         "trial_active": trial_active,
         "deal_hunter_unlocked": premium,
-        "premium_ui": premium or bal > 0,
+        "premium_ui": True,
         "features": features,
         "topup_packages": [{"key": k, **v} for k, v in TOPUP_PACKAGES.items()],
         "plans": [

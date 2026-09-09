@@ -360,7 +360,7 @@ export async function upsertProfile(
 /**
  * Seed portfela/subskrypcji dla nowego tenanta.
  * DLACZEGO tak: trigger SQL zwykle tworzy wiersz — tu bezpieczny fallback,
- * ignorujący konflikt (duplicate). Free + 100 kredytów + 30-dniowy trial Premium.
+ * ignorujący konflikt (duplicate). Free + 300 kredytów + 30-dniowy trial Premium.
  */
 export async function seedSubscription(accountKey: string): Promise<void> {
   try {
@@ -370,7 +370,7 @@ export async function seedSubscription(accountKey: string): Promise<void> {
     const { error } = await supabase.from('subscriptions').insert({
       account_key: key,
       tier_level: 0,
-      credits_balance: 100,
+      credits_balance: 300,
       status: 'active',
       free_starter_claimed: true,
       trial_ends_at: trialEnds,

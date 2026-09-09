@@ -11,7 +11,7 @@ import {
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
 /** Startowe kredyty AI przy rejestracji (trial Premium 30 dni osobno). */
-const STARTER_CREDITS = 100;
+const STARTER_CREDITS = 300;
 const TRIAL_DAYS = 30;
 
 function accountKey(): string {
@@ -52,21 +52,20 @@ export function formatTrialDaysLeft(days: number | null | undefined): string | n
   return `Zostało ${days} dni trialu Premium`;
 }
 
-/** Tier efektywny do feature-gate: aktywny trial = min. poziom Profesjonalny (2). */
+/** Play free: wszystkie moduły jak Profesjonalny — tier/trial nie blokują. */
 export function effectiveFeatureTier(
   tierLevel: number,
-  trialEndsAt: string | null | undefined,
+  _trialEndsAt?: string | null | undefined,
 ): number {
-  const tier = Number(tierLevel ?? 0);
-  return isPremiumTrialActive(trialEndsAt) ? Math.max(tier, 2) : tier;
+  return Math.max(Number(tierLevel ?? 0), 2);
 }
 
-/** Płatny Profesjonalny LUB aktywny trial Premium → pełny dostęp feature jak tier 2. */
+/** Play free: pełny dostęp do modułów (ogranicza tylko saldo kredytów AI). */
 export function isPremiumEntitled(
-  tierLevel: number,
-  trialEndsAt: string | null | undefined,
+  _tierLevel?: number,
+  _trialEndsAt?: string | null | undefined,
 ): boolean {
-  return effectiveFeatureTier(tierLevel, trialEndsAt) >= 2;
+  return true;
 }
 
 /**
@@ -133,16 +132,10 @@ function buildView(row: SubscriptionRow, message?: string | null): SubscriptionS
   const bal = Number(row.credits_balance ?? 0);
   const trialEnds = row.trial_ends_at ?? null;
   const trialActive = isPremiumTrialActive(trialEnds);
-  // Paid Profesjonalny LUB aktywny 30-dniowy trial → Łowca + feature gate jak tier 2
-  const premiumEntitled = isPremiumEntitled(tier, trialEnds);
   const effTier = effectiveFeatureTier(tier, trialEnds);
   const features = FEATURE_CATALOG.map((f) => {
-    let reason: string | null = null;
-    if (bal <= 0) {
-      reason = 'Brak kredytów — dostępne tylko funkcje manualne';
-    } else if (f.requires_deal_hunter && !premiumEntitled) {
-      reason = 'Wymaga planu Profesjonalny lub aktywnego trialu Premium (30 dni)';
-    }
+    const reason =
+      bal <= 0 ? 'Brak kredytów — dostępne tylko funkcje manualne' : null;
     return { ...f, locked: reason !== null, locked_reason: reason };
   });
   return {
@@ -154,9 +147,8 @@ function buildView(row: SubscriptionRow, message?: string | null): SubscriptionS
     current_period_end: row.current_period_end ?? null,
     trial_ends_at: trialEnds,
     trial_active: trialActive,
-    deal_hunter_unlocked: premiumEntitled,
-    // Dark premium chrome podczas trialu / płatnego planu / gdy są kredyty
-    premium_ui: premiumEntitled || bal > 0,
+    deal_hunter_unlocked: true,
+    premium_ui: true,
     features,
     topup_packages: TOPUP_PACKAGES,
     plans: TIER_PLANS,

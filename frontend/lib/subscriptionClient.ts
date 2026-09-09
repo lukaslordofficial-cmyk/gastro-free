@@ -11,7 +11,7 @@ import {
 
 const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL ?? '').trim();
 /** Startowe kredyty AI przy rejestracji (trial Premium 30 dni osobno). */
-const STARTER_CREDITS = 300;
+const STARTER_CREDITS = 100;
 const TRIAL_DAYS = 30;
 
 function accountKey(): string {

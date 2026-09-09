@@ -21,7 +21,7 @@ export const TIER_PLANS: PlanDef[] = [
     perks: [
       'Reklamy w aplikacji (po zakończeniu trialu)',
       'Manualny magazyn, finanse i baza receptur',
-      '300 kredytów AI na start + 30 dni trialu Premium (Łowca Okazji, dark UI)',
+      '100 kredytów AI na start + 30 dni trialu Premium (Łowca Okazji, dark UI)',
       'Po trialu: plan Free — pozostałe kredyty zostają',
       'Oglądaj wideo reklamowe, aby zdobyć dodatkowe kredyty AI',
     ],

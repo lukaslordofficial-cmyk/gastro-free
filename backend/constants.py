@@ -217,7 +217,7 @@ TIER_CONFIG = {
         "perks": [
             "Reklamy w aplikacji (po zakończeniu trialu)",
             "Manualny magazyn, finanse i baza receptur, bez wsparcia automatyzacji",
-            "300 kredytów AI na start + 30 dni trialu Premium "
+            "100 kredytów AI na start + 30 dni trialu Premium "
             "(Łowca Okazji, dark UI — jak plan Profesjonalny)",
             "Po trialu: Free; pozostałe kredyty zostają na koncie",
         ],
@@ -254,7 +254,7 @@ TIER_CONFIG = {
     },
 }
 
-STARTER_CREDITS = 300
+STARTER_CREDITS = 100
 TRIAL_DAYS = 30
 
 

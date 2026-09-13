@@ -363,12 +363,16 @@ export function MenuScanModal({ visible, onClose, onConfirmed }: Props) {
     setError(null);
     try {
       let finalPayload = preparePayloadDishes();
-      // Dedup w payloadzie — ta sama potrawa 2× w skanie nie tworzy 2 wierszy.
-      const seenNames = new Set<string>();
+      // Dedup w payloadzie — ta sama nazwa+cena 2× w skanie nie tworzy 2 wierszy.
+      // Różne ceny (Makaron 33 vs Makaron mafaldine 47) zostają osobno.
+      const seenKeys = new Set<string>();
       finalPayload = finalPayload.filter((d) => {
-        const k = (d.name || '').trim().toLowerCase();
-        if (!k || seenNames.has(k)) return false;
-        seenNames.add(k);
+        const n = (d.name || '').trim().toLowerCase();
+        if (!n) return false;
+        const price = Number(d.price_pln || 0);
+        const k = `${n}|${price.toFixed(2)}`;
+        if (seenKeys.has(k)) return false;
+        seenKeys.add(k);
         return true;
       });
       if (finalPayload.length === 0) {

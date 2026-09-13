@@ -8,6 +8,7 @@ from ingredient_name_norm import apply_whole_product_names_to_dishes as _apply_w
 from ingredient_name_norm import is_combo_polprodukt_name as _is_combo_polprodukt_name
 from ingredient_name_norm import norm_name as _norm_name
 from ingredient_name_norm import normalize_ingredient_name as _normalize_ingredient_name
+from pl_fuzzy_norm import norm_pl as _norm_pl
 from recipe_ingredient_units import apply_integer_quantities_to_dishes as _apply_integer_quantities_to_dishes
 from recipe_ingredient_units import canonicalize_ingredient_units as _canonicalize_ingredient_units
 from recipe_ingredient_units import normalize_recipe_quantity as _normalize_recipe_quantity
@@ -193,9 +194,38 @@ async def menu_confirm_scan(req: ConfirmMenuScanRequest):
                 category = "Półprodukty"
             price = float(dish.price_pln or 0)
 
-            # Deduplikacja: ta sama AKTYWNA potrawa już w menu → nie twórz drugiego dania,
-            # ALE zbierz składniki do onboarding magazynu (brakujące produkty / przywrócenie).
-            hit, _sc = _resolve_by_fuzzy(name, active_menu, threshold=88)
+            # Deduplikacja: ta sama AKTYWNA potrawa już w menu → nie twórz drugiego dania.
+            # Nie łącz „Makaron” z „Makaron mafaldine” ani dań o wyraźnie innej cenie.
+            hit = None
+            name_pl = _norm_pl(name)
+            for m in active_menu:
+                existing_name = (m.get("name") or "").strip()
+                if not existing_name:
+                    continue
+                try:
+                    existing_price = float(m.get("price_pln") or 0)
+                except (TypeError, ValueError):
+                    existing_price = 0.0
+                if abs(existing_price - price) >= 1.0 and min(existing_price, price) > 0:
+                    continue  # inna cena = inne danie
+                en = _norm_pl(existing_name)
+                if en == name_pl:
+                    hit = m
+                    break
+                # Fuzzy tylko przy prawie identycznej nazwie (nie przy samym wspólnym rdzeniu)
+                cand, sc = _resolve_by_fuzzy(name, [m], threshold=94, strict_food=True)
+                if cand is not None and sc >= 94:
+                    # Odrzuć gdy jedna nazwa ma dodatkowy wyróżnik (np. mafaldine)
+                    t_new = set(name_pl.split())
+                    t_old = set(en.split())
+                    if t_new == t_old or t_new <= t_old or t_old <= t_new:
+                        # Podzbiór tokenów + ta sama/cena bliska → możliwy duplikat OCR
+                        if abs(existing_price - price) < 1.0:
+                            # Jeśli dłuższa nazwa ma ≥1 token więcej (np. mafaldine) — NIE duplikat
+                            if abs(len(t_new) - len(t_old)) >= 1 and (t_new - t_old or t_old - t_new):
+                                continue
+                            hit = m
+                            break
             if hit:
                 skipped += 1
                 warnings.append(f"„{hit.get('name') or name}” już jest w menu — pominięto duplikat.")

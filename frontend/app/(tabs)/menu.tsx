@@ -15,7 +15,7 @@ import {
   RECIPE_INGREDIENTS_CHANGED,
   type RecipeIngredientsChangedPayload,
 } from '@/lib/recipeSync';
-import { MENU_CHANGED } from '@/lib/appRefresh';
+import { MENU_CHANGED, OPEN_MENU_DISH, takePendingOpenMenuDish, clearPendingOpenMenuDish, type OpenMenuDishPayload } from '@/lib/appRefresh';
 import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -95,6 +95,7 @@ import {
   subscribeDishCustomImages,
   getDishCustomImageSync,
 } from '@/lib/dishCustomImages';
+import { friendlyImageSaveError } from '@/lib/friendlyImageError';
 import { getMenuThumbSync, subscribeMenuThumbs, resetMenuThumbCacheMemory } from '@/lib/menuThumbCache';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/contexts/AuthContext';
@@ -123,15 +124,10 @@ export default function MenuScreen() {
   const { ready: authReady, isAuthenticated, accountKey } = useAuth();
   const { showInterstitialAfterAction, resetAdActionSeries } = useAds();
 
-  useFocusEffect(
-    useCallback(() => {
-      return () => {
-        resetAdActionSeries('menu_dish_series');
-      };
-    }, [resetAdActionSeries]),
-  );
   const { alert: premiumAlert } = usePremiumAlert();
   const [dishes, setDishes] = useState<Dish[]>([]);
+  const dishesRef = useRef<Dish[]>([]);
+  dishesRef.current = dishes;
   const [utensils, setUtensils] = useState<KitchenUtensil[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({});
@@ -236,6 +232,69 @@ export default function MenuScreen() {
     });
     return () => sub.remove();
   }, [fetchData]);
+
+  // Otwarcie dania z „Dostępność w menu” (product-suppliers).
+  const openDishById = useCallback(
+    async (rawId: string) => {
+      const id = (rawId || '').trim();
+      if (!id) return;
+      let dish = dishesRef.current.find((d) => d.id === id);
+      if (!dish) {
+        await fetchData();
+        dish =
+          dishesRef.current.find((d) => d.id === id)
+          || MENU_LIST_CACHE.get(accountKey)?.find((d) => d.id === id);
+      }
+      if (!dish) return;
+      clearPendingOpenMenuDish(id);
+      setEditingDish(dish);
+      setForm({ name: dish.name, category: dish.category, price: String(dish.price_pln) });
+      setShowAddModal(true);
+      setSelectedCat(dish.category);
+      try {
+        const data = await fetchRecipeIngredientRows(id);
+        const rows = [...data].sort(
+          (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0),
+        );
+        if (rows.length > 0) {
+          setIngredients(
+            rows.map((r) => ({
+              key: secureId('ing'),
+              name: r.ingredient_name ?? '',
+              quantity: String(r.quantity ?? 0),
+              unit: r.unit || 'g',
+              pieceWeightG: r.piece_weight_g != null ? String(r.piece_weight_g) : '',
+            })),
+          );
+          return;
+        }
+      } catch {
+        /* fallback poniżej */
+      }
+      setIngredients(dishToFormIngredients(dish));
+    },
+    [fetchData, accountKey],
+  );
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      OPEN_MENU_DISH,
+      (payload: OpenMenuDishPayload) => {
+        void openDishById(payload?.menuItemId || '');
+      },
+    );
+    return () => sub.remove();
+  }, [openDishById]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const pending = takePendingOpenMenuDish();
+      if (pending) void openDishById(pending);
+      return () => {
+        resetAdActionSeries('menu_dish_series');
+      };
+    }, [openDishById, resetAdActionSeries]),
+  );
 
   // Sync receptur z Ustawień POS (ta sama tabela recipe_ingredients)
   useEffect(() => {
@@ -404,7 +463,7 @@ export default function MenuScreen() {
       try {
         await setDishCustomImage(dishId, sourceUri);
       } catch (e: any) {
-        premiumAlert('Nie udało się zapisać', e?.message || 'Kompresja WebP nie powiodła się.');
+        premiumAlert('Nie udało się dodać obrazka', friendlyImageSaveError(e));
       } finally {
         setPhotoSaving(false);
       }

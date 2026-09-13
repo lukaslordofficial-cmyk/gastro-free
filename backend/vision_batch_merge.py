@@ -106,14 +106,28 @@ def merge_catalog_vision_batches(parts: list[dict]) -> dict:
 
 
 def merge_menu_vision_batches(parts: list[dict]) -> dict:
+    """Scala potrawy z kolejnych stron menu.
+
+    Klucz: znormalizowana nazwa + cena — „Makaron 33 zł” i „Makaron mafaldine 47 zł”
+    nie są sklejane, nawet gdy OCR skróci nazwę do wspólnego rdzenia na osobnych stronach
+    tylko przy identycznej nazwie i cenie.
+    """
     dishes: list[dict] = []
     seen: set[str] = set()
     for p in parts:
         for row in p.get("dishes") or []:
             if not isinstance(row, dict):
                 continue
-            key = norm_product_key(str(row.get("name") or row.get("product_name") or ""))
-            if not key or key in seen:
+            name = str(row.get("name") or row.get("product_name") or "").strip()
+            key_name = norm_product_key(name)
+            if not key_name:
+                continue
+            try:
+                price = float(row.get("price_pln") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            key = f"{key_name}|{price:.2f}"
+            if key in seen:
                 continue
             seen.add(key)
             dishes.append(row)

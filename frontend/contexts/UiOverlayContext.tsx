@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 
 export type CascadeProductItem = {
@@ -63,6 +63,19 @@ type UiOverlayContextValue = {
   menuScanVisible: boolean;
   openMenuScan: () => void;
   closeMenuScan: () => void;
+  /** Samouczek (Wyniki / po rejestracji). */
+  tutorialVisible: boolean;
+  tutorialSlide: number;
+  openTutorial: (slide?: number) => void;
+  closeTutorial: () => void;
+  setTutorialSlide: (slide: number) => void;
+  /** Slide 2 → skan menu; po potwierdzeniu i zamknięciu wraca na slide 3. */
+  startTutorialMenuScan: () => void;
+  /** Wywołaj w onConfirmed skanu menu — zapamiętuje sukces do momentu zamknięcia. */
+  markTutorialMenuScanConfirmed: () => void;
+  /** true = wrócono do tutoriala (nie nawiguj na Menu). */
+  finishTutorialMenuScan: () => boolean;
+  isTutorialMenuScanPending: () => boolean;
 };
 
 const EMPTY_CASCADE: CascadeState = {
@@ -96,6 +109,15 @@ const UiOverlayContext = createContext<UiOverlayContextValue>({
   menuScanVisible: false,
   openMenuScan: () => {},
   closeMenuScan: () => {},
+  tutorialVisible: false,
+  tutorialSlide: 0,
+  openTutorial: () => {},
+  closeTutorial: () => {},
+  setTutorialSlide: () => {},
+  startTutorialMenuScan: () => {},
+  markTutorialMenuScanConfirmed: () => {},
+  finishTutorialMenuScan: () => false,
+  isTutorialMenuScanPending: () => false,
 });
 
 export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
@@ -113,6 +135,10 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
   const [documentScanRevision, setDocumentScanRevision] = useState(0);
   const [lastDocumentScanKind, setLastDocumentScanKind] = useState<DocumentScanKind | null>(null);
   const [menuScanVisible, setMenuScanVisible] = useState(false);
+  const [tutorialVisible, setTutorialVisible] = useState(false);
+  const [tutorialSlide, setTutorialSlideState] = useState(0);
+  const tutorialMenuScanPending = useRef(false);
+  const tutorialMenuScanConfirmed = useRef(false);
 
   // Hard reset overlayów przy zmianie konta / wylogowaniu — zero wycieku UI między tenantami.
   useEffect(() => {
@@ -124,6 +150,10 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
     setWakeListenEnabledState(false);
     setDocumentScanVisible(false);
     setMenuScanVisible(false);
+    setTutorialVisible(false);
+    setTutorialSlideState(0);
+    tutorialMenuScanPending.current = false;
+    tutorialMenuScanConfirmed.current = false;
   }, [accountKey, isAuthenticated]);
 
   const openProductCascade = useCallback(
@@ -192,9 +222,57 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
     setMenuScanVisible(false);
   }, []);
 
+  const openTutorial = useCallback((slide = 0) => {
+    setTutorialSlideState(Math.max(0, slide));
+    setTutorialVisible(true);
+  }, []);
+
+  const closeTutorial = useCallback(() => {
+    setTutorialVisible(false);
+    tutorialMenuScanPending.current = false;
+    tutorialMenuScanConfirmed.current = false;
+  }, []);
+
+  const setTutorialSlide = useCallback((slide: number) => {
+    setTutorialSlideState(Math.max(0, slide));
+  }, []);
+
+  const startTutorialMenuScan = useCallback(() => {
+    tutorialMenuScanPending.current = true;
+    tutorialMenuScanConfirmed.current = false;
+    setTutorialVisible(false);
+    setDocumentScanVisible(false);
+    setMenuScanVisible(true);
+  }, []);
+
+  const markTutorialMenuScanConfirmed = useCallback(() => {
+    if (tutorialMenuScanPending.current) {
+      tutorialMenuScanConfirmed.current = true;
+    }
+  }, []);
+
+  const isTutorialMenuScanPending = useCallback(() => tutorialMenuScanPending.current, []);
+
+  const finishTutorialMenuScan = useCallback(() => {
+    if (!tutorialMenuScanPending.current) return false;
+    const confirmed = tutorialMenuScanConfirmed.current;
+    tutorialMenuScanPending.current = false;
+    tutorialMenuScanConfirmed.current = false;
+    setMenuScanVisible(false);
+    setTutorialSlideState(confirmed ? 2 : 1);
+    setTutorialVisible(true);
+    return true;
+  }, []);
   const value = useMemo(
     () => ({
-      hideAds: localVoiceOpen || voiceOpen || cameraOpen || cascade.visible || documentScanVisible || menuScanVisible,
+      hideAds:
+        localVoiceOpen
+        || voiceOpen
+        || cameraOpen
+        || cascade.visible
+        || documentScanVisible
+        || menuScanVisible
+        || tutorialVisible,
       setVoiceOverlay: setLocalVoiceOpen,
       setCameraOverlay: setCameraOpen,
       cascade,
@@ -216,6 +294,15 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
       menuScanVisible,
       openMenuScan,
       closeMenuScan,
+      tutorialVisible,
+      tutorialSlide,
+      openTutorial,
+      closeTutorial,
+      setTutorialSlide,
+      startTutorialMenuScan,
+      markTutorialMenuScanConfirmed,
+      finishTutorialMenuScan,
+      isTutorialMenuScanPending,
     }),
     [
       localVoiceOpen,
@@ -227,6 +314,8 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
       documentScanRevision,
       lastDocumentScanKind,
       menuScanVisible,
+      tutorialVisible,
+      tutorialSlide,
       wakeListenEnabled,
       voiceOpts,
       openProductCascade,
@@ -239,6 +328,13 @@ export function UiOverlayProvider({ children }: { children: React.ReactNode }) {
       notifyDocumentScanComplete,
       openMenuScan,
       closeMenuScan,
+      openTutorial,
+      closeTutorial,
+      setTutorialSlide,
+      startTutorialMenuScan,
+      markTutorialMenuScanConfirmed,
+      finishTutorialMenuScan,
+      isTutorialMenuScanPending,
     ],
   );
 

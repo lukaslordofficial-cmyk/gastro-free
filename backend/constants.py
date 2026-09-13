@@ -529,6 +529,9 @@ _MENU_SCAN_SYSTEM_PROMPT = (
     "'Gramatura', 'Gramatura porcji' NIE MOGĄ pojawić się w `ingredients`. "
     "Wielkość porcji zapisuj TYLKO w `portion_weight_value` + `portion_weight_unit`.\n"
     "- Zignoruj sekcje: promocje/loga/adres/godziny/opisy restauracji.\n"
+    "- Każda pozycja z inną nazwą LUB inną ceną = osobne danie. "
+    "Np. „Makaron” 33 zł i „Makaron mafaldine” 47 zł to DWA rekordy — nie łącz ich.\n"
+    "- Zachowuj pełną nazwę z karty (mafaldine, carbonara, diavola itd.), nie skracaj do rodzaju.\n"
     "- Zwróć wyłącznie poprawny JSON zgodny ze schematem."
 )
 

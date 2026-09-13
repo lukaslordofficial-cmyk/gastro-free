@@ -1,11 +1,12 @@
 /**
- * Pasek akcji w zakładce Finanse — powiadomienia + sterowanie głosem + zgłoś uwagi.
+ * Pasek akcji w zakładce Finanse — powiadomienia + samouczek + sterowanie głosem + zgłoś uwagi.
  */
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import { ReportInfoButton } from '@/components/ReportInfoButton';
 import { FeedbackButton } from '@/components/FeedbackButton';
 import { NotificationsButton } from '@/components/NotificationsButton';
+import { TutorialButton } from '@/components/TutorialButton';
 
 type Props = {
   contextHint?: string;
@@ -15,6 +16,7 @@ type Props = {
   reportTestID?: string;
   feedbackTestID?: string;
   notificationsTestID?: string;
+  tutorialTestID?: string;
 };
 
 export function FinanceHeaderActions({
@@ -25,10 +27,12 @@ export function FinanceHeaderActions({
   reportTestID = 'finanse-report-info',
   feedbackTestID = 'finanse-feedback',
   notificationsTestID = 'finanse-notifications',
+  tutorialTestID = 'finanse-tutorial',
 }: Props) {
   return (
     <View style={[styles.row, centered && styles.rowCentered]}>
       <NotificationsButton centered={centered} darkText={darkText} testID={notificationsTestID} />
+      <TutorialButton centered={centered} darkText={darkText} testID={tutorialTestID} />
       <ReportInfoButton
         contextHint={contextHint}
         onApplied={onApplied}

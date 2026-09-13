@@ -51,9 +51,9 @@ async function ensureCustomDir(): Promise<string> {
   return dir;
 }
 
-function destPath(itemId: string): string {
+function destPath(itemId: string, ext: 'webp' | 'jpg' = 'webp'): string {
   const safe = String(itemId || 'item').replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${customDir()}${safe}.webp`;
+  return `${customDir()}${safe}.${ext}`;
 }
 
 export function subscribeProductCustomImages(fn: () => void): () => void {
@@ -102,12 +102,18 @@ export async function setProductCustomImage(itemId: string, sourceUri: string): 
 
   await ensureCustomDir();
   const compressed = await compressDishPhotoToWebP(sourceUri);
-  const dest = destPath(id);
+  const dest = destPath(id, compressed.ext);
 
   try {
     const prev = (await loadProductCustomImages())[id];
     if (prev && prev !== dest && prev.startsWith('file://')) {
       await FileSystem.deleteAsync(prev, { idempotent: true }).catch(() => undefined);
+    }
+    for (const ext of ['webp', 'jpg'] as const) {
+      const alt = destPath(id, ext);
+      if (alt !== dest) {
+        await FileSystem.deleteAsync(alt, { idempotent: true }).catch(() => undefined);
+      }
     }
   } catch {
     /* ignore */

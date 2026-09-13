@@ -54,6 +54,7 @@ import {
   setProductCustomImage,
   subscribeProductCustomImages,
 } from '@/lib/productCustomImages';
+import { friendlyImageSaveError } from '@/lib/friendlyImageError';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { useSubscription } from '@/contexts/SubscriptionContext';
@@ -141,7 +142,7 @@ export default function MagazynScreen() {
       try {
         await setProductCustomImage(itemId, sourceUri);
       } catch (e: any) {
-        premiumAlert('Nie udało się zapisać', e?.message || 'Kompresja WebP nie powiodła się.');
+        premiumAlert('Nie udało się dodać obrazka', friendlyImageSaveError(e));
       } finally {
         setPhotoSaving(false);
       }

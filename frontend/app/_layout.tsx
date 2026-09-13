@@ -16,6 +16,7 @@ import { ThemeModeProvider, useThemeMode } from '@/contexts/ThemeModeContext';
 import { ProductCascadeHost } from '@/components/premium/ProductCascadeHost';
 import { JarvisVoiceHost } from '@/components/JarvisVoiceHost';
 import { DocumentScanHost } from '@/components/DocumentScanHost';
+import { TutorialHost } from '@/components/TutorialHost';
 import { PremiumAlertProvider } from '@/components/PremiumAlert';
 import { PushConsentBootstrap } from '@/components/PushConsentBootstrap';
 import {
@@ -103,6 +104,7 @@ function RootLayoutNav() {
               <ProductCascadeHost />
               <JarvisVoiceHost />
               <DocumentScanHost />
+              <TutorialHost />
             </AdsProvider>
           </UiOverlayProvider>
         </PremiumAlertProvider>

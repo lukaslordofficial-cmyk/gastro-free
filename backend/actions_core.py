@@ -156,7 +156,33 @@ async def _apply_menu_item(client, p, transcript, source):
             "select": "id,name,price_pln,category", "limit": "5000",
         }) or []
     active = [m for m in existing if m.get("is_active") is not False]
-    hit, _score = _resolve_by_fuzzy(name, active, threshold=88)
+    # Jak menu_confirm: nie łącz różnych cen / „Makaron” vs „Makaron mafaldine”.
+    hit = None
+    name_pl = _norm_pl(name)
+    for m in active:
+        existing_name = (m.get("name") or "").strip()
+        if not existing_name:
+            continue
+        try:
+            existing_price = float(m.get("price_pln") or 0)
+        except (TypeError, ValueError):
+            existing_price = 0.0
+        if abs(existing_price - price) >= 1.0 and min(existing_price, price) > 0:
+            continue
+        en = _norm_pl(existing_name)
+        if en == name_pl:
+            hit = m
+            break
+        cand, sc = _resolve_by_fuzzy(name, [m], threshold=94, strict_food=True)
+        if cand is not None and sc >= 94:
+            t_new = set(name_pl.split())
+            t_old = set(en.split())
+            if t_new == t_old or t_new <= t_old or t_old <= t_new:
+                if abs(existing_price - price) < 1.0:
+                    if abs(len(t_new) - len(t_old)) >= 1 and (t_new - t_old or t_old - t_new):
+                        continue
+                    hit = m
+                    break
     if hit:
         menu_id = hit["id"]
         warnings.append(f"Potrawa „{hit.get('name')}” już jest w menu — pominięto duplikat.")

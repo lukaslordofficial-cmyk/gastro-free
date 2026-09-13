@@ -89,6 +89,8 @@ export function CatalogThumbPickerModal({
       if (!uri) return;
       onPick({ slug: row.slug, labelPl: row.labelPl, uri });
       onClose();
+    } catch (e) {
+      if (__DEV__) console.warn('[CatalogThumbPicker] select failed', e);
     } finally {
       setBusySlug(null);
     }

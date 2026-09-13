@@ -28,7 +28,7 @@ import {
   RefreshCw,
 } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
-import { emitAppDataChanged } from '@/lib/appRefresh';
+import { emitAppDataChanged, emitOpenMenuDish } from '@/lib/appRefresh';
 import { apiJsonHeaders } from '@/lib/apiHeaders';
 import { usePremiumAlert } from '@/components/PremiumAlert';
 import { OrderModal } from '@/components/OrderModal';
@@ -773,7 +773,7 @@ export default function ProductSuppliersScreen() {
                   </TouchableOpacity>
                 </View>
                 <Text style={[s.yieldHint, { color: muted }]}>
-                  Na ile porcji każdej potrawy wystarczy aktualny zapas ({yieldData ? `${yieldData.stock_quantity} ${yieldData.stock_unit}` : '…'}). Wyliczane automatycznie z receptur.
+                  Na ile porcji każdej potrawy wystarczy aktualny zapas ({yieldData ? `${yieldData.stock_quantity} ${yieldData.stock_unit}` : '…'}). Wyliczane automatycznie z receptur. Kliknij potrawę, aby otworzyć ją w Menu ze składnikami.
                 </Text>
 
                 {loadingYield ? (
@@ -797,13 +797,18 @@ export default function ProductSuppliersScreen() {
                     {yieldData.dishes.map((d) => {
                       const critical = d.convertible && d.portions <= 3;
                       return (
-                        <View
+                        <TouchableOpacity
                           key={d.menu_item_id}
                           style={[
                             s.yieldRow,
                             prem && { backgroundColor: cardBg, borderColor: border },
                           ]}
                           testID={`yield-dish-${d.menu_item_id}`}
+                          activeOpacity={0.75}
+                          onPress={() => {
+                            emitOpenMenuDish(d.menu_item_id);
+                            router.push('/(tabs)/menu');
+                          }}
                         >
                           <View style={{ flex: 1 }}>
                             <Text style={[s.yieldDish, { color: text }]} numberOfLines={1}>{d.dish_name}</Text>
@@ -844,7 +849,7 @@ export default function ProductSuppliersScreen() {
                               <Text style={[s.yieldBadgeNaText, { color: muted }]}>jedn.{'\n'}niezgodne</Text>
                             </View>
                           )}
-                        </View>
+                        </TouchableOpacity>
                       );
                     })}
                   </View>

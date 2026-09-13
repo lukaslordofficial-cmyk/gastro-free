@@ -10,6 +10,32 @@ export const MENU_CHANGED = 'gm/menu-changed';
 export const FINANCE_CHANGED = 'gm/finance-changed';
 export const SUPPLIER_ORDERS_CHANGED = 'gm/supplier-orders-changed';
 export const APP_DATA_CHANGED = 'gm/app-data-changed';
+/** Otwórz danie w Menu (np. z „Dostępność w menu”). */
+export const OPEN_MENU_DISH = 'gm/open-menu-dish';
+
+export type OpenMenuDishPayload = { menuItemId: string };
+
+let pendingOpenMenuDishId: string | null = null;
+
+export function emitOpenMenuDish(menuItemId: string): void {
+  const id = (menuItemId || '').trim();
+  if (!id) return;
+  pendingOpenMenuDishId = id;
+  DeviceEventEmitter.emit(OPEN_MENU_DISH, { menuItemId: id } satisfies OpenMenuDishPayload);
+}
+
+/** Odbierz oczekujące otwarcie dania (gdy Menu montuje się po nawigacji). */
+export function takePendingOpenMenuDish(): string | null {
+  const id = pendingOpenMenuDishId;
+  pendingOpenMenuDishId = null;
+  return id;
+}
+
+export function clearPendingOpenMenuDish(menuItemId?: string): void {
+  if (!menuItemId || pendingOpenMenuDishId === menuItemId) {
+    pendingOpenMenuDishId = null;
+  }
+}
 
 export type AppRefreshHint =
   | 'inventory'

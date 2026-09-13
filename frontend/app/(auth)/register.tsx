@@ -17,6 +17,7 @@ import { DS, PremiumTokens } from '@/constants/premiumTheme';
 import { useAuth } from '@/contexts/AuthContext';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { validateRegisterShipping } from '@/lib/authVerify';
+import { markTutorialPendingAfterRegister } from '@/lib/tutorialStorage';
 
 export default function RegisterScreen() {
   const { signUp, isAuthenticated, ready } = useAuth();
@@ -79,6 +80,7 @@ export default function RegisterScreen() {
         setError(res.message);
         return;
       }
+      await markTutorialPendingAfterRegister();
       setDone(true);
     } finally {
       setBusy(false);

@@ -18,6 +18,9 @@ export function DocumentScanHost() {
     menuScanVisible,
     openMenuScan,
     closeMenuScan,
+    finishTutorialMenuScan,
+    markTutorialMenuScanConfirmed,
+    isTutorialMenuScanPending,
   } = useUiOverlay();
   const { alert: premiumAlert } = usePremiumAlert();
   const scanContext = documentScanKind === 'offer' ? 'supplier' : 'warehouse';
@@ -37,6 +40,11 @@ export function DocumentScanHost() {
     notifyDocumentScanComplete(documentScanKind === 'offer' ? 'offer' : 'invoice');
   }, [notifyDocumentScanComplete, documentScanKind]);
 
+  const onMenuClose = useCallback(() => {
+    const resumed = finishTutorialMenuScan();
+    if (!resumed) closeMenuScan();
+  }, [finishTutorialMenuScan, closeMenuScan]);
+
   return (
     <>
       <CatalogScanModal
@@ -54,9 +62,11 @@ export function DocumentScanHost() {
       />
       <MenuScanModal
         visible={menuScanVisible}
-        onClose={closeMenuScan}
+        onClose={onMenuClose}
         onConfirmed={async () => {
           notifyDocumentScanComplete('menu');
+          markTutorialMenuScanConfirmed();
+          if (isTutorialMenuScanPending()) return;
           await new Promise((r) => setTimeout(r, 80));
           try {
             router.push('/(tabs)/menu');

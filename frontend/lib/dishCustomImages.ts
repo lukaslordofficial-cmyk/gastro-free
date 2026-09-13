@@ -55,36 +55,51 @@ async function ensureCustomDir(): Promise<string> {
   return dir;
 }
 
-function destPath(dishId: string): string {
+function destPath(dishId: string, ext: 'webp' | 'jpg' = 'webp'): string {
   const safe = String(dishId || 'dish').replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${customDir()}${safe}.webp`;
+  return `${customDir()}${safe}.${ext}`;
 }
 
 /**
- * Kompresja uploadu użytkownika do lekkiego WebP (max krawędź 1280, quality 0.8).
- * Zwraca URI w cache — caller przenosi do documentDirectory.
+ * Kompresja uploadu użytkownika (max krawędź 1280, quality 0.8).
+ * Preferuje WebP; na urządzeniach bez encodera WebP → JPEG.
  */
 export async function compressDishPhotoToWebP(sourceUri: string): Promise<{
   uri: string;
   width: number;
   height: number;
+  ext: 'webp' | 'jpg';
 }> {
-  const probe = await manipulateAsync(sourceUri, [], {
-    compress: 1,
-    format: SaveFormat.JPEG,
-  });
-  const maxDim = Math.max(probe.width || 0, probe.height || 0);
-  const actions =
-    maxDim > MAX_EDGE
-      ? probe.width >= probe.height
-        ? [{ resize: { width: MAX_EDGE } }]
-        : [{ resize: { height: MAX_EDGE } }]
-      : [];
-  const out = await manipulateAsync(probe.uri, actions, {
-    compress: WEBP_QUALITY,
-    format: SaveFormat.WEBP,
-  });
-  return { uri: out.uri, width: out.width, height: out.height };
+  try {
+    const probe = await manipulateAsync(sourceUri, [], {
+      compress: 1,
+      format: SaveFormat.JPEG,
+    });
+    const maxDim = Math.max(probe.width || 0, probe.height || 0);
+    const actions =
+      maxDim > MAX_EDGE
+        ? probe.width >= probe.height
+          ? [{ resize: { width: MAX_EDGE } }]
+          : [{ resize: { height: MAX_EDGE } }]
+        : [];
+    try {
+      const out = await manipulateAsync(probe.uri, actions, {
+        compress: WEBP_QUALITY,
+        format: SaveFormat.WEBP,
+      });
+      return { uri: out.uri, width: out.width, height: out.height, ext: 'webp' };
+    } catch (webpErr) {
+      if (__DEV__) console.warn('[dishCustomImages] WebP failed → JPEG', webpErr);
+      const out = await manipulateAsync(probe.uri, actions, {
+        compress: WEBP_QUALITY,
+        format: SaveFormat.JPEG,
+      });
+      return { uri: out.uri, width: out.width, height: out.height, ext: 'jpg' };
+    }
+  } catch (e) {
+    if (__DEV__) console.warn('[dishCustomImages] compress failed', e);
+    throw new Error('Nie udało się dodać obrazka. Spróbuj inny.');
+  }
 }
 
 export function subscribeDishCustomImages(fn: () => void): () => void {
@@ -128,7 +143,7 @@ export function getDishCustomImageSync(dishId: string): string | undefined {
 }
 
 /**
- * Konwertuje źródło do WebP, zapisuje w documentDirectory i aktualizuje mapę.
+ * Konwertuje źródło do WebP/JPEG, zapisuje w documentDirectory i aktualizuje mapę.
  * Stary plik (jeśli był) jest usuwany.
  */
 export async function setDishCustomImage(dishId: string, sourceUri: string): Promise<string> {
@@ -138,12 +153,19 @@ export async function setDishCustomImage(dishId: string, sourceUri: string): Pro
 
   await ensureCustomDir();
   const compressed = await compressDishPhotoToWebP(sourceUri);
-  const dest = destPath(id);
+  const dest = destPath(id, compressed.ext);
 
   try {
     const prev = (await loadDishCustomImages())[id];
     if (prev && prev !== dest && prev.startsWith('file://')) {
       await FileSystem.deleteAsync(prev, { idempotent: true }).catch(() => undefined);
+    }
+    // Usuń ewentualny stary wariant rozszerzenia
+    for (const ext of ['webp', 'jpg'] as const) {
+      const alt = destPath(id, ext);
+      if (alt !== dest) {
+        await FileSystem.deleteAsync(alt, { idempotent: true }).catch(() => undefined);
+      }
     }
   } catch {
     /* ignore */

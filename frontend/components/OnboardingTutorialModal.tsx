@@ -51,8 +51,8 @@ export function OnboardingTutorialModal({
         icon: <ChefHat size={36} color={DS.color.greenMid} strokeWidth={2} />,
         title: 'Cieszymy się, że do nas dołączyłeś',
         body:
-          'Gastro Manager pomaga prowadzić restaurację od menu przez magazyn i sprzedaż, aż po zamówienia u dostawców. '
-          + 'Przejrzyj samouczek, wykonaj polecenia i zacznij korzystać z dobrodziejstw automatyzacji AI. '
+          'Gastro Manager pomaga prowadzić restaurację od menu przez magazyn i sprzedaż, aż po zamówienia u dostawców.\n\n'
+          + 'Przejrzyj samouczek, wykonaj polecenia i zacznij korzystać z dobrodziejstw automatyzacji AI.\n\n'
           + 'Jeśli chcesz powrócić do samouczka, możesz zrobić to w każdej chwili. Zajrzyj do zakładki Wyniki.',
         cta: 'dalej',
       },
@@ -69,10 +69,10 @@ export function OnboardingTutorialModal({
         icon: <ShoppingBag size={36} color={DS.color.greenMid} strokeWidth={2} />,
         title: 'Sprzedaż',
         body:
-          'Aby aplikacja odejmowała produkty z magazynu i dodawała przychody, potrzebuje danych o sprzedaży. '
-          + 'Można je dostarczyć na dwa sposoby: automatyczny — jeśli posiadasz system POS i przejdziesz przez proces integracji, '
-          + 'ręczny — skanowanie dobowej sprzedaży z ręcznych zapisków, jeśli nie posiadasz POS '
-          + '(szablony dokumentów znajdziesz w ustawieniach). '
+          'Aby aplikacja odejmowała produkty z magazynu i dodawała przychody, potrzebuje danych o sprzedaży.\n\n'
+          + 'Można je dostarczyć na dwa sposoby:\n\n'
+          + 'Automatyczny — jeśli posiadasz system POS i przejdziesz przez proces integracji.\n\n'
+          + 'Ręczny — skanowanie dobowej sprzedaży z ręcznych zapisków, jeśli nie posiadasz POS (szablony dokumentów znajdziesz w ustawieniach).\n\n'
           + 'Więcej informacji na temat integracji znajdziesz w zakładce Ustawienia.',
         cta: 'dalej',
       },

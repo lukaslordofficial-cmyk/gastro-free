@@ -234,7 +234,7 @@ export async function sharePosNumberList(
     )
     .join('');
 
-  const dateLabel = new Date().toLocaleDateString('pl-PL');
+  // Data zostawiona pusta — użytkownik wpisuje ręcznie (druk na zapas).
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
     <style>
       body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:13px;color:#111;padding:24px}
@@ -245,7 +245,7 @@ export async function sharePosNumberList(
       .hint{margin-top:20px;font-size:11px;color:#64748b;line-height:1.4}
     </style></head><body>
     <h1>Lista numerów POS</h1>
-    <p class="meta">Gastro Manager · ${esc(dateLabel)} · ${sorted.length} potraw</p>
+    <p class="meta">Gastro Manager · Data: _______________ · ${sorted.length} potraw</p>
     <table>
       <thead><tr><th>Nr</th><th>Danie</th></tr></thead>
       <tbody>${tableRows}</tbody>
